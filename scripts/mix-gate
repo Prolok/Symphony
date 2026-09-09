@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+command -v python3 >/dev/null 2>&1 || { echo "mix-gate: python3 not found in PATH" >&2; exit 127; }
+# Compile-time defaults and test fixtures must see the same physical temp root
+# (not /var during compilation and /private/var during tests on macOS).
+TMPDIR="$(python3 -c 'import os, tempfile; print(os.path.realpath(tempfile.gettempdir()))')"
+export TMPDIR
+script_path="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+script_dir="$(cd "$(dirname "$script_path")" && pwd -P)"
 repo_root="$(cd "$script_dir/.." && pwd -P)"
 mise_config="$repo_root/mise.toml"
 

@@ -177,7 +177,7 @@ defmodule SymphonyScriptTest do
         Task.async(fn -> run_script(repo_dir, home_dir, bin_dir, []) end)
       end
 
-    results = Enum.map(tasks, &Task.await(&1, 5_000))
+    results = Enum.map(tasks, &Task.await(&1, 30_000))
 
     assert Enum.all?(results, fn {_output, status} -> status == 0 end)
     refute Enum.any?(results, fn {output, _status} -> output =~ "overlap" end)
@@ -279,8 +279,171 @@ defmodule SymphonyScriptTest do
     refute output =~ "symphony-stub"
   end
 
+  test "startup fails before any mutations when a required tool is missing" do
+    %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
+    isolated = Path.join(bin_dir, "isolated")
+    File.mkdir_p!(isolated)
+
+    for tool <- ["basename", "dirname", "python3", "git", "make", "codex", "mise"] do
+      source = if tool in ["codex", "mise"], do: Path.join(bin_dir, tool), else: System.find_executable(tool)
+      File.ln_s!(source, Path.join(isolated, tool))
+    end
+
+    for tool <- ["python3", "git", "make", "codex", "mise"] do
+      path = Path.join(isolated, tool)
+      target = File.read_link!(path)
+      File.rm!(path)
+      {output, status} = run_script(repo_dir, home_dir, bin_dir, [], env: [{"PATH", isolated}])
+      assert status != 0
+      assert output =~ "#{tool} not found in PATH"
+      refute File.exists?(Path.join(repo_dir, ".mix-calls"))
+      refute File.exists?(Path.join(repo_dir, "_build"))
+      refute File.exists?(home_dir)
+      File.ln_s!(target, path)
+    end
+  end
+
+  test "failed mise lookup, missing runtime and failed activation cannot reach autoupdate" do
+    %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
+    autoupdate = Path.join(repo_dir, "autoupdate")
+    File.write!(autoupdate, "#!/bin/bash\necho MUTATED\n")
+    File.chmod!(autoupdate, 0o755)
+
+    for {variable, message} <- [
+          {"SYMPHONY_TEST_MISE_LS_STATUS", "konnte die konfigurierte"},
+          {"SYMPHONY_TEST_RUNTIME_MISSING", "Konfigurierte erlang-Laufzeit fehlt"},
+          {"SYMPHONY_TEST_MISE_ENV_STATUS", "konnte die Laufzeit nicht aktivieren"}
+        ] do
+      assert {output, 1} = run_script(repo_dir, home_dir, bin_dir, [], env: [{variable, "1"}])
+      assert output =~ message
+      refute output =~ "MUTATED"
+      refute File.exists?(Path.join(repo_dir, ".mix-calls"))
+      refute File.exists?(home_dir)
+    end
+
+    File.rm!(Path.join(bin_dir, "runtime/escript"))
+    assert {output, 1} = run_script(repo_dir, home_dir, bin_dir, [])
+    assert output =~ "escript fehlt nach mise-Aktivierung"
+    refute output =~ "MUTATED"
+    refute File.exists?(home_dir)
+  end
+
+  test "activation makes escript available only to the launched process" do
+    %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
+    env = SymphonyElixir.TestSupport.script_env(bin_dir)
+    assert {"", 1} = System.cmd("/bin/bash", ["-c", "command -v escript"], env: env)
+    File.write!(Path.join(repo_dir, "bin/symphony"), "#!/bin/bash\ncommand -v escript\n")
+    assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
+    assert String.trim(output) == Path.join(bin_dir, "runtime/escript")
+    assert {"", 1} = System.cmd("/bin/bash", ["-c", "command -v escript"], env: env)
+  end
+
+  test "relative multihop links and BSD directory links preserve the checkout and project cwd" do
+    %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
+    link = Path.join(bin_dir, "symphony-PRO-678")
+    File.ln_s!(Path.relative_to(Path.join(repo_dir, "symphony"), bin_dir, force: true), Path.join(bin_dir, "hop"))
+    File.ln_s!("hop", link)
+    user_bin = Path.join(home_dir, ".local/bin")
+    File.mkdir_p!(user_bin)
+    File.ln_s!("missing-target", Path.join(user_bin, "sym-codex"))
+    File.ln_s!(repo_dir, Path.join(user_bin, "sym-watch"))
+    skill = Path.join(home_dir, ".codex/skills/symphony-test")
+    File.mkdir_p!(Path.dirname(skill))
+    File.ln_s!(repo_dir, skill)
+
+    assert {output, 0} =
+             System.cmd("/bin/bash", ["-c", "symphony-PRO-678"],
+               cd: bin_dir,
+               env: [{"HOME", home_dir} | SymphonyElixir.TestSupport.script_env(bin_dir)],
+               stderr_to_stdout: true
+             )
+
+    assert output =~ "symphony-stub cwd=#{bin_dir}"
+    assert output =~ "symphony-stub workflow_file=#{repo_dir}/WORKFLOW.md"
+    assert File.read_link!(Path.join(user_bin, "sym-watch")) == Path.join(repo_dir, "sym-watch")
+    assert File.read_link!(skill) == Path.join(repo_dir, ".codex/skills/symphony-test")
+    refute File.exists?(Path.join(repo_dir, "sym-codex-PRO-678"))
+  end
+
+  @tag timeout: 120_000
+  test "a lock is released after each update and build failure" do
+    %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
+
+    for env <- [
+          [{"SYMPHONY_TEST_COMPILE_STATUS", "9"}],
+          [{"SYMPHONY_TEST_DEPS_LOADPATHS_STATUS", "1"}, {"SYMPHONY_TEST_DEPS_GET_STATUS", "7"}],
+          [{"SYMPHONY_TEST_ESCRIPT_STATUS", "6"}]
+        ] do
+      {_output, status} = run_script(repo_dir, home_dir, bin_dir, [], env: env)
+      assert status != 0
+      assert {_output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
+    end
+
+    autoupdate = Path.join(repo_dir, "autoupdate")
+    File.write!(autoupdate, "#!/bin/bash\nexit 13\n")
+    File.chmod!(autoupdate, 0o755)
+    assert {_output, 13} = run_script(repo_dir, home_dir, bin_dir, [])
+    File.rm!(autoupdate)
+    assert {_output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
+  end
+
+  test "a toolchain removed by autoupdate fails before build and registration" do
+    fixture = build_script_fixture!()
+    autoupdate = Path.join(fixture.repo_dir, "autoupdate")
+    File.write!(autoupdate, "#!/bin/bash\nrm \"#{fixture.bin_dir}/runtime/escript\"\n")
+    File.chmod!(autoupdate, 0o755)
+    assert {output, 1} = run_script(fixture.repo_dir, fixture.home_dir, fixture.bin_dir, [])
+    assert output =~ "escript fehlt nach mise-Aktivierung"
+    refute File.exists?(Path.join(fixture.repo_dir, ".mix-calls"))
+    refute File.exists?(fixture.home_dir)
+  end
+
+  @tag timeout: 120_000
+  test "the running service does not inherit or hold the start lock" do
+    fixture = build_script_fixture!()
+    assert {output, 0} = run_lock_probe(fixture, "service", 0, fixture.repo_dir)
+    assert output =~ "lock probe passed"
+  end
+
+  for mode <- ["holder", "waiter"], signum <- [2, 15] do
+    @tag timeout: 120_000
+    test "#{mode} interruption with signal #{signum} releases the lock and stops build children" do
+      fixture = build_script_fixture!()
+      assert {output, 0} = run_lock_probe(fixture, unquote(mode), unquote(signum), fixture.repo_dir)
+      assert output =~ "lock probe passed"
+    end
+  end
+
+  @tag timeout: 120_000
+  test "independent linked worktrees never share their startup lock" do
+    fixture = build_script_fixture!()
+    repo = fixture.repo_dir
+    other = Path.join(fixture.bin_dir, "other checkout")
+
+    for args <- [
+          ["init", "-b", "main"],
+          ["add", "."],
+          ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "fixture"],
+          ["worktree", "add", "-b", "second", other]
+        ] do
+      assert {_, 0} = System.cmd("git", ["-C", repo | args], stderr_to_stdout: true)
+    end
+
+    assert {output, 0} = run_lock_probe(fixture, "independent", 0, other)
+    assert output =~ "lock probe passed"
+  end
+
+  defp run_lock_probe(fixture, mode, signum, other) do
+    System.cmd(
+      System.find_executable("python3"),
+      [Path.expand("support/start_lock_probe.py", __DIR__), fixture.repo_dir, mode, to_string(signum), other],
+      env: [{"HOME", fixture.home_dir} | SymphonyElixir.TestSupport.script_env(fixture.bin_dir)],
+      stderr_to_stdout: true
+    )
+  end
+
   defp build_script_fixture! do
-    repo_dir = Path.join(System.tmp_dir!(), "symphony-script-#{System.unique_integer([:positive])}")
+    repo_dir = Path.join(System.tmp_dir!(), "symphony script-#{System.unique_integer([:positive])}")
     home_dir = Path.join(System.tmp_dir!(), "symphony-home-#{System.unique_integer([:positive])}")
     bin_dir = Path.join(System.tmp_dir!(), "symphony-bin-#{System.unique_integer([:positive])}")
 
@@ -313,20 +476,9 @@ defmodule SymphonyScriptTest do
     printf 'symphony-stub args=%s\\n' "$*"
     """)
 
-    File.write!(Path.join(bin_dir, "mise"), """
-    #!/usr/bin/env bash
-    if [ "$1" = "env" ]; then
-      exit 0
-    fi
-
-    if [ "$1" = "exec" ] && [ "$2" = "--" ]; then
-      shift 2
-      exec "$@"
-    fi
-
-    printf 'unexpected mise args=%s\\n' "$*" >&2
-    exit 1
-    """)
+    SymphonyElixir.TestSupport.install_runtime_fixture!(repo_dir, bin_dir)
+    File.write!(Path.join(bin_dir, "codex"), "#!/bin/bash\nexit 0\n")
+    File.chmod!(Path.join(bin_dir, "codex"), 0o755)
 
     File.write!(Path.join(bin_dir, "mix"), """
     #!/usr/bin/env bash
@@ -358,6 +510,10 @@ defmodule SymphonyScriptTest do
     File.chmod!(Path.join(bin_dir, "mise"), 0o755)
     File.chmod!(Path.join(bin_dir, "mix"), 0o755)
 
+    on_exit(fn ->
+      Enum.each([home_dir, repo_dir, bin_dir], &File.rm_rf/1)
+    end)
+
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir}
   end
 
@@ -371,13 +527,15 @@ defmodule SymphonyScriptTest do
         env:
           [
             {"HOME", home_dir},
-            {"PATH", "#{bin_dir}:#{System.get_env("PATH")}"}
+            {"BASH_ENV", nil},
+            {"ENV", nil},
+            {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)}
           ] ++ Keyword.get(opts, :env, []),
         stderr_to_stdout: true
       ]
       |> maybe_put_cd(Keyword.get(opts, :cd))
 
-    System.cmd("bash", [script_path | args], cmd_opts)
+    System.cmd("/bin/bash", [script_path | args], cmd_opts)
   end
 
   defp maybe_put_cd(opts, nil), do: opts

@@ -27,6 +27,122 @@ mix_runtime_trust_mise_config() {
   esac
 }
 
+# Sourceable by the launcher so the escript inherits the same process-local
+# toolchain as the build. Capture mise's status before evaluating its output.
+mix_runtime_activate() {
+  local repo_root="$1"
+  local tool runtime_env tool_state
+
+  for tool in python3 git make codex mise; do
+    command -v "$tool" >/dev/null 2>&1 || mix_runtime_die "$tool not found in PATH"
+  done
+  python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' ||
+    mix_runtime_die "Python 3.10 oder neuer ist erforderlich"
+  [[ -f "$repo_root/mise.toml" ]] || mix_runtime_die "mise.toml fehlt in $repo_root"
+  unset MIX_DEPS_PATH MIX_BUILD_ROOT MIX_BUILD_PATH
+  mix_runtime_trust_mise_config "$repo_root"
+
+  # A successful mise env alone does not prove that configured tools exist.
+  for tool in erlang elixir; do
+    tool_state="$(mise ls -C "$repo_root" --current --json "$tool")" ||
+      mix_runtime_die "mise konnte die konfigurierte $tool-Laufzeit nicht prüfen"
+    python3 -c '
+import json, os, sys
+tools = json.loads(sys.argv[1])
+config = os.path.realpath(sys.argv[2])
+sys.exit(not tools or not all(
+    t.get("installed") and t.get("active") and
+    os.path.realpath(t.get("source", {}).get("path", "")) == config
+    for t in tools
+))
+' "$tool_state" "$repo_root/mise.toml" ||
+      mix_runtime_die "Konfigurierte $tool-Laufzeit fehlt; im Checkout mise install ausführen"
+  done
+
+  runtime_env="$(mise env -C "$repo_root" -s bash)" ||
+    mix_runtime_die "mise konnte die Laufzeit nicht aktivieren"
+  eval "$runtime_env" || mix_runtime_die "mise-Laufzeitaktivierung fehlgeschlagen"
+  for tool in erl escript elixir mix; do
+    command -v "$tool" >/dev/null 2>&1 ||
+      mix_runtime_die "$tool fehlt nach mise-Aktivierung; mise install im Checkout prüfen"
+  done
+}
+
+mix_runtime_start() {
+  local repo_root="$1"
+  shift
+  local lock_path
+  lock_path="$(mix_runtime_lock_path "$repo_root")"
+
+  # Keep stdin attached for the update prompt. The build gets its own process
+  # group so interruption also stops grandchildren before releasing the lock.
+  exec python3 -c '
+import fcntl, os, signal, subprocess, sys, time
+
+lock_path, repo, invocation, *args = sys.argv[1:]
+received = 0
+def interrupted(signum, _frame):
+    global received
+    received = signum
+for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(sig, interrupted)
+
+with open(lock_path, "a") as lock:
+    waiting = False
+    while not received:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if not waiting:
+                print("mix-runtime: Warte auf Start-Lock " + lock_path, file=sys.stderr, flush=True)
+                waiting = True
+            time.sleep(0.05)
+    if received:
+        sys.exit(128 + received)
+    child = subprocess.Popen(
+        [os.path.join(repo, "scripts/mix-runtime"), "update-build", repo],
+        start_new_session=True, pass_fds=(lock.fileno(),))
+    forwarded = False
+    deadline = None
+    try:
+        while child.poll() is None:
+            if received and not forwarded:
+                try:
+                    os.killpg(child.pid, received)
+                except ProcessLookupError:
+                    pass
+                forwarded = True
+                deadline = time.monotonic() + 5
+            if deadline is not None and time.monotonic() >= deadline:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            time.sleep(0.05)
+    finally:
+        # Also reap a group whose leader exited before its descendants.
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+    status = 128 + received if received else child.returncode
+    if status:
+        sys.exit(status if status > 0 else 128 - status)
+
+# No inherited lock in the long-running service; reload the updated launcher
+# and toolchain, preserving the original project cwd and invocation name.
+for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(sig, signal.SIG_DFL)
+if received:
+    sys.exit(128 + received)
+os.execv("/bin/bash", ["/bin/bash", "-c",
+    "source \"$1\"; shift; symphony_launch \"$@\"", "symphony",
+    os.path.join(repo, "symphony"), invocation, *args])
+' "$lock_path" "$repo_root" "$@"
+}
+
 mix_runtime_run_mix() {
   local repo_root="$1"
   shift
@@ -83,6 +199,20 @@ mix_runtime_main() {
     mix_runtime_die "Checkout existiert nicht: $raw_repo_root"
 
   case "$command" in
+    start)
+      shift 2
+      mix_runtime_start "$repo_root" "$@"
+      ;;
+    update-build)
+      mix_runtime_activate "$repo_root"
+      if [[ -x "$repo_root/autoupdate" ]]; then
+        "$repo_root/autoupdate" "$repo_root"
+      fi
+      # Autoupdate may have changed mise.toml.
+      mix_runtime_activate "$repo_root"
+      mix_runtime_prepare "$repo_root"
+      mix_runtime_run_mix "$repo_root" escript.build
+      ;;
     mix)
       shift 2
       mix_runtime_run_mix "$repo_root" "$@"
@@ -103,4 +233,6 @@ mix_runtime_main() {
   esac
 }
 
-mix_runtime_main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  mix_runtime_main "$@"
+fi

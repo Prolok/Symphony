@@ -3,6 +3,90 @@ defmodule SymphonyElixir.TestSupport do
   @repo_workflow_file Path.expand("../../WORKFLOW.md", __DIR__)
   @test_isolation_env_names ["LINEAR_PROJECT_SLUG", "LINEAR_TEAM_KEY"]
 
+  # Script fixtures always use the system shell and system utilities. Python is
+  # an explicit dependency, so pin only that executable from the host PATH.
+  # In particular, never inherit Homebrew bash/coreutils/util-linux on macOS.
+  def script_path(bin_dir) do
+    python = Path.join(bin_dir, "python3")
+
+    if not File.exists?(python) do
+      case File.ln_s(System.find_executable("python3") || raise("python3 required"), python) do
+        :ok -> :ok
+        {:error, :eexist} -> :ok
+      end
+    end
+
+    "#{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin"
+  end
+
+  def script_env(bin_dir) do
+    [
+      {"PATH", script_path(bin_dir)},
+      {"BASH_ENV", nil},
+      {"ENV", nil},
+      {"ZDOTDIR", nil}
+    ]
+  end
+
+  def system_bash_hook(command, test_root) do
+    bin_dir = Path.join(test_root, "system-tools")
+    File.mkdir_p!(bin_dir)
+    path = script_path(bin_dir)
+    hook_file = Path.join(test_root, "system-hook.sh")
+
+    File.write!(hook_file, """
+    set -eu
+    export PATH=#{shell_quote(path)}
+    unset BASH_ENV ENV
+    if [[ "$(uname -s)" == Darwin ]]; then
+      [[ "$BASH_VERSION" == 3.2.* ]]
+      [[ "$(command -v ln)" == /bin/ln ]]
+    fi
+    #{command}
+    """)
+
+    "exec /bin/bash --noprofile --norc #{shell_quote(hook_file)}"
+  end
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+
+  def install_runtime_fixture!(repo_dir, bin_dir) do
+    runtime_dir = Path.join(bin_dir, "runtime")
+    File.mkdir_p!(runtime_dir)
+    File.write!(Path.join(repo_dir, "mise.toml"), "[tools]\nerlang = \"28\"\nelixir = \"1.19.5-otp-28\"\n")
+
+    for tool <- ["erl", "elixir", "escript"] do
+      path = Path.join(runtime_dir, tool)
+      File.write!(path, "#!/bin/bash\nexit 0\n")
+      File.chmod!(path, 0o755)
+    end
+
+    mise = Path.join(bin_dir, "mise")
+
+    File.write!(mise, """
+    #!/bin/bash
+    case "$1" in
+      ls)
+        test "${SYMPHONY_TEST_MISE_LS_STATUS:-0}" = 0 || exit "$SYMPHONY_TEST_MISE_LS_STATUS"
+        python3 -c 'import json, sys; print(json.dumps([{"installed": sys.argv[2] == "0", "active": True, "source": {"path": sys.argv[1] + "/mise.toml"}}]))' "$3" "${SYMPHONY_TEST_RUNTIME_MISSING:-0}"
+        ;;
+      env)
+        # Output before failure must never be evaluated by the launcher.
+        printf 'export PATH=%q:$PATH\\n' "#{runtime_dir}"
+        exit "${SYMPHONY_TEST_MISE_ENV_STATUS:-0}"
+        ;;
+      exec)
+        shift 2
+        exec "$@"
+        ;;
+      *) exit 1 ;;
+    esac
+    """)
+
+    File.chmod!(mise, 0o755)
+    runtime_dir
+  end
+
   defmacro __using__(_opts) do
     quote do
       use ExUnit.Case

@@ -197,6 +197,27 @@ Zusätzliche Review-Hinweise:
 
 ## Voraussetzungen und globale Kontrakte
 
+### Start- und Laufzeitvertrag
+
+Der reguläre Einstieg ist `./symphony` unter Linux oder macOS; die
+Plattformmatrix und Installation stehen in `README.md`. System-Bash 3.2 und
+BSD-Werkzeuge genügen. Python 3.10+, Git 2.31+, Make, Codex CLI und mise
+2026.3.17+ müssen erreichbar und die Toolchain aus `mise.toml` installiert sein.
+Der Wrapper prüft diese Voraussetzungen vor Autoupdate, Build und
+Hilfsbefehlsregistrierung und aktiviert Erlang/Elixir prozesslokal. Nach einem
+Autoupdate wird die möglicherweise geänderte Toolchain erneut geprüft.
+Der direkte Aufruf von `bin/symphony` benötigt dagegen bereits erreichbares
+`escript`, etwa über `mise exec -- bin/symphony`.
+
+Autoupdate und Build laufen unter einem checkout-spezifischen OS-Lock über
+die Python-Standardbibliothek; ein externes `flock` ist nicht erforderlich.
+Signale beenden auch die Build-Kinder, bevor der Lock freigegeben wird.
+Die Lockdatei wird nicht gelöscht; der Dienst erbt keinen Lock.
+Das aufrufende Projekt-CWD bleibt erhalten, während Workflow-Dateien und
+Mix-Artefakte an den aufgelösten Symphony-Checkout gebunden bleiben.
+Die vorhandenen Worktree-Hooks erzeugen ausführbare Issue-Befehle unter
+`~/.local/bin` für Bash und zsh und entfernen nur passende Links.
+
 ### Linear-Zugriff
 
 Der Agent sollte mit Linear kommunizieren können, entweder über einen konfigurierten Linear-MCP-Server oder über das injizierte Tool `linear_graphql`. HTTP 401, HTTP 403 ohne Rate-Limit-Signal oder als `auth` klassifizierte `linear_graphql`-Fehler gelten dabei wie fehlender Linear-Zugriff für den normalen Tool-Pfad. `classification: "rate_limited"`, `extensionsCodes` wie `RATELIMITED` und `rateLimit.limited: true` sind dagegen Rate-Limit-Signale und kein fehlender Linear-Zugriff; bloße nicht erschöpfte `rateLimit`-Header ohne `limited: true` bleiben Diagnosehinweise. Wenn kein regulärer Kommentar-Edit-Pfad verfügbar ist, nutze den lokalen Repo-Tracker-Fallback über `mise exec -- mix run --no-start -e` und `SymphonyElixir.Tracker`/`SymphonyElixir.Workpad`. Löse dafür den Source-/Config-Root zuerst im ursprünglichen Zielrepo-Kontext über `SYMPHONY_SOURCE_REPO` auf; nur wenn diese Variable fehlt oder leer ist, darf dort vor jedem Verzeichniswechsel `git rev-parse --show-toplevel` verwendet werden. Starte den Mix-Child anschließend aus `SYMPHONY_WORKFLOW_DIR`, übergib ihm den aufgelösten Source-Root explizit als `SYMPHONY_SOURCE_REPO`, aktiviere die durch `SYMPHONY_WORKFLOW_FILE` bezeichnete Workflowkonfiguration und lade `.symphony/.env(.local)` vom Source-Root per `SymphonyElixir.EnvFile.load(SymphonyElixir.EnvFile.config_dir(source_repo), override_existing: true)`. Starte danach nur `:req` per `Application.ensure_all_started(:req)`. Unterscheide dann per vollständig paginierter `workpad_exists?/1`-Prüfung zwischen Erstkontakt und bestehendem Workpad: Existiert noch kein Workpad, erstelle den kanonischen `## Symphony Workpad`-Kommentar und schreibe den Blocker-Hinweis dort hinein, bevor du das Issue nach `BLOCKER` verschiebst; existiert bereits ein Workpad, aktualisiere genau diesen Kommentar mit `SymphonyElixir.Workpad.update_tracker_workpad/2`, verifiziere das Ergebnis über den Rückgabewert und persistiere danach den Statuswechsel. Nur wenn auch dieser sichere Workpad-Update-Helfer scheitert, erstelle einen dedizierten Blocker-Kommentar außerhalb des Workpads, persistiere den Statuswechsel nach `BLOCKER` und halte in der Abschlussnachricht fest, dass der vorhandene Workpad-Kommentar auch per lokalem Update-Helfer nicht aktualisiert werden konnte. Erst wenn auch dieser lokale Schreibpfad scheitert, stoppe sofort und melde den fehlenden Linear-Zugriff in der Abschlussnachricht.

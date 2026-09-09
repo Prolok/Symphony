@@ -4,6 +4,11 @@ defmodule SymphonyElixir.CoreTest do
   alias SymphonyElixir.AutocommitMessage
   alias SymphonyElixir.Codex.ScriptSupport
 
+  setup do
+    isolate_git_discovery!(System.tmp_dir!())
+    :ok
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -1260,7 +1265,7 @@ defmodule SymphonyElixir.CoreTest do
     original_workflow_path = Workflow.workflow_file_path()
     original_script_name = Application.get_env(:symphony_elixir, :escript_script_name)
     original_cwd = File.cwd!()
-    temp_root = Path.join(System.tmp_dir!(), "symphony-workflow-no-escript-#{System.unique_integer([:positive])}")
+    temp_root = workflow_directory_outside_repo!("symphony-workflow-no-escript")
 
     on_exit(fn ->
       Workflow.set_workflow_file_path(original_workflow_path)
@@ -1286,7 +1291,7 @@ defmodule SymphonyElixir.CoreTest do
     original_workflow_path = Workflow.workflow_file_path()
     original_script_name = Application.get_env(:symphony_elixir, :escript_script_name)
     original_cwd = File.cwd!()
-    temp_root = Path.join(System.tmp_dir!(), "symphony-workflow-default-#{System.unique_integer([:positive])}")
+    temp_root = workflow_directory_outside_repo!("symphony-workflow-default")
 
     on_exit(fn ->
       Workflow.set_workflow_file_path(original_workflow_path)
@@ -1312,7 +1317,7 @@ defmodule SymphonyElixir.CoreTest do
     original_workflow_path = Workflow.workflow_file_path()
     original_script_name = Application.get_env(:symphony_elixir, :escript_script_name)
     original_cwd = File.cwd!()
-    temp_root = Path.join(System.tmp_dir!(), "symphony-workflow-generic-project-#{System.unique_integer([:positive])}")
+    temp_root = workflow_directory_outside_repo!("symphony-workflow-generic-project")
 
     on_exit(fn ->
       Workflow.set_workflow_file_path(original_workflow_path)
@@ -1353,7 +1358,7 @@ defmodule SymphonyElixir.CoreTest do
     original_workflow_path = Workflow.workflow_file_path()
     original_script_name = Application.get_env(:symphony_elixir, :escript_script_name)
     original_cwd = File.cwd!()
-    temp_root = Path.join(System.tmp_dir!(), "symphony-workflow-no-mix-#{System.unique_integer([:positive])}")
+    temp_root = workflow_directory_outside_repo!("symphony-workflow-no-mix")
 
     on_exit(fn ->
       Workflow.set_workflow_file_path(original_workflow_path)
@@ -1425,7 +1430,7 @@ defmodule SymphonyElixir.CoreTest do
     original_workflow_path = Workflow.workflow_file_path()
     original_script_name = Application.get_env(:symphony_elixir, :escript_script_name)
     original_cwd = File.cwd!()
-    temp_root = Path.join(System.tmp_dir!(), "symphony-workflow-cwd-#{System.unique_integer([:positive])}")
+    temp_root = workflow_directory_outside_repo!("symphony-workflow-cwd")
 
     on_exit(fn ->
       Workflow.set_workflow_file_path(original_workflow_path)
@@ -4917,17 +4922,38 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "retry dispatches recovered no-findings when workspace path is missing" do
-    test_root =
+    caller_repo =
       Path.join(
         System.tmp_dir!(),
         "symphony-elixir-missing-workspace-review-retry-handoff-#{System.unique_integer([:positive])}"
       )
 
+    test_root = Path.join(caller_repo, "tmp")
+    previous_tmpdir = System.get_env("TMPDIR")
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
     previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
 
     try do
+      File.mkdir_p!(test_root)
+      caller_git!(caller_repo, ["init", "--template=", "-b", "main"])
+      caller_git!(caller_repo, ["config", "user.name", "Test User"])
+      caller_git!(caller_repo, ["config", "user.email", "test@example.com"])
+      caller_git!(caller_repo, ["config", "core.hooksPath", "/dev/null"])
+      caller_git!(caller_repo, ["config", "commit.gpgsign", "false"])
+      File.write!(Path.join(caller_repo, ".gitignore"), "/tmp/\n")
+      sentinel = Path.join(caller_repo, "sentinel.txt")
+      File.write!(sentinel, "initial\n")
+      caller_git!(caller_repo, ["add", ".gitignore", "sentinel.txt"])
+      caller_git!(caller_repo, ["commit", "-m", "initial"])
+      File.write!(sentinel, "initial\nstaged\n")
+      caller_git!(caller_repo, ["add", "sentinel.txt"])
+      File.write!(sentinel, "initial\nstaged\nunstaged\n")
+      caller_before = caller_repository_snapshot(caller_repo)
+
+      System.put_env("TMPDIR", test_root)
+      isolate_git_discovery!(System.tmp_dir!())
+
       source_repo = Path.join(test_root, "source")
       workspace_root = Path.join(test_root, "worktrees")
       issue_id = "issue-missing-workspace-review-retry-handoff"
@@ -4969,41 +4995,44 @@ defmodule SymphonyElixir.CoreTest do
 
         {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
-        on_exit(fn ->
-          if Process.alive?(pid) do
-            Process.exit(pid, :normal)
-          end
-        end)
+        target_state =
+          try do
+            initial_state = :sys.get_state(pid)
 
-        initial_state = :sys.get_state(pid)
-
-        :sys.replace_state(pid, fn _ ->
-          %{
-            initial_state
-            | retry_attempts: %{
-                issue_id => %{
-                  attempt: 1,
-                  timer_ref: nil,
-                  retry_token: retry_token,
-                  due_at_ms: System.monotonic_time(:millisecond) + 30_000,
-                  identifier: issue_identifier,
-                  recovered_turn_context: "Keine Findings."
-                }
+            :sys.replace_state(pid, fn _ ->
+              %{
+                initial_state
+                | retry_attempts: %{
+                    issue_id => %{
+                      attempt: 1,
+                      timer_ref: nil,
+                      retry_token: retry_token,
+                      due_at_ms: System.monotonic_time(:millisecond) + 30_000,
+                      identifier: issue_identifier,
+                      recovered_turn_context: "Keine Findings."
+                    }
+                  }
               }
-          }
-        end)
+            end)
 
-        send(pid, {:retry_issue, issue_id, retry_token})
+            send(pid, {:retry_issue, issue_id, retry_token})
 
-        assert_receive {:memory_tracker_state_update, ^issue_id, "Freigabe Review"}, 1_000
-        assert_file_exists_eventually!(codex_stamp)
-        stop_orchestrator_and_workers(pid)
+            assert_receive {:memory_tracker_state_update, ^issue_id, target_state}, 5_000
+            assert_file_exists_eventually!(codex_stamp)
+            target_state
+          after
+            stop_orchestrator_and_workers(pid)
+            assert caller_repository_snapshot(caller_repo) == caller_before
+          end
+
+        assert target_state == "Freigabe Review"
       end)
     after
+      restore_env("TMPDIR", previous_tmpdir)
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_comments, previous_memory_comments)
-      File.rm_rf(test_root)
+      File.rm_rf(caller_repo)
     end
   end
 
@@ -5685,7 +5714,9 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.get(:running, %{})
       |> Enum.each(fn
         {_issue_id, %{pid: worker_pid}} when is_pid(worker_pid) ->
+          ref = Process.monitor(worker_pid)
           Process.exit(worker_pid, :kill)
+          assert_receive {:DOWN, ^ref, :process, ^worker_pid, _reason}, 1_000
 
         _entry ->
           :ok
@@ -13374,6 +13405,38 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp isolate_git_discovery!(directory) do
+    # Non-Git fixtures must not discover the repository containing TMPDIR.
+    {:ok, ceiling} = SymphonyElixir.PathSafety.canonicalize(directory)
+    previous = System.get_env("GIT_CEILING_DIRECTORIES")
+    on_exit(fn -> restore_env("GIT_CEILING_DIRECTORIES", previous) end)
+    ceilings = Enum.reject([ceiling, previous], &(&1 in [nil, ""]))
+    System.put_env("GIT_CEILING_DIRECTORIES", Enum.join(ceilings, ":"))
+  end
+
+  defp workflow_directory_outside_repo!(prefix) do
+    # Workflow discovery walks all ancestors independently of Git and TMPDIR.
+    {directory, 0} = System.cmd("mktemp", ["-d", "/tmp/#{prefix}-XXXXXX"])
+    {:ok, canonical_directory} = SymphonyElixir.PathSafety.canonicalize(String.trim(directory))
+    canonical_directory
+  end
+
+  defp caller_git!(directory, args) do
+    {output, 0} = System.cmd("git", ["-C", directory | args], env: [{"GIT_OPTIONAL_LOCKS", "0"}])
+    output
+  end
+
+  defp caller_repository_snapshot(directory) do
+    %{
+      head: caller_git!(directory, ["rev-parse", "HEAD"]),
+      index: caller_git!(directory, ["ls-files", "--stage", "-z"]),
+      staged: caller_git!(directory, ["diff", "--cached", "--binary"]),
+      unstaged: caller_git!(directory, ["diff", "--binary"]),
+      sentinel: File.read!(Path.join(directory, "sentinel.txt")),
+      review_marker: File.read(Path.join(directory, ".git/symphony.review-ai-autocommit.done"))
+    }
   end
 
   defp review_autocommit_marker_path!(workspace) do

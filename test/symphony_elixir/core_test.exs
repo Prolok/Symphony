@@ -246,6 +246,38 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "den globalen Skill `symphony-workpad`"
   end
 
+  test "regular follow-up issue rule requires the generated label at creation and aborts on lookup failure" do
+    workflow_source = File.read!(Path.expand("../../WORKFLOW.md", __DIR__))
+
+    assert [[_, global_rules]] =
+             Regex.scan(~r/^### Globale Arbeitsregeln\n(.*?)(?=^#|\z)/msu, workflow_source)
+
+    assert [[follow_up_rule]] =
+             Regex.scan(
+               ~r/^- Wenn während der Ausführung sinnvolle Verbesserungen außerhalb des Scopes entdeckt werden,.*?(?=^- |\z)/msu,
+               global_rules
+             )
+
+    follow_up_rule = String.replace(follow_up_rule, ~r/\s+/u, " ")
+
+    assert follow_up_rule =~
+             "Das Folge-Issue muss einen klaren Titel, eine Beschreibung und Validierungspunkte enthalten, in `Backlog` eingeordnet sein, demselben Projekt wie das aktuelle Issue zugewiesen werden"
+
+    assert follow_up_rule =~
+             "das aktuelle Issue als `related` verknüpfen und `blockedBy` verwenden, wenn das Folge-Issue vom aktuellen Issue abhängt."
+
+    assert follow_up_rule =~
+             "Löse vor der Anlage das Label `symphony-generated` im Ziel-Team sicher auf: Verwende ein vorhandenes gleichnamiges Label wieder"
+
+    assert follow_up_rule =~ "oder lege ein fehlendes Label einmalig im Ziel-Team an."
+
+    assert follow_up_rule =~
+             "Übergib die sicher bestimmte Label-ID bereits bei `issueCreate` über `labelIds`."
+
+    assert follow_up_rule =~
+             "Kann die Label-ID nicht sicher bestimmt werden, erstelle kein Folge-Issue, melde den Fehler sichtbar und behandle den Vorgang nicht als erfolgreich."
+  end
+
   test "review skills keep complete review scope and combined finding fix comments in symphony-review" do
     global_review_skill = File.read!(Path.expand("../../.codex/skills/symphony-review/SKILL.md", __DIR__))
     local_review_skill = File.read!(Path.expand("../../.codex/skills/sym-review/SKILL.md", __DIR__))

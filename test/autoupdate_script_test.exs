@@ -23,8 +23,12 @@ defmodule AutoupdateScriptTest do
 
     on_exit(fn -> File.rm_rf(root_dir) end)
 
-    assert {output, 0} = run_autoupdate(worktree_dir, "n\n", bin_dir, make_log)
+    for answer <- ["n\n", "Nein\n", "maybe\n", ""] do
+      assert {output, 0} = run_autoupdate(worktree_dir, answer, bin_dir, make_log)
+      assert output == @update_prompt
+    end
 
+    assert {output, 0} = run_autoupdate(worktree_dir, "n\n", bin_dir, make_log)
     assert output == @update_prompt
     refute output =~ "Symphony Update läuft…"
     assert git_output!(worktree_dir, ["rev-parse", "HEAD"]) == old_head
@@ -53,7 +57,7 @@ defmodule AutoupdateScriptTest do
 
     on_exit(fn -> File.rm_rf(root_dir) end)
 
-    assert {output, 0} = run_autoupdate(worktree_dir, "j\n", bin_dir, make_log)
+    assert {output, 0} = run_autoupdate(worktree_dir, "YeS\n", bin_dir, make_log)
 
     assert output =~ @update_prompt
     assert output =~ "Symphony Update läuft…"
@@ -76,7 +80,10 @@ defmodule AutoupdateScriptTest do
     configure_user!(seed_dir)
 
     File.write!(Path.join(seed_dir, "README.md"), "v1\n")
-    git!(seed_dir, ["add", "README.md"])
+    File.mkdir_p!(Path.join(seed_dir, "scripts"))
+    File.cp!(Path.expand("../scripts/mix-runtime", __DIR__), Path.join(seed_dir, "scripts/mix-runtime"))
+    File.write!(Path.join(seed_dir, "mise.toml"), "[tools]\n")
+    git!(seed_dir, ["add", "README.md", "scripts", "mise.toml"])
     git!(seed_dir, ["commit", "-m", "initial"])
     git!(seed_dir, ["branch", "-M", "main"])
     git!(seed_dir, ["push", "-u", "origin", "main"])
@@ -156,6 +163,15 @@ defmodule AutoupdateScriptTest do
     make_log = Path.join(root_dir, "make.log")
 
     File.mkdir_p!(bin_dir)
+    SymphonyElixir.TestSupport.install_runtime_fixture!(Path.join(root_dir, "worktree"), bin_dir)
+
+    for tool <- ["codex", "mix"] do
+      File.write!(Path.join(bin_dir, tool), "#!/bin/bash\nexit 0\n")
+      File.chmod!(Path.join(bin_dir, tool), 0o755)
+    end
+
+    # The fixture config is part of the clean checkout used by autoupdate.
+    git!(Path.join(root_dir, "worktree"), ["checkout", "--", "mise.toml"])
 
     File.write!(Path.join(bin_dir, "make"), """
     #!/usr/bin/env bash
@@ -185,7 +201,7 @@ defmodule AutoupdateScriptTest do
 
   defp run_autoupdate(repo_dir, input, bin_dir, make_log) do
     System.cmd(
-      "bash",
+      "/bin/bash",
       ["-c", "printf '%s' \"$AUTOUPDATE_INPUT\" | \"$AUTOUPDATE_SCRIPT\" \"$SYMPHONY_REPO\""],
       env: [
         {"AUTOUPDATE_INPUT", input},
@@ -195,7 +211,7 @@ defmodule AutoupdateScriptTest do
         {"MIX_DEPS_PATH", "/tmp/foreign-deps"},
         {"MIX_BUILD_ROOT", "/tmp/foreign-build"},
         {"MIX_BUILD_PATH", "/tmp/foreign-build-path"},
-        {"PATH", "#{bin_dir}:#{System.get_env("PATH")}"}
+        {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)}
       ],
       stderr_to_stdout: true
     )

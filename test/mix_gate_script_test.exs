@@ -32,7 +32,7 @@ defmodule MixGateScriptTest do
 
     env =
       [
-        {"PATH", "#{bin_dir}:#{System.get_env("PATH")}"},
+        {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)},
         {"MISE_TRUSTED_CONFIG_PATHS", "/tmp/existing-trust"},
         {"SYMPHONY_WORKFLOW_FILE", "/tmp/wrong/WORKFLOW.md"},
         {"SYMPHONY_WORKFLOW_DIR", "/tmp/wrong"},
@@ -46,7 +46,11 @@ defmodule MixGateScriptTest do
         {"MIX_BUILD_PATH", "/tmp/wrong-build-path"}
       ]
 
-    assert {output, 0} = System.cmd(@script_path, ["format", "--check-formatted"], env: env, stderr_to_stdout: true)
+    # Resolve a relative link chain from another cwd, using system Bash.
+    link = Path.join(bin_dir, "gate")
+    File.ln_s!(@script_path, Path.join(bin_dir, "hop"))
+    File.ln_s!("hop", link)
+    assert {output, 0} = System.cmd("/bin/bash", [link, "format", "--check-formatted"], cd: bin_dir, env: env, stderr_to_stdout: true)
 
     assert output =~ "args=x -- mix format --check-formatted"
     assert output =~ "trusted=#{Path.join(@repo_root, "mise.toml")}:/tmp/existing-trust"

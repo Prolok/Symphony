@@ -45,7 +45,7 @@ main() {
 
   cd "$source_repo" || sym_codex_mcp_die "cannot change into $source_repo"
   sym_codex_mcp_activate_venv "$source_repo"
-  sym_codex_mcp_prepare_mix "$source_repo"
+  sym_codex_mcp_prepare_mix "$source_repo" || return "$?"
   sym_codex_mcp_run_mix "$source_repo" run --no-compile --no-start -e 'SymphonyElixir.Codex.MCPServer.main()'
 }
 

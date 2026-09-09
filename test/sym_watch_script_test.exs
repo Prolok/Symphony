@@ -167,9 +167,9 @@ defmodule SymWatchScriptTest do
   end
 
   defp run_script(script_path, bin_dir, args, opts \\ []) do
-    env = [{"PATH", "#{bin_dir}:#{System.get_env("PATH")}"}] ++ Keyword.get(opts, :env, [])
+    env = [{"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)}] ++ Keyword.get(opts, :env, [])
 
-    System.cmd("bash", [script_path | args],
+    System.cmd("/bin/bash", [script_path | args],
       env: env,
       stderr_to_stdout: true
     )

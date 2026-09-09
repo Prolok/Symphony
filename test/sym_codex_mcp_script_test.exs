@@ -57,9 +57,9 @@ defmodule SymCodexMcpScriptTest do
     on_exit(fn -> File.rm_rf(root_dir) end)
 
     assert {_output, 0} =
-             System.cmd("bash", [@script_path],
+             System.cmd("/bin/bash", [@script_path],
                env: [
-                 {"PATH", "#{bin_dir}:#{System.get_env("PATH")}"},
+                 {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)},
                  {"SYMPHONY_SOURCE_REPO", source_repo},
                  {"MIX_DEPS_PATH", foreign_deps},
                  {"MIX_BUILD_ROOT", foreign_build},
@@ -98,8 +98,8 @@ defmodule SymCodexMcpScriptTest do
 
     {output, 0} =
       System.cmd(
-        "bash",
-        ["-lc", "cat \"$INPUT_FILE\" | \"$SCRIPT_PATH\""],
+        "/bin/bash",
+        ["--noprofile", "--norc", "-c", "cat \"$INPUT_FILE\" | \"$SCRIPT_PATH\""],
         env:
           SymphonyElixir.TestSupport.cleared_symphony_runtime_env() ++
             [
@@ -158,17 +158,20 @@ defmodule SymCodexMcpScriptTest do
   end
 
   defp elixir_runtime_path! do
-    runtime_path =
-      System.get_env("PATH")
-      |> to_string()
-      |> String.split(":", trim: true)
-      |> Enum.reject(&String.contains?(&1, "/.local/share/mise/shims"))
-      |> Enum.join(":")
+    bin_dir = Path.join(System.tmp_dir!(), "mcp-runtime-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(bin_dir)
+    on_exit(fn -> File.rm_rf(bin_dir) end)
+
+    for tool <- ["mise", "erl", "escript", "elixir", "mix"] do
+      File.ln_s!(System.find_executable(tool) || flunk("#{tool} required"), Path.join(bin_dir, tool))
+    end
+
+    runtime_path = SymphonyElixir.TestSupport.script_path(bin_dir)
 
     assert {_, 0} =
              System.cmd(
-               "bash",
-               ["-lc", "command -v elixir >/dev/null && command -v mix >/dev/null"],
+               "/bin/bash",
+               ["--noprofile", "--norc", "-c", "command -v elixir >/dev/null && command -v mix >/dev/null"],
                env: [{"PATH", runtime_path}],
                stderr_to_stdout: true
              )

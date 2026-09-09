@@ -91,7 +91,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(workflow_file,
         workspace_root: workspace_root,
-        hook_after_create: after_create
+        hook_after_create: SymphonyElixir.TestSupport.system_bash_hook(after_create, test_root)
       )
 
       Workflow.set_workflow_file_path(workflow_file)
@@ -191,7 +191,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       write_workflow_file!(workflow_file,
         workspace_root: workspace_root,
-        hook_after_create: after_create
+        hook_after_create: SymphonyElixir.TestSupport.system_bash_hook(after_create, test_root)
       )
 
       Workflow.set_workflow_file_path(workflow_file)

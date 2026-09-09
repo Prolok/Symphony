@@ -37,18 +37,29 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
 
 ### Voraussetzungen
 
-- `mise` fuer die Elixir-/OTP-Versionen
-- Git
-- `flock` aus `util-linux` für serialisierte Starts
+- Linux (Ubuntu 24.04) oder macOS 26; die CI prüft Ubuntu x86_64 und macOS
+  arm64 mit `make all`, auch für `symphony/*`-PRs. Ältere OS-Versionen sind
+  nicht Teil dieser Testmatrix.
+- Bash ab 3.2: Auf macOS genügt `/bin/bash` mit den BSD-Systemwerkzeugen;
+  GNU-Coreutils und ein externes `flock` sind nicht erforderlich.
+- `mise` ab 2026.3.17 und die installierte Toolchain aus `mise.toml`
+  (Erlang/OTP 28, Elixir 1.19.5 für OTP 28)
+- Git ab 2.31, Python ab 3.10 als `python3`, Make und Codex CLI im `PATH`
+- Build-Werkzeuge: unter macOS die Xcode Command Line Tools
+  (`xcode-select --install`), unter Ubuntu `build-essential`. Für lokale
+  Plattformtests zusätzlich zsh; sie führen die Hilfsbefehle aus Bash und
+  zsh aus.
 - Zugriff auf Linear
 - Fuer den vollen PR- und Merge-Ablauf zusaetzlich `gh`
 
 ### Einrichtung
 
-1. Abhängigkeiten installieren:
+1. Im Symphony-Checkout die konfigurierte Laufzeit und Abhängigkeiten installieren:
 
    ```bash
-   mix setup
+   mise trust
+   mise install
+   ./scripts/mix-gate setup
    ```
 
 2. Umgebungsvariablen vorbereiten, zum Beispiel über `.symphony/.env.local`.
@@ -117,12 +128,28 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
    ./symphony
    ```
 
-Der Wrapper `./symphony` serialisiert jeden Start über einen checkout-spezifischen
-`flock`. Innerhalb dieses Locks prüft er zunächst, ob der aktuelle Git-Upstream
+Der reguläre Einstieg ist `./symphony`. Der Wrapper prüft zuerst die benötigten
+Werkzeuge und die installierte Toolchain und aktiviert `mise.toml` ausschließlich
+für den laufenden Prozess und seine Kinder. Ein aktiviertes Shellprofil oder ein
+schon global erreichbares `escript` ist nicht nötig. Fehlende Voraussetzungen
+brechen vor Autoupdate, Build und Registrierung der Hilfsbefehle ab.
+
+Danach serialisiert der Wrapper Autoupdate und Build über einen OS-Lock aus der
+Python-Standardbibliothek. Die Lockdatei liegt im jeweiligen Git-Verzeichnis,
+bei Worktrees in deren eigenem Git-Verzeichnis; außerhalb von Git liegt sie in
+`_build/.symphony-start.lock`. Verschiedene Checkouts blockieren sich nicht.
+SIGINT/SIGTERM werden an die Build-Prozessgruppe weitergegeben; nach spätestens
+fünf Sekunden werden verbleibende Build-Kinder beendet. Der Kernel gibt den
+Lock beim Schließen frei; die Lockdatei bleibt bestehen und muss nicht gelöscht
+werden. Der gestartete Dienst erbt keinen Lock.
+
+Innerhalb dieses Locks prüft Symphony zunächst, ob der aktuelle Git-Upstream
 einen neueren Commit enthält. Wenn eine neue Version verfügbar ist, fragt
 Symphony `Neue Symphony Version verfügbar. Update ausführen j/n?`; bei Zustimmung
-führt das Autoupdate im Hintergrund `git pull --ff-only` und anschließend
+führt das Autoupdate `git pull --ff-only` und anschließend
 `make all` aus und zeigt währenddessen `Symphony Update läuft…`.
+Eine durch das Update geänderte Toolchain wird vor dem Gate und Build erneut
+geprüft und aktiviert.
 
 Unabhängig davon, ob ein Update verfügbar oder angenommen wurde, folgt im selben
 Lock ein selbstheilender Preflight. `mix deps.loadpaths --no-compile` prüft den
@@ -136,6 +163,21 @@ diesem Fall beginnt kein Ticket-Polling. Das Dashboard ist standardmäßig unter
 `http://127.0.0.1:4000/` erreichbar; mit `--port <port>` kann der Startport
 überschrieben werden. Wenn dieser Port bereits belegt ist, verwendet Symphony
 automatisch den nächsten freien Port.
+
+Für den direkten Aufruf des Build-Artefakts muss Erlang bereits aktiv sein,
+zum Beispiel `mise exec -- bin/symphony`. `bin/symphony` alleine aktiviert
+keine Laufzeit und benötigt `escript` im `PATH`; es übernimmt auch keinen
+Autoupdate-/Build-Preflight.
+
+Symlinks und Pfade mit Leerzeichen werden unterstützt. Ein Aufruf aus einem
+anderen Projektverzeichnis behält dieses als Projekt-CWD; Workflow-Dateien,
+Abhängigkeiten und Build-Artefakte gehören zum aufgelösten Symphony-Checkout.
+Die Worktree-Hooks legen `symphony-<Ticket-ID>` und `sym-codex-<Ticket-ID>` unter
+`~/.local/bin` an und entfernen beim Cleanup nur noch passende Links. Füge
+dieses Verzeichnis zum `PATH` deiner Bash oder zsh hinzu. Die Befehle sind
+ausführbare Skripte; auch beim Issue-Link kann die Ticket-ID explizit übergeben
+werden, etwa `sym-codex-PRO-678 PRO-678`. `sym-codex <Ticket-ID>` startet Codex im ausgewählten
+Worktree. Das zusätzliche Sourcing von `sym-codex` wird nur in Bash unterstützt.
 
 Mix-Artefakte werden nicht zwischen Git-Checkouts geteilt. Jeder Haupt-Checkout
 und jeder Worktree verwendet sein eigenes `deps` und `_build`; insbesondere
@@ -178,6 +220,9 @@ den Gate-Prozess bekannte geerbte `SYMPHONY_*`-Runtime-Variablen sowie
 `MISE_TRUSTED_CONFIG_PATHS` prozesslokal um `<Checkout>/mise.toml`, falls die
 Datei existiert. Ein dauerhaftes `mise trust` ist für `make all` nicht
 erforderlich.
+Der Gate-Wrapper normalisiert außerdem das temporäre Verzeichnis auf seinen
+physischen Pfad, damit Build-Defaults und Tests unter macOS dieselbe Adresse
+verwenden (`/var` und `/private/var` können auf dasselbe Verzeichnis zeigen).
 
 Fuer die `@spec`-Pruefung steht zusaetzlich zur Verfuegung:
 

@@ -6,7 +6,8 @@ unset MIX_DEPS_PATH MIX_BUILD_ROOT MIX_BUILD_PATH
 PROJECT_DIR="${1:-}"
 
 if [ -z "$PROJECT_DIR" ]; then
-  SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+  command -v python3 >/dev/null 2>&1 || { echo "autoupdate: python3 not found in PATH" >&2; exit 127; }
+  SCRIPT_PATH="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
   PROJECT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 else
   PROJECT_DIR="$(cd -- "$PROJECT_DIR" && pwd)"
@@ -62,8 +63,8 @@ if ! IFS= read -r ANSWER; then
   exit 0
 fi
 
-case "${ANSWER,,}" in
-  j | ja | y | yes)
+case "$ANSWER" in
+  [jJ] | [jJ][aA] | [yY] | [yY][eE][sS])
     ;;
   *)
     exit 0
@@ -73,10 +74,12 @@ esac
 run_update() {
   cd "$PROJECT_DIR"
   git pull --ff-only "$REMOTE_NAME" "$REMOTE_BRANCH"
+  # A fast-forward can change the configured toolchain. Validate it before
+  # make all, without relying on the runtime inherited from the old revision.
+  source "$PROJECT_DIR/scripts/mix-runtime"
+  mix_runtime_activate "$PROJECT_DIR"
   make all
 }
 
 echo "Symphony Update läuft…"
-run_update &
-UPDATE_PID="$!"
-wait "$UPDATE_PID"
+run_update

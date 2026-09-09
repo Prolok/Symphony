@@ -12,9 +12,15 @@ concurrency:
 
 jobs:
   make-all:
-    name: make all
-    if: ${{ github.event.pull_request.head.repo.full_name != github.repository || !startsWith(github.head_ref, 'symphony/') }}
-    runs-on: ubuntu-24.04
+    name: make all (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: /bin/bash --noprofile --norc -e -o pipefail {0}
 
     steps:
       - name: Repository auschecken
@@ -28,15 +34,39 @@ jobs:
       - name: mise.toml vertrauen
         run: mise trust -y
 
+      - name: Plattform und Systemwerkzeuge nachweisen
+        run: |
+          uname -sm
+          /bin/bash --version
+          python3 --version
+          git --version
+          mise --version
+          mise exec -- elixir --version
+          if [[ "${{ runner.os }}" == Darwin || "${{ runner.os }}" == macOS ]]; then
+            sw_vers
+            [[ "$BASH_VERSION" == 3.2.* ]]
+            # Test fixtures use this system PATH plus explicit doubles/Python.
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin
+            [[ "$(command -v bash)" == /bin/bash ]]
+            [[ "$(command -v ln)" == /bin/ln ]]
+            if ln --version 2>/dev/null; then
+              echo 'GNU ln must not mask the BSD platform proof' >&2
+              exit 1
+            fi
+          else
+            sudo apt-get update
+            sudo apt-get install -y zsh
+          fi
+
       - name: Mix-Artefakte cachen
         uses: actions/cache@v4
         with:
           path: |
             deps
             ~/.mix
-          key: ci-v1-${{ runner.os }}-${{ hashFiles('mix.lock', 'mise.toml') }}
+          key: ci-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mix.lock', 'mise.toml') }}
           restore-keys: |
-            ci-v1-${{ runner.os }}-
+            ci-v2-${{ runner.os }}-${{ runner.arch }}-
 
       - name: make all ausführen
         run: make all

@@ -4909,7 +4909,8 @@ defmodule SymphonyElixir.CoreTest do
 
         send(pid, {:retry_issue, issue_id, retry_token})
 
-        assert_receive {:memory_tracker_state_update, ^issue_id, "Freigabe Review"}, 1_000
+        # Recovery performs real Git checks and starts an app-server process.
+        assert_receive {:memory_tracker_state_update, ^issue_id, "Freigabe Review"}, 10_000
         assert_file_exists_eventually!(codex_stamp)
         stop_orchestrator_and_workers(pid)
       end)
@@ -5017,7 +5018,7 @@ defmodule SymphonyElixir.CoreTest do
 
             send(pid, {:retry_issue, issue_id, retry_token})
 
-            assert_receive {:memory_tracker_state_update, ^issue_id, target_state}, 5_000
+            assert_receive {:memory_tracker_state_update, ^issue_id, target_state}, 10_000
             assert_file_exists_eventually!(codex_stamp)
             target_state
           after
@@ -8740,7 +8741,8 @@ defmodule SymphonyElixir.CoreTest do
 
         send(pid, :tick)
 
-        assert_receive {:memory_tracker_branch_update, ^issue_id, ^expected_branch}, 1_000
+        # The handshake includes creating a real Git worktree and running its hook.
+        assert_receive {:memory_tracker_branch_update, ^issue_id, ^expected_branch}, 10_000
         Process.sleep(350)
 
         assert File.dir?(workspace)

@@ -653,12 +653,12 @@ defmodule SymCodexScriptTest do
       ~s|. "#{Path.join(repo_dir, "sym-codex")}" PRO-49; printf 'after pwd=%s venv=%s codex=%s\\n' "$PWD" "${VIRTUAL_ENV:-}" "$(command -v codex)"|
 
     {output, 0} =
-      System.cmd("bash", ["-lc", command],
+      System.cmd("/bin/bash", ["--noprofile", "--norc", "-c", command],
         cd: repo_dir,
         env:
           SymphonyElixir.TestSupport.cleared_symphony_runtime_env() ++
             [
-              {"PATH", "#{bin_dir}:#{System.get_env("PATH")}"},
+              {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)},
               {"SYMPHONY_PROJECT_WORKTREES_ROOT", workspace_root}
             ],
         stderr_to_stdout: true
@@ -705,12 +705,12 @@ defmodule SymCodexScriptTest do
       ~s|. "#{Path.join(repo_dir, "sym-codex")}" PRO-49; HOME="#{fake_home}" bash -lc 'printf "python=%s\\nvenv=%s\\nbash_env=%s\\n" "$(command -v python)" "${VIRTUAL_ENV:-}" "${BASH_ENV:-}"'|
 
     {output, 0} =
-      System.cmd("bash", ["-lc", command],
+      System.cmd("/bin/bash", ["--noprofile", "--norc", "-c", command],
         cd: repo_dir,
         env:
           SymphonyElixir.TestSupport.cleared_symphony_runtime_env() ++
             [
-              {"PATH", "#{bin_dir}:#{System.get_env("PATH")}"},
+              {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)},
               {"SYMPHONY_PROJECT_WORKTREES_ROOT", workspace_root}
             ],
         stderr_to_stdout: true
@@ -761,6 +761,54 @@ defmodule SymCodexScriptTest do
       run_script(Path.join(repo_dir, "sym-codex"), bin_dir, ["PRO-28"], cd: worktree)
 
     assert output =~ "venv=#{Path.join(project_root, ".venv")}"
+  end
+
+  test "worktree hooks create executable issue commands for bash and zsh and clean only matching links" do
+    %{repo_dir: repo, bin_dir: bin, worktree: worktree, workspace_root: workspace_root} =
+      build_script_worktree_fixture!("PRO-678")
+
+    home = Path.join(bin, "home with spaces")
+    user_bin = Path.join(home, ".local/bin")
+    File.mkdir_p!(user_bin)
+
+    env =
+      SymphonyElixir.TestSupport.cleared_symphony_runtime_env() ++
+        SymphonyElixir.TestSupport.script_env(bin) ++
+        [{"HOME", home}, {"SYMPHONY_PROJECT_WORKTREES_ROOT", workspace_root}]
+
+    on_exit(fn -> Enum.each([repo, bin, workspace_root], &File.rm_rf/1) end)
+    create = Path.expand("../.symphony/on_create_worktree.py", __DIR__)
+    remove = Path.expand("../.symphony/on_remove_worktree.py", __DIR__)
+
+    for _ <- 1..2 do
+      assert {_, 0} = System.cmd(System.find_executable("python3"), [create, repo, worktree], env: env)
+    end
+
+    link = Path.join(user_bin, "sym-codex-PRO-678")
+    assert File.read_link!(link) == Path.join(worktree, "sym-codex")
+    # A generic, relative multi-hop helper link must also choose the worktree.
+    File.ln_s!("sym-codex-PRO-678", Path.join(user_bin, "hop"))
+    File.ln_s!("hop", Path.join(user_bin, "sym-codex"))
+
+    for shell <- ["/bin/bash", System.find_executable("zsh") || flunk("zsh required for platform proof")],
+        command <- ["sym-codex-PRO-678 --observer PRO-678", "sym-codex --observer PRO-678", "sym-codex PRO-678"] do
+      assert {output, 0} =
+               System.cmd(shell, ["-f", "-c", command],
+                 cd: repo,
+                 env: env ++ [{"PATH", "#{user_bin}:#{SymphonyElixir.TestSupport.script_path(bin)}"}],
+                 stderr_to_stdout: true
+               )
+
+      assert output =~ "pwd=#{worktree}"
+    end
+
+    symphony_link = Path.join(user_bin, "symphony-PRO-678")
+    File.rm!(symphony_link)
+    File.ln_s!("foreign-target", symphony_link)
+    assert {_, 0} = System.cmd(System.find_executable("python3"), [remove, repo, worktree], env: env)
+    assert {:error, :enoent} = File.lstat(link)
+    assert File.read_link!(symphony_link) == "foreign-target"
+    assert File.read_link!(Path.join(user_bin, "sym-codex")) == "hop"
   end
 
   defp build_script_fixture! do
@@ -939,7 +987,7 @@ defmodule SymCodexScriptTest do
     env =
       SymphonyElixir.TestSupport.cleared_symphony_runtime_env() ++
         [
-          {"PATH", "#{bin_dir}:#{System.get_env("PATH")}"},
+          {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)},
           {"SYM_CODEX_MODEL", nil},
           {"SYM_CODEX_REASONING_EFFORT", nil},
           {"SYM_CODEX_SERVICE_TIER", nil},
@@ -950,7 +998,7 @@ defmodule SymCodexScriptTest do
     system_opts = maybe_put_cd(system_opts, Keyword.get(opts, :cd))
 
     System.cmd(
-      "bash",
+      "/bin/bash",
       [script_path | args],
       system_opts
     )

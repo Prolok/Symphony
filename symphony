@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_INVOCATION_NAME="$(basename -- "${BASH_SOURCE[0]}")"
-SCRIPT_PATH="$(readlink -f -- "${BASH_SOURCE[0]}")"
+command -v python3 >/dev/null 2>&1 || { echo "symphony: python3 not found in PATH" >&2; exit 127; }
+SCRIPT_PATH="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 SKILLS_DIR="$SCRIPT_DIR/.codex/skills"
 USER_SKILLS_DIR="$HOME/.codex/skills"
@@ -17,109 +18,83 @@ CODEX_LINK_PATH="$USER_BIN_DIR/sym-codex"
 CODEX_TARGET_PATH="$PROJECT_DIR/sym-codex"
 WATCH_LINK_PATH="$USER_BIN_DIR/sym-watch"
 WATCH_TARGET_PATH="$PROJECT_DIR/sym-watch"
-ISSUE_SUFFIX=""
-
-case "$SCRIPT_INVOCATION_NAME" in
-  symphony-*)
-    ISSUE_SUFFIX="${SCRIPT_INVOCATION_NAME#symphony-}"
-    ;;
-esac
-
-symphony_shell_escape() {
-  printf '%q' "$1"
-}
-
-unset MIX_DEPS_PATH MIX_BUILD_ROOT MIX_BUILD_PATH
-
-if ! command -v mise >/dev/null 2>&1; then
-  echo "symphony: mise not found in PATH" >&2
-  exit 127
-fi
-
-if ! command -v flock >/dev/null 2>&1; then
-  echo "symphony: flock not found in PATH" >&2
-  exit 127
-fi
 
 if [ ! -x "$MIX_RUNTIME_PATH" ]; then
   echo "symphony: Mix-Preflight fehlt oder ist nicht ausführbar: $MIX_RUNTIME_PATH" >&2
   exit 1
 fi
+source "$MIX_RUNTIME_PATH"
 
-START_LOCK_PATH="$("$MIX_RUNTIME_PATH" lock-path "$PROJECT_DIR")"
-exec {START_LOCK_FD}>"$START_LOCK_PATH"
-flock "$START_LOCK_FD"
+symphony_shell_escape() {
+  printf '%q' "$1"
+}
 
-if [ -x "$AUTOUPDATE_PATH" ]; then
-  "$AUTOUPDATE_PATH" "$PROJECT_DIR"
-fi
-
-"$MIX_RUNTIME_PATH" build "$PROJECT_DIR"
-flock -u "$START_LOCK_FD"
-exec {START_LOCK_FD}>&-
-
-mkdir -p "$USER_SKILLS_DIR"
-mkdir -p "$USER_BIN_DIR"
-
-if [ -e "$CODEX_LINK_PATH" ] && [ ! -L "$CODEX_LINK_PATH" ]; then
-  echo "symphony: $CODEX_LINK_PATH exists and is not a symlink" >&2
-  exit 1
-fi
-
-ln -sfnT "$CODEX_TARGET_PATH" "$CODEX_LINK_PATH"
-
-if [ -n "$ISSUE_SUFFIX" ]; then
-  CODEX_ISSUE_LINK_PATH="$USER_BIN_DIR/sym-codex-$ISSUE_SUFFIX"
-
-  if [ -e "$CODEX_ISSUE_LINK_PATH" ] && [ ! -L "$CODEX_ISSUE_LINK_PATH" ]; then
-    echo "symphony: $CODEX_ISSUE_LINK_PATH exists and is not a symlink" >&2
+symphony_link() {
+  # -n replaces a link to a directory itself on both BSD and GNU ln.
+  # Never replace a real file or directory owned by the user.
+  if [ -e "$2" ] && [ ! -L "$2" ]; then
+    echo "symphony: $2 exists and is not a symlink" >&2
     exit 1
   fi
+  ln -sfn "$1" "$2"
+}
 
-  ln -sfnT "$CODEX_TARGET_PATH" "$CODEX_ISSUE_LINK_PATH"
-  export SYMPHONY_CODEX_COMMAND="$(symphony_shell_escape "$CODEX_ISSUE_LINK_PATH") --observer"
+symphony_launch() {
+  SCRIPT_INVOCATION_NAME="$1"
+  shift
+  ISSUE_SUFFIX=""
+  case "$SCRIPT_INVOCATION_NAME" in
+    symphony-*) ISSUE_SUFFIX="${SCRIPT_INVOCATION_NAME#symphony-}" ;;
+  esac
+  mix_runtime_activate "$PROJECT_DIR"
+
+  mkdir -p "$USER_SKILLS_DIR"
+  mkdir -p "$USER_BIN_DIR"
+
+  symphony_link "$CODEX_TARGET_PATH" "$CODEX_LINK_PATH"
+
+  if [ -n "$ISSUE_SUFFIX" ]; then
+    CODEX_ISSUE_LINK_PATH="$USER_BIN_DIR/sym-codex-$ISSUE_SUFFIX"
+
+    symphony_link "$CODEX_TARGET_PATH" "$CODEX_ISSUE_LINK_PATH"
+    export SYMPHONY_CODEX_COMMAND="$(symphony_shell_escape "$CODEX_ISSUE_LINK_PATH") --observer"
+  fi
+
+  symphony_link "$WATCH_TARGET_PATH" "$WATCH_LINK_PATH"
+
+  shopt -s nullglob
+  for skill_dir in "$SKILLS_DIR"/symphony-*; do
+    if [ ! -d "$skill_dir" ]; then
+      continue
+    fi
+
+    skill_name="$(basename -- "$skill_dir")"
+    target_path="$USER_SKILLS_DIR/$skill_name"
+
+    symphony_link "$skill_dir" "$target_path"
+  done
+
+  for user_skill in "$USER_SKILLS_DIR"/symphony-*; do
+    if [ ! -L "$user_skill" ]; then
+      continue
+    fi
+
+    skill_name="$(basename -- "$user_skill")"
+    if [ ! -d "$SKILLS_DIR/$skill_name" ]; then
+      unlink "$user_skill"
+    fi
+  done
+  shopt -u nullglob
+
+  export SYMPHONY_WORKFLOW_FILE="$WORKFLOW_FILE"
+  export SYMPHONY_WORKFLOW_INTERACTIVE_FILE="$WORKFLOW_INTERACTIVE_FILE"
+  export SYMPHONY_WORKFLOW_DIALOG_FILE="$WORKFLOW_DIALOG_FILE"
+  export SYMPHONY_WORKFLOW_DIR="$PROJECT_DIR"
+
+  exec "$PROJECT_DIR/bin/symphony" "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  mix_runtime_activate "$PROJECT_DIR"
+  exec "$MIX_RUNTIME_PATH" start "$PROJECT_DIR" "$SCRIPT_INVOCATION_NAME" "$@"
 fi
-
-if [ -e "$WATCH_LINK_PATH" ] && [ ! -L "$WATCH_LINK_PATH" ]; then
-  echo "symphony: $WATCH_LINK_PATH exists and is not a symlink" >&2
-  exit 1
-fi
-
-ln -sfnT "$WATCH_TARGET_PATH" "$WATCH_LINK_PATH"
-
-shopt -s nullglob
-for skill_dir in "$SKILLS_DIR"/symphony-*; do
-  if [ ! -d "$skill_dir" ]; then
-    continue
-  fi
-
-  skill_name="$(basename -- "$skill_dir")"
-  target_path="$USER_SKILLS_DIR/$skill_name"
-
-  if [ -e "$target_path" ] && [ ! -L "$target_path" ]; then
-    echo "symphony: $target_path exists and is not a symlink" >&2
-    exit 1
-  fi
-
-  ln -sfnT "$skill_dir" "$target_path"
-done
-
-for user_skill in "$USER_SKILLS_DIR"/symphony-*; do
-  if [ ! -L "$user_skill" ]; then
-    continue
-  fi
-
-  skill_name="$(basename -- "$user_skill")"
-  if [ ! -d "$SKILLS_DIR/$skill_name" ]; then
-    unlink "$user_skill"
-  fi
-done
-shopt -u nullglob
-
-export SYMPHONY_WORKFLOW_FILE="$WORKFLOW_FILE"
-export SYMPHONY_WORKFLOW_INTERACTIVE_FILE="$WORKFLOW_INTERACTIVE_FILE"
-export SYMPHONY_WORKFLOW_DIALOG_FILE="$WORKFLOW_DIALOG_FILE"
-export SYMPHONY_WORKFLOW_DIR="$PROJECT_DIR"
-
-eval "$(mise env -C "$PROJECT_DIR" -s bash)"
-exec "$PROJECT_DIR/bin/symphony" "$@"

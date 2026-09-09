@@ -69,23 +69,11 @@ sym_codex_activate_venv() {
 }
 
 sym_codex_realpath() {
-  local raw_path="$1"
-  local resolved_path=""
-
-  if command -v readlink >/dev/null 2>&1; then
-    resolved_path="$(readlink -f -- "$raw_path" 2>/dev/null || true)"
-  fi
-
-  if [[ -z "$resolved_path" ]] && command -v realpath >/dev/null 2>&1; then
-    resolved_path="$(realpath "$raw_path" 2>/dev/null || true)"
-  fi
-
-  if [[ -n "$resolved_path" ]]; then
-    printf '%s\n' "$resolved_path"
-    return 0
-  fi
-
-  return 1
+  command -v python3 >/dev/null 2>&1 || {
+    sym_codex_stderr "python3 not found in PATH"
+    return 1
+  }
+  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
 }
 
 sym_codex_source_repo() {
@@ -102,7 +90,7 @@ sym_codex_source_repo() {
     fi
   fi
 
-  resolved_source="$(sym_codex_realpath "$script_source" 2>/dev/null || true)"
+  resolved_source="$(sym_codex_realpath "$script_source")" || return 1
 
   if [[ -n "$resolved_source" ]]; then
     script_source="$resolved_source"

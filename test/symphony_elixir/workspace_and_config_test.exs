@@ -2518,6 +2518,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            ]
   end
 
+  test "workspace defaults follow the runtime temp directory without recompilation" do
+    previous_tmpdir = System.get_env("TMPDIR")
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-runtime-workspace-default-#{System.unique_integer([:positive])}"
+      )
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: nil)
+    assert {:ok, _settings} = Schema.parse(%{})
+
+    try do
+      for name <- ["first", "second"] do
+        tmpdir = Path.join(test_root, name)
+        File.mkdir_p!(tmpdir)
+        System.put_env("TMPDIR", tmpdir)
+        assert System.tmp_dir!() == tmpdir
+        expected_root = Path.join(tmpdir, "symphony_workspaces")
+
+        for config <- [%{}, %{workspace: %{}}, %{workspace: %{root: nil}}] do
+          assert {:ok, settings} = Schema.parse(config)
+          assert settings.workspace.root == expected_root
+        end
+
+        assert Config.settings!().workspace.root == expected_root
+      end
+    after
+      restore_env("TMPDIR", previous_tmpdir)
+      File.rm_rf!(test_root)
+    end
+  end
+
   test "schema parse normalizes policy keys and env-backed fallbacks" do
     missing_workspace_env = "SYMP_MISSING_WORKSPACE_#{System.unique_integer([:positive])}"
     empty_secret_env = "SYMP_EMPTY_SECRET_#{System.unique_integer([:positive])}"

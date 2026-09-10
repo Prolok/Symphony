@@ -14,7 +14,16 @@ defmodule SymphonyElixir.RuntimePaths do
     "SYMPHONY_ISSUE_IDENTIFIER",
     "SYMPHONY_ISSUE_LABELS_JSON",
     "SYMPHONY_PROJECT_ROOT",
-    "SYMPHONY_PROJECT_WORKTREES_ROOT"
+    "SYMPHONY_PROJECT_WORKTREES_ROOT",
+    "SYMPHONY_RELEASE_ROOT",
+    "SYMPHONY_ROOT_DIR",
+    "SYMPHONY_LINEAR_ENV_DIR",
+    "SYMPHONY_LINEAR_AUTH_MODE",
+    "SYMPHONY_LINEAR_CLIENT_SECRET_ENV",
+    "SYMPHONY_LINEAR_BINDING_HASH",
+    "SYMPHONY_CODEX_STATE_ROOT",
+    "SYMPHONY_RUN_ID",
+    "SYMPHONY_PHASE"
   ]
 
   @spec runtime_env_names() :: [String.t()]
@@ -32,8 +41,10 @@ defmodule SymphonyElixir.RuntimePaths do
 
   @spec workflow_dir() :: Path.t()
   def workflow_dir do
-    Workflow.default_workflow_file_path()
-    |> Path.dirname()
+    case Map.get(bound_runtime_env(), "SYMPHONY_RELEASE_ROOT") do
+      root when is_binary(root) and root != "" -> root
+      _ -> Workflow.default_workflow_file_path() |> Path.dirname()
+    end
   end
 
   @spec workflow_file() :: Path.t()
@@ -49,6 +60,23 @@ defmodule SymphonyElixir.RuntimePaths do
       "SYMPHONY_WORKFLOW_DIR" => workflow_dir(),
       "SYMPHONY_WORKFLOW_FILE" => workflow_file()
     }
+    |> Map.merge(bound_runtime_env())
+  end
+
+  defp bound_runtime_env do
+    root = System.get_env("SYMPHONY_RELEASE_ROOT")
+
+    if is_binary(root) and File.regular?(Path.join(root, ".symphony-release.json")) do
+      names =
+        if System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app",
+          do: ~w(SYMPHONY_RELEASE_ROOT SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_BINDING_HASH),
+          else: ~w(SYMPHONY_RELEASE_ROOT)
+
+      Map.new(names, &{&1, System.get_env(&1) || ""})
+      |> Map.merge(System.get_env() |> Map.take(["SYMPHONY_ROOT_DIR", "SYMPHONY_LINEAR_ENV_DIR"]))
+    else
+      %{}
+    end
   end
 
   @spec cleaned_system_env(map()) :: [{String.t(), String.t() | nil}]
@@ -59,6 +87,7 @@ defmodule SymphonyElixir.RuntimePaths do
     |> Enum.reject(&Map.has_key?(normalized_overrides, &1))
     |> Enum.map(&{&1, nil})
     |> Kernel.++(Enum.to_list(normalized_overrides))
+    |> SymphonyElixir.Config.without_linear_secret()
   end
 
   @spec cleaned_builtin_system_env(map()) :: [{String.t(), String.t() | nil}]
@@ -101,6 +130,7 @@ defmodule SymphonyElixir.RuntimePaths do
 
     case System.cmd("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"],
            cd: cwd,
+           env: SymphonyElixir.Config.without_linear_secret([]),
            stderr_to_stdout: true
          ) do
       {output, 0} ->

@@ -65,7 +65,7 @@ defmodule SymphonyElixir.Codex.MCPServer do
     :ok
   end
 
-  defp load_project_env(config_dir), do: EnvFile.load(config_dir, override_existing: true)
+  defp load_project_env(config_dir), do: EnvFile.load_runtime(config_dir)
 
   @spec run([String.t()], keyword()) :: :ok
   def run(_args \\ [], opts \\ []) do

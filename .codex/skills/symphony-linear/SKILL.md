@@ -124,6 +124,20 @@ mutation AttachGitHubPR($issueId: String!, $url: String!, $title: String) {
 }
 ```
 
+## Expliziter App-Betrieb
+
+Wenn `SYMPHONY_LINEAR_AUTH_MODE=app` gesetzt ist, ausschließlich das injizierte
+`linear_graphql`, den gebundenen `symphony_linear`-MCP oder den lokalen
+Tracker-Fallback derselben Installation verwenden. Kein persönlicher Linear-MCP,
+kein direkter API-Key und keine Tokenabfrage. Providerfehler sichtbar behandeln.
+Der App-Client erfasst Kommentar-IDs/Fassungen selbst; offene Schreibabsichten
+anhand der gemeldeten Kommentar-ID abgleichen und keine blinde Neuanlage auslösen.
+
+Ein versiegelter Lauf (`SYMPHONY_RELEASE_ROOT`) verwendet beim Mix-Fallback
+zusätzlich `--no-compile`, damit seine Build-Artefakte unverändert bleiben.
+Workflow-, Source- und Env-Roots weiterhin getrennt gemäß folgendem Bootstrap
+auflösen. Den gebundenen Auth-Modus/Hash nicht löschen oder ersetzen.
+
 ## Lokaler Workpad-Fallback
 
 Wenn der reguläre Kommentar-Edit-Pfad wegen fehlendem Tool, HTTP 401, HTTP 403

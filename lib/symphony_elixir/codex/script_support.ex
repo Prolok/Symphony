@@ -147,7 +147,7 @@ defmodule SymphonyElixir.Codex.ScriptSupport do
   end
 
   defp load_runtime_context(workflow_path, env_files_dir) do
-    with :ok <- EnvFile.load(EnvFile.config_dir(env_files_dir), override_existing: true) do
+    with :ok <- EnvFile.load_runtime(EnvFile.config_dir(env_files_dir)) do
       with :ok <- Workflow.set_workflow_file_path(workflow_path),
            {:ok, _apps} <- Application.ensure_all_started(:req) do
         :ok

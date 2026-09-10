@@ -1,6 +1,16 @@
 ---
 tracker:
   kind: linear
+  # App-Bindung und Secret aus .symphony/.env.local des jeweiligen Fachprojekts.
+  # Secret erst im Auth-Prozess lesen; client_secret_env enthält nur den Namen.
+  # Alte Workflows ohne auth_mode sowie explizites legacy bleiben kompatibel.
+  auth_mode: app
+  app:
+    client_id: $LINEAR_APP_CLIENT_ID
+    client_secret_env: LINEAR_APP_SECRET
+    workspace_id: $LINEAR_APP_WORKSPACE_ID
+    user_id: $LINEAR_APP_USER_ID
+    installation_id: $LINEAR_APP_INSTALLATION_ID
   # Der Scope wird repository-lokal über LINEAR_PROJECT_SLUG/LINEAR_TEAM_KEY gewählt;
   # fehlende Tracker-Felder erhalten den jeweils gleichnamigen Env-Fallback.
   project_slug: $LINEAR_PROJECT_SLUG
@@ -49,7 +59,11 @@ hooks:
     if git -C "$source_repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
       git -C "$workspace" pull --ff-only origin "$branch"
     fi
-    python3 "$workspace/.symphony/on_create_worktree.py" "$source_repo" "$workspace"
+    if [ -n "${SYMPHONY_RELEASE_ROOT:-}" ]; then
+      python3 "$SYMPHONY_RELEASE_ROOT/.symphony/on_create_worktree.py" "$source_repo" "$workspace"
+    else
+      python3 "$workspace/.symphony/on_create_worktree.py" "$source_repo" "$workspace"
+    fi
   before_remove: |
     workspace="$PWD"
     python3 "$workspace/.symphony/on_remove_worktree.py" "$SYMPHONY_PROJECT_ROOT" "$workspace"

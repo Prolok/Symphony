@@ -63,6 +63,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:kind, :string)
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
       field(:api_key, :string)
+      field(:auth_mode, :string, default: "legacy")
+      field(:app, :map, default: %{})
       field(:project_slug, :string)
       field(:team_key, :string)
       field(:assignee, :string)
@@ -72,12 +74,18 @@ defmodule SymphonyElixir.Config.Schema do
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
+      attrs =
+        Map.update(attrs, "app", %{}, fn app ->
+          if is_map(app), do: Map.take(app, ~w(client_id client_secret_env workspace_id user_id installation_id allowed_issue_ids)), else: app
+        end)
+
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :team_key, :assignee, :active_states, :terminal_states],
+        ~w(kind endpoint api_key auth_mode app project_slug team_key assignee active_states terminal_states)a,
         empty_values: []
       )
+      |> validate_inclusion(:auth_mode, ["legacy", "app"])
     end
   end
 
@@ -394,7 +402,8 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     tracker = %{
       settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
+      | api_key: resolve_api_key(settings.tracker),
+        app: resolve_app_binding(settings.tracker),
         project_slug: resolve_linear_scope_setting(settings.tracker.project_slug, @linear_project_slug_env),
         team_key: resolve_linear_scope_setting(settings.tracker.team_key, @linear_team_key_env),
         assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE")),
@@ -413,6 +422,35 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
+  end
+
+  defp resolve_app_binding(%{auth_mode: "app", app: app}) do
+    Map.new(app, fn
+      {key, value} when key in ~w(client_id client_secret_env workspace_id user_id installation_id) ->
+        {key, resolve_secret_setting(value, nil)}
+
+      entry ->
+        entry
+    end)
+    |> bind_project_state()
+  end
+
+  defp resolve_app_binding(tracker), do: tracker.app
+
+  defp bind_project_state(app) do
+    case System.get_env("SYMPHONY_LINEAR_ENV_DIR") do
+      config_dir when is_binary(config_dir) and config_dir != "" ->
+        Map.put(app, "state_root", Path.join(config_dir, "state"))
+
+      _ ->
+        app
+    end
+  end
+
+  defp resolve_api_key(%{auth_mode: "app"}), do: nil
+
+  defp resolve_api_key(tracker) do
+    resolve_secret_setting(tracker.api_key, System.get_env("LINEAR_API_KEY"))
   end
 
   defp filter_managed_states(states) when is_list(states) do

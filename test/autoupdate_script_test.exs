@@ -204,6 +204,7 @@ defmodule AutoupdateScriptTest do
       "/bin/bash",
       ["-c", "printf '%s' \"$AUTOUPDATE_INPUT\" | \"$AUTOUPDATE_SCRIPT\" \"$SYMPHONY_REPO\""],
       env: [
+        {"SYMPHONY_RELEASE_ROOT", repo_dir},
         {"AUTOUPDATE_INPUT", input},
         {"AUTOUPDATE_SCRIPT", @script_source},
         {"SYMPHONY_REPO", repo_dir},

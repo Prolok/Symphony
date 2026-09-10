@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "Du arbeitest an einem Ticket dieses Repositorys."
   @repo_workflow_file Path.expand("../../WORKFLOW.md", __DIR__)
-  @test_isolation_env_names ["LINEAR_PROJECT_SLUG", "LINEAR_TEAM_KEY"]
+  @test_isolation_env_names ["LINEAR_PROJECT_SLUG", "LINEAR_TEAM_KEY", "SYMPHONY_LINEAR_SECRET_ACCESS"]
 
   # Script fixtures always use the system shell and system utilities. Python is
   # an explicit dependency, so pin only that executable from the host PATH.
@@ -114,6 +114,10 @@ defmodule SymphonyElixir.TestSupport do
         runtime_env_snapshot = SymphonyElixir.TestSupport.scrub_symphony_runtime_env()
 
         SymphonyElixir.TestSupport.ensure_application_started()
+        # Each fixture is a fresh installation. The shipped workflow now uses
+        # app identity; a live store correctly refuses switching it to a test
+        # identity. Restart the store at the fixture boundary instead.
+        Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
 
         workflow_root =
           Path.join(
@@ -125,7 +129,7 @@ defmodule SymphonyElixir.TestSupport do
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+        Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
         stop_default_http_server()
 
         on_exit(fn ->

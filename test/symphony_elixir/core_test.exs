@@ -286,6 +286,8 @@ defmodule SymphonyElixir.CoreTest do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
     Workflow.clear_workflow_file_path()
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
     assert is_map(config)
@@ -1095,6 +1097,8 @@ defmodule SymphonyElixir.CoreTest do
 
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
     Workflow.set_workflow_file_path(repo_workflow_path)
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     assert {:ok, status_overview} = Workflow.status_overview()
 
@@ -7383,6 +7387,8 @@ defmodule SymphonyElixir.CoreTest do
   test "in-repo WORKFLOW.md renders correctly" do
     workflow_path = Workflow.workflow_file_path()
     Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     issue = %Issue{
       identifier: "MT-616",
@@ -7455,6 +7461,9 @@ defmodule SymphonyElixir.CoreTest do
     workflow_file = Path.join(repo_root, "WORKFLOW.md")
 
     Workflow.set_workflow_file_path(workflow_file)
+
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     on_exit(fn ->
       Workflow.set_workflow_file_path(workflow_path)

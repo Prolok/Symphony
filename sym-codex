@@ -121,6 +121,12 @@ sym_codex_run_mix() {
   local mix_runtime="$source_repo/scripts/mix-runtime"
   shift
 
+  if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" && "${1:-}" == run ]]; then
+    shift
+    "$mix_runtime" mix "$source_repo" run --no-compile "$@"
+    return "$?"
+  fi
+
   [[ -x "$mix_runtime" ]] || sym_codex_die "Mix-Preflight fehlt oder ist nicht ausführbar: $mix_runtime"
   "$mix_runtime" mix "$source_repo" "$@"
 }
@@ -128,6 +134,12 @@ sym_codex_run_mix() {
 sym_codex_prepare_mix() {
   local source_repo="$1"
   local mix_runtime="$source_repo/scripts/mix-runtime"
+
+  if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" ]]; then
+    [[ -f "$source_repo/.symphony-release.json" ]] || sym_codex_die "ungebundener Laufzeitstand"
+    python3 "$source_repo/scripts/installation-release.py" verify "$source_repo" || sym_codex_die "Laufzeitstand wurde verändert"
+    return 0
+  fi
 
   [[ -x "$mix_runtime" ]] || sym_codex_die "Mix-Preflight fehlt oder ist nicht ausführbar: $mix_runtime"
   "$mix_runtime" prepare "$source_repo" 1>&2
@@ -137,6 +149,11 @@ sym_codex_project_root() {
   local start_dir="$1"
   local common_dir
   local project_root
+
+  if [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app && -n "${SYMPHONY_LINEAR_ENV_DIR:-}" ]]; then
+    dirname -- "$SYMPHONY_LINEAR_ENV_DIR"
+    return 0
+  fi
 
   common_dir="$(git -C "$start_dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
 
@@ -225,7 +242,15 @@ sym_codex_build_manual_prompt() {
              env_files_dir
            ) do
         {:ok, %{prompt: prompt, workflow_step: workflow_step, session_id: session_id}} ->
-          IO.write("SYM_CODEX_CONTEXT_V2\n")
+          runtime_env = SymphonyElixir.Linear.WriteContext.with_context(
+            %{run_id: Ecto.UUID.generate(), phase: workflow_step},
+            &SymphonyElixir.Config.linear_runtime_env/0
+          )
+          if runtime_env == %{} do
+            IO.write("SYM_CODEX_CONTEXT_V2\n")
+          else
+            IO.write("SYM_CODEX_CONTEXT_V3\n" <> Jason.encode!(runtime_env) <> "\n")
+          end
           IO.write((workflow_step || "") <> "\n")
           IO.write((session_id || "") <> "\n")
           IO.write("SYM_CODEX_PROMPT_V1\n")
@@ -300,11 +325,31 @@ sym_codex_parse_manual_prompt_context() {
   local prompt_context="$1"
   local context_v1_prefix=$'SYM_CODEX_CONTEXT_V1\n'
   local context_v2_prefix=$'SYM_CODEX_CONTEXT_V2\n'
+  local context_v3_prefix=$'SYM_CODEX_CONTEXT_V3\n'
   local prompt_marker=$'\nSYM_CODEX_PROMPT_V1\n'
   local terminal_prompt_marker=$'\nSYM_CODEX_PROMPT_V1'
   local metadata=""
   local remainder=""
   local newline=$'\n'
+
+  if [[ "$prompt_context" == "$context_v3_prefix"* ]]; then
+    remainder="${prompt_context#"$context_v3_prefix"}"
+    local runtime_json="${remainder%%"$newline"*}"
+    local runtime_entries name value
+    runtime_entries="$(python3 -c '
+import json,sys
+data=json.loads(sys.argv[1])
+allowed={"SYMPHONY_LINEAR_AUTH_MODE","SYMPHONY_LINEAR_CLIENT_SECRET_ENV","SYMPHONY_LINEAR_BINDING_HASH","SYMPHONY_CODEX_STATE_ROOT","SYMPHONY_RUN_ID","SYMPHONY_PHASE"}
+assert set(data) == allowed and data["SYMPHONY_LINEAR_AUTH_MODE"] == "app"
+for key,value in data.items():
+    assert isinstance(value,str) and "\n" not in value and "\r" not in value
+    print(key+"="+value)
+' "$runtime_json")" || sym_codex_die "invalid app runtime context"
+    while IFS='=' read -r name value; do
+      export "$name=$value"
+    done <<< "$runtime_entries"
+    prompt_context="$context_v2_prefix${remainder#*"$newline"}"
+  fi
 
   if [[ "$prompt_context" == "$context_v2_prefix"* ]] && [[ "$prompt_context" == *"$prompt_marker"* ]]; then
     remainder="${prompt_context#"$context_v2_prefix"}"
@@ -409,6 +454,11 @@ sym_codex_apply_launch_env_file() {
     [[ "$line" == *=* ]] || continue
 
     key="$(sym_codex_trim "${line%%=*}")"
+    # Discard all other values before passing anything to helper subprocesses.
+    case "$key" in
+      SYM_CODEX_MODEL|SYM_CODEX_REASONING_EFFORT|SYM_CODEX_SERVICE_TIER|SYM_CODEX_HUMAN_SERVICE_TIER) ;;
+      *) continue ;;
+    esac
     value="${line#*=}"
     value="${value%%#*}"
     value="$(sym_codex_trim "$value")"
@@ -451,6 +501,24 @@ sym_codex_load_launch_env() {
   [[ -n "${SYM_CODEX_REASONING_EFFORT+x}" ]] && keep_reasoning=1
   [[ -n "${SYM_CODEX_SERVICE_TIER+x}" ]] && keep_service_tier=1
   [[ -n "${SYM_CODEX_HUMAN_SERVICE_TIER+x}" ]] && keep_human_service_tier=1
+
+  if [[ -f "$project_root/.symphony/root-config.json" ]]; then
+    local entries key value
+    entries="$(python3 - "$project_root/.symphony/root-config.json" <<'PY'
+import json, os, sys
+values = json.load(open(sys.argv[1]))['values']
+for name in ('SYM_CODEX_MODEL', 'SYM_CODEX_REASONING_EFFORT', 'SYM_CODEX_SERVICE_TIER', 'SYM_CODEX_HUMAN_SERVICE_TIER'):
+    if name in values and name not in os.environ:
+        value = values[name]
+        assert isinstance(value, str) and '\n' not in value and '\r' not in value
+        print(name + '=' + value)
+PY
+)" || return 1
+    while IFS='=' read -r key value; do
+      [[ -z "$key" ]] || export "$key=$value"
+    done <<< "$entries"
+    return 0
+  fi
 
   sym_codex_apply_launch_env_file "$project_root/.env" "$keep_model" "$keep_reasoning" "$keep_service_tier" "$keep_human_service_tier"
   sym_codex_apply_launch_env_file "$project_root/.env.local" "$keep_model" "$keep_reasoning" "$keep_service_tier" "$keep_human_service_tier"
@@ -635,6 +703,7 @@ sym_codex_resolve_workspace() {
 }
 
 sym_codex_run() {
+  local original_args=("$@")
   local observer_mode=0
   local issue_identifier_inferred=0
   local issue_identifier=""
@@ -686,6 +755,20 @@ sym_codex_run() {
     sym_codex_finish 1
   fi
 
+  if [[ -z "${SYMPHONY_RELEASE_ROOT:-}" && ! -f "$source_repo/.symphony-release.json" &&
+        -f "$source_repo/scripts/installation-release.py" ]] &&
+      python3 "$source_repo/scripts/installation-release.py" app-workflow "$source_repo"; then
+    python3 "$source_repo/scripts/installation-release.py" codex "$source_repo" sym-codex "${original_args[@]}"
+    return "$?"
+  fi
+
+  if [[ -f "$source_repo/.symphony/root-config.json" ]]; then
+    export SYMPHONY_RELEASE_ROOT="$source_repo"
+    export SYMPHONY_ROOT_DIR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["root"])' "$source_repo/.symphony/root-config.json")"
+  elif [[ -z "${SYMPHONY_ROOT_DIR:-}" ]]; then
+    export SYMPHONY_ROOT_DIR="$source_repo"
+  fi
+
   if ! project_root="$(sym_codex_project_root "$(pwd -P)")"; then
     sym_codex_die "cannot determine the local project root"
   fi
@@ -693,6 +776,11 @@ sym_codex_run() {
   workflow_file="$source_repo/WORKFLOW.md"
   interactive_workflow_file="$source_repo/WORKFLOW_INTERACTIVE.md"
   dialog_workflow_file="$source_repo/WORKFLOW_DIALOG.md"
+  if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" ]]; then
+    workflow_file="${SYMPHONY_WORKFLOW_FILE:-$workflow_file}"
+    interactive_workflow_file="${SYMPHONY_WORKFLOW_INTERACTIVE_FILE:-$interactive_workflow_file}"
+    dialog_workflow_file="${SYMPHONY_WORKFLOW_DIALOG_FILE:-$dialog_workflow_file}"
+  fi
 
   if [[ -z "$issue_identifier" ]]; then
     issue_identifier="$(sym_codex_infer_issue_identifier_from_branch 2>/dev/null || true)"
@@ -747,6 +835,22 @@ sym_codex_run() {
   fi
 
   sym_codex_load_launch_env "$source_repo"
+  if (( observer_mode )) && [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" ]] && [[ -z "${SYMPHONY_LINEAR_AUTH_MODE:-}" ]]; then
+    # A directly invoked observer must derive app mode from its workflow too.
+    prompt_context="$(
+      sym_codex_prepare_mix "$source_repo" &&
+      sym_codex_run_mix "$source_repo" run --no-start -e '
+        [workflow, project] = System.argv()
+        :ok = SymphonyElixir.Workflow.set_workflow_file_path(workflow)
+        :ok = SymphonyElixir.EnvFile.load_runtime(SymphonyElixir.EnvFile.config_dir(project))
+        runtime_env = SymphonyElixir.Config.linear_runtime_env()
+        if runtime_env != %{}, do: IO.write("SYM_CODEX_CONTEXT_V3\n" <> Jason.encode!(runtime_env) <> "\n\n\nSYM_CODEX_PROMPT_V1\n")
+      ' -- "$workflow_file" "$project_root"
+    )" || sym_codex_die "cannot bind observer runtime context"
+    if [[ -n "$prompt_context" ]]; then
+      sym_codex_parse_manual_prompt_context "$prompt_context"
+    fi
+  fi
   sym_codex_set_launch_profile "$workflow_step"
   service_tier="$(sym_codex_effective_service_tier "$observer_mode")"
 
@@ -795,12 +899,20 @@ sym_codex_run() {
     sym_codex_activate_venv "$project_root" "$workspace" "$source_repo"
     (
       unset MIX_DEPS_PATH MIX_BUILD_ROOT MIX_BUILD_PATH
-      codex "${codex_args[@]}"
+      if [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app ]]; then
+        python3 "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
+      else
+        codex "${codex_args[@]}"
+      fi
     )
     return $?
   fi
 
   sym_codex_activate_venv "$project_root" "$workspace" "$source_repo"
+  if [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app ]]; then
+    exec env -u MIX_DEPS_PATH -u MIX_BUILD_ROOT -u MIX_BUILD_PATH python3 "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
+  fi
+
   exec env -u MIX_DEPS_PATH -u MIX_BUILD_ROOT -u MIX_BUILD_PATH codex "${codex_args[@]}"
 }
 

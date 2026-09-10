@@ -2283,11 +2283,13 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, {:team, "REFERENCED"}} = Config.linear_scope()
   end
 
-  test "CLI loads repository-local team scope before validating the unchanged central workflow" do
+  test "CLI loads repository-local app binding and team scope before validating the shared workflow" do
     project_root =
       Path.join(System.tmp_dir!(), "symphony-cli-team-scope-#{System.unique_integer([:positive])}")
 
-    env_names = ["LINEAR_API_KEY", "LINEAR_ASSIGNEE", "LINEAR_PROJECT_SLUG", "LINEAR_TEAM_KEY"]
+    env_names =
+      ~w(LINEAR_API_KEY LINEAR_ASSIGNEE LINEAR_PROJECT_SLUG LINEAR_TEAM_KEY LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_SECRET)
+
     previous_env = Map.new(env_names, fn name -> {name, System.get_env(name)} end)
     parent = self()
 
@@ -2302,15 +2304,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     File.write!(
       Path.join(config_dir, ".env.local"),
-      "LINEAR_API_KEY=test-token\nLINEAR_ASSIGNEE=dev@example.com\nLINEAR_PROJECT_SLUG=\nLINEAR_TEAM_KEY=QAI\n"
+      "LINEAR_API_KEY=test-token\nLINEAR_ASSIGNEE=dev@example.invalid\nLINEAR_PROJECT_SLUG=\nLINEAR_TEAM_KEY=QAI\n" <>
+        "LINEAR_APP_CLIENT_ID=synthetic-client\nLINEAR_APP_WORKSPACE_ID=synthetic-workspace\nLINEAR_APP_USER_ID=synthetic-app\n" <>
+        "LINEAR_APP_INSTALLATION_ID=synthetic-installation\nLINEAR_APP_SECRET=synthetic-secret\n"
     )
 
     workflow_file = Path.expand("../../WORKFLOW.md", __DIR__)
 
     deps = %{
       file_regular?: &File.regular?/1,
-      load_env_files: fn path -> SymphonyElixir.EnvFile.load(path, override_existing: true) end,
-      set_workflow_file_path: &Workflow.set_workflow_file_path/1,
+      load_env_files: &SymphonyElixir.EnvFile.load_runtime/1,
+      set_workflow_file_path: fn path ->
+        :ok = Workflow.set_workflow_file_path(path)
+        Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+        Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+        :ok
+      end,
       validate_startup_requirements: fn ->
         send(parent, {:scope_before_start, Config.linear_scope()})
         Config.validate_startup_requirements()
@@ -2320,6 +2329,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert :ok = CLI.run(workflow_file, project_root, deps)
     assert_received {:scope_before_start, {:ok, {:team, "QAI"}}}
+    assert Config.settings!().tracker.app["state_root"] == Path.join(project_root, ".symphony/state")
+    assert System.get_env("LINEAR_APP_SECRET") == nil
   end
 
   test "config no longer resolves legacy env: references" do

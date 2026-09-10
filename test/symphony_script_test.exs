@@ -4,7 +4,7 @@ defmodule SymphonyScriptTest do
   @script_source Path.expand("../symphony", __DIR__)
   @mix_runtime_source Path.expand("../scripts/mix-runtime", __DIR__)
 
-  test "symphony creates local bin symlinks for helper scripts" do
+  test "an isolated release binds helpers without creating global symlinks" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
     project_dir = Path.join(System.tmp_dir!(), "symphony-script-project-#{System.unique_integer([:positive])}")
 
@@ -21,7 +21,7 @@ defmodule SymphonyScriptTest do
     assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, ["--port", "4001"], cd: project_dir)
     assert output =~ "symphony-stub args=--port 4001"
     assert output =~ "symphony-stub cwd=#{project_dir}"
-    assert output =~ "symphony-stub codex_command=\n"
+    assert output =~ "--observer\n"
     assert output =~ "symphony-stub project_root=\n"
     assert output =~ "symphony-stub source_repo=\n"
     assert output =~ "symphony-stub workflow_file=#{Path.join(repo_dir, "WORKFLOW.md")}"
@@ -29,8 +29,8 @@ defmodule SymphonyScriptTest do
     assert output =~ "symphony-stub workflow_dialog_file=#{Path.join(repo_dir, "WORKFLOW_DIALOG.md")}"
     assert output =~ "symphony-stub workflow_dir=#{repo_dir}"
     assert output =~ "symphony-stub worktrees_root=\n"
-    assert File.read_link!(Path.join(home_dir, ".local/bin/sym-codex")) == Path.join(repo_dir, "sym-codex")
-    assert File.read_link!(Path.join(home_dir, ".local/bin/sym-watch")) == Path.join(repo_dir, "sym-watch")
+    refute File.exists?(Path.join(home_dir, ".local/bin/sym-codex"))
+    refute File.exists?(Path.join(home_dir, ".local/bin/sym-watch"))
   end
 
   test "symphony runs autoupdate before launching escript" do
@@ -70,7 +70,7 @@ defmodule SymphonyScriptTest do
     assert output =~ "symphony-stub"
 
     assert File.read!(Path.join(repo_dir, ".mix-calls")) ==
-             "deps.loadpaths\ndeps.get\ncompile\nescript.build\n"
+             "deps.loadpaths\ndeps.get\ncompile\nescript.build\nrun\n"
   end
 
   test "symphony clears inherited Mix artifact paths before preflight and launch" do
@@ -202,9 +202,9 @@ defmodule SymphonyScriptTest do
     assert {output, 0} = run_script_path(issue_link, home_dir, bin_dir, [], cd: project_dir)
 
     codex_issue_link = Path.join(home_dir, ".local/bin/sym-codex-PRO-351")
-    assert File.read_link!(codex_issue_link) == Path.join(repo_dir, "sym-codex")
+    refute File.exists?(codex_issue_link)
     assert output =~ "symphony-stub cwd=#{project_dir}"
-    assert output =~ "symphony-stub codex_command=#{codex_issue_link} --observer"
+    assert output =~ "--observer"
     assert output =~ "symphony-stub project_root=\n"
     assert output =~ "symphony-stub workflow_file=#{Path.join(repo_dir, "WORKFLOW.md")}"
     assert output =~ "symphony-stub workflow_interactive_file=#{Path.join(repo_dir, "WORKFLOW_INTERACTIVE.md")}"
@@ -257,11 +257,11 @@ defmodule SymphonyScriptTest do
 
     assert String.starts_with?(output, "autoupdate project=#{repo_dir}\n")
     assert output =~ "symphony-stub args=--port 4001"
-    assert File.read_link!(Path.join(home_dir, ".local/bin/sym-codex")) == Path.join(repo_dir, "sym-codex")
-    assert File.read_link!(Path.join(home_dir, ".local/bin/sym-watch")) == Path.join(repo_dir, "sym-watch")
+    refute File.exists?(Path.join(home_dir, ".local/bin/sym-codex"))
+    refute File.exists?(Path.join(home_dir, ".local/bin/sym-watch"))
   end
 
-  test "symphony rejects a non-symlink sym-watch local bin entry" do
+  test "an isolated release preserves an unmanaged sym-watch entry" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
     user_bin_dir = Path.join(home_dir, ".local/bin")
 
@@ -274,9 +274,9 @@ defmodule SymphonyScriptTest do
       File.rm_rf(bin_dir)
     end)
 
-    assert {output, 1} = run_script(repo_dir, home_dir, bin_dir, [])
-    assert output =~ "symphony: #{Path.join(user_bin_dir, "sym-watch")} exists and is not a symlink"
-    refute output =~ "symphony-stub"
+    assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
+    assert File.read!(Path.join(user_bin_dir, "sym-watch")) == "not managed by symphony\n"
+    assert output =~ "symphony-stub"
   end
 
   test "startup fails before any mutations when a required tool is missing" do
@@ -360,8 +360,9 @@ defmodule SymphonyScriptTest do
 
     assert output =~ "symphony-stub cwd=#{bin_dir}"
     assert output =~ "symphony-stub workflow_file=#{repo_dir}/WORKFLOW.md"
-    assert File.read_link!(Path.join(user_bin, "sym-watch")) == Path.join(repo_dir, "sym-watch")
-    assert File.read_link!(skill) == Path.join(repo_dir, ".codex/skills/symphony-test")
+    assert File.read_link!(Path.join(user_bin, "sym-watch")) == repo_dir
+    assert File.read_link!(skill) == repo_dir
+    assert File.read_link!(Path.join(user_bin, "sym-codex")) == "missing-target"
     refute File.exists?(Path.join(repo_dir, "sym-codex-PRO-678"))
   end
 
@@ -455,6 +456,18 @@ defmodule SymphonyScriptTest do
 
     File.cp!(@script_source, Path.join(repo_dir, "symphony"))
     File.cp!(@mix_runtime_source, Path.join(repo_dir, "scripts/mix-runtime"))
+    # These tests exercise preflight, build locking and launch inside an
+    # isolated release. The real snapshot copier has separate process tests.
+    File.write!(Path.join(repo_dir, "scripts/installation-release.py"), """
+    import os, sys
+    action, root, *args = sys.argv[1:]
+    if action == "start":
+        os.environ["SYMPHONY_RELEASE_ROOT"] = root
+        os.environ["SYMPHONY_ROOT_DIR"] = root
+        target = os.path.join(root, "scripts/mix-runtime")
+        os.execv(target, [target, "start", root, *args])
+    """)
+
     File.write!(Path.join(repo_dir, "sym-codex"), "#!/usr/bin/env bash\n")
     File.write!(Path.join(repo_dir, "sym-watch"), "#!/usr/bin/env bash\n")
 
@@ -496,6 +509,9 @@ defmodule SymphonyScriptTest do
         ;;
       escript.build)
         exit "${SYMPHONY_TEST_ESCRIPT_STATUS:-0}"
+        ;;
+      run)
+        exit 0
         ;;
     esac
 

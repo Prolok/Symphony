@@ -13,7 +13,13 @@ defmodule SymphonyElixir.HookRunner do
   def run_local(command, cwd, hook_name, opts \\ [])
       when is_binary(command) and is_binary(cwd) and is_binary(hook_name) and is_list(opts) do
     timeout_ms = Keyword.get(opts, :timeout_ms, 60_000)
-    env = Keyword.get(opts, :env, %{})
+
+    env =
+      opts
+      |> Keyword.get(:env, %{})
+      |> Map.new()
+      |> Map.put("SYMPHONY_LINEAR_AUTH_MODE", SymphonyElixir.Config.settings!().tracker.auth_mode)
+
     log_context = Keyword.get(opts, :log_context, %{})
     formatted_log_context = format_log_context(log_context)
 
@@ -23,7 +29,7 @@ defmodule SymphonyElixir.HookRunner do
       Task.async(fn ->
         System.cmd("sh", ["-lc", command],
           cd: cwd,
-          env: Enum.into(env, []),
+          env: SymphonyElixir.Config.without_linear_secret(env),
           stderr_to_stdout: true
         )
       end)

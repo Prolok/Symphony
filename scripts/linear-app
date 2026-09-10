@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+release="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+source_repo="${SYMPHONY_PROJECT_ROOT:-${SYMPHONY_SOURCE_REPO:-}}"
+if [[ -z "${source_repo//[[:space:]]/}" ]]; then
+  common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+  source_repo="$(cd "$common_dir/.." && pwd -P)"
+fi
+export SYMPHONY_SOURCE_REPO="$source_repo"
+export SYMPHONY_RELEASE_ROOT="$release"
+: "${SYMPHONY_WORKFLOW_FILE:?Explizite lokale Workflowdatei erforderlich}"
+python3 "$release/scripts/installation-release.py" verify "$release"
+if [[ -f "$release/.symphony/root-config.json" ]]; then
+  export SYMPHONY_ROOT_DIR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["root"])' "$release/.symphony/root-config.json")"
+fi
+exec "$release/scripts/mix-runtime" mix "$release" run --no-compile --no-start "$release/scripts/linear-app.exs" "$@"

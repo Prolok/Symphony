@@ -13,6 +13,143 @@ defmodule SymphonyElixir.EnvFile do
 
   @type load_mode :: :defaults | :local_override
 
+  @root_config_names ~w(SYM_CODEX_MODEL SYM_CODEX_REASONING_EFFORT
+    SYM_CODEX_SERVICE_TIER SYM_CODEX_HUMAN_SERVICE_TIER)
+
+  @spec root_config_names() :: [String.t()]
+  def root_config_names, do: @root_config_names
+
+  @doc "Capture only public root settings; the private source file stays outside the release."
+  @spec snapshot_root(Path.t(), Path.t()) :: :ok | {:error, term()}
+  def snapshot_root(root, release) do
+    path = Path.join(release, ".symphony/root-config.json")
+
+    with {:ok, values} <- read_selected([Path.join(release, ".env"), Path.join(root, ".env.local")], @root_config_names),
+         :ok <- File.mkdir_p(Path.dirname(path)) do
+      values = Map.merge(values, Map.take(System.get_env(), @root_config_names))
+      File.write(path, Jason.encode!(%{"root" => Path.expand(root), "values" => values}), [:exclusive])
+    end
+  end
+
+  @doc "Load root launch settings and project bindings; keep the project secret out of the environment."
+  @spec load_runtime(Path.t()) :: :ok | {:error, term()}
+  def load_runtime(config_dir) do
+    with :ok <- load_root(),
+         :ok <- bind_project_dir(config_dir) do
+      excluded = @root_config_names ++ SymphonyElixir.Config.linear_secret_env_names()
+      load(config_dir, override_existing: true, exclude: excluded)
+    end
+  end
+
+  defp bind_project_dir(config_dir) do
+    directory = Path.expand(config_dir)
+    current = System.get_env("SYMPHONY_LINEAR_ENV_DIR")
+
+    if System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app" and current not in [nil, directory] do
+      {:error, :linear_runtime_binding_changed}
+    else
+      System.put_env("SYMPHONY_LINEAR_ENV_DIR", directory)
+      :ok
+    end
+  end
+
+  @spec load_root() :: :ok | {:error, term()}
+  def load_root do
+    with {:ok, values} <- root_config() do
+      values |> Map.drop(Map.keys(System.get_env())) |> System.put_env()
+      :ok
+    end
+  end
+
+  defp root_config do
+    case {System.get_env("SYMPHONY_ROOT_DIR"), System.get_env("SYMPHONY_RELEASE_ROOT")} do
+      {nil, _} ->
+        {:ok, %{}}
+
+      {"", _} ->
+        {:ok, %{}}
+
+      {_root, release} when is_binary(release) and release != "" ->
+        read_root_snapshot(Path.join(release, ".symphony/root-config.json"))
+
+      {root, _} ->
+        read_selected(Enum.map(@env_files, fn {name, _} -> Path.join(root, name) end), @root_config_names)
+    end
+  end
+
+  defp read_root_snapshot(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, %{"root" => root, "values" => values}} <- Jason.decode(body),
+         true <- root == System.get_env("SYMPHONY_ROOT_DIR") and is_map(values),
+         true <- Enum.all?(values, fn {key, value} -> key in @root_config_names and is_binary(value) end) do
+      {:ok, values}
+    else
+      _ -> {:error, :invalid_root_config_snapshot}
+    end
+  end
+
+  @doc "Read only the requested project secret in a trusted auth runtime; never export it."
+  @spec linear_secret(String.t()) :: {:ok, String.t()} | {:error, atom()}
+  def linear_secret(name) do
+    if System.get_env("SYMPHONY_LINEAR_SECRET_ACCESS") == "denied" do
+      {:error, :linear_secret_access_denied}
+    else
+      read_linear_secret(name)
+    end
+  end
+
+  defp read_linear_secret(name) do
+    read_secret_file(System.get_env("SYMPHONY_LINEAR_ENV_DIR"), name)
+  end
+
+  defp read_secret_file(root, name) when is_binary(root) and root != "" do
+    paths = Enum.map(@env_files, fn {file, _} -> Path.join(root, file) end)
+
+    case read_selected(paths, [name]) do
+      {:ok, values} -> nonempty_secret(Map.get_lazy(values, name, fn -> System.get_env(name) end))
+      _ -> {:error, :linear_secret_source_unavailable}
+    end
+  end
+
+  defp read_secret_file(_root, name), do: nonempty_secret(System.get_env(name))
+
+  defp nonempty_secret(value) when is_binary(value) do
+    if String.trim(value) == "", do: {:error, :missing_linear_client_secret}, else: {:ok, value}
+  end
+
+  defp nonempty_secret(_value), do: {:error, :missing_linear_client_secret}
+
+  defp read_selected(paths, names) do
+    Enum.reduce_while(paths, {:ok, %{}}, fn path, {:ok, values} ->
+      case read_selected_file(path, names, values) do
+        {:ok, next} -> {:cont, {:ok, next}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp read_selected_file(path, names, values) do
+    case File.read(path) do
+      {:ok, contents} ->
+        # Select by key before parsing a value: non-auth loaders do not interpret
+        # secret lines, and no file is sourced or evaluated as shell code.
+        selected = contents |> String.split(~r/\r\n|\n|\r/, trim: false) |> Enum.map_join("\n", &select_line(&1, names))
+        parse_file(selected, path, values, fn key, value, acc -> {:ok, Map.put(acc, key, value)} end)
+
+      {:error, :enoent} ->
+        {:ok, values}
+
+      {:error, reason} ->
+        {:error, {:env_file_read_failed, path, reason}}
+    end
+  end
+
+  defp select_line(line, names) do
+    if line_key(line) in names, do: line, else: ""
+  end
+
+  defp line_key(line), do: line |> String.trim() |> strip_export_prefix() |> String.split("=", parts: 2) |> hd() |> String.trim()
+
   @spec config_dir(Path.t()) :: Path.t()
   def config_dir(project_root) when is_binary(project_root) do
     Path.join(project_root, @config_dir_name)
@@ -29,12 +166,22 @@ defmodule SymphonyElixir.EnvFile do
     end)
   end
 
+  @doc "Reuse an established project source across OTP boot and working-directory changes."
+  @spec bound_config_dir() :: Path.t()
+  def bound_config_dir do
+    System.get_env("SYMPHONY_LINEAR_ENV_DIR") ||
+      config_dir(System.get_env("SYMPHONY_PROJECT_ROOT") || System.get_env("SYMPHONY_SOURCE_REPO") || File.cwd!())
+  end
+
   @spec load(String.t()) :: :ok | {:error, term()}
   def load(config_dir) when is_binary(config_dir), do: load(config_dir, [])
 
   @spec load(String.t(), keyword()) :: :ok | {:error, term()}
   def load(config_dir, opts) when is_binary(config_dir) and is_list(opts) do
     override_existing = Keyword.get(opts, :override_existing, false)
+    excluded = Keyword.get(opts, :exclude, []) ++ SymphonyElixir.Config.linear_secret_env_names()
+
+    bound = protected_runtime_env()
 
     existing_keys =
       System.get_env()
@@ -46,15 +193,36 @@ defmodule SymphonyElixir.EnvFile do
     |> Enum.reduce_while({:ok, empty_key_set()}, fn {filename, mode}, {:ok, loaded_keys} ->
       config_dir
       |> Path.join(filename)
-      |> load_file(mode, existing_keys, loaded_keys)
+      |> load_file(mode, existing_keys, loaded_keys, excluded)
       |> case do
         {:ok, next_loaded_keys} -> {:cont, {:ok, next_loaded_keys}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, _loaded_keys} -> :ok
+      {:ok, _loaded_keys} -> verify_runtime_env(bound)
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp protected_runtime_env do
+    names = ~w(SYMPHONY_ROOT_DIR SYMPHONY_LINEAR_ENV_DIR SYMPHONY_LINEAR_SECRET_ACCESS)
+
+    names =
+      if System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app",
+        do: names ++ ~w(SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_CLIENT_SECRET_ENV SYMPHONY_LINEAR_BINDING_HASH
+        SYMPHONY_RELEASE_ROOT SYMPHONY_WORKFLOW_FILE SYMPHONY_WORKFLOW_DIR SYMPHONY_CODEX_STATE_ROOT),
+        else: names
+
+    System.get_env() |> Map.take(names)
+  end
+
+  defp verify_runtime_env(bound) do
+    if Enum.all?(bound, fn {key, value} -> System.get_env(key) == value end) do
+      :ok
+    else
+      System.put_env(bound)
+      {:error, :linear_runtime_binding_changed}
     end
   end
 
@@ -64,8 +232,13 @@ defmodule SymphonyElixir.EnvFile do
 
   defp empty_key_set, do: MapSet.delete(MapSet.new([""]), "")
 
-  defp load_file(path, mode, existing_keys, loaded_keys) do
-    env_putter = &maybe_put_env(&1, &2, mode, existing_keys, &3)
+  defp load_file(path, mode, existing_keys, loaded_keys, excluded) do
+    env_putter = fn key, value, keys ->
+      if key in excluded or key == System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV"),
+        do: {:ok, keys},
+        else: maybe_put_env(key, value, mode, existing_keys, keys)
+    end
+
     read_file(path, loaded_keys, env_putter)
   end
 
@@ -74,7 +247,7 @@ defmodule SymphonyElixir.EnvFile do
       true ->
         case File.read(path) do
           {:ok, contents} ->
-            parse_file(contents, path, loaded_keys, env_putter)
+            parse_file(public_contents(contents, excluded), path, loaded_keys, env_putter)
 
           {:error, reason} ->
             {:error, {:env_file_read_failed, path, reason}}
@@ -83,6 +256,10 @@ defmodule SymphonyElixir.EnvFile do
       false ->
         {:ok, loaded_keys}
     end
+  end
+
+  defp public_contents(contents, excluded) do
+    contents |> String.split(~r/\r\n|\n|\r/, trim: false) |> Enum.map_join("\n", fn line -> if line_key(line) in excluded, do: "", else: line end)
   end
 
   @spec maybe_put_env(String.t(), String.t(), load_mode(), MapSet.t(), MapSet.t()) ::

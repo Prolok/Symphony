@@ -18,6 +18,40 @@ defmodule SymCodexScriptTest do
     assert output =~ "codex-stub"
   end
 
+  test "manual app configuration selects the bound launcher without inherited worker variables" do
+    %{repo_dir: repo_dir, bin_dir: bin_dir, workspace_root: workspace_root, worktree: worktree} =
+      build_script_worktree_fixture!("PRO-676")
+
+    on_exit(fn -> Enum.each([repo_dir, bin_dir, workspace_root], &File.rm_rf!/1) end)
+
+    File.write!(Path.join(worktree, "scripts/codex-app-context.py"), """
+    import os
+    print('bound-app=' + os.environ['SYMPHONY_LINEAR_BINDING_HASH'])
+    print('state=' + os.environ['SYMPHONY_CODEX_STATE_ROOT'])
+    """)
+
+    runtime = %{
+      "SYMPHONY_LINEAR_AUTH_MODE" => "app",
+      "SYMPHONY_LINEAR_CLIENT_SECRET_ENV" => "SYMPHONY_TEST_SECRET",
+      "SYMPHONY_LINEAR_BINDING_HASH" => "synthetic-binding",
+      "SYMPHONY_CODEX_STATE_ROOT" => Path.join(repo_dir, "state"),
+      "SYMPHONY_RUN_ID" => "synthetic-run",
+      "SYMPHONY_PHASE" => "In Arbeit (AI)"
+    }
+
+    prompt = "SYM_CODEX_CONTEXT_V3\n#{Jason.encode!(runtime)}\nIn Arbeit (AI)\n\nSYM_CODEX_PROMPT_V1\nTest"
+
+    assert {output, 0} =
+             run_script(Path.join(worktree, "sym-codex"), bin_dir, [],
+               cd: worktree,
+               env: [{"SYMPHONY_TEST_MANUAL_PROMPT_OUTPUT", prompt}]
+             )
+
+    assert output =~ "bound-app=synthetic-binding"
+    assert output =~ "state=#{repo_dir}/state"
+    refute output =~ "codex-stub"
+  end
+
   test "sym-codex derives the issue identifier from the current worktree path" do
     %{repo_dir: repo_dir, bin_dir: bin_dir, workspace_root: workspace_root, worktree: worktree} =
       build_script_worktree_fixture!("PRO-49")

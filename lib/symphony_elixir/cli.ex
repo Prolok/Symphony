@@ -103,7 +103,7 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp load_project_env_files(env_files_dir) when is_binary(env_files_dir) do
-    EnvFile.load(env_files_dir, override_existing: true)
+    EnvFile.load_runtime(env_files_dir)
   end
 
   defp format_env_file_error({:invalid_env_file, path, line_number, reason}) do

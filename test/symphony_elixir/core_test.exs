@@ -4,6 +4,25 @@ defmodule SymphonyElixir.CoreTest do
   alias SymphonyElixir.AutocommitMessage
   alias SymphonyElixir.Codex.ScriptSupport
 
+  setup_all do
+    # The application also schedules polls when its initial poll is disabled.
+    # Keep it away from this module's global Memory fixtures until all per-test
+    # cleanup has finished; individual tests start their own orchestrators.
+    application_orchestrator = Process.whereis(Orchestrator)
+
+    if is_pid(application_orchestrator) do
+      stop_orchestrator_and_workers(application_orchestrator, fn _pid ->
+        Supervisor.terminate_child(SymphonyElixir.Supervisor, Orchestrator)
+      end)
+
+      on_exit(fn ->
+        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, Orchestrator)
+      end)
+    end
+
+    {:ok, application_orchestrator: application_orchestrator}
+  end
+
   setup do
     isolate_git_discovery!(System.tmp_dir!())
     :ok
@@ -1491,7 +1510,7 @@ defmodule SymphonyElixir.CoreTest do
     orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
 
     on_exit(fn ->
-      if is_pid(Process.whereis(SymphonyElixir.Supervisor)) and
+      if is_pid(orchestrator_pid) and is_pid(Process.whereis(SymphonyElixir.Supervisor)) and
            is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
         case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
           {:ok, _pid} -> :ok
@@ -5154,7 +5173,9 @@ defmodule SymphonyElixir.CoreTest do
     refute Orchestrator.should_dispatch_issue_for_test(regular_issue, state)
   end
 
-  test "unchanged answered dialog issue stays idle without comment refresh or activity touch" do
+  test "unchanged answered dialog issue stays idle without comment refresh or activity touch", %{
+    application_orchestrator: application_orchestrator
+  } do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -5211,45 +5232,106 @@ defmodule SymphonyElixir.CoreTest do
       parent = self()
       orchestrator_name = Module.concat(__MODULE__, :DialogIdlePollOrchestrator)
 
-      {:ok, pid} =
-        Orchestrator.start_link(
+      with_orchestrator(
+        [
           name: orchestrator_name,
           initial_poll?: false,
           idle_shutdown_ms: 1,
           output_fun: fn message -> send(parent, {:orchestrator_output, message}) end,
           shutdown_fun: fn -> send(parent, :shutdown_called) end
-        )
+        ],
+        fn pid ->
+          now_ms = System.monotonic_time(:millisecond)
 
-      on_exit(fn ->
-        if Process.alive?(pid) do
-          Process.exit(pid, :normal)
+          :sys.replace_state(pid, fn state ->
+            issue
+            |> Orchestrator.observe_dialog_full_check_for_test(state, now_ms)
+            |> Map.put(:last_activity_at_ms, now_ms - 10_000)
+            |> Map.put(:completed_states, %{issue_id => {"todo (dialog-ai)", DateTime.to_iso8601(completed_at)}})
+          end)
+
+          send(pid, :tick)
+
+          assert_receive {:orchestrator_output, "Symphony nach Inaktivität beendet"}, 1_000
+          assert_receive :shutdown_called, 1_000
+
+          refute Process.whereis(Orchestrator)
+
+          if is_pid(application_orchestrator) do
+            refute Process.alive?(application_orchestrator)
+            # A late poll from the application must not reach the current fixture.
+            send(application_orchestrator, :run_poll_cycle)
+          end
+
+          refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
+
+          state = orchestrator_state(pid)
+          refute Map.has_key?(state.running, issue_id)
+          refute MapSet.member?(state.claimed, issue_id)
+          assert state.last_activity_at_ms == now_ms - 10_000
+          assert state.shutdown_requested
         end
-      end)
-
-      now_ms = System.monotonic_time(:millisecond)
-
-      :sys.replace_state(pid, fn state ->
-        issue
-        |> Orchestrator.observe_dialog_full_check_for_test(state, now_ms)
-        |> Map.put(:last_activity_at_ms, now_ms - 10_000)
-        |> Map.put(:completed_states, %{issue_id => {"todo (dialog-ai)", DateTime.to_iso8601(completed_at)}})
-      end)
-
-      send(pid, :tick)
-
-      assert_receive {:orchestrator_output, "Symphony nach Inaktivität beendet"}, 1_000
-      assert_receive :shutdown_called, 1_000
-      refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
-
-      state = orchestrator_state(pid)
-      refute Map.has_key?(state.running, issue_id)
-      refute MapSet.member?(state.claimed, issue_id)
-      assert state.shutdown_requested
+      )
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       restore_app_env(:memory_tracker_comments, previous_memory_comments)
       File.rm_rf(test_root)
+    end
+  end
+
+  for outcome <- [:return, :raise] do
+    test "dialog fixture stops its orchestrator and worker before data restoration on #{outcome}" do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+      parent = self()
+
+      run_fixture = fn ->
+        with_orchestrator([name: nil, initial_poll?: false], fn pid ->
+          {:ok, worker} =
+            Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+              receive do
+                :stop -> :ok
+              end
+            end)
+
+          # Ensure a broken cleanup cannot leak the regression's worker itself.
+          on_exit(fn ->
+            Process.exit(worker, :kill)
+            if Process.alive?(pid), do: GenServer.stop(pid)
+          end)
+
+          :sys.replace_state(pid, fn state ->
+            %{state | running: %{"fixture-worker" => %{pid: worker, ref: Process.monitor(worker)}}}
+          end)
+
+          send(parent, {:fixture_processes, pid, Process.monitor(pid), worker, Process.monitor(worker)})
+
+          case unquote(outcome) do
+            :return -> :ok
+            :raise -> flunk("fixture assertion")
+          end
+        end)
+      end
+
+      case unquote(outcome) do
+        :return -> assert :ok = run_fixture.()
+        :raise -> assert_raise ExUnit.AssertionError, ~r/fixture assertion/, run_fixture
+      end
+
+      assert_receive {:fixture_processes, pid, ref, worker, worker_ref}
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+      assert_receive {:DOWN, ^worker_ref, :process, ^worker, :killed}
+      refute Process.alive?(pid)
+      refute Process.alive?(worker)
+
+      # Publish the next fixture only after both monitored processes are down.
+      issue_id = "issue-dialog-after-cleanup"
+      issue = %Issue{id: issue_id, identifier: "MT-AFTER-CLEANUP", state: "Todo (Dialog-AI)"}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      send(pid, :run_poll_cycle)
+      refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
     end
   end
 
@@ -5314,32 +5396,31 @@ defmodule SymphonyElixir.CoreTest do
       })
 
       orchestrator_name = Module.concat(__MODULE__, :DialogChangedSignalOrchestrator)
-      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, initial_poll?: false)
 
-      on_exit(fn -> stop_orchestrator_and_workers(pid) end)
+      with_orchestrator([name: orchestrator_name, initial_poll?: false], fn pid ->
+        observed_issue = %{issue | last_comment_signal: answer_signal}
+        now_ms = System.monotonic_time(:millisecond)
 
-      observed_issue = %{issue | last_comment_signal: answer_signal}
-      now_ms = System.monotonic_time(:millisecond)
-
-      :sys.replace_state(pid, fn state ->
-        observed_issue
-        |> Orchestrator.observe_dialog_full_check_for_test(state, now_ms)
-        |> Map.put(:completed_states, %{issue_id => {"todo (dialog-ai)", DateTime.to_iso8601(completed_at)}})
-      end)
-
-      send(pid, :tick)
-
-      assert_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 1_000
-
-      running_entry =
-        Enum.find_value(1..20, fn _attempt ->
-          Process.sleep(50)
-          orchestrator_state(pid).running[issue_id]
+        :sys.replace_state(pid, fn state ->
+          observed_issue
+          |> Orchestrator.observe_dialog_full_check_for_test(state, now_ms)
+          |> Map.put(:completed_states, %{issue_id => {"todo (dialog-ai)", DateTime.to_iso8601(completed_at)}})
         end)
 
-      assert %{run_mode: :dialog, issue: %Issue{updated_at: ^completed_at}} = running_entry
-      assert running_entry.issue.last_comment_signal.id == "comment-user-new"
-      refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
+        send(pid, :tick)
+
+        assert_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 1_000
+
+        running_entry =
+          Enum.find_value(1..20, fn _attempt ->
+            Process.sleep(50)
+            orchestrator_state(pid).running[issue_id]
+          end)
+
+        assert %{run_mode: :dialog, issue: %Issue{updated_at: ^completed_at}} = running_entry
+        assert running_entry.issue.last_comment_signal.id == "comment-user-new"
+        refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
+      end)
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
@@ -5402,33 +5483,29 @@ defmodule SymphonyElixir.CoreTest do
 
       orchestrator_name = Module.concat(__MODULE__, :DialogSafetyFallbackOrchestrator)
 
-      {:ok, pid} =
-        Orchestrator.start_link(
-          name: orchestrator_name,
-          initial_poll?: false,
-          active_instance_count_fun: fn -> 1 end
-        )
+      with_orchestrator(
+        [name: orchestrator_name, initial_poll?: false, active_instance_count_fun: fn -> 1 end],
+        fn pid ->
+          now_ms = System.monotonic_time(:millisecond)
 
-      on_exit(fn -> stop_orchestrator_and_workers(pid) end)
+          :sys.replace_state(pid, fn state ->
+            Orchestrator.observe_dialog_full_check_for_test(issue, state, now_ms - 31_000)
+          end)
 
-      now_ms = System.monotonic_time(:millisecond)
+          send(pid, :tick)
 
-      :sys.replace_state(pid, fn state ->
-        Orchestrator.observe_dialog_full_check_for_test(issue, state, now_ms - 31_000)
-      end)
+          assert_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 1_000
 
-      send(pid, :tick)
+          running_entry =
+            Enum.find_value(1..20, fn _attempt ->
+              Process.sleep(50)
+              orchestrator_state(pid).running[issue_id]
+            end)
 
-      assert_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 1_000
-
-      running_entry =
-        Enum.find_value(1..20, fn _attempt ->
-          Process.sleep(50)
-          orchestrator_state(pid).running[issue_id]
-        end)
-
-      assert %{run_mode: :dialog} = running_entry
-      refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
+          assert %{run_mode: :dialog} = running_entry
+          refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
+        end
+      )
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
@@ -5708,12 +5785,25 @@ defmodule SymphonyElixir.CoreTest do
     :sys.get_state(pid, 15_000)
   end
 
-  defp stop_orchestrator_and_workers(pid) when is_pid(pid) do
+  defp with_orchestrator(opts, fun) do
+    {:ok, pid} = Orchestrator.start_link(opts)
+
+    try do
+      fun.(pid)
+    after
+      stop_orchestrator_and_workers(pid)
+    end
+  end
+
+  defp stop_orchestrator_and_workers(pid, stop_fun \\ &GenServer.stop(&1, :normal, 1_000)) when is_pid(pid) do
     if Process.alive?(pid) do
-      pid
-      |> orchestrator_state()
-      |> Map.get(:running, %{})
-      |> Enum.each(fn
+      # Freeze dispatch before taking the worker snapshot. Stop the orchestrator
+      # first so worker exits cannot schedule retries or launch replacement work.
+      :ok = :sys.suspend(pid)
+      running = orchestrator_state(pid).running
+      :ok = stop_fun.(pid)
+
+      Enum.each(running, fn
         {_issue_id, %{pid: worker_pid}} when is_pid(worker_pid) ->
           ref = Process.monitor(worker_pid)
           Process.exit(worker_pid, :kill)
@@ -5722,8 +5812,6 @@ defmodule SymphonyElixir.CoreTest do
         _entry ->
           :ok
       end)
-
-      GenServer.stop(pid, :normal, 1_000)
     end
   end
 

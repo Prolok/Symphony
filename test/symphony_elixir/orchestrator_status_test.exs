@@ -954,17 +954,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator triggers an immediate poll cycle shortly after startup" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_api_token: "",
       poll_interval_ms: 5_000
     )
 
+    # An explicit empty token prevents fallback to LINEAR_API_KEY and keeps the poll local.
+    assert {:error, :missing_linear_api_token} = Config.validate!()
+
+    parent = self()
+    poll_ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :ImmediateStartupOrchestrator)
 
     {:ok, pid} =
       Orchestrator.start_link(
         name: orchestrator_name,
         initial_poll?: true,
-        active_instance_count_fun: fn -> 1 end
+        active_instance_count_fun: fn ->
+          send(parent, {:poll_completed, poll_ref, self()})
+          1
+        end
       )
 
     on_exit(fn ->
@@ -973,18 +981,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    assert %{polling: %{checking?: true}} =
-             wait_for_snapshot(
-               pid,
-               fn
-                 %{polling: %{checking?: true}} ->
-                   true
-
-                 _ ->
-                   false
-               end,
-               500
-             )
+    # The next interval is computed after the poll; its message survives the brief checking state.
+    assert_receive {:poll_completed, ^poll_ref, ^pid}, 500
 
     assert %{
              polling: %{
@@ -992,22 +990,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                next_poll_in_ms: next_poll_in_ms,
                poll_interval_ms: 5_000
              }
-           } =
-             wait_for_snapshot(
-               pid,
-               fn
-                 %{polling: %{checking?: false, next_poll_in_ms: due_in_ms}}
-                 when is_integer(due_in_ms) and due_in_ms <= 5_000 ->
-                   true
-
-                 _ ->
-                   false
-               end,
-               500
-             )
+           } = GenServer.call(pid, :snapshot)
 
     assert is_integer(next_poll_in_ms)
     assert next_poll_in_ms >= 0
+    assert next_poll_in_ms <= 5_000
   end
 
   test "orchestrator poll cycle resets next refresh countdown after a check" do

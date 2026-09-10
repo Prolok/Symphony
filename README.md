@@ -221,8 +221,11 @@ den Gate-Prozess bekannte geerbte `SYMPHONY_*`-Runtime-Variablen sowie
 Datei existiert. Ein dauerhaftes `mise trust` ist für `make all` nicht
 erforderlich.
 Der Gate-Wrapper normalisiert außerdem das temporäre Verzeichnis auf seinen
-physischen Pfad, damit Build-Defaults und Tests unter macOS dieselbe Adresse
+physischen Pfad, damit Skripte und Test-Fixtures unter macOS dieselbe Adresse
 verwenden (`/var` und `/private/var` können auf dasselbe Verzeichnis zeigen).
+Der Standardwert für `workspace.root` wird bei jeder Konfigurationsauflösung
+aus dem aktuellen `System.tmp_dir!()` ermittelt, unabhängig vom Temp-Verzeichnis
+beim Kompilieren.
 
 Fuer die `@spec`-Pruefung steht zusaetzlich zur Verfuegung:
 

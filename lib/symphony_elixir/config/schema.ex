@@ -108,7 +108,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      field(:root, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -478,6 +478,8 @@ defmodule SymphonyElixir.Config.Schema do
   defp resolve_linear_scope_setting(value, _env_name) when is_binary(value) do
     resolve_optional_string_setting(value)
   end
+
+  defp resolve_path_value(nil, default), do: default
 
   defp resolve_path_value(value, default) when is_binary(value) do
     case normalize_path_token(value) do

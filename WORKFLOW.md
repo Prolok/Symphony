@@ -22,6 +22,8 @@ polling:
   interval_ms: 5000
   idle_shutdown_ms: 3600000
 workspace:
+  # Ohne root oder bei null, leerem Wert bzw. fehlendem/leerem Env-Wert gilt
+  # bei jeder Konfigurationsauflösung zur Laufzeit: System.tmp_dir!()/symphony_workspaces.
   root: $SYMPHONY_PROJECT_WORKTREES_ROOT
 hooks:
   timeout_ms: 180000

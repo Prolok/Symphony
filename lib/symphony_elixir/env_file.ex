@@ -16,6 +16,17 @@ defmodule SymphonyElixir.EnvFile do
     Path.join(project_root, @config_dir_name)
   end
 
+  @doc "Reads defaults and local overrides without changing the process environment."
+  @spec read(Path.t()) :: {:ok, %{String.t() => String.t()}} | {:error, term()}
+  def read(config_dir) when is_binary(config_dir) do
+    Enum.reduce_while(@env_files, {:ok, %{}}, fn {filename, _mode}, {:ok, values} ->
+      case read_file(Path.join(config_dir, filename), values, &{:ok, Map.put(&3, &1, &2)}) do
+        {:ok, next_values} -> {:cont, {:ok, next_values}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
   @spec load(String.t()) :: :ok | {:error, term()}
   def load(config_dir) when is_binary(config_dir), do: load(config_dir, [])
 
@@ -53,7 +64,10 @@ defmodule SymphonyElixir.EnvFile do
 
   defp load_file(path, mode, existing_keys, loaded_keys) do
     env_putter = &maybe_put_env(&1, &2, mode, existing_keys, &3)
+    read_file(path, loaded_keys, env_putter)
+  end
 
+  defp read_file(path, loaded_keys, env_putter) do
     case File.regular?(path) do
       true ->
         case File.read(path) do

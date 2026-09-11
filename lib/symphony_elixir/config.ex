@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Config do
   """
 
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.{EnvFile, Workflow}
 
   @type linear_scope :: {:project, String.t()} | {:team, String.t()}
 
@@ -96,6 +96,27 @@ defmodule SymphonyElixir.Config do
 
       _ ->
         settings!().codex.command
+    end
+  end
+
+  @doc "Resolves the review budget from the environment and the active Symphony checkout."
+  @spec maximum_review_iterations!(Path.t()) :: pos_integer()
+  def maximum_review_iterations!(symphony_root) do
+    value =
+      case System.fetch_env("SYM_MAXIMUM_REVIEW_ITERATIONS") do
+        {:ok, value} ->
+          value
+
+        :error ->
+          case EnvFile.read(symphony_root) do
+            {:ok, values} -> Map.get(values, "SYM_MAXIMUM_REVIEW_ITERATIONS", "3")
+            {:error, reason} -> raise ArgumentError, "Invalid SYM_MAXIMUM_REVIEW_ITERATIONS config: #{inspect(reason)}"
+          end
+      end
+
+    case Integer.parse(String.trim(value)) do
+      {limit, ""} when limit > 0 -> limit
+      _ -> raise ArgumentError, "Invalid SYM_MAXIMUM_REVIEW_ITERATIONS: expected a positive integer"
     end
   end
 

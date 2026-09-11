@@ -3,6 +3,25 @@ defmodule SymphonyElixir.EnvFileTest do
 
   alias SymphonyElixir.EnvFile
 
+  test "reads merged root values without exporting defaults or overriding the environment" do
+    root = temp_project_root("read-values")
+    on_exit(fn -> File.rm_rf(root) end)
+    before_env = System.get_env()
+
+    assert {:ok, %{}} = EnvFile.read(root)
+
+    File.write!(Path.join(root, ".env"), "LINEAR_API_KEY=root-key\nSYM_MAXIMUM_REVIEW_ITERATIONS=3\n")
+    File.write!(Path.join(root, ".env.local"), "export SYM_MAXIMUM_REVIEW_ITERATIONS = ' 5 ' # local\n")
+
+    assert {:ok, %{"LINEAR_API_KEY" => "root-key", "SYM_MAXIMUM_REVIEW_ITERATIONS" => " 5 "}} = EnvFile.read(root)
+    assert System.get_env() == before_env
+
+    File.write!(Path.join(root, ".env.local"), "INVALID\n")
+    assert {:error, {:invalid_env_file, path, 1, :missing_assignment}} = EnvFile.read(root)
+    assert path == Path.join(root, ".env.local")
+    assert System.get_env() == before_env
+  end
+
   test "loads .symphony/.env and lets .symphony/.env.local override repo defaults" do
     project_root = temp_project_root("load-order")
     env_dir = symphony_dir(project_root)

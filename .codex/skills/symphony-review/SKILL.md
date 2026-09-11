@@ -24,6 +24,24 @@ Nur im Status `Review (AI)` verwenden. Pull und der einmalige
   Ticket-, Workpad- oder Workflow-Zusammenfassungskontext enthalten.
 - `### Review` pflegen, Details knapp in `### Verlauf`.
 
+## Rundenbudget
+
+- `runtime.maximum_review_iterations` aus dem Prompt ist die Obergrenze N
+  pro Aufenthalt in `Review (AI)`; ohne übergebenen Wert gilt N=3.
+  Der erste Pflichtdurchlauf zählt mit: N=1 erlaubt einen Start, N=3 drei.
+- Beim ersten Eintritt im Workpad Limit N und gestartete Runden (anfangs 0)
+  festhalten. Vor jedem `spawn_agent` prüfen: gestartete Runden < N.
+  Die nächste Rundennummer vor dem Start im Workpad reservieren und danach
+  die Subagent-ID ergänzen; pro Runde genau ein vollständiges Review.
+- Fortsetzungen, Retries und Recovery übernehmen Limit, Zähler, Subagent-IDs
+  und vorhandene Ergebnisse aus dem Workpad. Kein Reset wegen neuer Session.
+  Ein späterer neuer Eintritt nach Verlassen der Phase beginnt bei 0.
+- Warten auf denselben Subagenten und Wiederverwendung seines Ergebnisses
+  zählen nicht erneut. Bei unklarem Startzustand zuerst vorhandene
+  Subagent-/Session-Evidenz abgleichen; keinen Doppelstart auslösen.
+- Bei eindeutigem `Keine Findings.` darf die Schleife vor N enden.
+  Ein Timeout bleibt ein offener Pflichtschritt, auch am Rundenlimit.
+
 ## Pflicht-Review-Schritt
 
 - Starte pro Durchlauf genau einen isolierten read-only Review-Subagenten per
@@ -61,7 +79,8 @@ Nur im Status `Review (AI)` verwenden. Pull und der einmalige
 
 ## Review-/Fix-Schleife
 
-1. Mit dem Pflicht-Review-Schritt beginnen.
+1. Rundenbudget prüfen, vorhandene Runde fortsetzen oder den nächsten
+   Pflicht-Review-Schritt innerhalb des Budgets starten.
 2. Nach jedem Schritt den zugehörigen `### Review`-Punkt aktualisieren.
 3. Bei Fehlern oder Findings:
    - Wenn `wait_agent` ein finales Ergebnis mit `Findings:` liefert, diese
@@ -78,8 +97,16 @@ Nur im Status `Review (AI)` verwenden. Pull und der einmalige
    - Bei einem behandelten Finding entsteht genau ein kombinierter
      Nach-Fix-Kommentar. Bei zwei behandelten Findings entstehen genau zwei
      kombinierte Nach-Fix-Kommentare, nicht vier.
-   - Workpad aktualisieren und die Checkliste wieder bei Schritt 1 starten.
+   - Auch Findings aus Runde N vollständig bewerten, fixen oder begründet
+     anders behandeln, gezielt validieren und wie oben kommentieren.
+   - Workpad aktualisieren. Nur bei gestarteten Runden < N wieder bei
+     Schritt 1 starten; keine Runde N+1 starten.
 4. Lokale Fixes bleiben ungecommittet.
+5. Am ausgeschöpften Budget erst nach vollständig behandelter Evidenz die
+   Review-Checkliste schließen. Im Verlauf das erreichte Rundenlimit und
+   gegebenenfalls nicht erneut reviewte Fixes ausdrücklich dokumentieren.
+   Das Limit ist kein `Keine Findings.`-Signal; die bestehende
+   Freigabe-/Skip-Regel im Abschluss gilt auch hier.
 
 ## Abschluss
 

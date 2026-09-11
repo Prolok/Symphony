@@ -127,6 +127,7 @@ defmodule SymphonyElixir.PromptBuilder do
       "source_repo_root" => source_repo_root,
       "workflow_file" => workflow_file(opts),
       "workflow_dir" => Path.dirname(workflow_file(opts)),
+      "maximum_review_iterations" => Config.maximum_review_iterations!(Path.dirname(workflow_file(opts))),
       "docs_review_hint_enabled" => is_binary(review_additional_hints),
       "review_additional_hints" => review_additional_hints || "",
       "global_skill_roots" => global_skill_roots,

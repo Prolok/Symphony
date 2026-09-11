@@ -14,6 +14,9 @@ Pfadkontext:
 - Aktiv bearbeitetes Repository/Worktree: `{{ runtime.active_repo_root }}`
 - Repo-lokale `sym-*`-Skills: `{{ runtime.active_repo_skill_root }}`
 - Globale `symphony-*`-Skill-Wurzeln: `{{ runtime.global_skill_roots_text }}`
+{% if issue.state == "Review (AI)" %}
+- Reviewrunden für `symphony-review`: `runtime.maximum_review_iterations={{ runtime.maximum_review_iterations }}` (Obergrenze gemäß Skill).
+{% endif %}
 
 Beschreibung:
 {% if issue.description %}

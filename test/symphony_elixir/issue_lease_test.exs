@@ -45,6 +45,12 @@ defmodule SymphonyElixir.IssueLeaseTest do
     assert :legacy = IssueLease.run(%Issue{id: "issue"}, fn -> :legacy end)
   end
 
+  test "helper backend failure is unavailable, never a competing issue owner", %{helper_dir: helper_dir} do
+    File.write!(Path.join(helper_dir, "state_lock.py"), "def state_lock(*args, **kwargs):\n    raise OSError('synthetic backend failure')\nclass StateLockError(Exception):\n    pass\n")
+    assert {:error, :issue_lease_unavailable} = IssueLease.with_lock("workspace", "issue", fn -> flunk("no lease") end)
+    assert {:error, :comment_journal_unavailable} = IssueLease.with_journal_lock("project", fn -> flunk("no journal") end)
+  end
+
   @tag timeout: 20_000
   test "missing executable and unresponsive helper fail visibly", %{root: root, helper_dir: helper_dir} do
     previous = System.get_env("PATH")

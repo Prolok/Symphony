@@ -40,7 +40,7 @@ defmodule SymphonyElixir.Linear.CommentMutations do
     operation = %{operation | selection_set: %{operation.selection_set | selections: selections}}
     used = variable_names([operation.selection_set, operation.directives])
     operation = %{operation | variable_definitions: Enum.filter(operation.variable_definitions, &(&1.variable.name in used))}
-    query = inspect(%L.Document{definitions: [operation]}, pretty: true, limit: :infinity)
+    query = inspect(encode_strings(%L.Document{definitions: [operation]}), pretty: true, limit: :infinity)
     if receipts == [], do: {:ok, payload, []}, else: {:ok, %{payload | "query" => query}, Enum.reverse(receipts)}
   end
 
@@ -162,6 +162,16 @@ defmodule SymphonyElixir.Linear.CommentMutations do
   defp literal(value) when is_integer(value), do: %L.IntValue{value: value}
   defp literal(value) when is_float(value), do: %L.FloatValue{value: value}
   defp literal(nil), do: %L.NullValue{}
+
+  # Absinthe's pretty renderer trims StringValue contents and emits multiline
+  # blockstrings. At the render boundary only, use its raw value leaf for a
+  # JSON-escaped, ordinary GraphQL string. Traverse the whole operation so that
+  # retained defaults, directives and adjacent mutation inputs are also lossless.
+  defp encode_strings(%L.StringValue{value: value}), do: %{value: Jason.encode!(value)}
+  defp encode_strings(%module{} = value), do: struct(module, encode_strings(Map.from_struct(value)))
+  defp encode_strings(value) when is_map(value), do: Map.new(value, fn {key, item} -> {key, encode_strings(item)} end)
+  defp encode_strings(value) when is_list(value), do: Enum.map(value, &encode_strings/1)
+  defp encode_strings(value), do: value
 
   defp variable_names(%L.Variable{name: name}), do: [name]
   defp variable_names(value) when is_list(value), do: Enum.flat_map(value, &variable_names/1)

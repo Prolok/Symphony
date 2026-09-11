@@ -340,7 +340,10 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.workflow_prompt() == prompt
     assert prompt =~ "Der kanonische Arbeitsbranch für dieses Issue heißt immer `symphony/{{ issue.identifier }}`."
     assert prompt =~ "Wenn ein frischer Branch benötigt wird, erstelle oder verwende genau `symphony/{{ issue.identifier }}` von `origin/main`."
-    assert prompt =~ "Wenn kein regulärer Kommentar-Edit-Pfad verfügbar ist"
+    assert prompt =~ "Im App-Modus nutze ausschließlich das injizierte `linear_graphql` bzw. das gebundene `symphony_linear`-MCP"
+    assert prompt =~ "Das geschützte Betreiberwerkzeug `scripts/linear-app` ist kein Modell-Shell-Ersatz."
+    assert prompt =~ "Die lokalen Shell-/Mix-/Update-Skript-Fallbacks für Linear-Zugriff gelten nur im Legacy-Modus."
+    assert prompt =~ "Wenn im Legacy-Modus kein regulärer Kommentar-Edit-Pfad verfügbar ist"
     assert prompt =~ "mise exec -- mix run --no-start -e"
     assert prompt =~ "Source-/Config-Root zuerst im ursprünglichen Zielrepo-Kontext"
     assert prompt =~ "dort vor jedem Verzeichniswechsel `git rev-parse --show-toplevel`"

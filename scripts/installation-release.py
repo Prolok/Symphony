@@ -67,7 +67,9 @@ def capture_skills(release):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     original = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    module.prepare(release, original, [original / "skills", Path.home() / ".agents/skills", Path("/etc/codex/skills"), Path(release) / ".codex/skills"])
+    # The launcher preserves the operator's project cwd through update/build.
+    # Neither the release nor SYMPHONY_ROOT_DIR identifies that Fachprojekt.
+    module.prepare(release, original, [original / "skills", Path.home() / ".agents/skills", Path("/etc/codex/skills"), Path(release) / ".codex/skills"], Path.cwd())
 
 
 def seal(release):

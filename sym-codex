@@ -69,11 +69,11 @@ sym_codex_activate_venv() {
 }
 
 sym_codex_realpath() {
-  command -v python3 >/dev/null 2>&1 || {
-    sym_codex_stderr "python3 not found in PATH"
+  command -v "${SYMPHONY_PYTHON:-python3}" >/dev/null 2>&1 || {
+    sym_codex_stderr "Python-Laufzeit nicht verfügbar (App-Modus: Python 3.11+)"
     return 1
   }
-  python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+  "${SYMPHONY_PYTHON:-python3}" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
 }
 
 sym_codex_source_repo() {
@@ -137,7 +137,7 @@ sym_codex_prepare_mix() {
 
   if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" ]]; then
     [[ -f "$source_repo/.symphony-release.json" ]] || sym_codex_die "ungebundener Laufzeitstand"
-    python3 "$source_repo/scripts/installation-release.py" verify "$source_repo" || sym_codex_die "Laufzeitstand wurde verändert"
+    "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" verify "$source_repo" || sym_codex_die "Laufzeitstand wurde verändert"
     return 0
   fi
 
@@ -336,7 +336,7 @@ sym_codex_parse_manual_prompt_context() {
     remainder="${prompt_context#"$context_v3_prefix"}"
     local runtime_json="${remainder%%"$newline"*}"
     local runtime_entries name value
-    runtime_entries="$(python3 -c '
+    runtime_entries="$("${SYMPHONY_PYTHON:-python3}" -c '
 import json,sys
 data=json.loads(sys.argv[1])
 allowed={"SYMPHONY_LINEAR_AUTH_MODE","SYMPHONY_LINEAR_CLIENT_SECRET_ENV","SYMPHONY_LINEAR_BINDING_HASH","SYMPHONY_CODEX_STATE_ROOT","SYMPHONY_RUN_ID","SYMPHONY_PHASE"}
@@ -504,7 +504,7 @@ sym_codex_load_launch_env() {
 
   if [[ -f "$project_root/.symphony/root-config.json" ]]; then
     local entries key value
-    entries="$(python3 - "$project_root/.symphony/root-config.json" <<'PY'
+    entries="$("${SYMPHONY_PYTHON:-python3}" - "$project_root/.symphony/root-config.json" <<'PY'
 import json, os, sys
 values = json.load(open(sys.argv[1]))['values']
 for name in ('SYM_CODEX_MODEL', 'SYM_CODEX_REASONING_EFFORT', 'SYM_CODEX_SERVICE_TIER', 'SYM_CODEX_HUMAN_SERVICE_TIER'):
@@ -757,14 +757,14 @@ sym_codex_run() {
 
   if [[ -z "${SYMPHONY_RELEASE_ROOT:-}" && ! -f "$source_repo/.symphony-release.json" &&
         -f "$source_repo/scripts/installation-release.py" ]] &&
-      python3 "$source_repo/scripts/installation-release.py" app-workflow "$source_repo"; then
-    python3 "$source_repo/scripts/installation-release.py" codex "$source_repo" sym-codex "${original_args[@]}"
+      "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" app-workflow "$source_repo"; then
+    "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" codex "$source_repo" sym-codex "${original_args[@]}"
     return "$?"
   fi
 
   if [[ -f "$source_repo/.symphony/root-config.json" ]]; then
     export SYMPHONY_RELEASE_ROOT="$source_repo"
-    export SYMPHONY_ROOT_DIR="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["root"])' "$source_repo/.symphony/root-config.json")"
+    export SYMPHONY_ROOT_DIR="$("${SYMPHONY_PYTHON:-python3}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["root"])' "$source_repo/.symphony/root-config.json")"
   elif [[ -z "${SYMPHONY_ROOT_DIR:-}" ]]; then
     export SYMPHONY_ROOT_DIR="$source_repo"
   fi
@@ -851,6 +851,12 @@ sym_codex_run() {
       sym_codex_parse_manual_prompt_context "$prompt_context"
     fi
   fi
+  # Capture the helper interpreter before activating any project venv, also
+  # for manual invocations that did not pass through the service launcher.
+  SYMPHONY_PYTHON="$("${SYMPHONY_PYTHON:-python3}" -c 'import os,sys; print(os.path.abspath(sys.executable))' 2>/dev/null)" ||
+    { sym_codex_stderr "Python-Laufzeit nicht verfügbar (App-Modus: Python 3.11+)"; return 1; }
+  export SYMPHONY_PYTHON
+
   sym_codex_set_launch_profile "$workflow_step"
   service_tier="$(sym_codex_effective_service_tier "$observer_mode")"
 
@@ -900,7 +906,7 @@ sym_codex_run() {
     (
       unset MIX_DEPS_PATH MIX_BUILD_ROOT MIX_BUILD_PATH
       if [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app ]]; then
-        python3 "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
+        "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
       else
         codex "${codex_args[@]}"
       fi
@@ -910,7 +916,7 @@ sym_codex_run() {
 
   sym_codex_activate_venv "$project_root" "$workspace" "$source_repo"
   if [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app ]]; then
-    exec env -u MIX_DEPS_PATH -u MIX_BUILD_ROOT -u MIX_BUILD_PATH python3 "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
+    exec env -u MIX_DEPS_PATH -u MIX_BUILD_ROOT -u MIX_BUILD_PATH "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
   fi
 
   exec env -u MIX_DEPS_PATH -u MIX_BUILD_ROOT -u MIX_BUILD_PATH codex "${codex_args[@]}"

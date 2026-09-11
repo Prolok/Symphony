@@ -11,8 +11,10 @@ spec.loader.exec_module(store)
 try:
     request = json.loads(sys.stdin.readline())
     identity = json.dumps([request["workspace_id"], request["issue_id"]])
-    with store.state_lock("symphony-issue-lease", identity, timeout=0):
+    with store.state_lock("symphony-issue-lease", identity, timeout=request.get("timeout_ms", 0) / 1000):
         print("locked", flush=True)
         sys.stdin.read()
+except store.StateLockError as error:
+    print("busy" if str(error) == "binding_busy" else "unavailable", flush=True)
 except Exception:
     print("unavailable", flush=True)

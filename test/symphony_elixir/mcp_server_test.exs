@@ -6,6 +6,21 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
   alias SymphonyElixir.Codex.MCPServer
   alias SymphonyElixir.Workflow
 
+  test "real stdio preserves UTF-8 bytes for escaped and literal JSON in both directions" do
+    code_paths = Enum.flat_map(:code.get_path(), &["-pa", to_string(&1)])
+    helper = Path.expand("../support/linear_app/mcp_stdio_roundtrip.py", __DIR__)
+    {output, status} = System.cmd(System.find_executable("python3"), [helper, System.find_executable("elixir")] ++ code_paths, stderr_to_stdout: true)
+    assert status == 0, output
+    assert output =~ "framing and EOF passed"
+  end
+
+  test "an explicitly selected stderr device preserves Unicode response IDs" do
+    request = %{"jsonrpc" => "2.0", "id" => "Grüße 😀", "method" => "ping"}
+    {:ok, input} = StringIO.open(Jason.encode!(request) <> "\n")
+    output = capture_io(:stderr, fn -> MCPServer.run([], input: input, output: :stderr) end)
+    assert Jason.decode!(output) == %{"jsonrpc" => "2.0", "id" => "Grüße 😀", "result" => %{}}
+  end
+
   test "main bootstraps before running the server loop" do
     test_pid = self()
 
@@ -37,9 +52,11 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
     System.put_env("SYMPHONY_SOURCE_REPO", File.cwd!())
     System.put_env("SYMPHONY_WORKFLOW_FILE", Workflow.workflow_file_path())
 
-    assert capture_io("", fn -> assert :ok = MCPServer.main() end) == ""
+    # OTP's binary get_line uses an atom prompt; StringIO cannot capture it.
+    # MCP has no prompts, so exercise the byte stream without prompt capture.
+    assert capture_io([input: "", capture_prompt: false], fn -> assert :ok = MCPServer.main() end) == ""
 
-    assert capture_io(~s({"jsonrpc":"2.0","id":12,"method":"ping"}\n), fn ->
+    assert capture_io([input: ~s({"jsonrpc":"2.0","id":12,"method":"ping"}\n), capture_prompt: false], fn ->
              assert :ok = MCPServer.run()
            end) == "{\"id\":12,\"jsonrpc\":\"2.0\",\"result\":{}}\n"
   end

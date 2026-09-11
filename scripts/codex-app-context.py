@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 
 
@@ -25,7 +26,19 @@ def skill_directories(root):
     return sorted(found)
 
 
-def prepare(release, original_home, skill_roots):
+def project_root(directory):
+    directory = Path(directory).resolve(strict=True)
+    try:
+        common = subprocess.check_output(
+            ["git", "-C", str(directory), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+    except subprocess.CalledProcessError:
+        return directory
+    return Path(common).resolve(strict=True).parent
+
+
+def prepare(release, original_home, skill_roots, project_dir):
     release, original_home = Path(release).resolve(), Path(original_home)
     target = release / ".symphony" / "codex"
     if (target / "skills.json").is_file():
@@ -48,7 +61,13 @@ def prepare(release, original_home, skill_roots):
         # OpenAI login stays in its existing credential location. This helper
         # neither reads its content nor copies it into a release.
         (target / "auth.json").symlink_to(auth.resolve())
-    (target / "config.toml").write_text("[features]\napps = false\n")
+    # The operator's project start authorizes this one repository, including its
+    # worktrees. Codex otherwise persists this trust during thread/start, after
+    # sealing, and the required MCP correctly rejects the changed release.
+    project = json.dumps(str(project_root(project_dir)), ensure_ascii=False)
+    (target / "config.toml").write_text(
+        '[features]\napps = false\n\n[projects.' + project + ']\ntrust_level = "trusted"\n'
+    )
     (target / "skills.json").write_text(json.dumps(captured))
     return target
 
@@ -72,20 +91,28 @@ def launch_config(release, target, cwd, user_home, environment=None):
     settings = [{"path": path, "enabled": False} for path in sorted(disabled)] + enabled
     overrides = "[" + ",".join("{path=" + json.dumps(item["path"]) + ",enabled=" + str(item["enabled"]).lower() + "}" for item in settings) + "]"
     args = ["--config", "skills.config=" + overrides, "--config", "features.apps=false"]
+    disabled_servers, disabled_plugins = set(), set()
     for config in configs:
         if config.is_file():
             document = tomllib.loads(config.read_text())
-            for server in document.get("mcp_servers", {}):
-                args.extend(["--config", "mcp_servers." + json.dumps(server) + ".enabled=false"])
-            for plugin in document.get("plugins", {}):
-                args.extend(["--config", "plugins." + json.dumps(plugin) + ".enabled=false"])
+            disabled_servers.update(document.get("mcp_servers", {}))
+            disabled_plugins.update(document.get("plugins", {}))
+    # Codex splits CLI key paths on dots, without TOML key unquoting. Put
+    # arbitrary names inside a TOML table value instead, so the override disables
+    # the existing server/plugin rather than creating an invalid quoted name.
+    if disabled_servers:
+        blocked = ",".join(json.dumps(name) + "={enabled=false}" for name in sorted(disabled_servers))
+        args.extend(["--config", "mcp_servers={" + blocked + "}"])
+    if disabled_plugins:
+        blocked = ",".join(json.dumps(name) + "={enabled=false}" for name in sorted(disabled_plugins))
+        args.extend(["--config", "plugins={" + blocked + "}"])
     # Only the installation-owned MCP is enabled. Dynamic tools share its client.
     args.extend(["--config", "mcp_servers.symphony_linear.enabled=true",
                  "--config", "mcp_servers.symphony_linear.required=true",
                  "--config", "mcp_servers.symphony_linear.command=" + json.dumps(str(release / "sym-codex-mcp"))])
     names = ("SYMPHONY_RELEASE_ROOT", "SYMPHONY_ROOT_DIR", "SYMPHONY_LINEAR_ENV_DIR", "SYMPHONY_LINEAR_AUTH_MODE", "SYMPHONY_LINEAR_CLIENT_SECRET_ENV", "SYMPHONY_LINEAR_BINDING_HASH",
              "SYMPHONY_RUN_ID", "SYMPHONY_PHASE", "SYMPHONY_ISSUE_ID", "SYMPHONY_ISSUE_IDENTIFIER",
-             "SYMPHONY_SOURCE_REPO", "SYMPHONY_PROJECT_ROOT", "SYMPHONY_WORKFLOW_FILE", "SYMPHONY_CODEX_STATE_ROOT")
+             "SYMPHONY_SOURCE_REPO", "SYMPHONY_PROJECT_ROOT", "SYMPHONY_WORKFLOW_FILE", "SYMPHONY_CODEX_STATE_ROOT", "SYMPHONY_PYTHON")
     forwarded = ",".join(json.dumps(name) + "=" + json.dumps(environment[name]) for name in names if name in environment)
     # Only the configured MCP may load the project secret on demand. A shell child
     # keeps the denied marker even when it invokes a launcher or Mix itself.

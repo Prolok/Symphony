@@ -20,13 +20,23 @@ defmodule SymphonyElixir.Linear.IssueLease do
 
   @spec with_lock(String.t(), String.t(), (-> term())) :: term()
   def with_lock(workspace_id, issue_id, callback) do
+    lock(workspace_id, issue_id, callback, 0, {:issue_already_owned, :issue_lease_unavailable})
+  end
+
+  @spec with_journal_lock(String.t(), (-> term()), non_neg_integer()) :: term()
+  def with_journal_lock(state_root, callback, timeout \\ 10_000) do
+    # Keep the existing lock identity/inode, including across release upgrades.
+    lock("symphony-comment-journal", Path.expand(state_root), callback, timeout, {:comment_journal_busy, :comment_journal_unavailable})
+  end
+
+  defp lock(workspace_id, issue_id, callback, timeout, {_busy, unavailable} = errors) do
     case System.find_executable("python3") do
-      nil -> {:error, :issue_lease_unavailable}
-      python -> hold(python, workspace_id, issue_id, callback)
+      nil -> {:error, unavailable}
+      python -> hold(python, workspace_id, issue_id, callback, timeout, errors)
     end
   end
 
-  defp hold(python, workspace_id, issue_id, callback) do
+  defp hold(python, workspace_id, issue_id, callback, timeout, {busy, unavailable}) do
     script = Path.join(RuntimePaths.workflow_dir(), "priv/linear_app/issue_lease.py")
 
     env =
@@ -38,13 +48,14 @@ defmodule SymphonyElixir.Linear.IssueLease do
     port = Port.open({:spawn_executable, python}, [:binary, :exit_status, {:line, 128}, {:env, env}, {:args, ["-I", "-u", script]}])
 
     try do
-      Port.command(port, Jason.encode!(%{workspace_id: workspace_id, issue_id: issue_id}) <> "\n")
+      Port.command(port, Jason.encode!(%{workspace_id: workspace_id, issue_id: issue_id, timeout_ms: timeout}) <> "\n")
 
       receive do
         {^port, {:data, {:eol, "locked"}}} -> callback.()
-        {^port, _message} -> {:error, :issue_already_owned}
+        {^port, {:data, {:eol, "busy"}}} -> {:error, busy}
+        {^port, _message} -> {:error, unavailable}
       after
-        10_000 -> {:error, :issue_lease_unavailable}
+        timeout + 10_000 -> {:error, unavailable}
       end
     after
       if Port.info(port), do: Port.close(port)

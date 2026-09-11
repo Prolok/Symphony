@@ -4,6 +4,204 @@ defmodule SymphonyScriptTest do
   @script_source Path.expand("../symphony", __DIR__)
   @mix_runtime_source Path.expand("../scripts/mix-runtime", __DIR__)
 
+  test "the launcher rejects old Python before update or build and retains the legacy minimum" do
+    %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
+    python = System.find_executable("python3")
+    fake_python = Path.join(bin_dir, "python3")
+
+    for minor <- [9, 10] do
+      File.write!(fake_python, """
+      #!/bin/bash
+      if [[ "$1" == -c ]]; then
+        shift
+        exec #{shell_quote(python)} -c 'import sys; sys.version_info=(3,#{minor},0); code=sys.argv.pop(1); exec(code)' "$@"
+      fi
+      exec #{shell_quote(python)} "$@"
+      """)
+
+      File.chmod!(fake_python, 0o755)
+      File.write!(Path.join(repo_dir, "WORKFLOW.md"), "---\ntracker:\n  auth_mode: app\n---\n")
+
+      assert {output, 1} = run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_PYTHON", nil}])
+      assert output == "mix-runtime: Für den App-Modus ist Python 3.11 oder neuer erforderlich\n"
+      refute File.exists?(Path.join(repo_dir, ".mix-calls"))
+      refute File.exists?(Path.join(repo_dir, "_build"))
+      refute File.exists?(home_dir)
+
+      File.write!(Path.join(repo_dir, "WORKFLOW.md"), "---\ntracker:\n  auth_mode: legacy\n---\n")
+      {output, status} = run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_PYTHON", nil}])
+
+      if minor == 10 do
+        assert status == 0
+        assert output =~ "symphony-stub"
+        refute output =~ "/usr/bin/env "
+      else
+        assert status == 1
+        assert output == "mix-runtime: Python 3.10 oder neuer ist erforderlich\n"
+      end
+    end
+  end
+
+  for project_venv? <- [false, true] do
+    @tag timeout: 60_000
+    test "launcher → AppServer → bound app helper survives login PATH reset with project venv=#{project_venv?}" do
+      %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
+      project = Path.join(bin_dir, "project")
+      workspace = Path.join(project, "workspaces/worker")
+      bad_bin = Path.join(bin_dir, "incompatible-python")
+      trace = Path.join(bin_dir, "worker.trace")
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(home_dir)
+      File.mkdir_p!(bad_bin)
+
+      # Real release preparation, launcher and helper scripts; only external
+      # build tools and Codex's JSON-RPC peer are fixtures. No tracker calls.
+      for name <- ["sym-codex", "sym-codex-mcp", "scripts/installation-release.py", "scripts/codex-app-context.py"] do
+        File.cp!(Path.expand("../#{name}", __DIR__), Path.join(repo_dir, name))
+      end
+
+      File.write!(Path.join(repo_dir, "mix.exs"), "# fixture\n")
+      File.write!(Path.join(repo_dir, ".gitignore"), ".symphony/installations/\n_build/\n")
+
+      config = %{
+        "tracker" => %{
+          "kind" => "linear",
+          "auth_mode" => "app",
+          "app" => %{
+            "client_secret_env" => "SYMPHONY_TEST_START_SECRET",
+            "workspace_id" => "workspace",
+            "user_id" => "app",
+            "client_id" => "client",
+            "installation_id" => "install",
+            "state_root" => Path.join(project, ".symphony/state")
+          }
+        },
+        "workspace" => %{"root" => Path.dirname(workspace)},
+        "codex" => %{"read_timeout_ms" => 5_000}
+      }
+
+      File.write!(Path.join(repo_dir, "WORKFLOW.md"), "---\n#{Jason.encode!(config)}\n---\nSynthetic instructions\n")
+
+      # Pin the actual compiled Elixir modules, so the escript stand-in calls
+      # the production AppServer.start_session/2, including Port.open(-lc).
+      elixir = System.find_executable("elixir")
+      File.write!(Path.join(bin_dir, "runtime/erl"), "#!/bin/bash\nexec #{shell_quote(System.find_executable("erl"))} \"$@\"\n")
+      code_paths = Path.wildcard(Path.join(Mix.Project.build_path(), "lib/*/ebin")) |> Enum.map(&Path.expand/1)
+      runner = Path.join(bin_dir, "start-session.exs")
+
+      File.write!(runner, """
+      alias SymphonyElixir.{Workflow, Codex.AppServer}
+      :ok = Workflow.set_workflow_file_path(System.fetch_env!("SYMPHONY_WORKFLOW_FILE"))
+      IO.puts("launcher-ready")
+      {:ok, session} = AppServer.start_session(#{inspect(workspace)})
+      IO.puts("started=" <> session.thread_id)
+      AppServer.stop_session(session)
+      """)
+
+      File.write!(Path.join(repo_dir, "bin/symphony"), """
+      #!/bin/bash
+      exec #{shell_quote(elixir)} #{Enum.map_join(code_paths, " ", &("-pa " <> shell_quote(&1)))} #{shell_quote(runner)}
+      """)
+
+      # Deterministically model a login profile selecting an incompatible
+      # Python even on hosts whose real login Python is sufficiently recent.
+      File.write!(Path.join(bin_dir, "bash"), """
+      #!/bin/bash
+      if [[ "$1" == -lc ]]; then
+        printf 'login-path-reset\\n' >> #{shell_quote(trace)}
+        exec /bin/bash -lc 'export PATH="$1"; eval "$2"' worker #{shell_quote(bad_bin <> ":/usr/bin:/bin")} "$2"
+      fi
+      exec /bin/bash "$@"
+      """)
+
+      File.write!(Path.join(bad_bin, "python3"), """
+      #!#{System.find_executable("python3")}
+      import builtins, runpy, sys
+      with open(#{inspect(trace)}, "a") as trace:
+          trace.write("incompatible-python-used\\n")
+      sys.version_info = (3, 9, 6)
+      original_import = builtins.__import__
+      def old_python_import(name, *args, **kwargs):
+          if name == "tomllib":
+              raise ModuleNotFoundError("No module named 'tomllib'")
+          return original_import(name, *args, **kwargs)
+      builtins.__import__ = old_python_import
+      sys.argv = sys.argv[1:]
+      if sys.argv[0] == "-c":
+          code = sys.argv.pop(1)
+          exec(code)
+      else:
+          runpy.run_path(sys.argv[0], run_name="__main__")
+      """)
+
+      if unquote(project_venv?) do
+        venv = Path.join(project, ".venv")
+        File.mkdir_p!(Path.join(venv, "bin"))
+        File.ln_s!(Path.join(bad_bin, "python3"), Path.join(venv, "bin/python3"))
+
+        File.write!(Path.join(venv, "bin/activate"), """
+        export VIRTUAL_ENV=#{shell_quote(venv)}
+        export PATH="$VIRTUAL_ENV/bin:$PATH"
+        printf 'project-venv-active\\n' >> #{shell_quote(trace)}
+        """)
+      end
+
+      File.write!(Path.join(bin_dir, "codex"), """
+      #!/bin/bash
+      set -eu
+      [[ "$*" == *app-server* ]]
+      [[ "$CODEX_HOME" == "$SYMPHONY_RELEASE_ROOT/.symphony/codex" ]]
+      [[ "$SYMPHONY_LINEAR_AUTH_MODE" == app ]]
+      [[ "$*" == *SYMPHONY_PYTHON* ]]
+      [[ -n "$SYMPHONY_LINEAR_BINDING_HASH" ]]
+      printf 'codex-app-bound\\n' >> #{shell_quote(trace)}
+      "$SYMPHONY_RELEASE_ROOT/sym-codex-mcp"
+      printf 'mcp-helper-started\\n' >> #{shell_quote(trace)}
+      while IFS= read -r line; do
+        case "$line" in
+          *'"method":"initialize"'*)
+            printf 'initialize\\n' >> #{shell_quote(trace)}
+            printf '%s\\n' '{"id":1,"result":{}}' ;;
+          *'"method":"thread/start"'*)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"bound-worker"}}}' ;;
+        esac
+      done
+      """)
+
+      for path <- [Path.join(bin_dir, "bash"), Path.join(bad_bin, "python3"), Path.join(bin_dir, "codex")] do
+        File.chmod!(path, 0o755)
+      end
+
+      for args <- [["init", "-q"], ["add", "."], ["-c", "user.name=Synthetic", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]] do
+        assert {_, 0} = System.cmd("git", args, cd: repo_dir, stderr_to_stdout: true)
+      end
+
+      assert {output, 0} =
+               run_script(repo_dir, home_dir, bin_dir, [],
+                 cd: project,
+                 env:
+                   SymphonyElixir.TestSupport.cleared_symphony_runtime_env() ++
+                     [
+                       {"SYMPHONY_PYTHON", nil},
+                       {"SYMPHONY_CODEX_COMMAND", nil},
+                       {"CODEX_HOME", Path.join(home_dir, ".codex")},
+                       {"SYMPHONY_LINEAR_ENV_DIR", Path.join(project, ".symphony")}
+                     ]
+               )
+
+      assert output =~ "launcher-ready"
+      assert output =~ "started=bound-worker"
+      evidence = File.read!(trace)
+      assert evidence =~ "login-path-reset"
+      assert evidence =~ "codex-app-bound"
+      assert evidence =~ "mcp-helper-started"
+      assert evidence =~ "initialize"
+      assert evidence =~ "project-venv-active" == unquote(project_venv?)
+      refute evidence =~ "incompatible-python-used"
+      refute File.exists?(Path.join(home_dir, ".local/bin"))
+    end
+  end
+
   test "an isolated release binds helpers without creating global symlinks" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
     project_dir = Path.join(System.tmp_dir!(), "symphony-script-project-#{System.unique_integer([:positive])}")
@@ -459,8 +657,11 @@ defmodule SymphonyScriptTest do
     # These tests exercise preflight, build locking and launch inside an
     # isolated release. The real snapshot copier has separate process tests.
     File.write!(Path.join(repo_dir, "scripts/installation-release.py"), """
-    import os, sys
+    import os, pathlib, re, sys
     action, root, *args = sys.argv[1:]
+    if action == "app-workflow":
+        workflow = pathlib.Path(root) / "WORKFLOW.md"
+        sys.exit(0 if workflow.is_file() and re.search(r'auth_mode["\\x27]?\\s*:\\s*["\\x27]?app\\b', workflow.read_text()) else 1)
     if action == "start":
         os.environ["SYMPHONY_RELEASE_ROOT"] = root
         os.environ["SYMPHONY_ROOT_DIR"] = root
@@ -556,4 +757,6 @@ defmodule SymphonyScriptTest do
 
   defp maybe_put_cd(opts, nil), do: opts
   defp maybe_put_cd(opts, cd), do: Keyword.put(opts, :cd, cd)
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
 end

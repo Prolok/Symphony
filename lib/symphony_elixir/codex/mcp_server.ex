@@ -72,8 +72,13 @@ defmodule SymphonyElixir.Codex.MCPServer do
     input = Keyword.get(opts, :input, :stdio)
     output = Keyword.get(opts, :output, :stdio)
 
+    # MCP carries UTF-8 JSON bytes. Elixir's Unicode stdio would transcode
+    # binwrite's bytes as Latin-1, and a binary read needs the same raw mode.
+    :ok = :io.setopts(io_device(input), encoding: :latin1)
+    :ok = :io.setopts(io_device(output), encoding: :latin1)
+
     input
-    |> IO.stream(:line)
+    |> IO.binstream(:line)
     |> Enum.each(fn line ->
       case handle_message(line, opts) do
         nil ->
@@ -86,6 +91,10 @@ defmodule SymphonyElixir.Codex.MCPServer do
 
     :ok
   end
+
+  defp io_device(:stdio), do: :standard_io
+  defp io_device(:stderr), do: :standard_error
+  defp io_device(device), do: device
 
   @spec handle_message(String.t(), keyword()) :: response()
   def handle_message(line, opts \\ []) when is_binary(line) do

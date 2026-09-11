@@ -12,16 +12,25 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   @spec execute(map(), map(), (map() -> term()), map(), keyword()) :: term()
   def execute(binding, payload, request, context \\ %{}, opts \\ []) do
-    IssueLease.with_lock("symphony-comment-journal", Path.expand(binding["state_root"]), fn ->
-      execute_locked(binding, payload, request, context, opts)
-    end)
+    with {:ok, prepared, receipts} <- CommentMutations.prepare(payload) do
+      execute_prepared(binding, prepared, receipts, request, context, opts)
+    end
   end
 
-  defp execute_locked(binding, payload, request, context, opts) do
+  defp execute_prepared(_binding, prepared, [], request, _context, _opts), do: request.(prepared)
+
+  defp execute_prepared(binding, prepared, receipts, request, context, opts) do
+    IssueLease.with_journal_lock(
+      binding["state_root"],
+      fn -> execute_locked(binding, prepared, receipts, request, context, opts) end,
+      Keyword.get(opts, :lock_timeout, 10_000)
+    )
+  end
+
+  defp execute_locked(binding, prepared, receipts, request, context, opts) do
     binding = Map.put(binding, :state_writer, Keyword.get(opts, :state_writer, &DurableState.write/2))
 
-    with {:ok, prepared, receipts} <- CommentMutations.prepare(payload),
-         :ok <- recover_before_write(binding, receipts, request, context),
+    with :ok <- recover_before_write(binding, receipts, request, context),
          {:ok, receipts} <- collect(receipts, &hydrate_receipt(binding, &1, request)),
          :ok <- persist_intents(binding, receipts, context),
          {:ok, response} <- request.(prepared),
@@ -48,9 +57,11 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   @spec reconcile(map(), (map() -> term())) :: {:ok, [map()]} | {:error, term()}
   def reconcile(binding, request) do
-    with {:ok, records} <- intents(binding) do
-      collect(records, &confirm_remote(binding, &1, request))
-    end
+    IssueLease.with_journal_lock(binding["state_root"], fn ->
+      with {:ok, records} <- intents(binding) do
+        collect(records, &confirm_remote(binding, &1, request))
+      end
+    end)
   end
 
   @spec classify(map(), map()) :: :own | :pending | :foreign | {:error, term()}
@@ -69,8 +80,6 @@ defmodule SymphonyElixir.Linear.CommentJournal do
       true -> :foreign
     end
   end
-
-  defp recover_before_write(_binding, [], _request, _context), do: :ok
 
   defp recover_before_write(binding, receipts, request, context) do
     with {:ok, records} <- intents(binding),

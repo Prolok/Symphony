@@ -3,7 +3,9 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import tomllib
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location("installation_release", REPO / "scripts/installation-release.py")
@@ -86,6 +88,26 @@ class InstallationReleaseTest(unittest.TestCase):
             release.verify(snapshot)
         with self.assertRaisesRegex(RuntimeError, "already sealed"):
             release.seal(snapshot)
+
+    def test_capture_binds_project_cwd_before_sealing_and_rejects_config_tampering(self):
+        snapshot = release.snapshot(self.source, self.root / "release")
+        personal = self.root / "personal"
+        personal.mkdir()
+        # Even an unrelated Symphony root must never become the trusted project.
+        with mock.patch.dict("os.environ", {"CODEX_HOME": str(personal), "SYMPHONY_ROOT_DIR": str(snapshot)}), \
+             mock.patch.object(Path, "home", return_value=personal), \
+             mock.patch.object(Path, "cwd", return_value=self.source), \
+             mock.patch("os.walk", return_value=[]):
+            release.capture_skills(snapshot)
+        config = snapshot / ".symphony/codex/config.toml"
+        self.assertEqual(tomllib.loads(config.read_text())["projects"], {
+            str(self.source.resolve()): {"trust_level": "trusted"},
+        })
+        release.seal(snapshot)
+        self.assertIn(".symphony/codex/config.toml", release.verify(snapshot)["files"])
+        config.write_text(config.read_text() + '\n[mcp_servers.foreign]\ncommand = "foreign"\n')
+        with self.assertRaisesRegex(RuntimeError, "content changed"):
+            release.verify(snapshot)
 
 
 if __name__ == "__main__":

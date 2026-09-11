@@ -1,15 +1,23 @@
 defmodule SymphonyElixir.CommentJournalTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.Linear.DurableState
-
+  alias Absinthe.Language, as: L
   alias Absinthe.Phase.Parse
-  alias SymphonyElixir.Linear.{CommentJournal, CommentMutations}
+  alias SymphonyElixir.Linear.{CommentJournal, CommentMutations, DurableState, WorkpadTransfer}
 
   setup do
     root = Path.join([File.cwd!(), "_build", "journal-test-#{System.unique_integer([:positive])}"])
     on_exit(fn -> File.rm_rf!(root) end)
     {:ok, binding: %{"state_root" => root, "workspace_id" => "workspace", "user_id" => "app", "installation_id" => "install"}}
+  end
+
+  @tag timeout: 60_000
+  test "independent runtimes serialize the same project journal across issues and later phases" do
+    code_paths = Enum.flat_map(:code.get_path(), &["-pa", to_string(&1)])
+    helper = Path.expand("../support/linear_app/journal_process.py", __DIR__)
+    {output, status} = System.cmd(System.find_executable("python3"), [helper, System.find_executable("elixir")] ++ code_paths, stderr_to_stdout: true)
+    assert status == 0, output
+    assert output =~ "pending recovery and true issue exclusion passed"
   end
 
   test "parallel clients cannot enter the same journal transaction during HTTP", %{binding: binding} do
@@ -27,7 +35,16 @@ defmodule SymphonyElixir.CommentJournalTest do
       end)
 
     assert_receive :inside_http, 1_000
-    assert {:error, :issue_already_owned} = CommentJournal.execute(binding, create_payload(), fn _ -> flunk("concurrent write") end)
+
+    assert {:error, :comment_journal_busy} =
+             CommentJournal.execute(binding, create_payload(), fn _ -> flunk("concurrent write") end, %{}, lock_timeout: 100)
+
+    query = %{"query" => "query { viewer { id } }"}
+    read_request = fn ^query -> {:error, :backend_failure} end
+    assert {:error, :backend_failure} = CommentJournal.execute(binding, query, read_request)
+
+    update = %{"query" => "mutation { issueUpdate(id: \"other\", input: {title: \"later\"}) { success } }"}
+    assert {:ok, :updated} = CommentJournal.execute(binding, update, fn ^update -> {:ok, :updated} end)
     assert [_] = Path.wildcard(Path.join([binding["state_root"], "comments", "*.intent.json"]))
     send(first.pid, :finish)
     assert {:error, :connection_lost} = Task.await(first)
@@ -69,6 +86,199 @@ defmodule SymphonyElixir.CommentJournalTest do
              CommentMutations.prepare(%{"query" => "query A { viewer { id } } query B { viewer { id } }"})
 
     assert {:ok, _, []} = CommentMutations.prepare(%{"query" => "query A { viewer { id } } query B { viewer { id } }", "operationName" => "A"})
+  end
+
+  test "rewritten GraphQL roundtrips exact string values from variables, literals and defaults" do
+    bodies = [
+      "",
+      " \t\n\r\n ",
+      "\n\n  eingerückt\n    weitere Zeile\n\n",
+      "## Symphony Workpad\n\nStand\n",
+      "  Randabstände  ",
+      "\"Quotes\" und \"\"\"Blockgrenzen\"\"\"\nBackslash: \\n \\r C:\\tmp\\ende\\\n",
+      "\r\nZeile\r\nTab\tBackspace\bFormfeed\f\r\n",
+      "\u0000\u0001\u001F",
+      "\nGrüße 日本語 😀 e\u0301\u00A0\n",
+      "\n\"}) { success } injected: commentCreate(input: {body: \"fremd\"}) #\n"
+    ]
+
+    for body <- bodies, source <- [:variable, :literal, :default] do
+      encoded = Jason.encode!(body)
+
+      {definitions, input, variables} =
+        case source do
+          :variable -> {"($input: CommentCreateInput!)", "$input", %{"input" => %{"issueId" => "issue", "body" => body}}}
+          :literal -> {"", "{issueId: \"issue\", body: #{encoded}}", %{}}
+          :default -> {"($body: String! = #{encoded})", "{issueId: \"issue\", body: $body}", %{}}
+        end
+
+      payload = %{"query" => "mutation#{definitions} { commentCreate(input: #{input}) { success } }", "variables" => variables}
+      assert {:ok, prepared, [receipt]} = CommentMutations.prepare(payload)
+      assert [%{name: "commentCreate", arguments: %{"input" => actual}}] = parsed_fields(prepared)
+      assert actual == receipt["input"]
+      assert actual["body"] === body, "changed #{source} body #{inspect(body)}"
+    end
+  end
+
+  test "strings in nested input, retained defaults, directives and adjacent mutations also roundtrip" do
+    body = "\n  Stand \"\"\" mit \\ und ä😀\n\n"
+    encoded = Jason.encode!(body)
+
+    payload = %{
+      "query" => """
+      mutation($title: String! = #{encoded}, $input: CommentCreateInput!) @custom(value: #{encoded}) {
+        commentCreate(input: $input) { success }
+        commentUpdate(id: "old", input: {body: #{encoded}}) { success }
+        issueUpdate(id: "issue", input: {title: $title, description: #{encoded}}) { success }
+      }
+      """,
+      "variables" => %{"input" => %{"issueId" => "issue", "bodyData" => %{"nested" => [body, %{"text" => body}], "flags" => [true, false, nil, 2, 1.5]}}}
+    }
+
+    assert {:ok, prepared, [create, update]} = CommentMutations.prepare(payload)
+    assert [created, edited, adjacent] = parsed_fields(prepared)
+    assert created.arguments["input"] == create["input"]
+    assert Map.delete(created.arguments["input"], "id") == payload["variables"]["input"]
+    assert edited.arguments["input"] == update["input"]
+    assert edited.arguments["input"]["body"] === body
+    assert adjacent.arguments["input"] == %{"title" => body, "description" => body}
+    assert {:ok, %{input: %{definitions: [operation]}}} = Parse.run(prepared["query"])
+    assert [%{arguments: [%{value: %L.StringValue{value: ^body}}]}] = operation.directives
+  end
+
+  test "caller blockstrings preserve their parsed value when rewritten as ordinary strings" do
+    payload = %{"query" => ~s|mutation { commentCreate(input: {issueId: "issue", body: """\n  Plan\n    eingerückt\n  Ende\n"""}) { success } }|}
+    [original] = parsed_fields(payload)
+    assert {:ok, prepared, [_]} = CommentMutations.prepare(payload)
+    [rewritten] = parsed_fields(prepared)
+    assert rewritten.arguments["input"]["body"] === original.arguments["input"]["body"]
+  end
+
+  test "parsed app creation and immediate edit confirm exact bodies without blocking later writes", %{binding: binding} do
+    body = "\n\n## Symphony Workpad\n\n  Grüße \"\"\" \\ 😀\n\n"
+    Process.put(:remote_comments, %{})
+    request = &graphql_request/1
+    assert {:ok, _} = CommentJournal.execute(binding, variable_create("new", body), request)
+    created = Process.get(:remote_comments)["new"]
+    assert created["body"] === body
+    assert CommentJournal.classify(binding, created) == :own
+    assert length(journal_files(binding, "confirmed")) == 1
+
+    edited_body = body <> "\nErgänzung\n\n"
+    update = %{"query" => "mutation($body: String!) { commentUpdate(id: \"new\", input: {body: $body}) { success } }", "variables" => %{"body" => edited_body}}
+    assert {:ok, _} = CommentJournal.execute(binding, update, request)
+    edited = Process.get(:remote_comments)["new"]
+    assert edited["body"] === edited_body
+    assert CommentJournal.classify(binding, edited) == :own
+    assert length(journal_files(binding, "confirmed")) == 2
+    [edit_intent] = Enum.filter(journal_records(binding), &(&1["operation"] == "commentUpdate"))
+    assert edit_intent["previous_version"] == created["updatedAt"]
+    assert {:ok, _} = CommentJournal.execute(binding, variable_create("later", "Weiter\n"), request)
+    assert map_size(Process.get(:remote_comments)) == 2
+    assert length(journal_files(binding, "confirmed")) == 3
+  end
+
+  test "legacy newline conflicts block writes until exact operator repair and cannot cause duplicate creation", %{binding: binding} do
+    body = "## Symphony Workpad\n\nKünstlicher Stand\n"
+    payload = variable_create("legacy", body)
+    Process.put(:remote_comments, %{})
+    assert {:ok, _} = CommentJournal.execute(binding, payload, &legacy_graphql_request/1)
+    [intent_path] = journal_files(binding, "intent")
+    original_intent = File.read!(intent_path)
+    assert journal_files(binding, "confirmed") == []
+    truncated = Process.get(:remote_comments)["legacy"]
+    assert truncated["body"] === String.trim_trailing(body, "\n")
+    assert CommentJournal.classify(binding, truncated) == :pending
+
+    conflicts = [
+      truncated,
+      %{truncated | "body" => body, "user" => %{"id" => "human"}},
+      %{truncated | "body" => body, "issue" => %{"id" => "other"}},
+      %{truncated | "id" => "other", "body" => body}
+    ]
+
+    for remote <- conflicts do
+      assert {:ok, [%{"state" => "conflict"}]} = CommentJournal.reconcile(binding, fn _ -> response(%{"comment" => remote}) end)
+    end
+
+    other_issue = put_in(variable_create("other-comment", "Weiter"), ["variables", "input", "issueId"], "other-issue")
+    blocked = CommentJournal.execute(binding, other_issue, &lookup_only/1)
+    assert {:error, {:comment_write_unresolved, [%{"state" => "conflict"}]}} = blocked
+
+    assert File.read!(intent_path) == original_intent
+    assert journal_files(binding, "confirmed") == []
+    # Simulate the operator restoring the exact intended body at the verified ID.
+    put_remote(%{truncated | "body" => body, "updatedAt" => "operator-repair"})
+    assert {:ok, [%{"state" => "confirmed"}]} = CommentJournal.reconcile(binding, &lookup_only/1)
+    assert {:error, {:comment_write_recovered, ["legacy"]}} = CommentJournal.execute(binding, payload, fn _ -> flunk("duplicate creation") end)
+    assert File.read!(intent_path) == original_intent
+    assert {:ok, _} = CommentJournal.execute(binding, variable_create("later", "Weiter\n"), &graphql_request/1)
+  end
+
+  test "lost response after a parsed multiline creation recovers without generating another comment", %{binding: binding} do
+    payload = %{"query" => "mutation($body: String!) { commentCreate(input: {issueId: \"issue\", body: $body}) { success } }", "variables" => %{"body" => "\n\nStand \\ \"\"\" 😀\n\n"}}
+    Process.put(:remote_comments, %{})
+
+    lost_response = fn outgoing ->
+      assert {:ok, _} = graphql_request(outgoing)
+      {:error, :lost_response}
+    end
+
+    assert {:error, :lost_response} = CommentJournal.execute(binding, payload, lost_response)
+    [created] = remote_comments()
+    assert created["body"] === payload["variables"]["body"]
+    assert journal_files(binding, "confirmed") == []
+    assert {:error, {:comment_write_recovered, [id]}} = CommentJournal.execute(binding, payload, &lookup_only/1)
+    assert id == created["id"]
+    assert length(journal_files(binding, "intent")) == 1
+    assert length(journal_files(binding, "confirmed")) == 1
+    assert remote_comments() == [created]
+  end
+
+  test "transfer activation through parsed journal writes preserves the target and later edits", %{binding: binding} do
+    prepare_transfer(binding)
+    api = &transfer_api(binding, &1, &2)
+    assert {:ok, active} = WorkpadTransfer.activate(binding, "issue", api)
+    target = Process.get(:remote_comments)[active["target_id"]]
+    assert target["body"] === expected_target(active)
+    assert length(journal_files(binding, "confirmed")) == 2
+    assert :ok = WorkpadTransfer.ready(binding, "issue", remote_comments())
+    edited_body = target["body"] <> "\nSpäterer Stand\n"
+    assert :ok = api.(:update, %{"id" => target["id"], "body" => edited_body})
+    assert {:ok, ^active} = WorkpadTransfer.activate(binding, "issue", api)
+    assert Process.get(:remote_comments)[target["id"]]["body"] === edited_body
+    assert length(remote_comments()) == 2
+  end
+
+  test "retired transfer with a legacy pending creation resumes only after exact repair", %{binding: binding} do
+    prepare_transfer(binding)
+    legacy_api = fn action, input -> transfer_api(binding, action, input, &legacy_graphql_request/1) end
+    api = &transfer_api(binding, &1, &2)
+    assert {:error, {:comment_write_unresolved, [%{"state" => "conflict"}]}} = WorkpadTransfer.activate(binding, "issue", legacy_api)
+    assert {:ok, %{"phase" => "retired"} = record} = WorkpadTransfer.read(binding, "issue")
+    assert length(remote_comments()) == 2
+    [intent_path] = journal_files(binding, "intent")
+    original_intent = File.read!(intent_path)
+    assert {:error, :workpad_target_changed} = WorkpadTransfer.activate(binding, "issue", api)
+    assert {:error, :workpad_transfer_incomplete} = WorkpadTransfer.ready(binding, "issue", remote_comments())
+    target = Process.get(:remote_comments)[record["target_id"]]
+    assert target["body"] <> "\n" === expected_target(record)
+    put_remote(%{target | "body" => expected_target(record), "updatedAt" => "operator-repair"})
+    # The normal activation reconciles the old creation before its verification edit.
+    assert {:ok, active} = WorkpadTransfer.activate(binding, "issue", api)
+    assert active["active_id"] == record["target_id"]
+    assert :ok = WorkpadTransfer.ready(binding, "issue", remote_comments())
+    assert length(remote_comments()) == 2
+    assert File.read!(intent_path) == original_intent
+    assert length(journal_files(binding, "confirmed")) == 2
+
+    confirmation =
+      intent_path
+      |> String.replace_suffix(".intent.json", ".confirmed.json")
+      |> File.read!()
+      |> Jason.decode!()
+
+    assert confirmation["recovered"] == true
   end
 
   test "skipped comments do not produce an intent, and invalid inputs stop before writing" do
@@ -238,6 +448,111 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert [_] = Path.wildcard(Path.join([binding["state_root"], "comments", "*.intent.json"]))
     assert [] = Path.wildcard(Path.join([binding["state_root"], "comments", "*.confirmed.json"]))
   end
+
+  defp parsed_fields(payload) do
+    assert {:ok, %{input: %{definitions: [operation]}}} = Parse.run(payload["query"])
+    defaults = Map.new(operation.variable_definitions, &{&1.variable.name, parsed_value(&1.default_value, %{})})
+    variables = Map.merge(defaults, Map.get(payload, "variables", %{}))
+    Enum.map(operation.selection_set.selections, &%{name: &1.name, field: &1.alias || &1.name, arguments: Map.new(&1.arguments, fn arg -> {arg.name, parsed_value(arg.value, variables)} end)})
+  end
+
+  defp parsed_value(%L.Variable{name: name}, variables), do: Map.fetch!(variables, name)
+  defp parsed_value(%L.ObjectValue{fields: fields}, variables), do: Map.new(fields, &{&1.name, parsed_value(&1.value, variables)})
+  defp parsed_value(%L.ListValue{values: values}, variables), do: Enum.map(values, &parsed_value(&1, variables))
+  defp parsed_value(%L.NullValue{}, _variables), do: nil
+  defp parsed_value(nil, _variables), do: nil
+  defp parsed_value(%{value: value}, _variables), do: value
+
+  defp variable_create(id, body) do
+    %{"query" => "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }", "variables" => %{"input" => %{"id" => id, "issueId" => "issue", "body" => body}}}
+  end
+
+  defp journal_files(binding, kind), do: Path.wildcard(Path.join([binding["state_root"], "comments", "*.#{kind}.json"]))
+  defp journal_records(binding), do: Enum.map(journal_files(binding, "intent"), &(File.read!(&1) |> Jason.decode!()))
+  defp remote_comments, do: Map.values(Process.get(:remote_comments))
+  defp put_remote(comment), do: Process.put(:remote_comments, Map.put(Process.get(:remote_comments), comment["id"], comment))
+
+  defp lookup_only(payload) do
+    assert [%{name: "comment", arguments: %{"id" => id}}] = parsed_fields(payload)
+    response(%{"comment" => Process.get(:remote_comments)[id]})
+  end
+
+  # The remote stores only values parsed from the outgoing GraphQL, never the intent.
+  defp graphql_request(payload) do
+    case parsed_fields(payload) do
+      [%{name: "comment"}] ->
+        lookup_only(payload)
+
+      [%{name: operation, field: field, arguments: arguments}] ->
+        input = arguments["input"]
+
+        comment =
+          case operation do
+            "commentCreate" ->
+              refute Map.has_key?(Process.get(:remote_comments), input["id"])
+              %{"id" => input["id"], "body" => input["body"], "user" => %{"id" => "app"}, "issue" => %{"id" => input["issueId"]}}
+
+            "commentUpdate" ->
+              Process.get(:remote_comments) |> Map.fetch!(arguments["id"]) |> Map.put("body", input["body"])
+          end
+
+        comment = Map.put(comment, "updatedAt", "version-#{System.unique_integer([:positive])}")
+        put_remote(comment)
+        response(%{field => %{"success" => true, "symphonyReceipt" => comment}})
+    end
+  end
+
+  defp legacy_graphql_request(payload) do
+    assert {:ok, %{input: document}} = Parse.run(payload["query"])
+    graphql_request(%{payload | "query" => inspect(document, pretty: true, limit: :infinity)})
+  end
+
+  defp prepare_transfer(binding) do
+    source = %{"id" => "old", "body" => "## Symphony Workpad\n\n  Stand \"zitiert\" \\ Grüße 😀\n\n", "user" => %{"id" => "human"}}
+    Process.put(:remote_comments, %{"old" => source})
+
+    legacy = fn
+      :identity, _ ->
+        {:ok, %{"workspace_id" => "workspace", "user_id" => "human"}}
+
+      :list, _ ->
+        {:ok, remote_comments()}
+
+      :update, input ->
+        put_remote(%{source | "body" => input["body"]})
+        :ok
+    end
+
+    assert {:ok, _} = WorkpadTransfer.begin(binding, "issue", "app", %{"turns_stopped" => true, "files" => %{"config" => "synthetic"}}, legacy)
+    assert {:error, :workpad_transfer_incomplete} = WorkpadTransfer.ready(binding, "issue", remote_comments())
+    assert {:ok, _} = WorkpadTransfer.retire(binding, "issue", legacy)
+    assert {:error, :workpad_transfer_incomplete} = WorkpadTransfer.ready(binding, "issue", remote_comments())
+  end
+
+  defp transfer_api(binding, action, input, request \\ &graphql_request/1)
+  defp transfer_api(_binding, :identity, _input, _request), do: {:ok, %{"workspace_id" => "workspace", "user_id" => "app"}}
+  defp transfer_api(_binding, :list, _input, _request), do: {:ok, remote_comments()}
+
+  defp transfer_api(binding, action, input, request) do
+    payload =
+      case action do
+        :create ->
+          variable_create(input["id"], input["body"])
+
+        :update ->
+          %{
+            "query" => "mutation($id: String!, $input: CommentUpdateInput!) { commentUpdate(id: $id, input: $input) { success } }",
+            "variables" => %{"id" => input["id"], "input" => Map.delete(input, "id")}
+          }
+      end
+
+    case CommentJournal.execute(binding, payload, request) do
+      {:ok, _} -> :ok
+      error -> error
+    end
+  end
+
+  defp expected_target(record), do: record["source"]["body"] <> "\n\nVorgänger: old (Übergabe " <> record["transfer_id"] <> ")\n"
 
   defp create_payload, do: %{"query" => "mutation { commentCreate(input: {issueId: \"issue\", body: \"created\"}) { success } }", "variables" => %{}}
   defp comment(record), do: %{"id" => record["comment_id"], "body" => record["input"]["body"], "updatedAt" => "2026-09-10T00:00:00Z", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}

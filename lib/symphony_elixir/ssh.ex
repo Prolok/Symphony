@@ -4,6 +4,7 @@ defmodule SymphonyElixir.SSH do
   @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
+      opts = Keyword.put(opts, :env, SymphonyElixir.Config.without_linear_secret(Keyword.get(opts, :env, [])))
       {:ok, System.cmd(executable, ssh_args(host, command), opts)}
     end
   end
@@ -18,7 +19,12 @@ defmodule SymphonyElixir.SSH do
           :binary,
           :exit_status,
           :stderr_to_stdout,
-          args: Enum.map(ssh_args(host, command), &String.to_charlist/1)
+          args: Enum.map(ssh_args(host, command), &String.to_charlist/1),
+          env:
+            Enum.map(SymphonyElixir.Config.without_linear_secret([]), fn
+              {name, nil} -> {String.to_charlist(name), false}
+              {name, value} -> {String.to_charlist(name), String.to_charlist(value)}
+            end)
         ]
         |> maybe_put_line_option(line_bytes)
 

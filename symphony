@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_INVOCATION_NAME="$(basename -- "${BASH_SOURCE[0]}")"
 command -v python3 >/dev/null 2>&1 || { echo "symphony: python3 not found in PATH" >&2; exit 127; }
-SCRIPT_PATH="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
+SCRIPT_PATH="$("${SYMPHONY_PYTHON:-python3}" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 SKILLS_DIR="$SCRIPT_DIR/.codex/skills"
 USER_SKILLS_DIR="$HOME/.codex/skills"
@@ -47,6 +47,22 @@ symphony_launch() {
     symphony-*) ISSUE_SUFFIX="${SCRIPT_INVOCATION_NAME#symphony-}" ;;
   esac
   mix_runtime_activate "$PROJECT_DIR"
+
+  if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$PROJECT_DIR" ]]; then
+    export SYMPHONY_WORKFLOW_FILE="$WORKFLOW_FILE"
+    export SYMPHONY_WORKFLOW_INTERACTIVE_FILE="$WORKFLOW_INTERACTIVE_FILE"
+    export SYMPHONY_WORKFLOW_DIALOG_FILE="$WORKFLOW_DIALOG_FILE"
+    export SYMPHONY_WORKFLOW_DIR="$PROJECT_DIR"
+    "$MIX_RUNTIME_PATH" mix "$PROJECT_DIR" run --no-compile --no-start -e '
+      :ok = SymphonyElixir.EnvFile.snapshot_root(System.fetch_env!("SYMPHONY_ROOT_DIR"), System.fetch_env!("SYMPHONY_RELEASE_ROOT"))
+    '
+    "$SYMPHONY_PYTHON" "$PROJECT_DIR/scripts/installation-release.py" seal "$PROJECT_DIR"
+    if [[ "${SYMPHONY_LAUNCH_CODEX:-}" == "1" ]]; then
+      unset SYMPHONY_LAUNCH_CODEX
+      exec "$CODEX_TARGET_PATH" "$@"
+    fi
+    exec "$PROJECT_DIR/bin/symphony" "$@"
+  fi
 
   mkdir -p "$USER_SKILLS_DIR"
   mkdir -p "$USER_BIN_DIR"
@@ -96,5 +112,5 @@ symphony_launch() {
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   mix_runtime_activate "$PROJECT_DIR"
-  exec "$MIX_RUNTIME_PATH" start "$PROJECT_DIR" "$SCRIPT_INVOCATION_NAME" "$@"
+  exec "$SYMPHONY_PYTHON" "$PROJECT_DIR/scripts/installation-release.py" start "$PROJECT_DIR" "$SCRIPT_INVOCATION_NAME" "$@"
 fi

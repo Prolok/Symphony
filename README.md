@@ -33,6 +33,19 @@ Wenn ein zuvor vorgeschlagenes Umsetzungsticket ausdrücklich bestätigt wird,
 darf der Dialog-AI-Pfad dieses Ticket in Linear erstellen, verknüpfen und das
 Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
 
+## Eigene Linear-App-Identität
+
+Der gemeinsame neue `WORKFLOW.md` nutzt `auth_mode: app`. Seine App-Bindung kommt
+aus der versionierten Fachprojekt-`.symphony/.env`. Secret und persönliche
+Werte einschließlich `LINEAR_ASSIGNEE` (E-Mail oder UUID) bleiben in `.env.local`. Im gemeinsamen Symphony-Root liegen
+die `SYM_CODEX_*`-Startwerte und `SYM_MAXIMUM_REVIEW_ITERATIONS`; parallele Projekte dürfen verschiedene
+Linear-Workspaces/Apps mit getrennten Zustands- und Sessionpfaden verwenden.
+Die [Betriebsanleitung](docs/linear-app.md) beschreibt Einrichtung, Root-/Release-
+Ladepfad und die optionale spätere Workpad-Übergabe. Alte Versionen, unveränderte
+alte Workflows ohne `auth_mode` und explizites `legacy` bleiben kompatibel.
+Synthetische Tests und administrative beziehungsweise praktische Abnahme werden
+getrennt dokumentiert.
+
 ## Installation und Inbetriebnahme
 
 ### Voraussetzungen
@@ -44,7 +57,11 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
   GNU-Coreutils und ein externes `flock` sind nicht erforderlich.
 - `mise` ab 2026.3.17 und die installierte Toolchain aus `mise.toml`
   (Erlang/OTP 28, Elixir 1.19.5 für OTP 28)
-- Git ab 2.31, Python ab 3.10 als `python3`, Make und Codex CLI im `PATH`
+- Git ab 2.31, Python ab 3.11 als `python3` für den App-Modus (Legacy: 3.10), Make und Codex CLI im `PATH`
+- Das vollständige Entwicklungsgate `make all` prüft beide Modi und benötigt
+  immer Python 3.11+. Auf einem Legacy-Rechner mit Python 3.10 wird ein
+  bestätigtes Autoupdate vor dem Pull zurückgestellt und der vorhandene Stand
+  gestartet; dabei wird kein Test übersprungen und kein Update als geprüft ausgegeben.
 - Build-Werkzeuge: unter macOS die Xcode Command Line Tools
   (`xcode-select --install`), unter Ubuntu `build-essential`. Für lokale
   Plattformtests zusätzlich zsh; sie führen die Hilfsbefehle aus Bash und
@@ -62,9 +79,26 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
    ./scripts/mix-gate setup
    ```
 
-2. Umgebungsvariablen vorbereiten, zum Beispiel über `.symphony/.env.local`.
-   Typisch benötigt werden:
-   - `LINEAR_API_KEY`
+2. Die öffentliche App-/Projektbindung in [.symphony/.env](.symphony/.env)
+   versionieren: `LINEAR_APP_CLIENT_ID`, `LINEAR_APP_WORKSPACE_ID`,
+   `LINEAR_APP_USER_ID`, Projektscope und die feste Projektkennung
+   `LINEAR_APP_INSTALLATION_ID=symphony`. Der Zustandspfad wird automatisch als
+   `<gebundener Fachprojektroot>/.symphony/state` abgeleitet; kein konfigurierbarer Override.
+
+   In der privaten `.symphony/.env.local` bleiben `LINEAR_APP_SECRET`,
+   der vorhandene menschliche `LINEAR_ASSIGNEE`
+   und lokale Overrides. Keine zusätzliche Secret-Auswahlvariable ist nötig.
+   Ein leeres Secret genügt nicht zum Start. Einzelheiten:
+   [Einrichtung](docs/linear-app.md#normale-einrichtung).
+
+   Die Projektkennung bleibt auch auf getrennten Entwicklerrechnern gleich.
+   Sie bezeichnet lokale Sessions/Journalmetadaten; Issue-Leases sind hostlokal.
+   Persönliche Assignee-/Issue-Auswahl trennt die Arbeitsumfänge.
+
+   Die übrige Fachprojektkonfiguration bleibt erhalten; persönliche Werte und
+   Zugangsdaten gehören in `.symphony/.env.local`, öffentliche Defaults in `.symphony/.env`:
+
+   - `LINEAR_API_KEY` nur für alte Workflows oder explizites `legacy`
    - genau eine Scope-Variable: `LINEAR_PROJECT_SLUG` oder `LINEAR_TEAM_KEY`
    - `LINEAR_TEST_PROJECT_SLUG` für den Project-Slug, den Worktrees als
      `LINEAR_PROJECT_SLUG` verwenden
@@ -104,13 +138,14 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
    `sym-codex <TicketId>` priorisiert für den Linear-MCP-Zugriff die
    `.symphony/.env(.local)` des aufrufenden Projekt-Roots auch gegenüber
    geerbten Shell-Werten. Dadurch können
-   mehrere Projekte parallel mit unterschiedlichen `LINEAR_API_KEY`-Werten
-   arbeiten; das Symphony-Source-Repository bleibt der Fallback, wenn kein
+   Projekte im Legacy-Modus parallel mit unterschiedlichen `LINEAR_API_KEY`-Werten
+   arbeiten; das App-Secret wird erst im Auth-/MCP-Prozess gelesen; das Symphony-Source-Repository bleibt der Fallback, wenn kein
    Projekt-Root übergeben wird.
 
    Das von `sym-codex` verwendete Codex-Startprofil wird dagegen aus `.env`
-   und optional `.env.local` im aktiven Symphony-Checkout geladen, nicht aus
-   `.symphony/.env(.local)`. Unterstützt werden:
+   und optional `.env.local` im ursprünglichen Symphony-Root geladen, nicht aus
+   `.symphony/.env(.local)`. Ein isolierter Release hält die nicht geheimen
+   Werte in seinem versiegelten Root-Konfigurationssnapshot fest. Unterstützt werden:
    - `SYM_CODEX_MODEL`, Standard `gpt-5.6-sol`
    - `SYM_CODEX_REASONING_EFFORT`, Standard `high`; zusätzliche unterstützte
      Werte umfassen `max` und `ultra`
@@ -166,9 +201,9 @@ Unabhängig davon, ob ein Update verfügbar oder angenommen wurde, folgt im selb
 Lock ein selbstheilender Preflight. `mix deps.loadpaths --no-compile` prüft den
 lokalen Dependency-Zustand; bei einer Abweichung folgt `mix deps.get`. Danach
 kompiliert Symphony den Checkout und baut `bin/symphony` mit `mix escript.build`.
-Erst nach erfolgreichem Build wird der Lock freigegeben, der Wrapper verlinkt die
-mitgelieferten Skills sowie `sym-codex` und `sym-watch` in die lokalen Codex- und
-Bin-Verzeichnisse und startet das gerade gebaute Binary. Ein nicht reparierbarer
+Erst nach erfolgreichem Build wird der Lock freigegeben. Der Wrapper bindet
+Workflow, Skills, Helfer, Build und nicht geheime Root-Konfiguration an den
+eigenen Release und startet dessen Binary. Globale Links werden nicht ersetzt. Ein nicht reparierbarer
 Dependency-, Compile- oder Escript-Build-Fehler beendet den Start vorher; in
 diesem Fall beginnt kein Ticket-Polling. Das Dashboard ist standardmäßig unter
 `http://127.0.0.1:4000/` erreichbar; mit `--port <port>` kann der Startport
@@ -178,17 +213,25 @@ automatisch den nächsten freien Port.
 Für den direkten Aufruf des Build-Artefakts muss Erlang bereits aktiv sein,
 zum Beispiel `mise exec -- bin/symphony`. `bin/symphony` alleine aktiviert
 keine Laufzeit und benötigt `escript` im `PATH`; es übernimmt auch keinen
-Autoupdate-/Build-Preflight.
+Autoupdate-/Build-Preflight. Der Standard-Worker wird auch hier über den
+absoluten Helferpfad des ermittelten Symphony-Checkouts gestartet; ein globaler
+`sym-codex`-Link ist dafür nicht erforderlich.
 
 Symlinks und Pfade mit Leerzeichen werden unterstützt. Ein Aufruf aus einem
 anderen Projektverzeichnis behält dieses als Projekt-CWD; Workflow-Dateien,
 Abhängigkeiten und Build-Artefakte gehören zum aufgelösten Symphony-Checkout.
-Die Worktree-Hooks legen `symphony-<Ticket-ID>` und `sym-codex-<Ticket-ID>` unter
-`~/.local/bin` an und entfernen beim Cleanup nur noch passende Links. Füge
-dieses Verzeichnis zum `PATH` deiner Bash oder zsh hinzu. Die Befehle sind
-ausführbare Skripte; auch beim Issue-Link kann die Ticket-ID explizit übergeben
-werden, etwa `sym-codex-PRO-678 PRO-678`. `sym-codex <Ticket-ID>` startet Codex im ausgewählten
-Worktree. Das zusätzliche Sourcing von `sym-codex` wird nur in Bash unterstützt.
+Reguläre Release-Starts registrieren keine neuen globalen Ticketbefehle.
+Für einen manuellen Ticketstart verwende aus dem Fachprojektroot den absoluten
+`sym-codex`-Pfad des gewünschten Symphony-Checkouts mit der Ticket-ID, etwa
+`/pfad/zu/Symphony/sym-codex PRO-678`. Dieser Einstieg wählt den Worktree und
+bereitet im App-Modus einen eigenen gebundenen Release vor.
+Nur Hooks außerhalb eines Releases registrieren weiterhin
+`symphony-<Ticket-ID>` und `sym-codex-<Ticket-ID>` unter `~/.local/bin`;
+bestehende Befehle bleiben an ihre bisherige Installation gebunden. Cleanup
+entfernt nur passende Links. Die ausführbaren Skripte funktionieren in Bash
+und zsh; zusätzliches Sourcing von `sym-codex` wird nur in Bash unterstützt.
+Auch beim App-Release-Start bleibt diese Shell danach im gewählten Worktree
+mit aktivierter Projekt-Venv; der Rückgabecode von Codex bleibt erhalten.
 
 Mix-Artefakte werden nicht zwischen Git-Checkouts geteilt. Jeder Haupt-Checkout
 und jeder Worktree verwendet sein eigenes `deps` und `_build`; insbesondere

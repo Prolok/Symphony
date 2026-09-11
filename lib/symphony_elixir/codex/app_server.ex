@@ -4,6 +4,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
+  alias SymphonyElixir.Linear.WriteContext
+
   alias SymphonyElixir.Codex.{DynamicTool, LinearGraphqlTool}
   alias SymphonyElixir.{Config, PathSafety, RuntimePaths, SSH, Workflow}
 
@@ -284,6 +286,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp app_server_runtime_env(active_repo_root, issue_env)
        when is_binary(active_repo_root) and is_map(issue_env) do
     RuntimePaths.builtin_env()
+    |> Map.merge(Config.linear_runtime_env())
     |> Map.merge(%{
       "SYMPHONY_ACTIVE_REPO_ROOT" => active_repo_root,
       "SYMPHONY_SOURCE_REPO" => RuntimePaths.project_root()
@@ -976,8 +979,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
 
     result =
-      tool_name
-      |> tool_executor.(arguments)
+      WriteContext.with_context(Map.put(metadata, :tool_call_id, id), fn -> tool_executor.(tool_name, arguments) end)
       |> normalize_dynamic_tool_result()
 
     send_message(port, %{

@@ -4,6 +4,9 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
+  alias SymphonyElixir.Linear.AppAuth
+  alias SymphonyElixir.Linear.WriteContext
+
   alias SymphonyElixir.{Config, Dialog, Linear.Issue}
 
   @issue_page_size 50
@@ -96,10 +99,12 @@ defmodule SymphonyElixir.Linear.Client do
   @issue_comments_query """
   query SymphonyLinearIssueComments($id: String!, $first: Int!, $after: String) {
     issue(id: $id) {
-      comments(first: $first, after: $after) {
+      comments(first: $first, after: $after, includeArchived: true) {
         nodes {
           id
           body
+          user { id }
+          issue { id }
           createdAt
           updatedAt
         }
@@ -116,13 +121,36 @@ defmodule SymphonyElixir.Linear.Client do
   def fetch_candidate_issues do
     tracker = Config.settings!().tracker
 
-    if is_nil(tracker.api_key) do
+    if missing_legacy_token?(tracker) do
       {:error, :missing_linear_api_token}
     else
       with {:ok, scope} <- Config.linear_scope(tracker),
-           {:ok, assignee_filter} <- routing_assignee_filter() do
-        do_fetch_by_states(scope, candidate_state_names(tracker.active_states), assignee_filter)
+           {:ok, assignee_filter} <- routing_assignee_filter(),
+           {:ok, issues} <- do_fetch_by_states(scope, candidate_state_names(tracker.active_states), assignee_filter),
+           :ok <- validate_candidate_scope(tracker, issues) do
+        {:ok, issues}
       end
+    end
+  end
+
+  @spec validate_candidate_scope(map(), [Issue.t()]) :: :ok | {:error, term()}
+  def validate_candidate_scope(%{auth_mode: "app", app: %{"allowed_issue_ids" => ids}}, issues) when is_list(ids) do
+    if Enum.all?(issues, &(&1.id in ids)), do: :ok, else: {:error, :linear_app_candidate_scope_changed}
+  end
+
+  def validate_candidate_scope(_tracker, _issues), do: :ok
+
+  @spec resolve_legacy_assignee() :: {:ok, String.t()} | {:error, term()}
+  def resolve_legacy_assignee do
+    if Config.settings!().tracker.auth_mode == "legacy" do
+      with {:ok, %{"data" => %{"viewer" => %{"id" => id}}} = body} <- graphql(@viewer_query),
+           true <- Map.get(body, "errors", []) in [nil, []] do
+        {:ok, id}
+      else
+        _ -> {:error, :linear_assignee_resolution_failed}
+      end
+    else
+      {:error, :linear_assignee_requires_legacy_identity}
     end
   end
 
@@ -136,7 +164,7 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp fetch_issues_by_states(%{api_key: nil}, _state_names), do: {:error, :missing_linear_api_token}
+  defp fetch_issues_by_states(%{auth_mode: "legacy", api_key: nil}, _state_names), do: {:error, :missing_linear_api_token}
 
   defp fetch_issues_by_states(tracker, state_names) do
     with {:ok, scope} <- Config.linear_scope(tracker) do
@@ -168,7 +196,7 @@ defmodule SymphonyElixir.Linear.Client do
     tracker = Config.settings!().tracker
 
     cond do
-      is_nil(tracker.api_key) ->
+      missing_legacy_token?(tracker) ->
         {:error, :missing_linear_api_token}
 
       normalized_identifier == "" ->
@@ -214,10 +242,10 @@ defmodule SymphonyElixir.Linear.Client do
         Application.get_env(:symphony_elixir, :linear_client_request_fun, &post_graphql_request/2)
       )
 
-    with {:ok, headers} <- graphql_headers(),
-         {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
-      {:ok, body}
-    else
+    case authenticated_request(payload, request_fun) do
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, body}
+
       {:ok, response} ->
         diagnostics = http_error_diagnostics(response)
         status = Map.get(diagnostics, :status)
@@ -234,6 +262,18 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, {:linear_api_request, reason}}
     end
   end
+
+  defp authenticated_request(payload, request_fun) do
+    case Config.settings!().tracker do
+      %{auth_mode: "app"} = tracker ->
+        AppAuth.request(tracker, payload, request_fun, context: WriteContext.current())
+
+      _tracker ->
+        with {:ok, headers} <- graphql_headers(), do: request_fun.(payload, headers)
+    end
+  end
+
+  defp missing_legacy_token?(tracker), do: tracker.auth_mode == "legacy" and is_nil(tracker.api_key)
 
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
@@ -691,6 +731,8 @@ defmodule SymphonyElixir.Linear.Client do
     Req.post(Config.settings!().tracker.endpoint,
       headers: headers,
       json: payload,
+      redirect: Config.settings!().tracker.auth_mode != "app",
+      retry: if(Config.settings!().tracker.auth_mode == "app", do: false, else: :safe_transient),
       connect_options: [timeout: 30_000]
     )
   end
@@ -1024,6 +1066,8 @@ defmodule SymphonyElixir.Linear.Client do
     %{
       id: comment["id"],
       body: body,
+      user_id: get_in(comment, ["user", "id"]),
+      issue_id: get_in(comment, ["issue", "id"]),
       created_at: parse_datetime(comment["createdAt"]),
       updated_at: parse_datetime(comment["updatedAt"])
     }

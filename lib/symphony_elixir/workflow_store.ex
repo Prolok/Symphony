@@ -106,11 +106,25 @@ defmodule SymphonyElixir.WorkflowStore do
   defp reload_path(path, state) do
     case load_state(path) do
       {:ok, new_state} ->
-        {:ok, new_state}
+        if auth_binding(new_state.workflow) == auth_binding(state.workflow) do
+          {:ok, new_state}
+        else
+          log_reload_error(path, :auth_binding_change_requires_restart)
+          {:error, :auth_binding_change_requires_restart, state}
+        end
 
       {:error, reason} ->
         log_reload_error(path, reason)
         {:error, reason, state}
+    end
+  end
+
+  defp auth_binding(workflow) do
+    tracker = Map.get(workflow.config, "tracker", %{})
+
+    case Map.get(tracker, "auth_mode", "legacy") do
+      "legacy" -> :legacy
+      mode -> {mode, Map.take(tracker, ~w(app assignee endpoint project_slug team_key))}
     end
   end
 

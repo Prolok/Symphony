@@ -124,7 +124,26 @@ mutation AttachGitHubPR($issueId: String!, $url: String!, $title: String) {
 }
 ```
 
-## Lokaler Workpad-Fallback
+## Expliziter App-Betrieb
+
+Wenn `SYMPHONY_LINEAR_AUTH_MODE=app` gesetzt ist, ausschließlich das injizierte
+`linear_graphql` oder den gebundenen `symphony_linear`-MCP verwenden.
+Fällt ein Transport aus, den anderen gebundenen Transport verwenden. Fehlen
+oder scheitern beide, den Zugriffsblocker sichtbar melden; Kommentar und Status
+nur bei bestätigtem erlaubtem Schreibzugriff als gespeichert behandeln.
+Keine Shell-/Mix-/Update-Skript-Fallbacks im App-Modus und keine privaten
+Envdateien laden. `scripts/linear-app` bleibt ein geschütztes Betreiberwerkzeug.
+Kein persönlicher Linear-MCP,
+kein direkter API-Key und keine Tokenabfrage. Providerfehler sichtbar behandeln.
+Der App-Client erfasst Kommentar-IDs/Fassungen selbst; offene Schreibabsichten
+anhand der gemeldeten Kommentar-ID abgleichen und keine blinde Neuanlage auslösen.
+
+Ein versiegelter Legacy-Lauf (`SYMPHONY_RELEASE_ROOT`) verwendet beim Mix-Fallback
+zusätzlich `--no-compile`, damit seine Build-Artefakte unverändert bleiben.
+Workflow-, Source- und Env-Roots weiterhin getrennt gemäß folgendem Bootstrap
+auflösen. Den gebundenen Auth-Modus/Hash nicht löschen oder ersetzen.
+
+## Lokaler Workpad-Fallback (nur Legacy)
 
 Wenn der reguläre Kommentar-Edit-Pfad wegen fehlendem Tool, HTTP 401, HTTP 403
 ohne Rate-Limit-Signal oder Auth-Ausfall nicht nutzbar ist, aktualisiere einen
@@ -171,7 +190,7 @@ body = File.read!(System.fetch_env!("WORKPAD_BODY_FILE"))
 )
 ```
 
-Erstelle einen separaten Blocker-Kommentar nur dann, wenn sowohl der reguläre
+Erstelle im Legacy-Modus einen separaten Blocker-Kommentar nur dann, wenn sowohl der reguläre
 Kommentar-Edit-Pfad als auch dieser lokale Workpad-Update-Helfer scheitern.
 
 ## Introspection und Uploads

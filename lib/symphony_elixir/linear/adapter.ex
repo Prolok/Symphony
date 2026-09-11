@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
     commentCreate(input: {issueId: $issueId, body: $body}) {
       success
+      comment { id body updatedAt user { id } issue { id } }
     }
   }
   """
@@ -22,6 +23,9 @@ defmodule SymphonyElixir.Linear.Adapter do
       comment {
         id
         body
+        updatedAt
+        user { id }
+        issue { id }
       }
     }
   }

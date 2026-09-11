@@ -1136,11 +1136,13 @@ defmodule SymphonyElixir.Workspace do
 
   defp remote_hook_env_exports do
     unsets =
-      RuntimePaths.runtime_env_names()
+      (RuntimePaths.runtime_env_names() ++ Config.linear_secret_env_names())
       |> Enum.map_join("\n", fn key -> "unset #{key}" end)
 
     exports =
       RuntimePaths.builtin_env()
+      |> Map.put("SYMPHONY_LINEAR_SECRET_ACCESS", "denied")
+      |> Map.put("SYMPHONY_LINEAR_AUTH_MODE", Config.settings!().tracker.auth_mode)
       |> Enum.map_join("\n", fn {key, value} ->
         "export #{key}=#{shell_escape(value)}"
       end)

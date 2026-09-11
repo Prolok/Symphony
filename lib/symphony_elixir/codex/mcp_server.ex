@@ -46,8 +46,8 @@ defmodule SymphonyElixir.Codex.MCPServer do
     workflow_file = env_value("SYMPHONY_WORKFLOW_FILE") || Workflow.default_workflow_file_path()
 
     with :ok <- logger_configurer.(),
-         :ok <- env_loader.(EnvFile.config_dir(env_files_root)),
          :ok <- workflow_setter.(workflow_file),
+         :ok <- env_loader.(EnvFile.config_dir(env_files_root)),
          {:ok, _apps} <- Application.ensure_all_started(:req) do
       :ok
     end
@@ -65,15 +65,20 @@ defmodule SymphonyElixir.Codex.MCPServer do
     :ok
   end
 
-  defp load_project_env(config_dir), do: EnvFile.load(config_dir, override_existing: true)
+  defp load_project_env(config_dir), do: EnvFile.load_runtime(config_dir)
 
   @spec run([String.t()], keyword()) :: :ok
   def run(_args \\ [], opts \\ []) do
     input = Keyword.get(opts, :input, :stdio)
     output = Keyword.get(opts, :output, :stdio)
 
+    # MCP carries UTF-8 JSON bytes. Elixir's Unicode stdio would transcode
+    # binwrite's bytes as Latin-1, and a binary read needs the same raw mode.
+    :ok = :io.setopts(io_device(input), encoding: :latin1)
+    :ok = :io.setopts(io_device(output), encoding: :latin1)
+
     input
-    |> IO.stream(:line)
+    |> IO.binstream(:line)
     |> Enum.each(fn line ->
       case handle_message(line, opts) do
         nil ->
@@ -86,6 +91,10 @@ defmodule SymphonyElixir.Codex.MCPServer do
 
     :ok
   end
+
+  defp io_device(:stdio), do: :standard_io
+  defp io_device(:stderr), do: :standard_error
+  defp io_device(device), do: device
 
   @spec handle_message(String.t(), keyword()) :: response()
   def handle_message(line, opts \\ []) when is_binary(line) do

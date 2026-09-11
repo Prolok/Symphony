@@ -286,6 +286,8 @@ defmodule SymphonyElixir.CoreTest do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
     Workflow.clear_workflow_file_path()
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
     assert is_map(config)
@@ -327,18 +329,17 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "before_remove") =~ "cd \"$SYMPHONY_WORKFLOW_DIR\" && mise exec -- mix workspace.before_remove --workspace \"$workspace\" --source-repo \"$SYMPHONY_PROJECT_ROOT\""
     codex = Map.get(config, "codex", %{})
     assert is_map(codex)
-    assert Map.get(codex, "command") =~ "git rev-parse --path-format=absolute --git-common-dir"
-    assert Map.get(codex, "command") =~ "common_dir=\"$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)\"; if [ -z \"$common_dir\" ]; then"
-    assert Map.get(codex, "command") =~ "exit 1;"
-    assert Map.get(codex, "command") =~ "fi; source_repo=\"$(cd \"$common_dir/..\" && pwd -P)\";"
-    assert Map.get(codex, "command") =~ "exec \"$source_repo/sym-codex\" --observer"
+    assert Map.get(codex, "command") == "sym-codex --observer"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() == prompt
     assert prompt =~ "Der kanonische Arbeitsbranch für dieses Issue heißt immer `symphony/{{ issue.identifier }}`."
     assert prompt =~ "Wenn ein frischer Branch benötigt wird, erstelle oder verwende genau `symphony/{{ issue.identifier }}` von `origin/main`."
-    assert prompt =~ "Wenn kein regulärer Kommentar-Edit-Pfad verfügbar ist"
+    assert prompt =~ "Im App-Modus nutze ausschließlich das injizierte `linear_graphql` bzw. das gebundene `symphony_linear`-MCP"
+    assert prompt =~ "Das geschützte Betreiberwerkzeug `scripts/linear-app` ist kein Modell-Shell-Ersatz."
+    assert prompt =~ "Die lokalen Shell-/Mix-/Update-Skript-Fallbacks für Linear-Zugriff gelten nur im Legacy-Modus."
+    assert prompt =~ "Wenn im Legacy-Modus kein regulärer Kommentar-Edit-Pfad verfügbar ist"
     assert prompt =~ "mise exec -- mix run --no-start -e"
     assert prompt =~ "Source-/Config-Root zuerst im ursprünglichen Zielrepo-Kontext"
     assert prompt =~ "dort vor jedem Verzeichniswechsel `git rev-parse --show-toplevel`"
@@ -1095,6 +1096,8 @@ defmodule SymphonyElixir.CoreTest do
 
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
     Workflow.set_workflow_file_path(repo_workflow_path)
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     assert {:ok, status_overview} = Workflow.status_overview()
 
@@ -7383,6 +7386,8 @@ defmodule SymphonyElixir.CoreTest do
   test "in-repo WORKFLOW.md renders correctly" do
     workflow_path = Workflow.workflow_file_path()
     Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     issue = %Issue{
       identifier: "MT-616",
@@ -7455,6 +7460,9 @@ defmodule SymphonyElixir.CoreTest do
     workflow_file = Path.join(repo_root, "WORKFLOW.md")
 
     Workflow.set_workflow_file_path(workflow_file)
+
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     on_exit(fn ->
       Workflow.set_workflow_file_path(workflow_path)

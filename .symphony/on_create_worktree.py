@@ -7,11 +7,17 @@ import re
 import shutil
 import sys
 from pathlib import Path
+import os
 
 MANAGED_BINARIES = ("symphony", "sym-codex")
 LINEAR_PROJECT_SLUG = "LINEAR_PROJECT_SLUG"
 LINEAR_TEST_PROJECT_SLUG = "LINEAR_TEST_PROJECT_SLUG"
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+APP_PROJECT_KEYS = {
+    LINEAR_PROJECT_SLUG, LINEAR_TEST_PROJECT_SLUG, "LINEAR_TEAM_KEY", "LINEAR_ASSIGNEE",
+    "LINEAR_APP_CLIENT_ID", "LINEAR_APP_WORKSPACE_ID", "LINEAR_APP_USER_ID", "LINEAR_APP_INSTALLATION_ID",
+}
+MODEL_KEYS = {"SYM_CODEX_MODEL", "SYM_CODEX_REASONING_EFFORT", "SYM_CODEX_SERVICE_TIER", "SYM_CODEX_HUMAN_SERVICE_TIER"}
 
 
 def copy_env_local(source: Path, target: Path) -> None:
@@ -23,6 +29,22 @@ def copy_env_local(source: Path, target: Path) -> None:
     target.chmod(0o600)
 
 
+def copy_public_env_values(source: Path, target: Path, keys: set[str]) -> None:
+    if target.exists() or not source.is_file():
+        return
+    values = {}
+    for line in source.read_text(encoding="utf-8").splitlines():
+        candidate = re.sub(r"^export\s+", "", line.strip()).split("=", 1)[0].strip()
+        if candidate in keys:
+            parsed = parse_env_assignment(line)
+            if parsed is not None:
+                values[parsed[0]] = parsed[1]
+    if values:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("".join(f"{key}={quote_env_value(value)}\n" for key, value in values.items()), encoding="utf-8")
+        target.chmod(0o600)
+
+
 def read_env_value(path: Path, key: str) -> str | None:
     if not path.is_file():
         return None
@@ -30,6 +52,9 @@ def read_env_value(path: Path, key: str) -> str | None:
     result = None
 
     for raw_line in path.read_text(encoding="utf-8").splitlines():
+        candidate = re.sub(r"^export\s+", "", raw_line.strip()).split("=", 1)[0].strip()
+        if candidate != key:
+            continue
         parsed = parse_env_assignment(raw_line)
 
         if parsed is None:
@@ -191,6 +216,8 @@ def quote_env_value(value: str) -> str:
 
 
 def ensure_managed_symlink(workspace: Path, binary_name: str) -> None:
+    if os.environ.get("SYMPHONY_RELEASE_ROOT"):
+        return
     target = workspace / binary_name
     link_path = managed_link_path(workspace, binary_name)
     link_path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,10 +248,14 @@ def main(argv: list[str]) -> int:
 
     source_repo = Path(argv[1]).expanduser().resolve()
     workspace = Path(argv[2]).expanduser().resolve()
-    copy_env_local(
-        source_repo / ".symphony" / ".env.local",
-        workspace / ".symphony" / ".env.local",
-    )
+    app_mode = os.environ.get("SYMPHONY_LINEAR_AUTH_MODE") == "app"
+    project_source = source_repo / ".symphony" / ".env.local"
+    project_target = workspace / ".symphony" / ".env.local"
+    preserve_project_target = app_mode and project_target.exists()
+    if app_mode:
+        copy_public_env_values(project_source, project_target, APP_PROJECT_KEYS)
+    else:
+        copy_env_local(project_source, project_target)
     test_project_slug = read_env_value_with_overrides(
         [
             source_repo / ".symphony" / ".env",
@@ -233,14 +264,17 @@ def main(argv: list[str]) -> int:
         LINEAR_TEST_PROJECT_SLUG,
     )
 
-    if test_project_slug is not None:
+    if test_project_slug is not None and not preserve_project_target:
         set_env_value(
             workspace / ".symphony" / ".env.local",
             LINEAR_PROJECT_SLUG,
             test_project_slug,
         )
 
-    copy_env_local(source_repo / ".env.local", workspace / ".env.local")
+    if app_mode:
+        copy_public_env_values(source_repo / ".env.local", workspace / ".env.local", MODEL_KEYS)
+    else:
+        copy_env_local(source_repo / ".env.local", workspace / ".env.local")
 
     for binary_name in MANAGED_BINARIES:
         ensure_managed_symlink(workspace, binary_name)

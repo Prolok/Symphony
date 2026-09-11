@@ -3,6 +3,9 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  alias SymphonyElixir.Linear.AppAuth
+  alias SymphonyElixir.Linear.WriteContext
+
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.{EnvFile, Workflow}
 
@@ -32,11 +35,88 @@ defmodule SymphonyElixir.Config do
   def settings do
     case Workflow.current() do
       {:ok, %{config: config}} when is_map(config) ->
-        Schema.parse(config)
+        with {:ok, settings} <- Schema.parse(config),
+             :ok <- validate_bound_identity(settings.tracker) do
+          {:ok, settings}
+        end
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc "Reads only the referenced process secret; it never becomes part of settings."
+  @spec linear_client_secret(map()) :: {:ok, String.t()} | {:error, atom()}
+  def linear_client_secret(binding) do
+    SymphonyElixir.EnvFile.linear_secret(binding["client_secret_env"])
+  end
+
+  @doc "Non-secret environment names excluded from non-authentication children."
+  @spec linear_secret_env_names() :: [String.t()]
+  def linear_secret_env_names do
+    configured =
+      case linear_secret_reference() do
+        "$" <> name -> System.get_env(name)
+        name -> name
+      end
+
+    ["LINEAR_APP_SECRET", configured, System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")]
+    |> Enum.filter(&(is_binary(&1) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, &1)))
+    |> Enum.uniq()
+  end
+
+  @doc "Return the public secret reference so loaders can exclude project-selected names before exporting values."
+  @spec linear_secret_reference() :: String.t() | nil
+  def linear_secret_reference do
+    case Workflow.current() do
+      {:ok, %{config: %{"tracker" => %{"auth_mode" => "app", "app" => app}}}} -> app["client_secret_env"]
+      _ -> nil
+    end
+  end
+
+  @spec without_linear_secret(map() | list()) :: [{String.t(), String.t() | nil}]
+  def without_linear_secret(env) do
+    Enum.reduce(linear_secret_env_names(), Map.new(env), &Map.put(&2, &1, nil))
+    |> Map.put("SYMPHONY_LINEAR_SECRET_ACCESS", "denied")
+    |> Enum.to_list()
+  end
+
+  @spec linear_runtime_env() :: map()
+  def linear_runtime_env do
+    tracker = settings!().tracker
+
+    if tracker.auth_mode == "app" do
+      %{
+        "SYMPHONY_LINEAR_AUTH_MODE" => tracker.auth_mode,
+        "SYMPHONY_LINEAR_CLIENT_SECRET_ENV" => tracker.app["client_secret_env"],
+        "SYMPHONY_CODEX_STATE_ROOT" => Path.join([tracker.app["state_root"], "codex", tracker.app["installation_id"]]),
+        "SYMPHONY_LINEAR_BINDING_HASH" => binding_hash(tracker),
+        "SYMPHONY_RUN_ID" => WriteContext.current()["run_id"] || "",
+        "SYMPHONY_PHASE" => WriteContext.current()["phase"] || ""
+      }
+    else
+      %{}
+    end
+  end
+
+  defp validate_bound_identity(tracker) do
+    case {System.get_env("SYMPHONY_LINEAR_AUTH_MODE"), System.get_env("SYMPHONY_LINEAR_BINDING_HASH")} do
+      {"app", value} when is_binary(value) and value != "" ->
+        if value == binding_hash(tracker), do: :ok, else: {:error, :linear_runtime_binding_changed}
+
+      {"app", _} ->
+        {:error, :linear_runtime_binding_missing}
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp binding_hash(tracker) do
+    {tracker.auth_mode, tracker.app, tracker.endpoint, tracker.project_slug, tracker.team_key, tracker.assignee}
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 
   @spec settings!() :: Schema.t()
@@ -90,12 +170,12 @@ defmodule SymphonyElixir.Config do
     case System.get_env("SYMPHONY_CODEX_COMMAND") do
       command when is_binary(command) ->
         case String.trim(command) do
-          "" -> settings!().codex.command
+          "" -> configured_local_codex_command()
           trimmed_command -> trimmed_command
         end
 
       _ ->
-        settings!().codex.command
+        configured_local_codex_command()
     end
   end
 
@@ -119,6 +199,42 @@ defmodule SymphonyElixir.Config do
       _ -> raise ArgumentError, "Invalid SYM_MAXIMUM_REVIEW_ITERATIONS: expected a positive integer"
     end
   end
+
+  defp configured_local_codex_command do
+    settings = settings!()
+    command = settings.codex.command
+    release = local_helper_root()
+    app? = settings.tracker.auth_mode == "app"
+    bundled? = command == "sym-codex --observer" or (app? and command == "codex app-server")
+
+    if is_binary(release) and release != "" and bundled? do
+      helper = shell_quote(Path.join(release, "sym-codex")) <> " --observer"
+
+      if app? do
+        # Restore the validated local toolchain after AppServer's login shell.
+        python = System.get_env("SYMPHONY_PYTHON") || System.find_executable("python3") || "python3"
+        env = ["PATH=" <> System.fetch_env!("PATH"), "SYMPHONY_PYTHON=" <> python]
+        "/usr/bin/env " <> Enum.map_join(env, " ", &shell_quote/1) <> " " <> helper
+      else
+        helper
+      end
+    else
+      command
+    end
+  end
+
+  defp local_helper_root do
+    case System.get_env("SYMPHONY_RELEASE_ROOT") do
+      release when is_binary(release) and release != "" ->
+        release
+
+      _ ->
+        root = Path.dirname(Workflow.default_workflow_file_path())
+        if File.regular?(Path.join(root, "sym-codex")), do: root
+    end
+  end
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
 
   @spec server_port() :: non_neg_integer() | nil
   def server_port do
@@ -194,6 +310,13 @@ defmodule SymphonyElixir.Config do
 
       kind ->
         {:error, {:unsupported_tracker_kind, kind}}
+    end
+  end
+
+  defp validate_linear_tracker(%{tracker: %{auth_mode: "app"} = tracker}) do
+    with :ok <- AppAuth.validate(tracker),
+         {:ok, _scope} <- linear_scope(tracker) do
+      :ok
     end
   end
 

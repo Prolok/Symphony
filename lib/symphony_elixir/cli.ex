@@ -103,7 +103,7 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp load_project_env_files(env_files_dir) when is_binary(env_files_dir) do
-    EnvFile.load(env_files_dir, override_existing: true)
+    EnvFile.load_runtime(env_files_dir)
   end
 
   defp format_env_file_error({:invalid_env_file, path, line_number, reason}) do
@@ -117,8 +117,8 @@ defmodule SymphonyElixir.CLI do
   defp format_env_file_error(reason), do: inspect(reason)
 
   defp load_and_start(workflow_path, env_files_dir, deps) do
-    with :ok <- deps.load_env_files.(env_files_dir),
-         :ok <- deps.set_workflow_file_path.(workflow_path),
+    with :ok <- deps.set_workflow_file_path.(workflow_path),
+         :ok <- deps.load_env_files.(env_files_dir),
          :ok <- deps.validate_startup_requirements.() do
       start_application(workflow_path, deps)
     else

@@ -26,6 +26,7 @@ WORKFLOW_FILE_ENV = "SYMPHONY_WORKFLOW_FILE"
 ISSUE_IDENTIFIER_ENV = "SYMPHONY_ISSUE_IDENTIFIER"
 MANUAL_REVIEW_LABEL_ENV = "SYMPHONY_ISSUE_LABELS_JSON"
 MANUAL_REVIEW_BLOCKER_EXIT = 7
+APP_LABEL_LOOKUP_EXIT = 8
 DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 
 
@@ -64,6 +65,10 @@ class PrNotFoundError(RuntimeError):
 
 
 class LabelRefreshError(RuntimeError):
+    pass
+
+
+class AppLabelLookupRequired(LabelRefreshError):
     pass
 
 
@@ -493,6 +498,7 @@ def issue_labels_from_json(raw: str | None) -> list[str] | None:
 
 
 async def current_issue_labels(snapshot_labels: list[str] | None = None) -> list[str]:
+    require_legacy_label_refresh()
     snapshot = issue_labels_from_env() if snapshot_labels is None else snapshot_labels
     if current_issue_identifier() is None:
         return snapshot
@@ -500,6 +506,13 @@ async def current_issue_labels(snapshot_labels: list[str] | None = None) -> list
     if live_labels is None:
         raise LabelRefreshError("Could not refresh current Linear issue labels before merge.")
     return live_labels
+
+
+def require_legacy_label_refresh() -> None:
+    if os.environ.get("SYMPHONY_LINEAR_AUTH_MODE") == "app":
+        if current_issue_identifier() is None:
+            raise LabelRefreshError("Missing issue identity for the App label gate.")
+        raise AppLabelLookupRequired("Live labels must be read through the bound Linear tool.")
 
 
 def current_issue_identifier() -> str | None:
@@ -536,6 +549,7 @@ def issue_labels_from_refresh_output(output: str) -> list[str] | None:
 
 
 async def run_tracker_label_refresh() -> str:
+    require_legacy_label_refresh()
     source_root = await source_repo_root()
     workflow_root = await workflow_execution_root()
     elixir = """
@@ -1066,6 +1080,14 @@ async def watch_pr() -> None:
 
     try:
         labels = await current_issue_labels()
+    except AppLabelLookupRequired:
+        print(
+            f"Merge gate incomplete: {pr.url}, head {head_sha}, issue {current_issue_identifier()}. "
+            "GitHub checks/review completed. Read current issue labels through the bound Linear tool; "
+            "then complete the manual-approval gate and recheck the PR head before merging. "
+            "Do not use the dispatch snapshot or a shell/Mix credential fallback."
+        )
+        raise SystemExit(APP_LABEL_LOOKUP_EXIT) from None
     except LabelRefreshError as error:
         print(label_refresh_blocker_message(pr, error))
         raise SystemExit(MANUAL_REVIEW_BLOCKER_EXIT) from error

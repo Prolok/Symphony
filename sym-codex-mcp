@@ -43,7 +43,20 @@ main() {
     sym_codex_mcp_die "source repo does not exist: $source_repo"
   fi
 
+  if [[ -n "${SYMPHONY_RELEASE_ROOT:-}" ]]; then
+    local runtime_root="$SYMPHONY_RELEASE_ROOT"
+    [[ -f "$runtime_root/.symphony-release.json" ]] || sym_codex_mcp_die "ungebundener Laufzeitstand"
+    "${SYMPHONY_PYTHON:-python3}" "$runtime_root/scripts/installation-release.py" verify "$runtime_root" || sym_codex_mcp_die "Laufzeitstand wurde verändert"
+    if [[ -f "$runtime_root/.symphony/root-config.json" ]]; then
+      export SYMPHONY_ROOT_DIR="$("${SYMPHONY_PYTHON:-python3}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["root"])' "$runtime_root/.symphony/root-config.json")"
+    fi
+    cd "$runtime_root" || sym_codex_mcp_die "cannot enter bound release"
+    sym_codex_mcp_run_mix "$runtime_root" run --no-compile --no-start -e 'SymphonyElixir.Codex.MCPServer.main()'
+    return "$?"
+  fi
+
   cd "$source_repo" || sym_codex_mcp_die "cannot change into $source_repo"
+  export SYMPHONY_ROOT_DIR="${SYMPHONY_ROOT_DIR:-$source_repo}"
   sym_codex_mcp_activate_venv "$source_repo"
   sym_codex_mcp_prepare_mix "$source_repo" || return "$?"
   sym_codex_mcp_run_mix "$source_repo" run --no-compile --no-start -e 'SymphonyElixir.Codex.MCPServer.main()'

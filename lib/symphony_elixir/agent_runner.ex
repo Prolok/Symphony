@@ -5,6 +5,9 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
 
+  alias SymphonyElixir.Linear.IssueLease
+  alias SymphonyElixir.Linear.WriteContext
+
   alias SymphonyElixir.{
     AutocommitMessage,
     Codex.AppServer,
@@ -52,7 +55,13 @@ defmodule SymphonyElixir.AgentRunner do
 
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
+    result =
+      WriteContext.with_context(
+        %{issue_id: issue.id, phase: issue.state, run_id: Ecto.UUID.generate()},
+        fn -> IssueLease.run(issue, fn -> run_on_worker_host(issue, codex_update_recipient, opts, worker_host) end) end
+      )
+
+    case result do
       :ok ->
         :ok
 

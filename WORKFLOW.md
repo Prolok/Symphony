@@ -237,6 +237,10 @@ Mix-Artefakte an den aufgelösten Symphony-Checkout gebunden bleiben.
 Der eigenständige Release-Checkout übernimmt den aktuellen Arbeitsstand samt
 gestagten Löschungen, Umbenennungen und Datei-/Verzeichniswechseln;
 ignorierte Dateien werden nicht übernommen.
+Die öffentlichen Rootwerte `SYM_CODEX_*` und `SYM_MAXIMUM_REVIEW_ITERATIONS`
+werden mit ihren lokalen Overrides im Release-Snapshot gebunden. Spätere
+Rootänderungen gelten erst für einen neuen Release; Fachprojektdateien
+überschreiben weder Modellstartwerte noch das Reviewbudget.
 Im App-Modus bereitet der autorisierte Projektstart vor dem Versiegeln des
 Releases genau eine lokale Codex-Trust-Freigabe für den Fachprojektroot vor
 (bei Git-Worktrees den Git-common-root). Dadurch verändert der erste

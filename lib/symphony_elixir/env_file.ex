@@ -14,7 +14,7 @@ defmodule SymphonyElixir.EnvFile do
   @type load_mode :: :defaults | :local_override
 
   @root_config_names ~w(SYM_CODEX_MODEL SYM_CODEX_REASONING_EFFORT
-    SYM_CODEX_SERVICE_TIER SYM_CODEX_HUMAN_SERVICE_TIER)
+    SYM_CODEX_SERVICE_TIER SYM_CODEX_HUMAN_SERVICE_TIER SYM_MAXIMUM_REVIEW_ITERATIONS)
 
   @spec root_config_names() :: [String.t()]
   def root_config_names, do: @root_config_names
@@ -262,10 +262,10 @@ defmodule SymphonyElixir.EnvFile do
         else: maybe_put_env(key, value, mode, existing_keys, keys)
     end
 
-    read_file(path, loaded_keys, env_putter)
+    read_file(path, loaded_keys, env_putter, excluded)
   end
 
-  defp read_file(path, loaded_keys, env_putter) do
+  defp read_file(path, loaded_keys, env_putter, excluded \\ []) do
     case File.regular?(path) do
       true ->
         case File.read(path) do

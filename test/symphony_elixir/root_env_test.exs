@@ -177,6 +177,24 @@ defmodule SymphonyElixir.RootEnvTest do
     assert {:error, {:invalid_env_file, _, 1, :unterminated_quote}} = EnvFile.snapshot_root(ctx.source, ctx.release)
   end
 
+  test "release keeps the root review budget across source updates and project overrides", ctx do
+    previous = System.get_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
+    System.delete_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
+    on_exit(fn -> SymphonyElixir.TestSupport.restore_env_snapshot(%{"SYM_MAXIMUM_REVIEW_ITERATIONS" => previous}) end)
+    File.write!(Path.join(ctx.release, ".env"), "SYM_MAXIMUM_REVIEW_ITERATIONS=3\n")
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=5\nLINEAR_APP_SECRET=synthetic-root-secret\n")
+    File.write!(Path.join(ctx.project, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
+    assert :ok = EnvFile.snapshot_root(ctx.source, ctx.release)
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=7\n")
+    System.put_env("SYMPHONY_RELEASE_ROOT", ctx.release)
+    assert :ok = EnvFile.load_runtime(ctx.project)
+    assert Config.maximum_review_iterations!(ctx.release) == 5
+    refute File.read!(Path.join(ctx.release, ".symphony/root-config.json")) =~ "synthetic-root-secret"
+    System.put_env("SYM_MAXIMUM_REVIEW_ITERATIONS", "8")
+    assert :ok = EnvFile.load_runtime(ctx.project)
+    assert Config.maximum_review_iterations!(ctx.release) == 8
+  end
+
   test "non-auth children cannot regain project secret access by reloading config", ctx do
     File.write!(Path.join(ctx.source, ".env.local"), "LINEAR_APP_SECRET=synthetic-secret\n")
     System.put_env("SYMPHONY_LINEAR_SECRET_ACCESS", "denied")

@@ -18,8 +18,8 @@ Secret nicht. Frühere PKCE-Grants müssen administrativ kontrolliert umgestellt
 werden; ihre Existenz belegt keine Client-Credentials-Aktivierung. Die Laufzeit
 verwendet immer `grant_type=client_credentials` und `scope=read,write`.
 
-Im Symphony-Root liegen nur die gemeinsamen `SYM_CODEX_*`-Startwerte in `.env`
-und optional `.env.local`. Die führende Projektvorlage ist
+Im Symphony-Root liegen die gemeinsamen `SYM_CODEX_*`-Startwerte und
+`SYM_MAXIMUM_REVIEW_ITERATIONS` in `.env` und optional `.env.local`. Die führende Projektvorlage ist
 [.symphony/.env](../.symphony/.env). Nicht entwicklerspezifische öffentliche
 Bindungen, Projektscope und die feste Projektkennung `LINEAR_APP_INSTALLATION_ID`
 werden dort versioniert. Secret, persönliche Zuständigkeit und lokale Overrides gehören ausschließlich
@@ -80,12 +80,14 @@ Die optionale Übergabe bestehender Workpads ist ein **separater späterer Schri
 ## Root- und Projektladepfad
 
 Der Launcher bindet den tatsächlichen Symphony-Root als `SYMPHONY_ROOT_DIR`.
-Nach Update und Build werden ausschließlich die vier `SYM_CODEX_*`-Startwerte aus
+Nach Update und Build werden die vier `SYM_CODEX_*`-Startwerte und das Reviewbudget
+`SYM_MAXIMUM_REVIEW_ITERATIONS` aus
 Release-`.env` und Root-`.env.local` in `.symphony/root-config.json` festgehalten und
 mit dem Release versiegelt. Der Snapshot enthält diese feste Liste und die
 Rootreferenz, keine Linear-Bindung und kein Secret. Die private Rootdatei wird
 nicht kopiert. Die Präzedenz bleibt: extern gesetzte Startvariable vor
-Root-`.env.local` vor `.env` vor eingebautem Startdefault. Rootänderungen werden
+Root-`.env.local` vor `.env` vor eingebautem Startdefault. Das Reviewbudget bleibt
+damit ebenfalls an den Release gebunden; Projektdateien können es nicht überschreiben. Rootänderungen werden
 beim nächsten Release übernommen.
 
 Orchestrator, `sym-codex`, MCP und `scripts/linear-app` behalten den jeweiligen

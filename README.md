@@ -37,8 +37,8 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
 
 Der gemeinsame neue `WORKFLOW.md` nutzt `auth_mode: app`. Seine App-Bindung kommt
 aus der versionierten Fachprojekt-`.symphony/.env`. Secret und persönliche
-Werte einschließlich `LINEAR_ASSIGNEE` (E-Mail oder UUID) bleiben in `.env.local`. Im gemeinsamen Symphony-Root liegen nur
-die `SYM_CODEX_*`-Startwerte; parallele Projekte dürfen verschiedene
+Werte einschließlich `LINEAR_ASSIGNEE` (E-Mail oder UUID) bleiben in `.env.local`. Im gemeinsamen Symphony-Root liegen
+die `SYM_CODEX_*`-Startwerte und `SYM_MAXIMUM_REVIEW_ITERATIONS`; parallele Projekte dürfen verschiedene
 Linear-Workspaces/Apps mit getrennten Zustands- und Sessionpfaden verwenden.
 Die [Betriebsanleitung](docs/linear-app.md) beschreibt Einrichtung, Root-/Release-
 Ladepfad und die optionale spätere Workpad-Übergabe. Alte Versionen, unveränderte

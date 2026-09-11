@@ -130,6 +130,8 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
    Review-Skill. Dieser führt das Budget im Workpad über Fortsetzungen hinweg
    und behandelt auch die letzten Findings vor der bestehenden Übergabe.
    Das ist eine Skill-Anweisung, kein technisch erzwungener Subagent-Zähler.
+   Die Dateien werden am Symphony-Checkout gelesen, auch bei externer
+   Workflowdatei; Projektdateien unter `.symphony/` setzen diesen Schlüssel nicht.
 
 3. Symphony starten:
 

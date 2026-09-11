@@ -3,7 +3,7 @@ defmodule SymphonyElixir.PromptBuilder do
   Builds agent prompts from Linear issue data.
   """
 
-  alias SymphonyElixir.{Config, Tracker, Workflow}
+  alias SymphonyElixir.{Config, RuntimePaths, Tracker, Workflow}
 
   @type session_mode :: :manual | :orchestrated
   @type workflow_mode :: :automated | :interactive
@@ -127,7 +127,7 @@ defmodule SymphonyElixir.PromptBuilder do
       "source_repo_root" => source_repo_root,
       "workflow_file" => workflow_file(opts),
       "workflow_dir" => Path.dirname(workflow_file(opts)),
-      "maximum_review_iterations" => Config.maximum_review_iterations!(Path.dirname(workflow_file(opts))),
+      "maximum_review_iterations" => Config.maximum_review_iterations!(RuntimePaths.workflow_dir()),
       "docs_review_hint_enabled" => is_binary(review_additional_hints),
       "review_additional_hints" => review_additional_hints || "",
       "global_skill_roots" => global_skill_roots,

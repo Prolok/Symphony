@@ -144,7 +144,9 @@ defmodule SymphonyElixir.CoreTest do
       previous = System.get_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
       System.delete_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
       on_exit(fn -> restore_env("SYM_MAXIMUM_REVIEW_ITERATIONS", previous) end)
-      {:ok, symphony_root: Path.dirname(Workflow.workflow_file_path())}
+      root = Path.dirname(Workflow.workflow_file_path())
+      File.write!(Path.join(root, "mix.exs"), "defmodule SymphonyElixir.MixProject\napp: :symphony_elixir\n")
+      {:ok, symphony_root: root}
     end
 
     test "resolves built-in, root file, local and process precedence without exporting values", %{symphony_root: root} do
@@ -215,11 +217,32 @@ defmodule SymphonyElixir.CoreTest do
 
       File.cd!(worktree, fn ->
         assert PromptBuilder.build_prompt(issue, opts) == "2"
-        assert PromptBuilder.build_prompt(issue, Keyword.put(opts, :workflow_file, Path.join(other_symphony, "WORKFLOW.md"))) == "6"
+        assert PromptBuilder.build_prompt(issue, Keyword.put(opts, :workflow_file, Path.join(other_symphony, "WORKFLOW.md"))) == "2"
         assert PromptBuilder.build_prompt(issue, opts) == "2"
       end)
 
+      assert Config.maximum_review_iterations!(other_symphony) == 5
       assert System.get_env() == before_env
+    end
+
+    test "external workflow files do not replace the Symphony checkout as budget source", %{symphony_root: root} do
+      external = Path.join(root, "external-config")
+      File.mkdir_p!(external)
+      File.write!(Path.join(root, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=1\n")
+      File.write!(Path.join(external, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
+      workflow_file = Path.join(external, "CUSTOM.md")
+      write_workflow_file!(workflow_file)
+      Workflow.set_workflow_file_path(workflow_file)
+
+      File.cd!(root, fn ->
+        for mode <- [:orchestrated, :manual] do
+          assert PromptBuilder.build_prompt(%Issue{state: "Review (AI)"},
+                   prompt_template: "{{ runtime.maximum_review_iterations }}",
+                   session_mode: mode,
+                   workflow_file: workflow_file
+                 ) == "1"
+        end
+      end)
     end
 
     test "renders the real automated and manual review prompts with the same budget", %{symphony_root: root} do
@@ -231,7 +254,7 @@ defmodule SymphonyElixir.CoreTest do
         if limit != 3, do: File.write!(Path.join(root, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=#{limit}\n")
 
         for {mode, template} <- [orchestrated: automated, manual: manual] do
-          prompt = PromptBuilder.build_prompt(issue, session_mode: mode, prompt_template: template)
+          prompt = File.cd!(root, fn -> PromptBuilder.build_prompt(issue, session_mode: mode, prompt_template: template) end)
           assert prompt =~ "runtime.maximum_review_iterations=#{limit}"
           assert prompt =~ "gemäß Skill"
         end
@@ -243,10 +266,19 @@ defmodule SymphonyElixir.CoreTest do
       File.cp!(Path.expand("../../WORKFLOW_INTERACTIVE.md", __DIR__), interactive_path)
       workflow_path = Workflow.workflow_file_path()
 
-      assert {:ok, %{prompt: prompt, workflow_step: "Review (AI)"}} =
-               ScriptSupport.manual_prompt_context(workflow_path, interactive_path, issue.identifier, root)
+      File.mkdir_p!(Path.join(root, ".symphony"))
+      File.write!(Path.join(root, ".symphony/.env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
 
-      assert prompt =~ "runtime.maximum_review_iterations=5"
+      for {shell_value, expected} <- [{nil, 5}, {"7", 7}] do
+        restore_env("SYM_MAXIMUM_REVIEW_ITERATIONS", shell_value)
+
+        assert {:ok, %{prompt: prompt, workflow_step: "Review (AI)"}} =
+                 File.cd!(root, fn ->
+                   ScriptSupport.manual_prompt_context(workflow_path, interactive_path, issue.identifier, root)
+                 end)
+
+        assert prompt =~ "runtime.maximum_review_iterations=#{expected}"
+      end
     end
   end
 

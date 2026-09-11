@@ -4,6 +4,8 @@ defmodule SymphonyElixir.EnvFile do
   """
 
   @config_dir_name ".symphony"
+  # Root-only settings are read by Config; project files must not export them.
+  @root_only_keys ["SYM_MAXIMUM_REVIEW_ITERATIONS"]
   @env_files [
     {".env", :defaults},
     {".env.local", :local_override}
@@ -87,6 +89,9 @@ defmodule SymphonyElixir.EnvFile do
           {:ok, MapSet.t()}
   defp maybe_put_env(key, value, mode, existing_keys, loaded_keys) do
     cond do
+      key in @root_only_keys ->
+        {:ok, loaded_keys}
+
       mode == :defaults and MapSet.member?(existing_keys, key) ->
         {:ok, loaded_keys}
 

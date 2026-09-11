@@ -122,6 +122,17 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
    `service_tier`; interaktive/manuelle Starts übergeben stattdessen
    `SYM_CODEX_HUMAN_SERVICE_TIER`.
 
+   `SYM_MAXIMUM_REVIEW_ITERATIONS=3` in derselben Root-`.env` begrenzt die
+   Reviewrunden pro Aufenthalt in `Review (AI)`, einschließlich Erst-Review.
+   Es gilt dieselbe Präzedenz; erlaubt sind positive Ganzzahlen, ungültige
+   oder leere Werte brechen den Promptbau mit einem Konfigurationsfehler ab.
+   `Config` übergibt den Wert vor manuellen und orchestrierten Starts an den
+   Review-Skill. Dieser führt das Budget im Workpad über Fortsetzungen hinweg
+   und behandelt auch die letzten Findings vor der bestehenden Übergabe.
+   Das ist eine Skill-Anweisung, kein technisch erzwungener Subagent-Zähler.
+   Die Dateien werden am Symphony-Checkout gelesen, auch bei externer
+   Workflowdatei; Projektdateien unter `.symphony/` setzen diesen Schlüssel nicht.
+
 3. Symphony starten:
 
    ```bash

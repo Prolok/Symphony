@@ -3,6 +3,45 @@ defmodule SymphonyElixir.EnvFileTest do
 
   alias SymphonyElixir.EnvFile
 
+  test "project loads cannot export or overwrite the Symphony root review budget" do
+    root = temp_project_root("root-only-budget")
+    env_dir = symphony_dir(root)
+    previous = System.get_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
+
+    on_exit(fn ->
+      restore_env("SYM_MAXIMUM_REVIEW_ITERATIONS", previous)
+      File.rm_rf(root)
+    end)
+
+    for inherited <- [nil, "7"], project_value <- ["99", ""] do
+      restore_env("SYM_MAXIMUM_REVIEW_ITERATIONS", inherited)
+      File.write!(Path.join(env_dir, ".env"), "SYM_MAXIMUM_REVIEW_ITERATIONS=98\n")
+      File.write!(Path.join(env_dir, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=#{project_value}\n")
+
+      assert :ok = EnvFile.load(env_dir, override_existing: true)
+      assert System.get_env("SYM_MAXIMUM_REVIEW_ITERATIONS") == inherited
+    end
+  end
+
+  test "reads merged root values without exporting defaults or overriding the environment" do
+    root = temp_project_root("read-values")
+    on_exit(fn -> File.rm_rf(root) end)
+    before_env = System.get_env()
+
+    assert {:ok, %{}} = EnvFile.read(root)
+
+    File.write!(Path.join(root, ".env"), "LINEAR_API_KEY=root-key\nSYM_MAXIMUM_REVIEW_ITERATIONS=3\n")
+    File.write!(Path.join(root, ".env.local"), "export SYM_MAXIMUM_REVIEW_ITERATIONS = ' 5 ' # local\n")
+
+    assert {:ok, %{"LINEAR_API_KEY" => "root-key", "SYM_MAXIMUM_REVIEW_ITERATIONS" => " 5 "}} = EnvFile.read(root)
+    assert System.get_env() == before_env
+
+    File.write!(Path.join(root, ".env.local"), "INVALID\n")
+    assert {:error, {:invalid_env_file, path, 1, :missing_assignment}} = EnvFile.read(root)
+    assert path == Path.join(root, ".env.local")
+    assert System.get_env() == before_env
+  end
+
   test "loads .symphony/.env and lets .symphony/.env.local override repo defaults" do
     project_root = temp_project_root("load-order")
     env_dir = symphony_dir(project_root)

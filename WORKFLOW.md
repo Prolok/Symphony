@@ -102,7 +102,7 @@ prompt_snippets:
 
     - Der unmittelbar vorherige Codex-Turn endete unerwartet, nachdem ein Subagent bereits ein finales Ergebnis geliefert hatte.
     - Verwende das unten stehende abgeschlossene Subagent-Ergebnis erneut, statt sofort denselben Subagenten noch einmal zu starten.
-    - Arbeite vom aktuellen Workspace- und Workpad-Stand aus weiter, setze erforderliche Fixes selbst um und starte den Subagenten nur dann erneut, wenn der aktive Workflow das nach den Fixes weiterhin verlangt.
+    - Arbeite vom aktuellen Workspace- und Workpad-Stand aus weiter, setze erforderliche Fixes selbst um und starte den Subagenten nur dann erneut, wenn der aktive Workflow das nach den Fixes weiterhin verlangt und das Rundenbudget aus `symphony-review` es erlaubt.
 
     Wiederhergestelltes Subagent-Ergebnis:
 
@@ -132,9 +132,9 @@ prompt_snippets:
     - Der vollständige relevante Review-Scope ist der Repository-Stand gegen `origin/main`: Branch-Commits sowie gestagte, ungestagte und untracked Änderungen plus daraus folgende repo-lokale Konsistenz zwischen Code, `WORKFLOW.md`, Skills und `docs/`. Er ist kein Abgleich gegen Linear-Issue, Workpad, Ticketabsicht oder Akzeptanzkriterien.
     - Ersetze einen verpflichtenden Review-Subagenten nicht durch ein rein lokales Review, außer die aktiven Anweisungen erlauben diesen Fallback ausdrücklich.
     - Wenn die erforderliche Isolation des Review-Subagenten in diesem Turn nicht möglich ist, bleibt der Review-Schritt offen; behaupte kein lokales Ersatz-Review und verschiebe das Ticket nicht weiter.
-    - Der Hauptagent muss die Findings weiterhin selbst bewerten, die Fixes selbst umsetzen und die Review-Schleife bei Bedarf erneut ausführen.
+    - Der Hauptagent muss die Findings weiterhin selbst bewerten, die Fixes selbst umsetzen und die Review-Schleife bei Bedarf innerhalb des Rundenbudgets aus `symphony-review` erneut ausführen.
     - Verwende für den Review-Subagenten `wait_agent` mit langem Timeout. Ein 30-Sekunden-Timeout reicht für einen vollständigen Review-Durchlauf nicht aus.
-    - Wenn `wait_agent` ein finales Ergebnis mit `Findings:` liefert, verarbeite diese Findings sofort im Hauptturn: im Workpad erfassen, fixen oder begründet anders behandeln, validieren, danach je behandeltem Finding genau einen kombinierten Nach-Fix-Kommentar posten und die Review-Schleife fortsetzen. Beende den Turn nicht zwischen Findings-Erhalt und dieser Verarbeitung.
+    - Wenn `wait_agent` ein finales Ergebnis mit `Findings:` liefert, verarbeite diese Findings sofort im Hauptturn: im Workpad erfassen, fixen oder begründet anders behandeln, validieren, danach je behandeltem Finding genau einen kombinierten Nach-Fix-Kommentar posten und die Review-Schleife gemäß Rundenbudget fortsetzen oder abschließen. Beende den Turn nicht zwischen Findings-Erhalt und dieser Verarbeitung.
     - Poste vor den Fixes keinen separaten Findings-Kommentar. Bei einem behandelten Finding entsteht genau ein kombinierter Nach-Fix-Kommentar; bei zwei behandelten Findings entstehen genau zwei kombinierte Nach-Fix-Kommentare, nicht vier.
     - Wenn `wait_agent` abläuft oder kein finales Ergebnis liefert, ist der Review-Schritt weiterhin unvollständig. Lass den Subagenten weiterlaufen und warte erneut, statt Ergebnisse zu erfinden oder die Checkliste neu zu starten.
     - Rufe `close_agent` nicht auf einem noch laufenden Review-Subagenten auf, nur weil ein Wait-Timeout erreicht wurde.
@@ -281,7 +281,7 @@ Nutze die dabei zurückgegebene interne `id` anschließend für eng begrenzte Fo
 - Repo-lokale Skills werden direkt unter `{{ runtime.active_repo_skill_root }}` gesucht.
 - Globale Skills werden direkt unter den globalen Skill-Wurzeln `{{ runtime.global_skill_roots_text }}` gesucht.
 - `symphony-prereview`: wenn das Ticket `PreReview (AI)` erreicht, den globalen Skill `symphony-prereview` explizit öffnen und befolgen.
-- `symphony-review`: wenn das Ticket `Review (AI)` erreicht, den globalen Skill `symphony-review` explizit öffnen und befolgen.
+- `symphony-review`: wenn das Ticket `Review (AI)` erreicht, den globalen Skill `symphony-review` explizit öffnen und befolgen; `runtime.maximum_review_iterations={{ runtime.maximum_review_iterations }}` begrenzt die Reviewrunden gemäß Skill.
 - `symphony-test`: wenn das Ticket `Test (AI)` erreicht, den globalen Skill `symphony-test` explizit öffnen und befolgen.
 - `symphony-land`: wenn das Ticket `Merge (AI)` erreicht, den globalen Skill `symphony-land` explizit öffnen und befolgen; dort ist die `symphony-land`-Schleife enthalten.
 

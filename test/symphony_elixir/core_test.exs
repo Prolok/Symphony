@@ -139,6 +139,149 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  describe "maximum review iterations" do
+    setup do
+      previous = System.get_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
+      System.delete_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
+      on_exit(fn -> restore_env("SYM_MAXIMUM_REVIEW_ITERATIONS", previous) end)
+      root = Path.dirname(Workflow.workflow_file_path())
+      File.write!(Path.join(root, "mix.exs"), "defmodule SymphonyElixir.MixProject\napp: :symphony_elixir\n")
+      {:ok, symphony_root: root}
+    end
+
+    test "resolves built-in, root file, local and process precedence without exporting values", %{symphony_root: root} do
+      before_env = System.get_env()
+      assert Config.maximum_review_iterations!(root) == 3
+      File.write!(Path.join(root, ".env"), "UNRELATED_SETTING=unchanged\n")
+      assert Config.maximum_review_iterations!(root) == 3
+
+      File.write!(Path.join(root, ".env"), "SYM_MAXIMUM_REVIEW_ITERATIONS=4\n")
+      assert Config.maximum_review_iterations!(root) == 4
+
+      for {assignment, expected} <- [{"1", 1}, {"' 5 '", 5}, {~s(" 3 "), 3}] do
+        File.write!(Path.join(root, ".env.local"), "export SYM_MAXIMUM_REVIEW_ITERATIONS = #{assignment} # override\n")
+        assert Config.maximum_review_iterations!(root) == expected
+      end
+
+      assert System.get_env() == before_env
+      System.put_env("SYM_MAXIMUM_REVIEW_ITERATIONS", " 7 ")
+      assert Config.maximum_review_iterations!(root) == 7
+    end
+
+    test "rejects explicit empty and invalid values from every source with a named error", %{symphony_root: root} do
+      for value <- ["", "0", "-1", "1.5", "text"] do
+        for filename <- [".env", ".env.local"] do
+          path = Path.join(root, filename)
+          File.write!(path, "SYM_MAXIMUM_REVIEW_ITERATIONS=#{value}\n")
+
+          assert_raise ArgumentError, ~r/SYM_MAXIMUM_REVIEW_ITERATIONS.*positive integer/, fn ->
+            Config.maximum_review_iterations!(root)
+          end
+
+          File.rm!(path)
+        end
+
+        System.put_env("SYM_MAXIMUM_REVIEW_ITERATIONS", value)
+
+        assert_raise ArgumentError, ~r/SYM_MAXIMUM_REVIEW_ITERATIONS.*positive integer/, fn ->
+          PromptBuilder.build_prompt(%Issue{state: "Review (AI)"}, prompt_template: "review")
+        end
+
+        System.delete_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
+      end
+
+      File.write!(Path.join(root, ".env.local"), "MALFORMED\n")
+
+      assert_raise ArgumentError, ~r/SYM_MAXIMUM_REVIEW_ITERATIONS config.*invalid_env_file/, fn ->
+        Config.maximum_review_iterations!(root)
+      end
+    end
+
+    test "keeps Symphony configuration isolated from target repo, worktree and previous resolutions", %{symphony_root: root} do
+      target = Path.join(root, "target-project")
+      worktree = Path.join(root, "target-worktrees/ISSUE-1")
+      other_symphony = Path.join(root, "other-symphony")
+
+      for {directory, value} <- [{root, 1}, {target, 8}, {worktree, 9}, {other_symphony, 5}] do
+        File.mkdir_p!(Path.join(directory, ".symphony"))
+        File.write!(Path.join(directory, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=#{value}\nLINEAR_API_KEY=ignored\nSYM_CODEX_MODEL=ignored\n")
+        File.write!(Path.join(directory, ".symphony/.env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
+      end
+
+      System.put_env("SYMPHONY_SOURCE_REPO", target)
+      System.put_env("SYMPHONY_ACTIVE_REPO_ROOT", worktree)
+      System.put_env("SYMPHONY_WORKFLOW_FILE", Path.join(root, "WORKFLOW.md"))
+      before_env = System.get_env()
+      issue = %Issue{state: "Review (AI)"}
+      opts = [prompt_template: "{{ runtime.maximum_review_iterations | plus: 1 }}"]
+
+      File.cd!(worktree, fn ->
+        assert PromptBuilder.build_prompt(issue, opts) == "2"
+        assert PromptBuilder.build_prompt(issue, Keyword.put(opts, :workflow_file, Path.join(other_symphony, "WORKFLOW.md"))) == "2"
+        assert PromptBuilder.build_prompt(issue, opts) == "2"
+      end)
+
+      assert Config.maximum_review_iterations!(other_symphony) == 5
+      assert System.get_env() == before_env
+    end
+
+    test "external workflow files do not replace the Symphony checkout as budget source", %{symphony_root: root} do
+      external = Path.join(root, "external-config")
+      File.mkdir_p!(external)
+      File.write!(Path.join(root, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=1\n")
+      File.write!(Path.join(external, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
+      workflow_file = Path.join(external, "CUSTOM.md")
+      write_workflow_file!(workflow_file)
+      Workflow.set_workflow_file_path(workflow_file)
+
+      File.cd!(root, fn ->
+        for mode <- [:orchestrated, :manual] do
+          assert PromptBuilder.build_prompt(%Issue{state: "Review (AI)"},
+                   prompt_template: "{{ runtime.maximum_review_iterations }}",
+                   session_mode: mode,
+                   workflow_file: workflow_file
+                 ) == "1"
+        end
+      end)
+    end
+
+    test "renders the real automated and manual review prompts with the same budget", %{symphony_root: root} do
+      {:ok, %{prompt_template: automated}} = Workflow.load(Path.expand("../../WORKFLOW.md", __DIR__))
+      {:ok, %{prompt_template: manual}} = Workflow.load(Path.expand("../../WORKFLOW_INTERACTIVE.md", __DIR__))
+      issue = %Issue{id: "review-budget", identifier: "MT-696", title: "Review", state: "Review (AI)", labels: []}
+
+      for limit <- [3, 1, 5] do
+        if limit != 3, do: File.write!(Path.join(root, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=#{limit}\n")
+
+        for {mode, template} <- [orchestrated: automated, manual: manual] do
+          prompt = File.cd!(root, fn -> PromptBuilder.build_prompt(issue, session_mode: mode, prompt_template: template) end)
+          assert prompt =~ "runtime.maximum_review_iterations=#{limit}"
+          assert prompt =~ "gemäß Skill"
+        end
+      end
+
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      interactive_path = Path.join(root, "WORKFLOW_INTERACTIVE.md")
+      File.cp!(Path.expand("../../WORKFLOW_INTERACTIVE.md", __DIR__), interactive_path)
+      workflow_path = Workflow.workflow_file_path()
+
+      File.mkdir_p!(Path.join(root, ".symphony"))
+      File.write!(Path.join(root, ".symphony/.env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
+
+      for {shell_value, expected} <- [{nil, 5}, {"7", 7}] do
+        restore_env("SYM_MAXIMUM_REVIEW_ITERATIONS", shell_value)
+
+        assert {:ok, %{prompt: prompt, workflow_step: "Review (AI)"}} =
+                 File.cd!(root, fn ->
+                   ScriptSupport.manual_prompt_context(workflow_path, interactive_path, issue.identifier, root)
+                 end)
+
+        assert prompt =~ "runtime.maximum_review_iterations=#{expected}"
+      end
+    end
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
@@ -341,6 +484,38 @@ defmodule SymphonyElixir.CoreTest do
     assert workpad_skill =~ "Review-Finding-Fix-Kommentare"
     assert workpad_skill =~ "Zulässige Ausnahmen"
     assert workpad_skill =~ "ersetzen das Workpad nicht"
+  end
+
+  test "review budget contract counts starts across recovery and treats final-round findings before handoff" do
+    skill = File.read!(Path.expand("../../.codex/skills/symphony-review/SKILL.md", __DIR__))
+    workflow = File.read!(Path.expand("../../WORKFLOW.md", __DIR__))
+    defaults = File.read!(Path.expand("../../.env", __DIR__))
+
+    assert defaults =~ "SYM_MAXIMUM_REVIEW_ITERATIONS=3"
+    assert skill =~ "`runtime.maximum_review_iterations`"
+    assert skill =~ "N=1 erlaubt einen Start, N=3 drei"
+    assert skill =~ "Vor jedem `spawn_agent` prüfen: gestartete Runden < N"
+    assert skill =~ "Rundennummer vor dem Start im Workpad reservieren"
+    assert skill =~ "die Subagent-ID ergänzen"
+    assert skill =~ "Fortsetzungen, Retries und Recovery übernehmen Limit, Zähler, Subagent-IDs"
+    assert skill =~ "Kein Reset wegen neuer Session"
+    assert skill =~ "neuer Eintritt nach Verlassen der Phase beginnt bei 0"
+    assert skill =~ ~r/Warten auf denselben Subagenten und Wiederverwendung seines Ergebnisses\s+zählen nicht erneut/
+    assert skill =~ "keinen Doppelstart auslösen"
+    assert skill =~ "Bei eindeutigem `Keine Findings.` darf die Schleife vor N enden"
+    assert skill =~ "Ein Timeout bleibt ein offener Pflichtschritt, auch am Rundenlimit"
+    assert skill =~ "Auch Findings aus Runde N vollständig bewerten"
+    assert skill =~ "gezielt validieren und wie oben kommentieren"
+    assert skill =~ "keine Runde N+1 starten"
+    assert skill =~ "erst nach vollständig behandelter Evidenz"
+    assert skill =~ "nicht erneut reviewte Fixes ausdrücklich dokumentieren"
+    assert skill =~ "Das Limit ist kein `Keine Findings.`-Signal"
+    assert skill =~ ~r/Freigabe-\/Skip-Regel im Abschluss gilt auch hier/
+    assert skill =~ "Solange die Review-Checkliste im Workpad offen, fehlend"
+    assert skill =~ "nach `Freigabe Review` verschieben; mit `--yolo` oder `Skip \"Freigabe Review\"`"
+    refute skill =~ "die Checkliste wieder bei Schritt 1 starten"
+    assert workflow =~ "das Rundenbudget aus `symphony-review` es erlaubt"
+    assert workflow =~ "die Review-Schleife gemäß Rundenbudget fortsetzen oder abschließen"
   end
 
   test "AI phase completion contracts require closed checklists and merge evidence" do

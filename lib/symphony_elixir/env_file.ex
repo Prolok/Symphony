@@ -4,6 +4,8 @@ defmodule SymphonyElixir.EnvFile do
   """
 
   @config_dir_name ".symphony"
+  # Root-only settings are read by Config; project files must not export them.
+  @root_only_keys ["SYM_MAXIMUM_REVIEW_ITERATIONS"]
   @env_files [
     {".env", :defaults},
     {".env.local", :local_override}
@@ -14,6 +16,17 @@ defmodule SymphonyElixir.EnvFile do
   @spec config_dir(Path.t()) :: Path.t()
   def config_dir(project_root) when is_binary(project_root) do
     Path.join(project_root, @config_dir_name)
+  end
+
+  @doc "Reads defaults and local overrides without changing the process environment."
+  @spec read(Path.t()) :: {:ok, %{String.t() => String.t()}} | {:error, term()}
+  def read(config_dir) when is_binary(config_dir) do
+    Enum.reduce_while(@env_files, {:ok, %{}}, fn {filename, _mode}, {:ok, values} ->
+      case read_file(Path.join(config_dir, filename), values, &{:ok, Map.put(&3, &1, &2)}) do
+        {:ok, next_values} -> {:cont, {:ok, next_values}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   @spec load(String.t()) :: :ok | {:error, term()}
@@ -53,7 +66,10 @@ defmodule SymphonyElixir.EnvFile do
 
   defp load_file(path, mode, existing_keys, loaded_keys) do
     env_putter = &maybe_put_env(&1, &2, mode, existing_keys, &3)
+    read_file(path, loaded_keys, env_putter)
+  end
 
+  defp read_file(path, loaded_keys, env_putter) do
     case File.regular?(path) do
       true ->
         case File.read(path) do
@@ -73,6 +89,9 @@ defmodule SymphonyElixir.EnvFile do
           {:ok, MapSet.t()}
   defp maybe_put_env(key, value, mode, existing_keys, loaded_keys) do
     cond do
+      key in @root_only_keys ->
+        {:ok, loaded_keys}
+
       mode == :defaults and MapSet.member?(existing_keys, key) ->
         {:ok, loaded_keys}
 

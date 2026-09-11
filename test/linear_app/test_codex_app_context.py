@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
@@ -33,6 +35,27 @@ class AppContextTest(unittest.TestCase):
         self.skill.mkdir(parents=True)
         (self.skill / "SKILL.md").write_text("original skill")
         (self.skill / "helper.py").write_text("original helper")
+
+    def test_concurrent_first_workers_share_the_same_session_links(self):
+        target = context.prepare(self.release, self.original, [], self.project)
+        state = self.root / "state"
+        barrier = Barrier(2)
+        symlink_to = Path.symlink_to
+
+        def concurrent_link(path, destination, **kwargs):
+            if path.name == "sessions":
+                barrier.wait(timeout=5)
+            return symlink_to(path, destination, **kwargs)
+
+        with mock.patch.object(Path, "symlink_to", concurrent_link), ThreadPoolExecutor(max_workers=2) as workers:
+            futures = [workers.submit(context.bind_sessions, target, state) for _ in range(2)]
+            for future in futures:
+                future.result(timeout=10)
+        for name in ("sessions", "archived_sessions"):
+            self.assertEqual((target / name).resolve(), (state / name).resolve())
+        context.bind_sessions(target, state)
+        with self.assertRaisesRegex(RuntimeError, "changed session binding"):
+            context.bind_sessions(target, self.root / "other-state")
 
     def test_pinned_skills_keep_referenced_files_after_global_changes_and_second_start(self):
         target = context.prepare(self.release, self.original, [self.original / "skills"], self.project)
@@ -89,7 +112,11 @@ class AppContextTest(unittest.TestCase):
         })
 
     def test_non_git_project_uses_only_its_canonical_directory(self):
-        with tempfile.TemporaryDirectory() as directory:
+        # The fixture must stay outside parent Git discovery even when TMPDIR
+        # is inside this checkout. Keep the real Git failure/fallback path.
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ, {"GIT_CEILING_DIRECTORIES": str(Path(directory).resolve().parent)}
+        ):
             target = context.prepare(self.release, self.original, [], directory)
             self.assertEqual(tomllib.loads((target / "config.toml").read_text())["projects"], {
                 str(Path(directory).resolve()): {"trust_level": "trusted"},

@@ -702,6 +702,36 @@ sym_codex_resolve_workspace() {
   printf '%s\n' "$workspace"
 }
 
+sym_codex_run_release() {
+  local source_repo="$1"
+  shift
+  if (( ! _sym_codex_sourced )); then
+    "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" codex "$source_repo" sym-codex "$@"
+    return "$?"
+  fi
+
+  local context_file status=0 selected_project selected_workspace selected_release
+  mkdir -p "$source_repo/.symphony/installations" || return 1
+  context_file="$(mktemp "$source_repo/.symphony/installations/sourced-XXXXXXXX")" || return 1
+  SYMPHONY_CODEX_SOURCED_CONTEXT="$context_file" \
+    "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" codex "$source_repo" sym-codex "$@" || status=$?
+
+  # The release child returns only its selected directories, never shell code
+  # or auth configuration. Preserve the existing sourced cwd/venv semantics.
+  if [[ -s "$context_file" ]]; then
+    if { IFS= read -r -d '' selected_project &&
+         IFS= read -r -d '' selected_workspace &&
+         IFS= read -r -d '' selected_release; } < "$context_file" &&
+        cd "$selected_workspace"; then
+      sym_codex_activate_venv "$selected_project" "$selected_workspace" "$selected_release" || status=$?
+    else
+      status=1
+    fi
+  fi
+  rm -f "$context_file"
+  return "$status"
+}
+
 sym_codex_run() {
   local original_args=("$@")
   local observer_mode=0
@@ -758,7 +788,7 @@ sym_codex_run() {
   if [[ -z "${SYMPHONY_RELEASE_ROOT:-}" && ! -f "$source_repo/.symphony-release.json" &&
         -f "$source_repo/scripts/installation-release.py" ]] &&
       "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" app-workflow "$source_repo"; then
-    "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" codex "$source_repo" sym-codex "${original_args[@]}"
+    sym_codex_run_release "$source_repo" "${original_args[@]}"
     return "$?"
   fi
 
@@ -873,6 +903,16 @@ sym_codex_run() {
   fi
 
   if (( observer_mode )); then
+    if [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app ]]; then
+      # Direct observers do not inherit AgentRunner's project environment.
+      # Forward the already resolved binding, also to the required MCP child.
+      export SYMPHONY_PROJECT_ROOT="$project_root"
+      export SYMPHONY_SOURCE_REPO="$project_root"
+      export SYMPHONY_WORKFLOW_DIR="$source_repo"
+      export SYMPHONY_WORKFLOW_FILE="$workflow_file"
+      export SYMPHONY_WORKFLOW_INTERACTIVE_FILE="$interactive_workflow_file"
+      export SYMPHONY_WORKFLOW_DIALOG_FILE="$dialog_workflow_file"
+    fi
     codex_args+=(app-server)
   else
     export SYMPHONY_ACTIVE_REPO_ROOT="$workspace"
@@ -899,6 +939,11 @@ sym_codex_run() {
     else
       codex_args+=("$prompt")
     fi
+  fi
+
+  if [[ -n "${SYMPHONY_CODEX_SOURCED_CONTEXT:-}" ]]; then
+    printf '%s\0%s\0%s\0' "$project_root" "$PWD" "$source_repo" > "$SYMPHONY_CODEX_SOURCED_CONTEXT" || return 1
+    unset SYMPHONY_CODEX_SOURCED_CONTEXT
   fi
 
   if (( _sym_codex_sourced )); then

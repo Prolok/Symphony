@@ -18,7 +18,12 @@ bei `symphony-planning`.
 - Suche vorhandene Kommentare nach diesem Marker und nutze einen aktiven Treffer
   weiter; sonst erstelle einen neuen Kommentar in der Standardstruktur.
 - Fortschritt, Review, Test und Handoff bleiben in derselben Kommentar-ID.
-- Wenn der reguläre Linear-Edit-Pfad fehlt oder wegen HTTP 401, HTTP 403 ohne
+- Im App-Modus ausschließlich das injizierte `linear_graphql` oder den
+  gebundenen `symphony_linear`-MCP verwenden. Bei Ausfall eines Transports den
+  anderen verwenden; sind beide nicht verfügbar, den Zugriffsblocker sichtbar
+  melden. Kein Shell-/Mix-/Update-Skript-Fallback, keine privaten Envdateien
+  laden und keine unbestätigte Workpad-/Statusspeicherung behaupten.
+- Nur im Legacy-Modus: Wenn der reguläre Linear-Edit-Pfad fehlt oder wegen HTTP 401, HTTP 403 ohne
   Rate-Limit-Signal oder Auth ausfällt, aktualisiere bestehende Workpads lokal mit
   `SymphonyElixir.Workpad.update_tracker_workpad/2`. Der Helfer sucht
   vollständig paginiert genau einen Marker-Kommentar, lehnt leere,
@@ -85,6 +90,6 @@ widersprüchlich war.
   `WORKFLOW.md` oder aufgerufenen Skills verlangten Nachvollziehbarkeitskommentare,
   etwa für Originalbeschreibungen, Klärungsfragen oder kombinierte
   Review-Finding-Fix-Kommentare; sie ersetzen das Workpad nicht.
-- Ein separater Blocker-Kommentar ist bei bestehendem Workpad nur letzte Stufe,
+- Im Legacy-Modus ist ein separater Blocker-Kommentar bei bestehendem Workpad nur letzte Stufe,
   wenn sowohl reguläres Bearbeiten als auch
   `SymphonyElixir.Workpad.update_tracker_workpad/2` scheitern.

@@ -8,7 +8,8 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   alias SymphonyElixir.Linear.{CommentMutations, DurableState, IssueLease}
   alias SymphonyElixir.Workpad
 
-  @lookup "query SymphonyReceipt($id: String!) { comment(id: $id) { id body bodyData updatedAt user { id } issue { id } } }"
+  @lookup "query SymphonyReceipt($id: String!) { comment(id: $id) { id body bodyData quotedText resolvingUser { id } resolvingComment { id } updatedAt user { id } issue { id identifier } } }"
+  @issue_lookup "query SymphonyReceiptIssue($id: String!) { issue(id: $id) { id } }"
 
   @spec execute(map(), map(), (map() -> term()), map(), keyword()) :: term()
   def execute(binding, payload, request, context \\ %{}, opts \\ []) do
@@ -30,12 +31,20 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp execute_locked(binding, prepared, receipts, request, context, opts) do
     binding = Map.put(binding, :state_writer, Keyword.get(opts, :state_writer, &DurableState.write/2))
 
-    with :ok <- recover_before_write(binding, receipts, request, context),
-         {:ok, receipts} <- collect(receipts, &hydrate_receipt(binding, &1, request)),
+    with {:ok, receipts} <- collect(receipts, &hydrate_receipt(binding, &1, request)),
+         :ok <- recover_before_write(binding, receipts, request),
          :ok <- persist_intents(binding, receipts, context),
          {:ok, response} <- request.(prepared),
          :ok <- confirm_response(binding, receipts, response) do
       {:ok, response}
+    end
+  end
+
+  defp hydrate_receipt(_binding, %{"operation" => "commentCreate", "issue_id" => issue} = receipt, request) when is_binary(issue) do
+    if Regex.match?(~r/\A[A-Za-z][A-Za-z0-9_]*-[0-9]+\z/, issue) do
+      resolve_issue_identity(receipt, request)
+    else
+      {:ok, receipt}
     end
   end
 
@@ -55,6 +64,16 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp hydrate_receipt(_binding, receipt, _request), do: {:ok, receipt}
 
+  defp resolve_issue_identity(receipt, request) do
+    case request.(%{"query" => @issue_lookup, "variables" => %{"id" => receipt["issue_id"]}}) do
+      {:ok, %{status: 200, body: %{"data" => %{"issue" => %{"id" => id}}} = body}} when is_binary(id) ->
+        if Map.get(body, "errors", []) in [nil, []], do: {:ok, %{receipt | "issue_id" => id}}, else: {:error, :comment_issue_identity_unverified}
+
+      _ ->
+        {:error, :comment_issue_identity_unverified}
+    end
+  end
+
   @spec reconcile(map(), (map() -> term())) :: {:ok, [map()]} | {:error, term()}
   def reconcile(binding, request) do
     IssueLease.with_journal_lock(binding["state_root"], fn ->
@@ -72,7 +91,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp classify_records(records, binding, comment) do
-    matches = Enum.filter(records, &(&1["comment_id"] == comment["id"]))
+    matches = Enum.filter(records, &(&1["comment_id"] == comment["id"] and not rejected?(binding, &1)))
 
     cond do
       Enum.any?(matches, &matches?(&1, comment, binding)) -> :own
@@ -81,10 +100,12 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     end
   end
 
-  defp recover_before_write(binding, receipts, request, context) do
+  defp recover_before_write(binding, receipts, request) do
     with {:ok, records} <- intents(binding),
-         {:ok, recovered} <- collect(Enum.reject(records, &confirmed?(binding, &1)), &confirm_remote(binding, &1, request)) do
-      prior = Enum.filter(records, &(recovered?(binding, &1) and &1["context"] == context))
+         {:ok, recovered} <- collect(Enum.reject(records, &(confirmed?(binding, &1) or rejected?(binding, &1))), &confirm_remote(binding, &1, request)) do
+      # Another issue or a restarted runtime may have completed reconciliation.
+      # The original run/tool context is evidence, not a retry identity.
+      prior = Enum.filter(records, &recovered?(binding, &1))
       check_recovery(records, recovered, receipts, prior)
     end
   end
@@ -110,6 +131,10 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp recovered?(binding, record) do
     match?({:ok, %{"recovered" => true}}, DurableState.read(path(binding, record, "confirmed")))
+  end
+
+  defp rejected?(binding, record) do
+    match?({:ok, %{"state" => "rejected"}}, DurableState.read(path(binding, record, "rejected")))
   end
 
   defp confirmed?(binding, record) do
@@ -138,11 +163,34 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp confirm_response(binding, receipts, response) do
-    reduce_ok(receipts, fn receipt ->
-      comment = get_in(response, [:body, "data", receipt["field"], "symphonyReceipt"])
-      confirm_comment(binding, receipt, comment)
+    if definitively_rejected?(response) do
+      reduce_ok(receipts, &persist(binding, path(binding, &1, "rejected"), %{"state" => "rejected", "http_status" => response.status}))
+    else
+      reduce_ok(receipts, fn receipt ->
+        comment = response_comment(response, receipt["field"])
+        confirm_comment(binding, receipt, comment)
+      end)
+    end
+  end
+
+  defp response_comment(%{body: %{"data" => data}}, field) when is_map(data), do: get_in(data, [field, "symphonyReceipt"])
+  defp response_comment(_response, _field), do: nil
+
+  defp definitively_rejected?(%{status: status, body: body}) when is_map(body) do
+    is_nil(body["data"]) and (status in [401, 429] or pre_execution_errors?(body["errors"]))
+  end
+
+  defp definitively_rejected?(%{status: status}) when status in [401, 429], do: true
+  defp definitively_rejected?(_response), do: false
+
+  defp pre_execution_errors?(errors) when is_list(errors) and errors != [] do
+    Enum.all?(errors, fn error ->
+      is_map(error) and is_nil(error["path"]) and
+        get_in(error, ["extensions", "code"]) in ["GRAPHQL_PARSE_FAILED", "GRAPHQL_VALIDATION_FAILED", "RATELIMITED"]
     end)
   end
+
+  defp pre_execution_errors?(_errors), do: false
 
   defp confirm_comment(binding, receipt, comment) when is_map(comment) do
     if matches?(receipt, comment, binding),
@@ -153,6 +201,10 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp confirm_comment(_binding, _receipt, _comment), do: :ok
 
   defp confirm_remote(binding, record, request) do
+    if rejected?(binding, record), do: {:ok, result(record, "rejected")}, else: lookup_remote(binding, record, request)
+  end
+
+  defp lookup_remote(binding, record, request) do
     case request.(%{"query" => @lookup, "variables" => %{"id" => record["comment_id"]}}) do
       {:ok, %{status: 200, body: %{"data" => %{"comment" => comment}} = body}} when is_map(comment) ->
         reconcile_comment(binding, record, comment, Map.get(body, "errors", []))
@@ -175,10 +227,26 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp result(record, state), do: %{"comment_id" => record["comment_id"], "state" => state}
 
   defp matches?(record, comment, binding) do
-    comment["id"] == record["comment_id"] and get_in(comment, ["user", "id"]) == binding["user_id"] and
-      (is_nil(record["issue_id"]) or get_in(comment, ["issue", "id"]) == record["issue_id"]) and
-      Enum.all?(Map.take(record["input"], ["body", "bodyData"]), fn {key, value} -> comment[key] == value end)
+    author_id = Map.get(record, "author_id", binding["user_id"])
+
+    comment["id"] == record["comment_id"] and get_in(comment, ["user", "id"]) == author_id and
+      (is_nil(record["issue_id"]) or record["issue_id"] in [get_in(comment, ["issue", "id"]), get_in(comment, ["issue", "identifier"])]) and
+      Enum.all?(Map.take(record["input"], ~w(body bodyData quotedText resolvingUserId resolvingCommentId)), &field_matches?(&1, comment))
   end
+
+  defp field_matches?({"bodyData", expected}, comment), do: normalize_json(comment["bodyData"]) == normalize_json(expected)
+  defp field_matches?({"resolvingUserId", expected}, comment), do: get_in(comment, ["resolvingUser", "id"]) == expected
+  defp field_matches?({"resolvingCommentId", expected}, comment), do: get_in(comment, ["resolvingComment", "id"]) == expected
+  defp field_matches?({key, expected}, comment), do: Map.fetch(comment, key) == {:ok, expected}
+
+  defp normalize_json(value) when is_binary(value) do
+    case Jason.decode(value) do
+      {:ok, decoded} -> decoded
+      _ -> value
+    end
+  end
+
+  defp normalize_json(value), do: value
 
   defp intents(binding) do
     case File.ls(directory(binding)) do

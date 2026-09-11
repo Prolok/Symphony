@@ -22,6 +22,7 @@ defmodule MixGateScriptTest do
     printf 'labels=%s\\n' "${SYMPHONY_ISSUE_LABELS_JSON-unset}"
     printf 'project=%s\\n' "${SYMPHONY_PROJECT_ROOT-unset}"
     printf 'python=%s\\n' "${SYMPHONY_PYTHON-unset}"
+    printf 'secret_access=%s\\n' "${SYMPHONY_LINEAR_SECRET_ACCESS-unset}"
     printf 'mix_deps=%s\\n' "${MIX_DEPS_PATH-unset}"
     printf 'mix_build_root=%s\\n' "${MIX_BUILD_ROOT-unset}"
     printf 'mix_build_path=%s\\n' "${MIX_BUILD_PATH-unset}"
@@ -43,6 +44,7 @@ defmodule MixGateScriptTest do
         {"SYMPHONY_ISSUE_LABELS_JSON", ~s([{"name":"Requires Manual Review"}])},
         {"SYMPHONY_PROJECT_ROOT", "/tmp/wrong-project"},
         {"SYMPHONY_PYTHON", "/tmp/wrong-python"},
+        {"SYMPHONY_LINEAR_SECRET_ACCESS", "denied"},
         {"MIX_DEPS_PATH", "/tmp/wrong-deps"},
         {"MIX_BUILD_ROOT", "/tmp/wrong-build"},
         {"MIX_BUILD_PATH", "/tmp/wrong-build-path"}
@@ -64,6 +66,7 @@ defmodule MixGateScriptTest do
     assert output =~ "labels=unset"
     assert output =~ "project=unset"
     assert output =~ "python=unset"
+    assert output =~ "secret_access=denied"
     assert output =~ "mix_deps=unset"
     assert output =~ "mix_build_root=unset"
     assert output =~ "mix_build_path=unset"

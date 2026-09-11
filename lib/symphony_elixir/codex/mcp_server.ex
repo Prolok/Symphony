@@ -46,8 +46,8 @@ defmodule SymphonyElixir.Codex.MCPServer do
     workflow_file = env_value("SYMPHONY_WORKFLOW_FILE") || Workflow.default_workflow_file_path()
 
     with :ok <- logger_configurer.(),
-         :ok <- env_loader.(EnvFile.config_dir(env_files_root)),
          :ok <- workflow_setter.(workflow_file),
+         :ok <- env_loader.(EnvFile.config_dir(env_files_root)),
          {:ok, _apps} <- Application.ensure_all_started(:req) do
       :ok
     end

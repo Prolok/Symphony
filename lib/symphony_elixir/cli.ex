@@ -117,8 +117,8 @@ defmodule SymphonyElixir.CLI do
   defp format_env_file_error(reason), do: inspect(reason)
 
   defp load_and_start(workflow_path, env_files_dir, deps) do
-    with :ok <- deps.load_env_files.(env_files_dir),
-         :ok <- deps.set_workflow_file_path.(workflow_path),
+    with :ok <- deps.set_workflow_file_path.(workflow_path),
+         :ok <- deps.load_env_files.(env_files_dir),
          :ok <- deps.validate_startup_requirements.() do
       start_application(workflow_path, deps)
     else

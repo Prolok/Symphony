@@ -219,7 +219,7 @@ defmodule SymphonyScriptTest do
     assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, ["--port", "4001"], cd: project_dir)
     assert output =~ "symphony-stub args=--port 4001"
     assert output =~ "symphony-stub cwd=#{project_dir}"
-    assert output =~ "--observer\n"
+    assert output =~ "symphony-stub codex_command=\n"
     assert output =~ "symphony-stub project_root=\n"
     assert output =~ "symphony-stub source_repo=\n"
     assert output =~ "symphony-stub workflow_file=#{Path.join(repo_dir, "WORKFLOW.md")}"
@@ -229,6 +229,14 @@ defmodule SymphonyScriptTest do
     assert output =~ "symphony-stub worktrees_root=\n"
     refute File.exists?(Path.join(home_dir, ".local/bin/sym-codex"))
     refute File.exists?(Path.join(home_dir, ".local/bin/sym-watch"))
+  end
+
+  test "a regular release preserves the explicit local Codex override" do
+    %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
+    on_exit(fn -> Enum.each([home_dir, repo_dir, bin_dir], &File.rm_rf/1) end)
+    command = "custom-codex --profile local app-server"
+    assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_CODEX_COMMAND", command}])
+    assert output =~ "symphony-stub codex_command=#{command}\n"
   end
 
   test "symphony runs autoupdate before launching escript" do
@@ -381,7 +389,7 @@ defmodule SymphonyScriptTest do
     refute Enum.any?(results, fn {output, _status} -> output =~ "overlap" end)
   end
 
-  test "symphony issue symlink points the local codex command at the matching issue symlink" do
+  test "symphony issue symlink keeps release configuration without registering a new global command" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
     project_dir = Path.join(System.tmp_dir!(), "symphony-script-issue-project-#{System.unique_integer([:positive])}")
     issue_link = Path.join(bin_dir, "symphony-PRO-351")
@@ -402,7 +410,7 @@ defmodule SymphonyScriptTest do
     codex_issue_link = Path.join(home_dir, ".local/bin/sym-codex-PRO-351")
     refute File.exists?(codex_issue_link)
     assert output =~ "symphony-stub cwd=#{project_dir}"
-    assert output =~ "--observer"
+    assert output =~ "symphony-stub codex_command=\n"
     assert output =~ "symphony-stub project_root=\n"
     assert output =~ "symphony-stub workflow_file=#{Path.join(repo_dir, "WORKFLOW.md")}"
     assert output =~ "symphony-stub workflow_interactive_file=#{Path.join(repo_dir, "WORKFLOW_INTERACTIVE.md")}"

@@ -193,8 +193,11 @@ defmodule SymphonyElixir.Linear.AppAuth do
       {:ok, %{status: 200, body: body}} ->
         verify_viewer(body, binding, assignee)
 
+      {:ok, %{status: 400, body: body}} when is_map(body) ->
+        identity_error(body, :linear_app_identity_unavailable)
+
       {:ok, %{status: 403, body: body}} ->
-        if rate_limited?(body), do: {:error, :linear_app_rate_limited}, else: {:error, :linear_app_identity_denied}
+        identity_error(body, :linear_app_identity_denied)
 
       {:ok, %{status: 401}} ->
         {:error, :linear_app_token_expired}
@@ -212,6 +215,10 @@ defmodule SymphonyElixir.Linear.AppAuth do
 
   defp verify_viewer(body, binding, assignee) do
     if rate_limited?(body), do: {:error, :linear_app_rate_limited}, else: match_viewer(body, binding, assignee)
+  end
+
+  defp identity_error(body, fallback) do
+    if rate_limited?(body), do: {:error, :linear_app_rate_limited}, else: {:error, fallback}
   end
 
   defp match_viewer(%{"data" => %{"viewer" => %{"id" => user, "app" => true, "organization" => %{"id" => workspace}} = viewer}} = body, binding, assignee) do

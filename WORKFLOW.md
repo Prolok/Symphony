@@ -73,21 +73,9 @@ agent:
   max_concurrent_agents: 10
   max_turns: 20
 codex:
-  command: >-
-    common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)";
-    if [ -z "$common_dir" ]; then
-      echo "Unable to determine git common dir for sym-codex" >&2;
-      exit 1;
-    fi;
-    source_repo="$(cd "$common_dir/.." && pwd -P)";
-    if [ -x "$source_repo/sym-codex" ]; then
-      exec "$source_repo/sym-codex" --observer;
-    fi;
-    if command -v sym-codex >/dev/null 2>&1; then
-      exec "$(command -v sym-codex)" --observer;
-    fi;
-    echo "sym-codex not found in $source_repo or PATH" >&2;
-    exit 127
+  # Der lokale Release bindet dieses Standardkommando an seinen eigenen Helfer.
+  # Andere Kommandos und SYMPHONY_CODEX_COMMAND behalten ihren konfigurierten Wert.
+  command: sym-codex --observer
   approval_policy: never
   thread_sandbox: danger-full-access
   read_timeout_ms: 30000
@@ -231,8 +219,14 @@ bleibt für Projektwerkzeuge aktiv. Legacy-, Custom-Codex- und SSH-Aufrufe
 behalten ihren Shell-Vertrag; lokale Toolchain-Pfade werden nicht über SSH
 exportiert. Fehlt die passende Python-Laufzeit, stoppt der Launcher vor
 Autoupdate, Build und Dienststart mit einer kurzen Anforderungsmeldung.
+Das vollständige `make all` benötigt für die App-/Legacy-Testmatrix Python
+3.11+, auch bei Legacy-Konfiguration. Mit Legacy-Python 3.10 bleibt der Start
+möglich; ein angenommenes Autoupdate wird vor dem Pull sichtbar zurückgestellt,
+weil das vollständige Update-Gate dort nicht ausführbar ist.
 Der direkte Aufruf von `bin/symphony` benötigt dagegen bereits erreichbares
-`escript`, etwa über `mise exec -- bin/symphony`.
+`escript`, etwa über `mise exec -- bin/symphony`. Der lokale Standard-Worker
+wird auch ohne Release-Variable an den Helfer des ermittelten Symphony-Checkouts
+gebunden und benötigt keinen globalen `sym-codex`-Link.
 
 Autoupdate und Build laufen unter einem checkout-spezifischen OS-Lock über
 die Python-Standardbibliothek; ein externes `flock` ist nicht erforderlich.
@@ -240,17 +234,40 @@ Signale beenden auch die Build-Kinder, bevor der Lock freigegeben wird.
 Die Lockdatei wird nicht gelöscht; der Dienst erbt keinen Lock.
 Das aufrufende Projekt-CWD bleibt erhalten, während Workflow-Dateien und
 Mix-Artefakte an den aufgelösten Symphony-Checkout gebunden bleiben.
+Der eigenständige Release-Checkout übernimmt den aktuellen Arbeitsstand samt
+gestagten Löschungen, Umbenennungen und Datei-/Verzeichniswechseln;
+ignorierte Dateien werden nicht übernommen.
 Im App-Modus bereitet der autorisierte Projektstart vor dem Versiegeln des
 Releases genau eine lokale Codex-Trust-Freigabe für den Fachprojektroot vor
 (bei Git-Worktrees den Git-common-root). Dadurch verändert der erste
 `thread/start` die versiegelte Konfiguration nicht. Persönliche MCPs und
 Plugins bleiben gesperrt; die Manifestprüfung gilt weiterhin für die gesamte
 vorbereitete `config.toml`.
-Die vorhandenen Worktree-Hooks erzeugen ausführbare Issue-Befehle unter
-`~/.local/bin` für Bash und zsh und entfernen nur passende Links.
+Reguläre Release-Starts erzeugen keine globalen Issue-Befehle. Für manuelle
+Ticketstarts aus dem Fachprojektroot den absoluten `sym-codex`-Pfad der
+gewünschten Installation mit Ticket-ID verwenden. Nur Hooks außerhalb eines
+Releases registrieren weiter Issue-Befehle unter `~/.local/bin`; vorhandene
+Links bleiben gebunden, Cleanup entfernt nur passende Links.
 
 App-Kommentarschreibvorgänge und ihre Wiederaufnahme werden pro Projektjournal
-prozessübergreifend serialisiert. Konkurrierende Journalzugriffe warten bis zu
+prozessübergreifend serialisiert. Jede App-Anfrage darf eine Kommentar-ID nur
+einmal verändern; mehrfache Writes derselben ID werden vor HTTP mit
+`invalid_comment_mutation` abgewiesen und müssen einzeln gesendet werden.
+Optionale GraphQL-Felder bleiben bei fehlenden Variablen ausgelassen;
+explizites `null` bleibt erhalten. Ticketkennungen werden vor der Intent-Anlage
+lesend zu Issue-IDs aufgelöst. JSON-Inhalt und die String-Ausgabe von `bodyData`
+werden strukturell verglichen. Kommentarupdates unterstützen die rücklesbaren
+Felder `body`, `bodyData`, `quotedText`, `resolvingUserId` und
+`resolvingCommentId`; andere Update-Felder werden vor HTTP abgewiesen.
+Eindeutige 401/429 ohne Daten werden auch bei leerem oder textuellem Body als
+abgewiesen protokolliert; unklare Ausgänge werden weiterhin abgeglichen.
+GraphQL-`RATELIMITED` ohne Daten und ohne Feldpfad wird ebenso als eindeutige
+Ablehnung erfasst, auch bei HTTP 400/403. Antworten mit Daten oder unklaren
+zusätzlichen Fehlern bleiben abgleichpflichtig.
+Historische Journalbelege werden auch nach einem kontrollierten App-Wechsel
+gegen ihren gespeicherten Autor geprüft. Neue Writes und Kommentarupdates
+bleiben an die aktuell geprüfte App-Identität gebunden.
+Konkurrierende Journalzugriffe warten bis zu
 10 Sekunden auf den Lock (`comment_journal_busy` bei Zeitüberschreitung,
 `comment_journal_unavailable` bei Helfer-/Backendfehlern). GraphQL-Aufrufe ohne
 Kommentarschreibvorgang benötigen keinen Journal-Lock. Echte konkurrierende
@@ -259,6 +276,11 @@ Der gebundene Linear-MCP überträgt UTF-8-JSON als unveränderte Bytes mit gena
 einer Protokollzeile pro Nachricht, einschließlich Unicode und Text-Whitespace.
 
 ### Linear-Zugriff
+
+CLI, MCP und manuelle Skripthelfer aktivieren den ausgewählten Workflow vor
+dem öffentlichen Laden der Projektumgebung. Damit sind auch bei abweichenden
+Workflowdateien deren direkte oder indirekte Secretreferenzen von Anfang an
+vom Export ausgeschlossen.
 
 Der Agent sollte mit Linear kommunizieren können, entweder über einen konfigurierten Linear-MCP-Server oder über das injizierte Tool `linear_graphql`. HTTP 401, HTTP 403 ohne Rate-Limit-Signal oder als `auth` klassifizierte `linear_graphql`-Fehler gelten dabei wie fehlender Linear-Zugriff für den normalen Tool-Pfad. `classification: "rate_limited"`, `extensionsCodes` wie `RATELIMITED` und `rateLimit.limited: true` sind dagegen Rate-Limit-Signale und kein fehlender Linear-Zugriff; bloße nicht erschöpfte `rateLimit`-Header ohne `limited: true` bleiben Diagnosehinweise.
 
@@ -729,7 +751,14 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
    dokumentiere PR-Nummer oder URL, aktuelle Head-SHA, den nicht verifizierbaren
    Labelstand und die notwendige Wiederholung nach behobenem Label-Lookup,
    verschiebe nach `BLOCKER` und beende den Turn.
-   Der Live-Refresh startet `mix run` aus dem durch `SYMPHONY_WORKFLOW_DIR`
+   Im App-Modus führt der Hauptagent den vollständig paginierten Live-Labelabruf
+   über das injizierte `linear_graphql` oder das gebundene `symphony_linear`-MCP
+   aus. Der Watch-Helper übergibt nach seinen GitHub-Prüfungen mit Exit `8` an
+   diesen noch offenen Schritt; das ist keine Merge-Freigabe. Danach das
+   gegebenenfalls erforderliche menschliche Approval und den unveränderten
+   lokalen/Remote-/PR-Head prüfen und die Evidenz im Workpad halten. Kein
+   Shell-/Mix-Fallback im App-Modus.
+   Nur im Legacy-Modus startet der Live-Refresh `mix run` aus dem durch `SYMPHONY_WORKFLOW_DIR`
    bezeichneten Symphony-Mix-Kontext und aktiviert dort vor dem Tracker-Zugriff
    die durch `SYMPHONY_WORKFLOW_FILE` bezeichnete Workflowkonfiguration. Die
    projektspezifische Env-Konfiguration wird davon getrennt weiterhin aus dem
@@ -839,7 +868,7 @@ der globale Skill `symphony-planning` die maßgebliche Quelle.
 - Bearbeite den Issue-Body/die Beschreibung nicht für Planung oder Fortschrittsverfolgung. Ausnahmen sind nur die automatisierte Beschreibungspflege in `Planung (AI)` und das einmalige `Erstkontakt-Protokoll für neue Items`.
 - Verwende pro Issue genau einen persistierenden Workpad-Kommentar (`## Symphony Workpad`).
 - Von aufgerufenen Skills ausdrücklich geforderte separate Nachvollziehbarkeitskommentare sind neben dem Workpad zulässig; sie ersetzen den Workpad-Kommentar nicht und zählen nicht als zusätzliche Workpads. Im Review-Kontext bedeutet das kombinierte Nach-Fix-Kommentare pro behandeltem Finding, keine getrennten Vorab-Finding-Kommentare plus spätere Fix-Kommentare.
-- Wenn Kommentarbearbeitung in der Sitzung nicht verfügbar ist, verwende das Update-Skript. Melde nur dann einen Blocker, wenn sowohl MCP-Bearbeitung als auch skriptbasierte Bearbeitung nicht verfügbar sind.
+- Wenn Kommentarbearbeitung in der Sitzung nicht verfügbar ist, verwende im Legacy-Modus das Update-Skript; dort gilt ein Blocker erst, wenn sowohl MCP-Bearbeitung als auch skriptbasierte Bearbeitung nicht verfügbar sind. Im App-Modus gilt ausschließlich der gebundene Toolzugriff aus `Linear-Zugriff`: verbleibenden gebundenen Transport nutzen, bei Ausfall beider Transporte sichtbar stoppen; kein Shell-/Mix-/Update-Skript-Fallback.
 - Automatische Commits sind ausschließlich in `Test (AI)` und `Merge (AI)` zulässig. Die einzige zusätzliche Ausnahme ist der einmalige Einstiegssnapshot `<Issue-Key> Review (AI) Autocommit` beim ersten Eintritt in `Review (AI)`. Verwende sonst nur `<Issue-Key> Test (AI) Autocommit` oder `<Issue-Key> Merge (AI) Autocommit`.
 - Automatische Commit-Nachrichten verwenden als Betreff `<Issue-Key> <Status> Autocommit` und zusätzlich einen kurzen Body. Der Body hält fest, dass der Commit im genannten Schritt erstellt wurde, den bis dahin offenen Arbeitsstand sichert und kein Nachweis für den Abschluss dieses Schritts ist.
 - Der vorgeschaltete `symphony-pull` darf uncommittete Änderungen nur staschen und wiederherstellen, nicht committen.

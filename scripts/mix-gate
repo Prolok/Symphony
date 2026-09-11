@@ -27,7 +27,6 @@ runtime_env_vars=(
   SYMPHONY_PYTHON
   SYMPHONY_ROOT_DIR
   SYMPHONY_LINEAR_ENV_DIR
-  SYMPHONY_LINEAR_SECRET_ACCESS
   SYMPHONY_LINEAR_AUTH_MODE
   SYMPHONY_LINEAR_BINDING_HASH
   SYMPHONY_CODEX_STATE_ROOT
@@ -40,6 +39,8 @@ for env_var in "${runtime_env_vars[@]}"; do
 done
 
 # Gates never load operator root credentials or inherit a selected app binding.
+# Preserve an inherited secret-access denial even for `mix run`; only test
+# fixtures may explicitly clear it for their synthetic credential sources.
 unset LINEAR_APP_SECRET LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID
 unset LINEAR_APP_INSTALLATION_ID
 unset LINEAR_APP_SECRET_ENV

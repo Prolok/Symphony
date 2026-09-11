@@ -58,6 +58,10 @@ getrennt dokumentiert.
 - `mise` ab 2026.3.17 und die installierte Toolchain aus `mise.toml`
   (Erlang/OTP 28, Elixir 1.19.5 für OTP 28)
 - Git ab 2.31, Python ab 3.11 als `python3` für den App-Modus (Legacy: 3.10), Make und Codex CLI im `PATH`
+- Das vollständige Entwicklungsgate `make all` prüft beide Modi und benötigt
+  immer Python 3.11+. Auf einem Legacy-Rechner mit Python 3.10 wird ein
+  bestätigtes Autoupdate vor dem Pull zurückgestellt und der vorhandene Stand
+  gestartet; dabei wird kein Test übersprungen und kein Update als geprüft ausgegeben.
 - Build-Werkzeuge: unter macOS die Xcode Command Line Tools
   (`xcode-select --install`), unter Ubuntu `build-essential`. Für lokale
   Plattformtests zusätzlich zsh; sie führen die Hilfsbefehle aus Bash und
@@ -209,17 +213,25 @@ automatisch den nächsten freien Port.
 Für den direkten Aufruf des Build-Artefakts muss Erlang bereits aktiv sein,
 zum Beispiel `mise exec -- bin/symphony`. `bin/symphony` alleine aktiviert
 keine Laufzeit und benötigt `escript` im `PATH`; es übernimmt auch keinen
-Autoupdate-/Build-Preflight.
+Autoupdate-/Build-Preflight. Der Standard-Worker wird auch hier über den
+absoluten Helferpfad des ermittelten Symphony-Checkouts gestartet; ein globaler
+`sym-codex`-Link ist dafür nicht erforderlich.
 
 Symlinks und Pfade mit Leerzeichen werden unterstützt. Ein Aufruf aus einem
 anderen Projektverzeichnis behält dieses als Projekt-CWD; Workflow-Dateien,
 Abhängigkeiten und Build-Artefakte gehören zum aufgelösten Symphony-Checkout.
-Die Worktree-Hooks legen `symphony-<Ticket-ID>` und `sym-codex-<Ticket-ID>` unter
-`~/.local/bin` an und entfernen beim Cleanup nur noch passende Links. Füge
-dieses Verzeichnis zum `PATH` deiner Bash oder zsh hinzu. Die Befehle sind
-ausführbare Skripte; auch beim Issue-Link kann die Ticket-ID explizit übergeben
-werden, etwa `sym-codex-PRO-678 PRO-678`. `sym-codex <Ticket-ID>` startet Codex im ausgewählten
-Worktree. Das zusätzliche Sourcing von `sym-codex` wird nur in Bash unterstützt.
+Reguläre Release-Starts registrieren keine neuen globalen Ticketbefehle.
+Für einen manuellen Ticketstart verwende aus dem Fachprojektroot den absoluten
+`sym-codex`-Pfad des gewünschten Symphony-Checkouts mit der Ticket-ID, etwa
+`/pfad/zu/Symphony/sym-codex PRO-678`. Dieser Einstieg wählt den Worktree und
+bereitet im App-Modus einen eigenen gebundenen Release vor.
+Nur Hooks außerhalb eines Releases registrieren weiterhin
+`symphony-<Ticket-ID>` und `sym-codex-<Ticket-ID>` unter `~/.local/bin`;
+bestehende Befehle bleiben an ihre bisherige Installation gebunden. Cleanup
+entfernt nur passende Links. Die ausführbaren Skripte funktionieren in Bash
+und zsh; zusätzliches Sourcing von `sym-codex` wird nur in Bash unterstützt.
+Auch beim App-Release-Start bleibt diese Shell danach im gewählten Worktree
+mit aktivierter Projekt-Venv; der Rückgabecode von Codex bleibt erhalten.
 
 Mix-Artefakte werden nicht zwischen Git-Checkouts geteilt. Jeder Haupt-Checkout
 und jeder Worktree verwendet sein eigenes `deps` und `_build`; insbesondere

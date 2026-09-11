@@ -67,6 +67,40 @@ defmodule AutoupdateScriptTest do
              "make args=all mix_deps=unset mix_build_root=unset mix_build_path=unset\n"
   end
 
+  test "Legacy Python 3.10 defers an accepted update before changing the checkout" do
+    %{root_dir: root_dir, seed_dir: seed_dir, worktree_dir: worktree_dir} = build_git_fixture!()
+    %{bin_dir: bin_dir, make_log: make_log} = build_make_fixture!(root_dir)
+    on_exit(fn -> File.rm_rf(root_dir) end)
+    old_head = git_output!(worktree_dir, ["rev-parse", "HEAD"])
+    push_remote_commit!(seed_dir, "v2\n", "remote update")
+    python = System.find_executable("python3")
+    fake_python = Path.join(bin_dir, "python3")
+    File.rm(fake_python)
+
+    File.write!(fake_python, """
+    #!/bin/bash
+    if [[ "$1" == -c ]]; then
+      shift
+      exec #{shell_quote(python)} -c 'import sys; sys.version_info=(3,10,0); code=sys.argv.pop(1); exec(code)' "$@"
+    fi
+    exec #{shell_quote(python)} "$@"
+    """)
+
+    File.chmod!(fake_python, 0o755)
+    assert {output, 0} = run_autoupdate(worktree_dir, "j\n", bin_dir, make_log)
+    assert output =~ "Update nicht ausgeführt: make all benötigt Python 3.11+"
+    assert git_output!(worktree_dir, ["rev-parse", "HEAD"]) == old_head
+    refute File.exists?(make_log)
+
+    {output, status} =
+      System.cmd("/usr/bin/make", ["-f", Path.expand("../Makefile", __DIR__), "python-check"], env: SymphonyElixir.TestSupport.script_env(bin_dir), stderr_to_stdout: true)
+
+    assert status != 0
+    assert output =~ "Python 3.11+ ist für die vollständige App-/Legacy-Testmatrix erforderlich"
+  end
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+
   defp build_git_fixture! do
     root_dir = Path.join(System.tmp_dir!(), "symphony-autoupdate-#{System.unique_integer([:positive])}")
     remote_dir = Path.join(root_dir, "remote.git")

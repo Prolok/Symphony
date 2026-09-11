@@ -96,15 +96,17 @@ defmodule SymphonyElixir.LinearAppPathsTest do
   end
 
   test "app rate limits retain their classification through dynamic and MCP tool responses" do
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn _, _ ->
-      {:ok, %{status: 429, body: %{}}}
-    end)
+    for status <- [400, 403, 429] do
+      Application.put_env(:symphony_elixir, :linear_client_request_fun, fn _, _ ->
+        {:ok, %{status: status, body: %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}}}
+      end)
 
-    assert %{"success" => false, "output" => output} = DynamicTool.execute("linear_graphql", "{ viewer { id } }")
-    assert %{"error" => %{"classification" => "rate_limited"}} = Jason.decode!(output)
-    assert %{"isError" => true, "content" => [%{"text" => output}]} = LinearGraphqlTool.mcp_call("{ viewer { id } }")
-    assert %{"error" => %{"classification" => "rate_limited"}} = Jason.decode!(output)
-    refute_received :http_write
+      assert %{"success" => false, "output" => output} = DynamicTool.execute("linear_graphql", "{ viewer { id } }")
+      assert %{"error" => %{"classification" => "rate_limited"}} = Jason.decode!(output)
+      assert %{"isError" => true, "content" => [%{"text" => output}]} = LinearGraphqlTool.mcp_call("{ viewer { id } }")
+      assert %{"error" => %{"classification" => "rate_limited"}} = Jason.decode!(output)
+      refute_received :http_write
+    end
   end
 
   test "fallback EnvFile loading cannot change pinned auth while personal keys remain ignored", %{root: root} do

@@ -285,7 +285,7 @@ defmodule SymphonyElixir.LinearAppAuthTest do
   end
 
   test "identity rate limits and errors stay distinct with no token churn", ctx do
-    for status <- [200, 403, 429] do
+    for status <- [200, 400, 403, 429] do
       assert {:error, :linear_app_rate_limited} =
                call(ctx,
                  request: fn _, _ ->
@@ -296,6 +296,11 @@ defmodule SymphonyElixir.LinearAppAuthTest do
 
     for result <- [{:ok, %{status: 403}}, {:ok, %{status: 403, body: %{}}}] do
       assert {:error, :linear_app_identity_denied} = call(ctx, request: fn _, _ -> result end)
+    end
+
+    for body <- [%{}, "unavailable", nil] do
+      request = fn _, _ -> {:ok, %{status: 400, body: body}} end
+      assert {:error, :linear_app_identity_unavailable} = call(ctx, request: request)
     end
 
     for fun <- [fn _, _ -> {:error, "synthetic-token"} end, fn _, _ -> raise "synthetic-token" end] do

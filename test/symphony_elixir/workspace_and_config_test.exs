@@ -1952,6 +1952,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "release command binding preserves custom workflow commands and explicit overrides" do
+    override = System.get_env("SYMPHONY_CODEX_COMMAND")
+    on_exit(fn -> restore_env("SYMPHONY_CODEX_COMMAND", override) end)
+    System.delete_env("SYMPHONY_CODEX_COMMAND")
+    System.put_env("SYMPHONY_RELEASE_ROOT", "/synthetic/release with spaces")
+
+    for command <- ["custom-agent --profile local app-server", "codex app-server"] do
+      write_workflow_file!(Workflow.workflow_file_path(), codex_command: command)
+      assert Config.local_codex_command() == command
+    end
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "sym-codex --observer")
+    assert Config.local_codex_command() == "'/synthetic/release with spaces/sym-codex' --observer"
+    System.put_env("SYMPHONY_CODEX_COMMAND", "explicit --profile personal")
+    assert Config.local_codex_command() == "explicit --profile personal"
+    System.put_env("SYMPHONY_CODEX_COMMAND", "  ")
+    assert Config.local_codex_command() == "'/synthetic/release with spaces/sym-codex' --observer"
+    System.delete_env("SYMPHONY_RELEASE_ROOT")
+    helper = Path.join(Path.dirname(Workflow.default_workflow_file_path()), "sym-codex")
+    command = Config.local_codex_command()
+    assert command == "'#{helper}' --observer"
+    assert {output, 0} = System.cmd("/bin/bash", ["--noprofile", "--norc", "-c", "PATH=/usr/bin:/bin #{command} --help"], stderr_to_stdout: true)
+    assert output =~ "Usage:"
+
+    python = System.get_env("SYMPHONY_PYTHON")
+    on_exit(fn -> restore_env("SYMPHONY_PYTHON", python) end)
+    System.delete_env("SYMPHONY_PYTHON")
+    File.write!(Workflow.workflow_file_path(), "---\ntracker:\n  kind: linear\n  auth_mode: app\ncodex:\n  command: sym-codex --observer\n---\n")
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+    {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+    app_command = Config.local_codex_command()
+    assert app_command =~ "SYMPHONY_PYTHON="
+    assert {app_output, 0} = System.cmd("/bin/bash", ["--noprofile", "--norc", "-c", "PATH=/usr/bin:/bin #{app_command} --help"], stderr_to_stdout: true)
+    assert app_output =~ "Usage:"
+  end
+
   test "config reads defaults for optional settings" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)

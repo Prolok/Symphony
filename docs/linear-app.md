@@ -39,6 +39,14 @@ oder neuen Provider sind nötig. Der gemeinsame Workflow enthält dafür ausschl
 Variablenreferenzen für die Bindung; `client_secret_env: LINEAR_APP_SECRET`
 ist der feste Secretname. Eine zusätzliche Auswahlvariable ist nicht nötig;
 vorhandene interne Unterstützung anderer Secretreferenzen bleibt erhalten.
+Bei einer indirekten Referenz wie `$SECRET_SELECTOR` liest der öffentliche
+Loader zuerst ausschließlich deren Namen aus beiden Projektdateien. Alle dort
+referenzierten Secret-Schlüssel werden bereits vor dem ersten Export ausgeschlossen,
+auch wenn `.env.local` einen anderen Namen auswählt oder der Secret-Eintrag vor
+der Auswahlvariable steht. Secretwerte werden nur im geschützten Auth-Pfad gelesen.
+CLI, MCP und manuelle Skripthelfer aktivieren deshalb den ausgewählten Workflow
+vor dem ersten öffentlichen Env-Laden, auch beim frischen Start mit einem
+anderen Workflow als dem Default des Arbeitsverzeichnisses.
 
 Der Zustandspfad ist fest **`<gebundener Fachprojektroot>/.symphony/state`**,
 unabhängig von Release-, Worktree- oder späterem Prozess-CWD. Dafür gibt es keine
@@ -154,6 +162,8 @@ Für eine extern bereitgestellte Secretvariable bleibt die bestehende
 MCP-Vererbung über `env_vars` (nur der Name) unterstützt. Modell-Shells schließen
 Secretvariablen aus und erhalten `SYMPHONY_LINEAR_SECRET_ACCESS=denied`. Damit
 scheitert auch ein erneuter EnvFile-/Mix-/Launcher-Aufruf beim Secretzugriff.
+`scripts/mix-gate` erhält diese Sperre auch bei `mix run`; nur die Testfixtures
+heben sie für ihre synthetischen Quellen ausdrücklich auf.
 Workspace-/Lifecycle-Hooks, Git-/Cleanup-Helfer, SSH-Transport und fachliche
 Lock-Helfer erhalten dieselbe Sperre. Shell-Snapshots und Codex-Hooks bleiben im
 App-Kontext deaktiviert. Die gebundene MCP-Konfiguration gibt nur dem vorgesehenen
@@ -171,12 +181,38 @@ werden.
 
 ## Gebundene Ressourcen und Schreibwege
 
-Jeder reguläre Start erstellt einen eigenständigen Release-Checkout. Ein
+Jeder reguläre Start erstellt einen eigenständigen Release-Checkout aus dem
+aktuellen Arbeitsstand einschließlich gestagter Löschungen, Umbenennungen und
+Datei-/Verzeichniswechsel. Ignorierte Dateien werden nicht übernommen. Ein
 bestätigtes Update erfolgt dort vor Build und Aktivierung. `autoupdate` verändert
 keinen bereits versiegelten Stand. Das Manifest `.symphony-release.json` enthält
 Code-, Helfer-, Skill-, Build- und Workflowhashes. Spätere CLI-/MCP-Kinder prüfen
 die unveränderlichen Dateien und verwenden `mix run --no-compile` im selben
 Release. Eine andere Installation ersetzt weder dessen Build noch seine Links.
+
+Reguläre Releases registrieren keine globalen Ticketbefehle. Ein manueller
+Start erfolgt aus dem Fachprojektroot über den absoluten `sym-codex`-Pfad der
+gewünschten Installation plus Ticket-ID. Vorhandene globale Befehle bleiben
+an ihre bisherige Installation gebunden. Beim Sourcing in Bash gibt der
+Release-Kindprozess seine gewählten Projekt-/Worktree-/Release-Verzeichnisse
+über eine temporäre Datei unter dem ignorierten `.symphony/installations/` zurück. Die Eltern-Shell übernimmt
+Worktree und Venv, entfernt die Datei und erhält den Codex-Rückgabecode.
+Die Datei enthält ausschließlich Pfade; ihr Verweis wird vor Codex entfernt.
+
+Der lokale Standard `codex.command: sym-codex --observer` wird im Release auf
+dessen eigenen Helfer aufgelöst. Ohne Release-Variable, etwa beim direkten
+`mise exec -- bin/symphony`, wird der Helfer aus dem ermittelten Symphony-Checkout
+absolut gebunden. Ein globaler Link ist nicht erforderlich. Im App-Modus gilt dies auch für den
+Schema-Default `codex app-server`; nur diese Standardaufrufe erhalten nach dem
+Shell-Login den geprüften lokalen Toolchain-PATH. Andere konfigurierte Kommandos
+und ein explizites `SYMPHONY_CODEX_COMMAND` bleiben unverändert; deren Betreiber
+verantworten die Bindung der verwendeten Helfer. SSH verwendet das dort
+konfigurierte Kommando und benötigt dort erreichbare Helfer.
+
+Legacy-Laufzeit bleibt mit Python 3.10 möglich. Das vollständige Entwicklungsgate
+prüft auch App-Code und benötigt unabhängig vom gewählten Modus Python 3.11+.
+Ein angenommenes Update unter Legacy-Python 3.10 wird vor dem Pull sichtbar
+zurückgestellt; der vorhandene Stand startet weiter. Keine App-Tests entfallen.
 
 Lokale Workflowänderungen bleiben nachladbar. Wechsel von Auth-Modus, Bindung
 oder menschlichem Scope benötigen einen Neustart nach Ende aktiver Turns.
@@ -192,11 +228,37 @@ aktiviert. Die OpenAI-Anmeldung bleibt an ihrer bisherigen Credential-Referenz;
 Linear-Tokens bleiben ausschließlich im Speicher ihrer jeweiligen Client-Laufzeit.
 Codex-Sessions bleiben unter `state_root/codex/<installation_id>` releaseübergreifend
 erhalten. Vorhandene Sessions werden bei einer Migration ausdrücklich übernommen.
+Parallele erste Worker dürfen dieselben Session-Verknüpfungen anlegen; ein
+bereits vorhandener Link wird nur mit identischem Ziel akzeptiert. Direkte
+Observer-Starts übergeben den ermittelten Fachprojektroot auch ohne geerbte
+Projektvariablen an ihren erforderlichen Linear-MCP.
+
+Der Merge-Watch-Helper hat aus der App-Modell-Shell keinen Auth-Zugriff. Nach
+seinen GitHub-Prüfungen liefert er Exit `8`; das Merge-Gate bleibt offen. Der
+Hauptagent liest anschließend die aktuellen Labels über den gebundenen
+Linear-Toolzugriff und prüft das gegebenenfalls erforderliche menschliche
+Approval auf dem unveränderten PR-Head. Dispatch-Labels ersetzen diesen
+Live-Lookup nicht. Legacy behält den lokalen Tracker-Refresh.
 
 Tracker, dynamisches `linear_graphql`, MCP, Mix-Fallback und Dialogantworten benutzen
 denselben `Linear.Client`. Kommentar-IDs und API-Fassungen werden unabhängig von
 den durch das Modell angeforderten Feldern erfasst. GraphQL wird strukturell
 geparst, inklusive Alias, Fragment, Variablen, Inline-Input und Teilerfolgen.
+Ausgelassene optionale Eingabefelder bleiben ausgelassen; explizites `null` und
+Variablendefaults bleiben erhalten. Ticketkennungen als `issueId` werden vor
+der Schreibabsicht lesend zur kanonischen Issue-ID aufgelöst; ein fehlgeschlagener
+Lookup verhindert den Write. Frühere Kennungen im Journal bleiben über die
+zurückgelesene Issue-Kennung abgleichbar.
+`bodyData` wird beim Vergleich als JSON normalisiert, weil Linear JSON-Input
+und eine serialisierte String-Ausgabe verwendet. Updates von `body`, `bodyData`,
+`quotedText`, `resolvingUserId` und `resolvingCommentId` werden anhand ihrer
+zurückgelesenen Werte bestätigt. Andere Update-Felder, etwa Abonnementsteuerung,
+werden vor HTTP mit `invalid_comment_mutation` abgewiesen, da ihr Erfolg nach
+einer verlorenen Antwort nicht über den Kommentar nachgewiesen werden kann.
+Eine App-Anfrage darf jede Kommentar-ID höchstens einmal verändern.
+Mehrere aliased Writes derselben ID werden vor HTTP und Intent-Persistenz mit
+`invalid_comment_mutation` abgewiesen: Nach verlorener Batch-Antwort könnte nur
+die letzte Fassung abgeglichen werden. Solche Updates einzeln nacheinander senden.
 Eine vom Auth-Cache unabhängige hostlokale Journalsperre schützt Abgleich,
 Schreibabsicht, HTTP und Bestätigung gegen parallele Clients. Die bestehende
 Issue-Sperre bleibt separat. Eine Schreibabsicht wird vor HTTP synchron persistiert, die Bestätigung danach
@@ -204,11 +266,28 @@ atomar ergänzt. Bei Updates werden Autor und Issue vorher geprüft. `:ok`-Aufru
 und Memory-Adapter behalten ihren Vertrag.
 
 Das Journal enthält Workspace, Issue, Kommentar-ID, Ausgabeart, Installation,
-Lauf/Phase, beabsichtigte und bestätigte Fassung. Ein Neustart gleicht offene
+Autor, Lauf/Phase, beabsichtigte und bestätigte Fassung. Historische Belege behalten
+bei einem kontrollierten App-Wechsel im selben Workspace ihre gespeicherte
+Autorenbindung. Sie werden gegen diesen Autor abgeglichen und nicht der neuen
+App zugeschrieben; neue Writes und Updates benötigen weiterhin die aktuelle
+App-Identität. Ein Neustart gleicht offene
 Schreibabsichten per ID/Autor/Fassung ab. Ungeklärte Ausgänge stoppen weitere
 Kommentarwrites sichtbar; eine bereits erfolgreiche Ausgabe wird nicht blind neu
 angelegt. Die Fehlerantwort nennt die betroffenen IDs. Diese IDs zurücklesen und
 den vorhandenen Kommentar weiterführen, nicht erneut ohne ID anlegen.
+Der Recovery-Nachweis bleibt auch nach einem anderen Issue-Schreibvorgang und
+bei neuen Lauf-/Tool-IDs wirksam. Ein inhaltlich identischer Create nach einer
+Recovery wird deshalb mit der bestehenden Kommentar-ID zurückgewiesen.
+Eindeutige Ablehnungen vor Ausführung (GraphQL-Parse-/Schemafehler oder
+`RATELIMITED`, jeweils ohne Daten und ohne Feldpfad, sowie HTTP 401/429 ohne Daten) erhalten einen dauerhaften
+`rejected`-Beleg, bei 401/429 auch für leere oder textuelle Antwortbodies.
+Das erfasst auch den von Linear dokumentierten
+[HTTP-400-Rate-Limit-Response](https://linear.app/developers/rate-limiting)
+und den entsprechenden GraphQL-Fehler bei HTTP 403.
+Auch die vorgeschaltete Identitätsprüfung erhält diese Rate-Limit-Klassifikation
+bei HTTP 400; dynamisches Tool und MCP geben sie als `rate_limited` weiter.
+Ein korrigierter späterer Aufruf darf dann schreiben.
+Transportfehler, unbekannte Fehler und Teilerfolge bleiben abzugleichen.
 `CommentJournal.classify/2` liefert für ungeklärte App-Ausgaben `:pending` statt
 `:foreign`; allgemeine Kommentarverarbeitung ist weiterhin nicht enthalten.
 

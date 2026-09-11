@@ -8,7 +8,7 @@ defmodule SymphonyElixir.RootEnvTest do
   setup do
     keys =
       EnvFile.root_config_names() ++
-        ~w(LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_STATE_ROOT LINEAR_APP_SECRET_ENV LINEAR_APP_SECRET LINEAR_ASSIGNEE SYMPHONY_ROOT_DIR SYMPHONY_LINEAR_ENV_DIR SYMPHONY_RELEASE_ROOT SYMPHONY_LINEAR_SECRET_ACCESS)
+        ~w(LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_STATE_ROOT LINEAR_APP_SECRET_ENV LINEAR_APP_SECRET LINEAR_ASSIGNEE SYMPHONY_ROOT_DIR SYMPHONY_LINEAR_ENV_DIR SYMPHONY_RELEASE_ROOT SYMPHONY_LINEAR_SECRET_ACCESS SECRET_SELECTOR SYNTHETIC_SECRET_DEFAULT SYNTHETIC_SECRET_LOCAL)
 
     previous = Map.new(keys, &{&1, System.get_env(&1)})
     Enum.each(keys, &System.delete_env/1)
@@ -81,6 +81,61 @@ defmodule SymphonyElixir.RootEnvTest do
     assert {:error, :missing_linear_client_secret} = EnvFile.linear_secret("LINEAR_APP_SECRET")
     System.put_env("SYMPHONY_ROOT_DIR", "")
     assert :ok = EnvFile.load_root()
+  end
+
+  test "project-selected secret names are excluded before either public env file loads", ctx do
+    workflow = Path.join(ctx.root, "selected-workflow.md")
+    File.write!(workflow, "---\ntracker:\n  auth_mode: app\n  app:\n    client_secret_env: $SECRET_SELECTOR\n---\nSynthetic\n")
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Workflow.set_workflow_file_path(workflow)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+
+    for selector_first? <- [true, false] do
+      System.delete_env("SECRET_SELECTOR")
+      System.delete_env("SYNTHETIC_SECRET_DEFAULT")
+      System.delete_env("SYNTHETIC_SECRET_LOCAL")
+
+      for {file, name} <- [{".env", "SYNTHETIC_SECRET_DEFAULT"}, {".env.local", "SYNTHETIC_SECRET_LOCAL"}] do
+        lines = ["SECRET_SELECTOR=#{name}", "#{name}=synthetic-never-export"]
+        lines = if selector_first?, do: lines, else: Enum.reverse(lines)
+        File.write!(Path.join(ctx.project, file), Enum.join(lines, "\n") <> "\n")
+      end
+
+      assert :ok = EnvFile.load_runtime(ctx.project)
+      assert System.get_env("SECRET_SELECTOR") == "SYNTHETIC_SECRET_LOCAL"
+      assert System.get_env("SYNTHETIC_SECRET_DEFAULT") == nil
+      assert System.get_env("SYNTHETIC_SECRET_LOCAL") == nil
+      assert {:ok, "synthetic-never-export"} = EnvFile.linear_secret("SYNTHETIC_SECRET_LOCAL")
+    end
+
+    File.write!(Path.join(ctx.project, ".env"), "SECRET_SELECTOR=\"unterminated\n")
+    assert {:error, _} = EnvFile.load_runtime(ctx.project)
+    assert System.get_env("SYNTHETIC_SECRET_DEFAULT") == nil
+    assert System.get_env("SYNTHETIC_SECRET_LOCAL") == nil
+  end
+
+  test "fresh CLI MCP and script bootstraps select their workflow before loading secrets", ctx do
+    project = Path.dirname(ctx.project)
+    File.write!(Path.join(project, "WORKFLOW.md"), "---\ntracker:\n  auth_mode: legacy\n---\nSynthetic default\n")
+    workflow = Path.join(project, "CUSTOM.md")
+    helper = Path.expand("../support/linear_app/bootstrap_helper.exs", __DIR__)
+    code_paths = Enum.flat_map(:code.get_path(), &["-pa", to_string(&1)])
+
+    results =
+      for mode <- ~w(cli mcp script), indirect? <- [true, false] do
+        reference = if indirect?, do: "$SECRET_SELECTOR", else: "SYNTHETIC_SECRET_LOCAL"
+        default = if indirect?, do: "SYNTHETIC_SECRET_DEFAULT", else: "SYNTHETIC_SECRET_LOCAL"
+        File.write!(workflow, "---\ntracker:\n  auth_mode: app\n  app:\n    client_secret_env: #{reference}\n---\nSynthetic selected\n")
+        File.write!(Path.join(ctx.project, ".env"), "#{default}=synthetic-default-value\nSECRET_SELECTOR=#{default}\n")
+        File.write!(Path.join(ctx.project, ".env.local"), "SYNTHETIC_SECRET_LOCAL=synthetic-local-value\nSECRET_SELECTOR=SYNTHETIC_SECRET_LOCAL\n")
+        {output, status} = System.cmd(System.find_executable("elixir"), code_paths ++ [helper, mode, project, workflow], stderr_to_stdout: true)
+        assert status == 0, "#{mode}: #{output}"
+        refute output =~ "synthetic-local-value"
+        result = output |> String.trim() |> Jason.decode!()
+        {mode, indirect?, result["exported"]}
+      end
+
+    assert Enum.all?(results, fn {_mode, _indirect, exported} -> exported == false end), inspect(results)
   end
 
   test "release snapshot pins only launch values and never stores project bindings or secrets", ctx do

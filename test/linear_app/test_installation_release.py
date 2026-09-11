@@ -64,6 +64,23 @@ class InstallationReleaseTest(unittest.TestCase):
             release.snapshot(self.source, self.root / "release")
         self.assertFalse((self.root / "release").exists())
 
+    def test_staged_deletions_and_renames_leave_no_head_files_in_the_snapshot(self):
+        self.git("rm", "--quiet", "sym-codex")
+        self.git("mv", "scripts/helper", "scripts/renamed-helper")
+        snapshot = release.snapshot(self.source, self.root / "release")
+        self.assertFalse((snapshot / "sym-codex").exists())
+        self.assertFalse((snapshot / "scripts/helper").exists())
+        self.assertEqual((snapshot / "scripts/renamed-helper").read_text(), "old contents\n")
+        self.assertEqual((snapshot / "WORKFLOW.md").read_text(), "old contents\n")
+
+    def test_staged_directory_replacement_is_a_file_in_the_snapshot(self):
+        self.git("rm", "--quiet", "scripts/helper")
+        (self.source / "scripts").write_text("replacement file\n")
+        self.git("add", "scripts")
+        snapshot = release.snapshot(self.source, self.root / "release")
+        self.assertTrue((snapshot / "scripts").is_file())
+        self.assertEqual((snapshot / "scripts").read_text(), "replacement file\n")
+
     def test_sealing_records_actual_contents_without_touching_existing_global_links(self):
         old_link = self.root / "old-global-link"
         old_link.symlink_to(self.source / "sym-codex")

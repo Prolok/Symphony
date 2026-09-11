@@ -329,11 +329,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "before_remove") =~ "cd \"$SYMPHONY_WORKFLOW_DIR\" && mise exec -- mix workspace.before_remove --workspace \"$workspace\" --source-repo \"$SYMPHONY_PROJECT_ROOT\""
     codex = Map.get(config, "codex", %{})
     assert is_map(codex)
-    assert Map.get(codex, "command") =~ "git rev-parse --path-format=absolute --git-common-dir"
-    assert Map.get(codex, "command") =~ "common_dir=\"$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)\"; if [ -z \"$common_dir\" ]; then"
-    assert Map.get(codex, "command") =~ "exit 1;"
-    assert Map.get(codex, "command") =~ "fi; source_repo=\"$(cd \"$common_dir/..\" && pwd -P)\";"
-    assert Map.get(codex, "command") =~ "exec \"$source_repo/sym-codex\" --observer"
+    assert Map.get(codex, "command") == "sym-codex --observer"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())

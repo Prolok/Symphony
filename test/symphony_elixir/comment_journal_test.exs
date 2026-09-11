@@ -88,6 +88,187 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert {:ok, _, []} = CommentMutations.prepare(%{"query" => "query A { viewer { id } } query B { viewer { id } }", "operationName" => "A"})
   end
 
+  test "omitted optional input fields stay absent while null and defaults remain explicit" do
+    query = "mutation($body: String, $quote: String = \"default\") { commentUpdate(id: \"old\", input: {body: $body, quotedText: $quote}) { success } }"
+    assert {:ok, prepared, [receipt]} = CommentMutations.prepare(%{"query" => query})
+    assert receipt["input"] == %{"quotedText" => "default"}
+    assert [%{arguments: %{"input" => %{"quotedText" => "default"}}}] = parsed_fields(prepared)
+    assert {:ok, _, [receipt]} = CommentMutations.prepare(%{"query" => query, "variables" => %{"body" => nil, "quote" => nil}})
+    assert receipt["input"] == %{"body" => nil, "quotedText" => nil}
+
+    nested = "mutation($missing: String) { commentCreate(input: {bodyData: {omitted: $missing, list: [$missing, null, \"kept\"]}}) { success } }"
+    assert {:ok, _, [receipt]} = CommentMutations.prepare(%{"query" => nested})
+    assert receipt["input"]["bodyData"] == %{"list" => [nil, nil, "kept"]}
+    required = "mutation($body: String!) { commentUpdate(id: \"old\", input: {body: $body}) { success } }"
+
+    for variables <- [%{}, %{"body" => nil}] do
+      assert {:error, :invalid_comment_mutation} = CommentMutations.prepare(%{"query" => required, "variables" => variables})
+    end
+  end
+
+  test "ticket identifiers create canonical journal receipts and recover without duplicates", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+    payload = %{"query" => "mutation { commentCreate(input: {issueId: \"TEST-123\", body: \"created\"}) { success } }"}
+
+    request = fn payload ->
+      case parsed_fields(payload) do
+        [%{name: "issue"}] ->
+          response(%{"issue" => %{"id" => "issue-uuid"}})
+
+        [%{name: "comment"}] ->
+          lookup_only(payload)
+
+        [%{field: field, arguments: %{"input" => input}}] ->
+          remote = %{"id" => input["id"], "body" => input["body"], "user" => %{"id" => "app"}, "issue" => %{"id" => "issue-uuid", "identifier" => "TEST-123"}}
+          put_remote(remote)
+          if Process.get(:lose_response), do: {:error, :lost}, else: response(%{field => %{"symphonyReceipt" => remote}})
+      end
+    end
+
+    Process.put(:lose_response, true)
+    assert {:error, :lost} = CommentJournal.execute(binding, payload, request)
+    [record] = journal_records(binding)
+    assert record["issue_id"] == "issue-uuid"
+    assert {:ok, [%{"state" => "confirmed"}]} = CommentJournal.reconcile(binding, request)
+    assert {:error, {:comment_write_recovered, [_]}} = CommentJournal.execute(binding, payload, request)
+    assert length(remote_comments()) == 1
+  end
+
+  test "unverified issue lookup prevents intent and mutation", %{binding: binding} do
+    payload = %{"query" => "mutation { commentCreate(input: {issueId: \"TEST-123\", body: \"created\"}) { success } }"}
+
+    partial = %{"data" => %{"issue" => %{"id" => "issue-uuid"}}, "errors" => [%{"message" => "partial"}]}
+
+    for result <- [{:error, :offline}, response(%{"issue" => nil}), {:ok, %{status: 200, body: partial}}] do
+      request = fn request ->
+        assert request["query"] =~ "SymphonyReceiptIssue"
+        result
+      end
+
+      assert {:error, :comment_issue_identity_unverified} = CommentJournal.execute(binding, payload, request)
+      assert journal_files(binding, "intent") == []
+    end
+  end
+
+  test "JSON bodyData matches serialized API data after lost responses", %{binding: binding} do
+    data = %{"type" => "doc", "content" => [%{"type" => "paragraph", "text" => "Grüße"}]}
+    payload = %{"query" => "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }", "variables" => %{"input" => %{"issueId" => "issue", "bodyData" => data}}}
+    assert {:error, :lost} = CommentJournal.execute(binding, payload, fn _ -> {:error, :lost} end)
+    [record] = journal_records(binding)
+    remote = Map.put(comment(record), "bodyData", Jason.encode!(data))
+    assert {:ok, [%{"state" => "confirmed"}]} = CommentJournal.reconcile(binding, fn _ -> response(%{"comment" => remote}) end)
+    assert CommentJournal.classify(binding, remote) == :own
+    assert CommentJournal.classify(binding, %{remote | "bodyData" => "{}"}) == :pending
+    assert CommentJournal.classify(binding, %{remote | "bodyData" => "invalid JSON"}) == :pending
+  end
+
+  test "confirmed historical authors survive a controlled app change without blocking new writes", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+    assert {:ok, _} = CommentJournal.execute(binding, create_payload(), &graphql_request/1)
+    [old] = remote_comments()
+    next_binding = %{binding | "user_id" => "next-app"}
+
+    request = fn payload ->
+      case parsed_fields(payload) do
+        [%{name: "comment"}] ->
+          lookup_only(payload)
+
+        [%{field: field}] ->
+          {:ok, %{body: %{"data" => data}}} = graphql_request(payload)
+          created = put_in(data[field]["symphonyReceipt"]["user"]["id"], "next-app")
+          put_remote(created[field]["symphonyReceipt"])
+          response(created)
+      end
+    end
+
+    assert {:ok, _} = CommentJournal.execute(next_binding, variable_create(Ecto.UUID.generate(), "new workpad"), request)
+    assert length(journal_files(binding, "confirmed")) == 2
+    assert Enum.sort(Enum.map(journal_records(binding), & &1["author_id"])) == ["app", "next-app"]
+    assert CommentJournal.classify(next_binding, old) == :own
+    assert CommentJournal.classify(next_binding, put_in(old["user"]["id"], "next-app")) == :pending
+
+    update = %{"query" => "mutation { commentUpdate(id: \"#{old["id"]}\", input: {body: \"changed\"}) { success } }"}
+    assert {:error, :comment_update_identity_unverified} = CommentJournal.execute(next_binding, update, request)
+    assert Process.get(:remote_comments)[old["id"]] == old
+  end
+
+  test "recovery after an app change requires the recorded historical author", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+
+    assert {:error, :lost} =
+             CommentJournal.execute(binding, create_payload(), fn payload ->
+               graphql_request(payload)
+               {:error, :lost}
+             end)
+
+    [old] = remote_comments()
+    next_binding = %{binding | "user_id" => "next-app"}
+    put_remote(put_in(old["user"]["id"], "next-app"))
+    assert {:ok, [%{"state" => "conflict"}]} = CommentJournal.reconcile(next_binding, &lookup_only/1)
+    assert journal_files(binding, "confirmed") == []
+    put_remote(old)
+    assert {:ok, [%{"state" => "confirmed"}]} = CommentJournal.reconcile(next_binding, &lookup_only/1)
+    assert CommentJournal.classify(next_binding, old) == :own
+    replay = CommentJournal.execute(next_binding, create_payload(), &lookup_only/1)
+    assert {:error, {:comment_write_recovered, [_]}} = replay
+    assert remote_comments() == [old]
+  end
+
+  test "project-update comments without an issue confirm serialized JSON immediately", %{binding: binding} do
+    data = %{"type" => "doc", "content" => []}
+    payload = %{"query" => "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success } }", "variables" => %{"input" => %{"projectUpdateId" => "update", "bodyData" => data}}}
+
+    request = fn prepared ->
+      assert [%{arguments: %{"input" => input}}] = parsed_fields(prepared)
+      assert input["projectUpdateId"] == "update"
+      remote = %{"id" => input["id"], "bodyData" => Jason.encode!(input["bodyData"]), "body" => "", "user" => %{"id" => "app"}, "issue" => nil}
+      Process.put(:project_comment, remote)
+      response(%{"commentCreate" => %{"symphonyReceipt" => remote}})
+    end
+
+    assert {:ok, _} = CommentJournal.execute(binding, payload, request)
+    assert [_] = journal_files(binding, "confirmed")
+    assert CommentJournal.classify(binding, Process.get(:project_comment)) == :own
+  end
+
+  test "recovery does not confirm an unexecuted quotedText update", %{binding: binding} do
+    remote = %{"id" => "old", "body" => "unchanged", "quotedText" => "before", "updatedAt" => "v1", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
+    payload = %{"query" => "mutation { commentUpdate(id: \"old\", input: {quotedText: \"after\"}) { success } }"}
+
+    request = fn payload ->
+      if payload["query"] =~ "SymphonyReceipt", do: response(%{"comment" => remote}), else: {:error, :lost_before_execution}
+    end
+
+    assert {:error, :lost_before_execution} = CommentJournal.execute(binding, payload, request)
+    assert {:ok, [%{"state" => "conflict"}]} = CommentJournal.reconcile(binding, request)
+    assert journal_files(binding, "confirmed") == []
+    assert {:error, {:comment_write_unresolved, [_]}} = CommentJournal.execute(binding, create_payload(), request)
+    changed = %{remote | "quotedText" => "after", "updatedAt" => "v2"}
+    assert {:ok, [%{"state" => "confirmed"}]} = CommentJournal.reconcile(binding, fn _ -> response(%{"comment" => changed}) end)
+    assert CommentJournal.classify(binding, remote) == :pending
+  end
+
+  test "resolving relations are checked and unverifiable update controls are rejected", %{binding: binding} do
+    for {input, output} <- [{"resolvingUserId", "resolvingUser"}, {"resolvingCommentId", "resolvingComment"}] do
+      nested = Map.put(binding, "state_root", Path.join(binding["state_root"], input))
+      remote = %{"id" => "old", "body" => "unchanged", output => %{"id" => "before"}, "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
+      payload = %{"query" => "mutation($input: CommentUpdateInput!) { commentUpdate(id: \"old\", input: $input) { success } }", "variables" => %{"input" => %{input => "after"}}}
+      request = fn payload -> if payload["query"] =~ "SymphonyReceipt", do: response(%{"comment" => remote}), else: {:error, :lost} end
+      assert {:error, :lost} = CommentJournal.execute(nested, payload, request)
+      assert {:ok, [%{"state" => "conflict"}]} = CommentJournal.reconcile(nested, request)
+      changed = %{remote | output => %{"id" => "after"}}
+
+      assert {:ok, [%{"state" => "confirmed"}]} =
+               CommentJournal.reconcile(nested, fn _ -> response(%{"comment" => changed}) end)
+    end
+
+    for input <- [%{"subscriberIds" => ["user"]}, %{"doNotSubscribeToIssue" => true}] do
+      payload = %{"query" => "mutation($input: CommentUpdateInput!) { commentUpdate(id: \"old\", input: $input) { success } }", "variables" => %{"input" => input}}
+      assert {:error, :invalid_comment_mutation} = CommentJournal.execute(binding, payload, fn _ -> flunk("no HTTP") end)
+      assert journal_files(binding, "intent") == []
+    end
+  end
+
   test "rewritten GraphQL roundtrips exact string values from variables, literals and defaults" do
     bodies = [
       "",
@@ -250,6 +431,113 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert length(remote_comments()) == 2
   end
 
+  test "recovery by another issue survives a new run and tool call without duplicate creation", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+
+    lost_response = fn outgoing ->
+      assert {:ok, _} = graphql_request(outgoing)
+      {:error, :lost_response}
+    end
+
+    assert {:error, :lost_response} =
+             CommentJournal.execute(binding, create_payload(), lost_response, %{"run_id" => "first", "tool_call_id" => "a"})
+
+    [created] = remote_comments()
+    other = put_in(variable_create("other", "Other issue"), ["variables", "input", "issueId"], "other-issue")
+    assert {:ok, _} = CommentJournal.execute(binding, other, &graphql_request/1, %{"run_id" => "other"})
+
+    assert {:error, {:comment_write_recovered, [id]}} =
+             CommentJournal.execute(binding, create_payload(), &graphql_request/1, %{"run_id" => "new", "tool_call_id" => "b"})
+
+    assert id == created["id"]
+    assert length(remote_comments()) == 2
+    assert length(journal_files(binding, "intent")) == 2
+  end
+
+  test "a definitive GraphQL validation rejection does not poison later writes", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+    rejected = %{status: 400, body: %{"errors" => [%{"message" => "Unknown field", "extensions" => %{"code" => "GRAPHQL_VALIDATION_FAILED"}}]}}
+    invalid = %{"query" => "mutation { commentCreate(input: {issueId: \"issue\", body: \"created\"}) { unknownField } }"}
+    assert {:ok, ^rejected} = CommentJournal.execute(binding, invalid, fn _ -> {:ok, rejected} end)
+    assert {:ok, _} = CommentJournal.execute(binding, create_payload(), &graphql_request/1)
+    assert length(remote_comments()) == 1
+    assert length(journal_files(binding, "rejected")) == 1
+    assert {:ok, results} = CommentJournal.reconcile(binding, &lookup_only/1)
+    assert Enum.any?(results, &(&1["state"] == "rejected"))
+  end
+
+  test "only definitive pre-execution rejections release intents", %{binding: binding} do
+    rate_error = %{"extensions" => %{"code" => "RATELIMITED"}}
+    ambiguous = %{"errors" => [rate_error, %{"extensions" => %{"code" => "INTERNAL_SERVER_ERROR"}}]}
+
+    for {response, rejected?} <- [
+          {%{status: 401, body: %{}}, true},
+          {%{status: 429, body: %{}}, true},
+          {%{status: 401, body: ""}, true},
+          {%{status: 429, body: "rate limited"}, true},
+          {%{status: 401, body: nil}, true},
+          {%{status: 429}, true},
+          {%{status: 429, body: %{"data" => %{}}}, false},
+          {%{status: 400, body: %{"errors" => [rate_error]}}, true},
+          {%{status: 403, body: %{"errors" => [rate_error]}}, true},
+          {%{status: 200, body: %{"data" => nil, "errors" => [rate_error]}}, true},
+          {%{status: 400, body: %{"data" => %{}, "errors" => [rate_error]}}, false},
+          {%{status: 400, body: %{"errors" => [Map.put(rate_error, "path", ["commentCreate"])]}}, false},
+          {%{status: 400, body: ambiguous}, false},
+          {%{status: 400, body: %{"errors" => [%{"extensions" => %{"code" => "GRAPHQL_PARSE_FAILED"}}]}}, true},
+          {%{status: 500, body: %{"errors" => [%{"extensions" => %{"code" => "INTERNAL_SERVER_ERROR"}}]}}, false},
+          {%{status: 200, body: %{"data" => nil, "errors" => [%{"path" => ["commentCreate"], "extensions" => %{"code" => "GRAPHQL_VALIDATION_FAILED"}}]}}, false},
+          {%{status: 400, body: %{"errors" => []}}, false},
+          {%{status: 502, body: "gateway unavailable"}, false}
+        ] do
+      binding = Map.put(binding, "state_root", Path.join(binding["state_root"], Ecto.UUID.generate()))
+      assert {:ok, ^response} = CommentJournal.execute(binding, create_payload(), fn _ -> {:ok, response} end)
+      [record] = journal_records(binding)
+      assert journal_files(binding, "rejected") != [] == rejected?
+      assert CommentJournal.classify(binding, comment(record)) == if(rejected?, do: :pending, else: :own)
+
+      if rejected? do
+        no_lookup = fn _ -> flunk("rejected intent must not be looked up") end
+        assert {:ok, [%{"state" => "rejected"}]} = CommentJournal.reconcile(binding, no_lookup)
+      else
+        missing = fn _ -> response(%{"comment" => nil}) end
+        assert {:error, {:comment_write_unresolved, [_]}} = CommentJournal.execute(binding, create_payload(), missing)
+      end
+    end
+  end
+
+  test "GraphQL rate limit rejection permits a later write without polling an uncreated comment", %{binding: binding} do
+    for status <- [400, 403] do
+      binding = Map.put(binding, "state_root", Path.join(binding["state_root"], to_string(status)))
+      Process.put(:remote_comments, %{})
+      limited = %{status: status, body: %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}}
+      assert {:ok, ^limited} = CommentJournal.execute(binding, create_payload(), fn _ -> {:ok, limited} end)
+
+      request = fn payload ->
+        assert [%{name: "commentCreate"}] = parsed_fields(payload)
+        graphql_request(payload)
+      end
+
+      assert {:ok, _} = CommentJournal.execute(binding, create_payload(), request)
+      assert length(remote_comments()) == 1
+      assert length(journal_files(binding, "rejected")) == 1
+    end
+  end
+
+  test "failed rejection persistence leaves the original intent visibly unresolved", %{binding: binding} do
+    writer = fn path, record ->
+      if String.ends_with?(path, ".rejected.json"), do: {:error, :disk_failure}, else: DurableState.write(path, record)
+    end
+
+    rejected = %{status: 401, body: %{}}
+
+    assert {:error, :comment_journal_persist_failed} =
+             CommentJournal.execute(binding, create_payload(), fn _ -> {:ok, rejected} end, %{}, state_writer: writer)
+
+    assert {:error, {:comment_write_unresolved, [_]}} =
+             CommentJournal.execute(binding, create_payload(), fn _ -> response(%{"comment" => nil}) end)
+  end
+
   test "retired transfer with a legacy pending creation resumes only after exact repair", %{binding: binding} do
     prepare_transfer(binding)
     legacy_api = fn action, input -> transfer_api(binding, action, input, &legacy_graphql_request/1) end
@@ -345,6 +633,14 @@ defmodule SymphonyElixir.CommentJournalTest do
 
     assert length(Path.wildcard(Path.join([binding["state_root"], "comments", "*.intent.json"]))) == 2
     assert length(Path.wildcard(Path.join([binding["state_root"], "comments", "*.confirmed.json"]))) == 1
+  end
+
+  test "multiple writes to one comment are rejected before creating an unrecoverable batch", %{binding: binding} do
+    payload = %{"query" => "mutation { first: commentUpdate(id: \"old\", input: {body: \"A\"}) { success } last: commentUpdate(id: \"old\", input: {body: \"B\"}) { success } }"}
+    assert {:error, :invalid_comment_mutation} = CommentMutations.prepare(payload)
+    no_http = fn _ -> flunk("ambiguous batch must not reach HTTP") end
+    assert {:error, :invalid_comment_mutation} = CommentJournal.execute(binding, payload, no_http)
+    assert journal_files(binding, "intent") == []
   end
 
   test "changed body, wrong author and unresolved app outputs never become foreign input", %{binding: binding} do

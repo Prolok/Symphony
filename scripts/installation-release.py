@@ -33,7 +33,13 @@ def snapshot(source, destination):
     subprocess.run(["git", "-C", str(destination), "checkout", "--quiet", "--detach", revision], check=True)
     # Include the exact working state in developer runs. No ignored secrets,
     # shared dependencies, build products, worktrees or nested release copies.
-    tracked = git(source, "ls-files", "-z").split(b"\0")
+    # Clear the cloned HEAD files first: staged removals are already absent
+    # from the source index, and old file paths may now be directories.
+    for raw in git(destination, "ls-files", "-z").split(b"\0"):
+        if raw:
+            target = destination / Path(os.fsdecode(raw))
+            if target.is_file() or target.is_symlink():
+                target.unlink()
     paths = git(source, "ls-files", "-c", "-o", "--exclude-standard", "-z").split(b"\0")
     for raw in set(paths):
         if not raw:
@@ -44,9 +50,9 @@ def snapshot(source, destination):
             target.parent.mkdir(parents=True, exist_ok=True)
             if target.is_symlink():
                 target.unlink()
+            elif target.is_dir():
+                shutil.rmtree(target)
             shutil.copy2(origin, target, follow_symlinks=True)
-        elif raw in tracked and not origin.exists() and target.exists():
-            target.unlink()
     try:
         upstream = git(source, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}").decode().strip()
     except subprocess.CalledProcessError:

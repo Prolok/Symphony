@@ -55,20 +55,23 @@ defmodule SymphonyElixir.Config do
   @spec linear_secret_env_names() :: [String.t()]
   def linear_secret_env_names do
     configured =
-      case Workflow.current() do
-        {:ok, %{config: %{"tracker" => %{"auth_mode" => "app", "app" => app}}}} ->
-          case app["client_secret_env"] do
-            "$" <> name -> System.get_env(name)
-            name -> name
-          end
-
-        _ ->
-          nil
+      case linear_secret_reference() do
+        "$" <> name -> System.get_env(name)
+        name -> name
       end
 
     ["LINEAR_APP_SECRET", configured, System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")]
     |> Enum.filter(&(is_binary(&1) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, &1)))
     |> Enum.uniq()
+  end
+
+  @doc "Return the public secret reference so loaders can exclude project-selected names before exporting values."
+  @spec linear_secret_reference() :: String.t() | nil
+  def linear_secret_reference do
+    case Workflow.current() do
+      {:ok, %{config: %{"tracker" => %{"auth_mode" => "app", "app" => app}}}} -> app["client_secret_env"]
+      _ -> nil
+    end
   end
 
   @spec without_linear_secret(map() | list()) :: [{String.t(), String.t() | nil}]
@@ -167,12 +170,12 @@ defmodule SymphonyElixir.Config do
     case System.get_env("SYMPHONY_CODEX_COMMAND") do
       command when is_binary(command) ->
         case String.trim(command) do
-          "" -> settings!().codex.command
+          "" -> configured_local_codex_command()
           trimmed_command -> trimmed_command
         end
 
       _ ->
-        settings!().codex.command
+        configured_local_codex_command()
     end
   end
 
@@ -196,6 +199,42 @@ defmodule SymphonyElixir.Config do
       _ -> raise ArgumentError, "Invalid SYM_MAXIMUM_REVIEW_ITERATIONS: expected a positive integer"
     end
   end
+
+  defp configured_local_codex_command do
+    settings = settings!()
+    command = settings.codex.command
+    release = local_helper_root()
+    app? = settings.tracker.auth_mode == "app"
+    bundled? = command == "sym-codex --observer" or (app? and command == "codex app-server")
+
+    if is_binary(release) and release != "" and bundled? do
+      helper = shell_quote(Path.join(release, "sym-codex")) <> " --observer"
+
+      if app? do
+        # Restore the validated local toolchain after AppServer's login shell.
+        python = System.get_env("SYMPHONY_PYTHON") || System.find_executable("python3") || "python3"
+        env = ["PATH=" <> System.fetch_env!("PATH"), "SYMPHONY_PYTHON=" <> python]
+        "/usr/bin/env " <> Enum.map_join(env, " ", &shell_quote/1) <> " " <> helper
+      else
+        helper
+      end
+    else
+      command
+    end
+  end
+
+  defp local_helper_root do
+    case System.get_env("SYMPHONY_RELEASE_ROOT") do
+      release when is_binary(release) and release != "" ->
+        release
+
+      _ ->
+        root = Path.dirname(Workflow.default_workflow_file_path())
+        if File.regular?(Path.join(root, "sym-codex")), do: root
+    end
+  end
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
 
   @spec server_port() :: non_neg_integer() | nil
   def server_port do

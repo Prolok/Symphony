@@ -178,8 +178,31 @@ defmodule SymphonyElixir.EnvFile do
 
   @spec load(String.t(), keyword()) :: :ok | {:error, term()}
   def load(config_dir, opts) when is_binary(config_dir) and is_list(opts) do
+    with {:ok, selected_secrets} <- project_secret_names(config_dir) do
+      load_public(config_dir, opts, selected_secrets)
+    end
+  end
+
+  defp project_secret_names(config_dir) do
+    case SymphonyElixir.Config.linear_secret_reference() do
+      "$" <> selector ->
+        Enum.reduce_while(@env_files, {:ok, []}, &collect_secret_names(&1, &2, config_dir, selector))
+
+      _ ->
+        {:ok, []}
+    end
+  end
+
+  defp collect_secret_names({filename, _}, {:ok, names}, config_dir, selector) do
+    case read_selected([Path.join(config_dir, filename)], [selector]) do
+      {:ok, values} -> {:cont, {:ok, Map.values(values) ++ names}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp load_public(config_dir, opts, selected_secrets) do
     override_existing = Keyword.get(opts, :override_existing, false)
-    excluded = Keyword.get(opts, :exclude, []) ++ SymphonyElixir.Config.linear_secret_env_names()
+    excluded = selected_secrets ++ Keyword.get(opts, :exclude, []) ++ SymphonyElixir.Config.linear_secret_env_names()
 
     bound = protected_runtime_env()
 

@@ -67,6 +67,20 @@ Nur im Merge-Schritt des Workflows verwenden.
    Wenn der aktuelle Linear-Labelstand im App-Server-Kontext nicht sicher
    verifiziert werden kann, ebenfalls vor jedem Merge-Versuch als eigener
    Label-Lookup-Blocker nach `BLOCKER` stoppen.
+   Im App-Modus liest der Hauptagent die aktuellen Labels unmittelbar vor
+   dieser Prüfung über das injizierte `linear_graphql` oder das gebundene
+   `symphony_linear`-MCP vollständig paginiert für das aktuelle Issue. Der
+   Watch-Helper übergibt diese Prüfung mit Exit `8`, weil seine Modell-Shell
+   keinen Auth-Zugriff hat. Exit `8` ist weder Merge-Freigabe noch Blocker:
+   Live-Lookup und gegebenenfalls menschliches GitHub-Approval müssen danach
+   noch abgeschlossen werden. Bei gesetztem Label nur ein Approval eines
+   menschlichen Nicht-Autors auf der aktuellen PR-Head-SHA akzeptieren;
+   Bots, veraltete oder zurückgezogene Approvals erfüllen das Gate nicht.
+   Vor dem Merge lokalen/Remote-/PR-Head nochmals vergleichen und den
+   aktuellen Live-Labelstand samt etwaiger Approval-Evidenz im Workpad halten.
+   Scheitert der erlaubte Live-Lookup, bleibt der Label-Lookup-Blocker bestehen.
+   Kein Dispatch-Snapshot, kein Shell-/Mix-Fallback und keine Lockerung der
+   Secret-Abschirmung. Nur Legacy nutzt den lokalen Tracker-Refresh.
 10. Wenn GitHub-Checks bestanden oder gemäß Skip-/Neutral-Policy akzeptabel sind
    und Feedback erledigt ist, mit Merge-Commit-Betreff
    `<IssueId>: <IssueTitle>` mergen.
@@ -87,7 +101,12 @@ Exit-Codes: `2` Review-Kommentare, `3` CI-Fehler, `4` PR-Head während des
 Watch-Laufs aktualisiert, `5` Merge-Konflikt, `6` fehlende oder inkonsistente
 PR-/Remote-Preflight-Evidenz, `7` fehlendes gültiges manuelles GitHub-Approval
 bei gesetztem Label `Requires Manual Review` oder nicht verifizierbarer
-aktueller Linear-Labelstand im App-Server-Kontext.
+aktueller Linear-Labelstand im App-Server-Kontext; `8` App-Übergabe zum noch
+offenen Live-Label-/Approval-Gate über den gebundenen Toolzugriff (Schritt 9).
+
+Bei Exit `8` im selben Turn Schritt 9 über die erlaubten Tools vollständig
+ausführen. Der Helper hat dann lediglich seine GitHub-Prüfungen abgeschlossen;
+weder das gesamte Merge-Gate noch der Merge selbst sind dadurch abgeschlossen.
 
 Bei Exit-Code `7` nennt die Helper-Ausgabe PR-Nummer oder URL und aktuelle
 Head-SHA. Wenn `Requires Manual Review` gesetzt ist, nennt sie zusätzlich das

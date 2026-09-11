@@ -7,7 +7,8 @@ defmodule SymphonyElixir.Linear.CommentMutations do
   alias Absinthe.Language, as: L
   alias Absinthe.Phase.Parse
 
-  @selection "{ symphonyReceipt: comment { id body bodyData updatedAt user { id } issue { id } } }"
+  @selection "{ symphonyReceipt: comment { id body bodyData quotedText resolvingUser { id } resolvingComment { id } updatedAt user { id } issue { id identifier } } }"
+  @update_fields ~w(body bodyData quotedText resolvingUserId resolvingCommentId)
 
   @spec prepare(map()) :: {:ok, map(), [map()]} | {:error, term()}
   def prepare(%{"query" => query} = payload) do
@@ -37,6 +38,9 @@ defmodule SymphonyElixir.Linear.CommentMutations do
     fragments = Map.new(Enum.filter(document.definitions, &match?(%L.Fragment{}, &1)), &{&1.name, &1})
     selections = expand(operation.selection_set.selections, fragments, [])
     {selections, receipts} = rewrite(selections, variables, [])
+    # A lost batch response cannot prove intermediate versions of one comment.
+    # Reject it before HTTP instead of leaving an unreconcilable journal intent.
+    if length(Enum.uniq_by(receipts, & &1["comment_id"])) != length(receipts), do: throw(:invalid_comment_mutation)
     operation = %{operation | selection_set: %{operation.selection_set | selections: selections}}
     used = variable_names([operation.selection_set, operation.directives])
     operation = %{operation | variable_definitions: Enum.filter(operation.variable_definitions, &(&1.variable.name in used))}
@@ -87,6 +91,7 @@ defmodule SymphonyElixir.Linear.CommentMutations do
   defp rewrite_node(%L.Field{name: name} = field, variables, receipts) when name in ["commentCreate", "commentUpdate"] do
     arguments = Map.new(field.arguments, &{&1.name, value(&1.value, variables)})
     input = Map.fetch!(arguments, "input")
+    validate_input(name, input)
     previous = Enum.find(receipts, &(&1["field"] == (field.alias || name)))
     id = comment_id(name, input, arguments, previous)
     if not is_binary(id) or id == "", do: throw(:invalid_comment_mutation)
@@ -111,6 +116,12 @@ defmodule SymphonyElixir.Linear.CommentMutations do
   end
 
   defp rewrite_node(node, _variables, receipts), do: {node, receipts}
+
+  defp validate_input("commentUpdate", input) do
+    if not Enum.all?(Map.keys(input), &(&1 in @update_fields)), do: throw(:invalid_comment_mutation)
+  end
+
+  defp validate_input(_name, _input), do: :ok
 
   defp validate_previous(nil, _input, _name), do: :ok
 
@@ -144,15 +155,32 @@ defmodule SymphonyElixir.Linear.CommentMutations do
   end
 
   defp variable_values(operation, provided) do
-    defaults = Map.new(operation.variable_definitions, &{&1.variable.name, value(&1.default_value, %{})})
-    Map.merge(defaults, provided |> Jason.encode!() |> Jason.decode!())
+    defaults = operation.variable_definitions |> Enum.reject(&is_nil(&1.default_value)) |> Map.new(&{&1.variable.name, value(&1.default_value, %{})})
+    variables = Map.merge(defaults, provided |> Jason.encode!() |> Jason.decode!())
+
+    Enum.each(operation.variable_definitions, fn definition ->
+      if match?(%L.NonNullType{}, definition.type) and is_nil(variables[definition.variable.name]), do: throw(:invalid_comment_mutation)
+    end)
+
+    variables
   end
 
-  defp value(%L.Variable{name: name}, variables), do: Map.fetch!(variables, name)
-  defp value(%L.ObjectValue{fields: fields}, variables), do: Map.new(fields, &{&1.name, value(&1.value, variables)})
-  defp value(%L.ListValue{values: values}, variables), do: Enum.map(values, &value(&1, variables))
+  defp value(%L.Variable{name: name}, variables), do: Map.get(variables, name, :undefined)
+
+  defp value(%L.ObjectValue{fields: fields}, variables) do
+    fields |> Map.new(&{&1.name, value(&1.value, variables)}) |> Map.reject(fn {_key, item} -> item == :undefined end)
+  end
+
+  defp value(%L.ListValue{values: values}, variables),
+    do:
+      Enum.map(values, fn item ->
+        case value(item, variables) do
+          :undefined -> nil
+          resolved -> resolved
+        end
+      end)
+
   defp value(%L.NullValue{}, _variables), do: nil
-  defp value(nil, _variables), do: nil
   defp value(%{value: value}, _variables), do: value
 
   defp literal(value) when is_map(value), do: %L.ObjectValue{fields: Enum.map(value, fn {key, item} -> %L.ObjectField{name: key, value: literal(item)} end)}

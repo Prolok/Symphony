@@ -49,12 +49,6 @@ symphony_launch() {
   mix_runtime_activate "$PROJECT_DIR"
 
   if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$PROJECT_DIR" ]]; then
-    export SYMPHONY_CODEX_COMMAND="$(symphony_shell_escape "$CODEX_TARGET_PATH") --observer"
-    if "$SYMPHONY_PYTHON" "$PROJECT_DIR/scripts/installation-release.py" app-workflow "$PROJECT_DIR"; then
-      # AppServer retains its login-shell contract. Restore this launcher's
-      # validated toolchain only for the bound local App worker, after login.
-      export SYMPHONY_CODEX_COMMAND="/usr/bin/env $(symphony_shell_escape "PATH=$PATH") $(symphony_shell_escape "SYMPHONY_PYTHON=$SYMPHONY_PYTHON") $SYMPHONY_CODEX_COMMAND"
-    fi
     export SYMPHONY_WORKFLOW_FILE="$WORKFLOW_FILE"
     export SYMPHONY_WORKFLOW_INTERACTIVE_FILE="$WORKFLOW_INTERACTIVE_FILE"
     export SYMPHONY_WORKFLOW_DIALOG_FILE="$WORKFLOW_DIALOG_FILE"

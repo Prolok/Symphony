@@ -137,6 +137,19 @@ def launch_config(release, target, cwd, user_home, environment=None):
     return args
 
 
+def bind_sessions(target, state):
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for name in ("sessions", "archived_sessions"):
+        (state / name).mkdir(exist_ok=True, mode=0o700)
+        link = target / name
+        try:
+            link.symlink_to(state / name, target_is_directory=True)
+        except FileExistsError:
+            pass
+        if not link.is_symlink() or link.resolve() != (state / name).resolve():
+            raise RuntimeError("changed session binding")
+
+
 def main():
     release = Path(os.environ["SYMPHONY_RELEASE_ROOT"]).resolve()
     if not (release / ".symphony-release.json").is_file():
@@ -147,14 +160,7 @@ def main():
     state = Path(os.environ["SYMPHONY_CODEX_STATE_ROOT"])
     if not state.is_absolute():
         raise RuntimeError("unbound session state")
-    state.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for name in ("sessions", "archived_sessions"):
-        (state / name).mkdir(exist_ok=True, mode=0o700)
-        link = target / name
-        if not link.exists():
-            link.symlink_to(state / name, target_is_directory=True)
-        elif link.resolve() != (state / name).resolve():
-            raise RuntimeError("changed session binding")
+    bind_sessions(target, state)
     executable = shutil.which("codex")
     if not executable:
         raise RuntimeError("codex unavailable")

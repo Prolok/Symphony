@@ -673,6 +673,59 @@ defmodule SymCodexScriptTest do
     refute output =~ "mix should not run"
   end
 
+  test "sourced app launcher returns the selected worktree and venv through the release child" do
+    %{repo_dir: repo_dir, bin_dir: bin_dir, workspace_root: workspace_root, worktree: worktree} =
+      build_script_worktree_fixture!("PRO-49")
+
+    on_exit(fn ->
+      File.rm_rf(repo_dir)
+      File.rm_rf(bin_dir)
+      File.rm_rf(workspace_root)
+    end)
+
+    File.cp!(Path.expand("../scripts/installation-release.py", __DIR__), Path.join(repo_dir, "scripts/installation-release.py"))
+    File.write!(Path.join(repo_dir, "WORKFLOW.md"), "---\ntracker:\n  auth_mode: app\n---\n")
+    File.write!(Path.join(repo_dir, ".gitignore"), ".symphony/\n")
+    File.rename!(Path.join(repo_dir, "scripts/mix-runtime"), Path.join(repo_dir, "scripts/mix-runtime-fixture"))
+
+    # Keep real snapshotting, argument forwarding and both sym-codex processes;
+    # stand in only for the external build/Linear peers in this shell contract.
+    File.write!(Path.join(repo_dir, "scripts/mix-runtime"), """
+    #!/bin/bash
+    if [[ "$1" == start ]]; then
+      release="$2"
+      shift 3
+      printf '{"files":{}}' > "$release/.symphony-release.json"
+      exec "$release/sym-codex" "$@"
+    fi
+    exec "$(dirname "${BASH_SOURCE[0]}")/mix-runtime-fixture" "$@"
+    """)
+
+    File.chmod!(Path.join(repo_dir, "scripts/mix-runtime"), 0o755)
+    File.write!(Path.join(repo_dir, ".venv/bin/codex"), "\nexit 7\n", [:append])
+
+    command =
+      ~s|. "#{Path.join(repo_dir, "sym-codex")}" PRO-49; status=$?; printf 'after status=%s pwd=%s venv=%s\\n' "$status" "$PWD" "${VIRTUAL_ENV:-}"|
+
+    assert {output, 0} =
+             System.cmd("/bin/bash", ["--noprofile", "--norc", "-c", command],
+               cd: repo_dir,
+               env:
+                 SymphonyElixir.TestSupport.cleared_symphony_runtime_env() ++
+                   [
+                     {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)},
+                     {"SYMPHONY_PROJECT_WORKTREES_ROOT", workspace_root},
+                     {"SYMPHONY_SOURCE_REPO", repo_dir}
+                   ],
+               stderr_to_stdout: true
+             )
+
+    assert output =~ "Eigener Laufzeitstand"
+    assert output =~ "codex-stub pwd=#{worktree}"
+    assert output =~ "after status=7 pwd=#{worktree} venv=#{Path.join(repo_dir, ".venv")}"
+    assert Path.wildcard(Path.join(repo_dir, ".symphony/installations/sourced-*")) == []
+  end
+
   test "sourced sym-codex activates the repo venv in the current shell" do
     %{repo_dir: repo_dir, bin_dir: bin_dir, workspace_root: workspace_root, worktree: worktree} =
       build_script_worktree_fixture!("PRO-49")

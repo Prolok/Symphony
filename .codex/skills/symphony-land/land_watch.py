@@ -105,10 +105,13 @@ async def run_git(*args: str) -> str:
 
 
 async def run_gh(*args: str) -> str:
+    # A merge retry must re-enter merge_bound and its fresh runtime gates.
+    # Read-only GitHub calls may keep their bounded rate-limit backoff.
+    attempts = 1 if args[:2] == ("pr", "merge") else MAX_GH_RETRIES
     max_delay = BASE_GH_BACKOFF_SECONDS * (2 ** (MAX_GH_RETRIES - 1))
     delay_seconds = BASE_GH_BACKOFF_SECONDS
     last_error = "gh command failed"
-    for attempt in range(1, MAX_GH_RETRIES + 1):
+    for attempt in range(1, attempts + 1):
         proc = await asyncio.create_subprocess_exec(
             "gh",
             *args,
@@ -122,7 +125,7 @@ async def run_gh(*args: str) -> str:
         if not is_rate_limit_error(error):
             raise RuntimeError(error)
         last_error = error
-        if attempt >= MAX_GH_RETRIES:
+        if attempt >= attempts:
             break
         jitter = random.uniform(0, delay_seconds)
         await asyncio.sleep(min(delay_seconds + jitter, max_delay))
@@ -804,11 +807,22 @@ def raise_on_missing_manual_review_approval(
 def filter_blocking_reviews(
     reviews: list[dict[str, Any]],
     review_requested_at: datetime | None,
+    latest_ack: datetime | None = None,
 ) -> list[dict[str, Any]]:
+    candidates = dedupe_reviews(reviews)
+    for decisive in latest_decisive_reviews(reviews):
+        if review_state(decisive) == "CHANGES_REQUESTED" and decisive not in candidates:
+            candidates.append(decisive)
     return [
         review
-        for review in dedupe_reviews(reviews)
+        for review in candidates
         if is_blocking_review(review, review_requested_at)
+        and not (
+            review_state(review) == "COMMENTED"
+            and latest_ack is not None
+            and review_timestamp(review) is not None
+            and review_timestamp(review) <= latest_ack
+        )
     ]
 
 
@@ -847,7 +861,7 @@ def raise_on_human_feedback(
             "and note in your root-level update.",
         )
         raise SystemExit(2)
-    blocking_reviews = filter_blocking_reviews(reviews, review_request_at)
+    blocking_reviews = filter_blocking_reviews(reviews, review_request_at, latest_codex_issue_reply_time(issue_comments))
     if blocking_reviews:
         print("Review states/comments detected. Address before merge.")
         print(

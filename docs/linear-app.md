@@ -148,14 +148,20 @@ bereits zuvor erkannte offene Versionen bleiben erhalten. Manuelle Gates und
 Dialog-AI werden durch diesen Eingang nicht dispatcht.
 
 Unter dem vorhandenen projektlokalen `state_root/inputs/` hält `DurableState`
-pro Issue die Bindung, beobachtete Quellversionen, Baseline, letzten vollständigen
+pro Issue die Bindung, beobachtete Quellversionen (auch aus Vor-/Nachscan-Signalen), Baseline, letzten vollständigen
 Abruf, Scanfehler und Zustände `recognized`, `delivered`, `processed` fest.
 Die bestehende OS-Journal-Sperre serialisiert Scan/Ack; Beobachtungen werden mit
 App-Schreibvorgängen serialisiert und unbestätigte Schreibbelege abgeglichen.
 Ein fehlgeschlagener Scan ersetzt keinen vollständigen Stand. Schon gelesene
-Seiten bleiben als offene Beobachtungen erhalten. Ein verschwundener Kommentar
+Seiten bleiben als offene Beobachtungen erhalten. Das gilt auch für gültige
+Quellen innerhalb einer Seite mit GraphQL-Teilfehlern, ungültigen anderen Zeilen
+oder fehlenden Seitenmetadaten; der Scan bleibt dabei unvollständig.
+Ein verschwundener Kommentar
 benötigt zusätzlich eine direkte Nicht-gefunden-Antwort bei weiterhin
-sichtbarem Issue, bevor er als gelöscht eingeordnet wird.
+sichtbarem Issue, bevor er als gelöscht eingeordnet wird. Nach vorheriger
+Zustellung oder Bestätigung erhält die Löschung einen eigenen Quellschlüssel;
+der Worker ordnet mögliche begonnene Auswirkungen ein. Frühere Ergebnisse
+bleiben erhalten und bestätigen die Löschung nicht mit.
 
 `symphony_comments` liefert sichere Checkpoints und schreibt versionsbezogene
 fachliche Ergebnisse in `### Kommentareingang` des einen Workpads. Nach einem
@@ -172,9 +178,18 @@ die menschliche Antwort besitzt ihre eigene Quellversion.
 Statusaktionen laufen durch den frischen zentralen Check. `symphony_merge` führt
 den vorhandenen Land-Helper in einem gebundenen Prozess aus und beantwortet dessen
 letzten Checkpoint unmittelbar vor dem GitHub-Merge. Linear-Zugang verbleibt im
-App-Runtime-Prozess; der Helper erhält keine Secrets. Manuelle GitHub-Approvals,
+App-Runtime-Prozess; der Helper erhält keine Secrets. Bei SSH-Workern wird der
+Helper über den bestehenden SSH-Transport im gebundenen, bereits auf dem Worker
+aufgelösten Workspace (auch bei relativen oder `~/`-Roots)
+gestartet; Checkpoint-Anfragen kommen über denselben Prozesskanal zurück.
+Beide Starts übernehmen die gebundene Projektumgebung, einschließlich Git-/GitHub-
+Konfiguration. Linear-Secrets werden vor der Übergabe entfernt.
+Manuelle GitHub-Approvals,
 PR-/Remote-/Head-, CI- und Review-Gates bleiben bestehen. Offene Eingaben,
-fehlgeschlagene Scans oder geänderte Labels verhindern den Abschluss.
+fehlgeschlagene Scans oder geänderte Labels verhindern den Abschluss. Ein
+GitHub-Rate-Limit bei der Merge-Anforderung beendet den Versuch; die Wiederholung
+über `symphony_merge` prüft sämtliche Gates frisch. Nur lesende GitHub-Aufrufe
+wiederholen Rate-Limits intern mit Backoff.
 
 Logs `Comment scan completed/failed` nennen Projektroot, Issue-/Session-Kontext,
 letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Rate-Limits folgen

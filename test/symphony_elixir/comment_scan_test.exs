@@ -59,6 +59,23 @@ defmodule SymphonyElixir.CommentScanTest do
     assert {:error, {:linear_api_status, 403, %{classification: "rate_limited"}}} = Client.fetch_issue_comments("issue")
   end
 
+  test "valid observations on a partial page survive errors and malformed or foreign siblings" do
+    first = source("first", "beobachtete Fassung")
+    second = source("second", "weitere beobachtete Fassung")
+    foreign = put_in(source("foreign", "fremdes Issue"), ["issue", "id"], "other")
+
+    for response <- [
+          add_errors(page([first, second], false, nil)),
+          page([first, %{"body" => "missing ID"}, second], false, nil),
+          page([first, foreign, second], false, nil),
+          data(%{"issue" => %{"comments" => %{"nodes" => [first, second]}}})
+        ] do
+      SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> response end)
+      assert {:error, {:comment_scan_incomplete, _, observations}} = Client.fetch_issue_comments("issue")
+      assert Enum.map(observations, & &1.source) == [first, second]
+    end
+  end
+
   test "fresh signal around full pagination detects visible edits and preserves scanned versions" do
     first = source("first", "eins")
     changed = %{first | "body" => "zwei"}
@@ -76,7 +93,8 @@ defmodule SymphonyElixir.CommentScanTest do
         end
       end)
 
-      assert {:error, {:comment_scan_incomplete, _, [%{source: ^first}]}} = Client.scan_issue_comments("issue")
+      assert {:error, {:comment_scan_incomplete, _, observed}} = Client.scan_issue_comments("issue")
+      assert Enum.map(observed, & &1.source) == if(final == signal([changed]), do: [first, changed], else: [first])
     end
 
     SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
@@ -86,6 +104,56 @@ defmodule SymphonyElixir.CommentScanTest do
     assert {:ok, [%{source: ^first}]} = Client.scan_issue_comments("issue")
     SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> signal([%{}]) end)
     assert {:error, :comment_scan_signal_unavailable} = Client.scan_issue_comments("issue")
+  end
+
+  test "a pre-scan version survives pagination failure and a later changed version", _ctx do
+    first = source("first", "nur im Vorsignal beobachtet")
+    changed = %{first | "body" => "in Paginierung beobachtet"}
+
+    for page_result <- [page([changed], false, nil), {:error, :page_offline}] do
+      Process.put(:signal_reads, 0)
+
+      SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+        if payload["query"] =~ "SymphonyCommentScanSignal" do
+          count = Process.get(:signal_reads)
+          Process.put(:signal_reads, count + 1)
+          if count == 0, do: signal([first]), else: signal([changed])
+        else
+          page_result
+        end
+      end)
+
+      assert {:error, {:comment_scan_incomplete, _, observed}} = Client.scan_issue_comments("issue")
+      assert hd(observed).source == first
+      if page_result == page([changed], false, nil), do: assert(Enum.map(observed, & &1.source) == [first, changed])
+    end
+  end
+
+  test "partial signal errors preserve valid observed versions at both scan boundaries" do
+    first = source("first", "vorher")
+    changed = %{first | "body" => "nachher"}
+
+    for boundary <- [:before, :after] do
+      Process.put(:signal_reads, 0)
+
+      SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+        if payload["query"] =~ "SymphonyCommentScanSignal" do
+          count = Process.get(:signal_reads)
+          Process.put(:signal_reads, count + 1)
+
+          cond do
+            boundary == :before -> add_errors(signal([first]))
+            count == 0 -> signal([first])
+            true -> add_errors(signal([changed]))
+          end
+        else
+          page([first], false, nil)
+        end
+      end)
+
+      assert {:error, {:comment_scan_incomplete, _, observed}} = Client.scan_issue_comments("issue")
+      assert Enum.map(observed, & &1.source) == if(boundary == :before, do: [first], else: [first, changed])
+    end
   end
 
   test "deletion needs explicit not-found plus still-visible issue; denied or missing responses never prove deletion" do

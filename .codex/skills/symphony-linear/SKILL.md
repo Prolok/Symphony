@@ -153,8 +153,9 @@ zugestellte Versionen mit fachlichem Ergebnis im Workpad fest. Details und
 Baseline-Vertrag stehen in `symphony-workpad` und `WORKFLOW.md`.
 
 Eine abgelehnte vorwärtsführende Statusmutation mit `comment_inputs_pending`
-erfordert die Bearbeitung der gelieferten Quellen und einen neuen frischen
-Checkpoint. API-/Rate-Limit-Fehler sind kein vollständiger Scan und kein
+nennt nur die offenen Quellschlüssel. Die vollständigen Quellen über einen
+frischen Kommentar-Checkpoint abrufen und fachlich bearbeiten.
+API-/Rate-Limit-Fehler sind kein vollständiger Scan und kein
 Löschbeleg. Keinen alternativen Mutationspfad zur Umgehung benutzen. Kommentare
 an manuellen Gates aktivieren keine Arbeit und erteilen keine Freigaben.
 Für den bestehenden Land-Aktionsweg `symphony_merge` verwenden; Shell-`gh pr merge`

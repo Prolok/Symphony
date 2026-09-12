@@ -127,7 +127,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
       ids = MapSet.new(observed, & &1["source"]["id"])
       baseline = state["baseline"] || baseline(observed, now)
 
-      case check_absent(versions, ids, opts) do
+      case check_absent(versions, ids, baseline, opts) do
         {:ok, versions} ->
           baseline = mark_deleted_baseline_sources(baseline, versions)
           {:ok, Map.merge(state, %{"baseline" => baseline, "versions" => versions, "last_successful_scan" => now, "scan_error" => nil})}
@@ -188,7 +188,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     Map.put_new(versions, version["key"], Map.put(version, "sequence", map_size(versions) + 1))
   end
 
-  defp check_absent(versions, ids, opts) do
+  defp check_absent(versions, ids, baseline, opts) do
     missing = versions |> Map.values() |> Enum.reject(&(&1["deleted"] or MapSet.member?(ids, &1["source"]["id"]))) |> Enum.uniq_by(& &1["source"]["id"])
     confirm = Keyword.get(opts, :confirm_absence, fn _ -> {:error, :comment_absence_unverified} end)
 
@@ -196,11 +196,44 @@ defmodule SymphonyElixir.Linear.CommentInbox do
       id = version["source"]["id"]
 
       case confirm.(id) do
-        :deleted -> {:cont, {:ok, Map.new(versions, fn {key, entry} -> {key, if(entry["source"]["id"] == id, do: Map.put(entry, "deleted", true), else: entry)} end)}}
+        :deleted -> {:cont, {:ok, mark_deleted(versions, id, baseline)}}
         {:present, _} -> {:halt, {:error, :comment_scan_inconsistent}}
         {:error, _} = error -> {:halt, error}
       end
     end)
+  end
+
+  defp mark_deleted(versions, id, baseline) do
+    Enum.reduce(versions, versions, fn {key, version}, acc ->
+      if version["source"]["id"] == id and not version["deleted"] do
+        acc = Map.put(acc, key, Map.put(version, "deleted", true))
+        maybe_insert_deletion(acc, version, baseline)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp maybe_insert_deletion(versions, version, baseline) do
+    delivered? = version["status"] in ["delivered", "processed"] or (version["status"] == "historical" and baseline["status"] in ["delivered", "processed"])
+
+    if delivered? and version["origin"] in ["human", "changed_app_output", "unknown"] do
+      source = Map.put(version["source"], "deleted", true)
+
+      deletion = %{
+        "key" => CommentVersion.key(source),
+        "source" => source,
+        "origin" => version["origin"],
+        "status" => "recognized",
+        "deleted" => true,
+        "observed_at" => timestamp(),
+        "previous_result" => version["result"]
+      }
+
+      insert(deletion, versions, false)
+    else
+      versions
+    end
   end
 
   defp baseline(observed, now) do

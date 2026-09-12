@@ -130,6 +130,11 @@ verschieben.
 - Codex-Reviews kommen als Issue-Kommentare mit `## Codex Review`; darauf im
   Issue-Thread antworten.
 - Alle Agent-Kommentare beginnen mit `[codex]`.
+- Menschliche Review-Zusammenfassungen im Zustand `COMMENTED` nach Bearbeitung
+  im PR-Issue-Thread mit einer `[codex]`-Ergebnisantwort dokumentieren. Wie bei
+  sonstigem Issue-Feedback berücksichtigt der Helper deren Zeitstand; spätere
+  Reviews bleiben offen. `CHANGES_REQUESTED` und das separate Manual-Approval-Gate
+  werden dadurch nicht aufgehoben.
 - Für jedes Feedback entscheiden: akzeptieren, zurückstellen oder ablehnen. Bei
   correctness-Feedback konkrete Validierung liefern.
 - File-changing Review-Fixes in `Merge (AI)` immer mit Commit-SHA und Ergebnis

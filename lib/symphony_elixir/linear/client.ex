@@ -93,28 +93,32 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @comment_selection """
+  id
+  body
+  user { id app }
+  issue { id }
+  parentId
+  editedAt
+  resolvedAt
+  archivedAt
+  botActor { id type }
+  externalUser { id }
+  onBehalfOf { id app }
+  bodyData
+  quotedText
+  resolvingUser { id }
+  resolvingComment { id }
+  createdAt
+  updatedAt
+  """
+
   @issue_comments_query """
   query SymphonyLinearIssueComments($id: String!, $first: Int!, $after: String) {
     issue(id: $id) {
       comments(first: $first, after: $after, includeArchived: true) {
         nodes {
-          id
-          body
-          user { id app }
-          issue { id }
-          parentId
-          editedAt
-          resolvedAt
-          archivedAt
-          botActor { id type }
-          externalUser { id }
-          onBehalfOf { id app }
-          bodyData
-          quotedText
-          resolvingUser { id }
-          resolvingComment { id }
-          createdAt
-          updatedAt
+          #{@comment_selection}
         }
         pageInfo {
           hasNextPage
@@ -437,27 +441,42 @@ defmodule SymphonyElixir.Linear.Client do
   @doc "Detect visible changes during pagination; preserve observed versions without claiming a complete scan."
   @spec scan_issue_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
   def scan_issue_comments(issue_id) do
-    with {:ok, before} <- comment_scan_signal(issue_id),
-         {:ok, comments} <- fetch_issue_comments(issue_id) do
-      finish_comment_scan(comment_scan_signal(issue_id), before, comments)
+    with {:ok, before} <- comment_scan_signal(issue_id) do
+      scan_comment_pages(fetch_issue_comments(issue_id), issue_id, before)
     end
   end
 
-  defp finish_comment_scan({:ok, signal}, signal, comments), do: {:ok, comments}
-  defp finish_comment_scan({:ok, _}, _before, comments), do: incomplete_comments(:comment_scan_changed, comments)
+  defp scan_comment_pages({:ok, comments}, issue_id, before) do
+    finish_comment_scan(comment_scan_signal(issue_id), before, before ++ comments)
+  end
+
+  defp scan_comment_pages({:error, {:comment_scan_incomplete, reason, comments}}, _issue_id, before),
+    do: incomplete_comments(reason, before ++ comments)
+
+  defp scan_comment_pages({:error, reason}, _issue_id, before), do: incomplete_comments(reason, before)
+
+  defp finish_comment_scan({:ok, signal}, signal, comments), do: {:ok, Enum.uniq_by(comments, &CommentVersion.key/1)}
+  defp finish_comment_scan({:ok, after_scan}, _before, comments), do: incomplete_comments(:comment_scan_changed, comments ++ after_scan)
+  defp finish_comment_scan({:error, {:comment_scan_incomplete, reason, observed}}, _before, comments), do: incomplete_comments(reason, comments ++ observed)
   defp finish_comment_scan({:error, reason}, _before, comments), do: incomplete_comments(reason, comments)
 
   defp comment_scan_signal(issue_id) do
-    query = "query SymphonyCommentScanSignal($id: String!) { issue(id: $id) { comments(first: 1, orderBy: updatedAt, includeArchived: true) { nodes { id body updatedAt editedAt } } } }"
+    query = "query SymphonyCommentScanSignal($id: String!) { issue(id: $id) { comments(first: 1, orderBy: updatedAt, includeArchived: true) { nodes { #{@comment_selection} } } } }"
 
-    with {:ok, body} <- graphql(query, %{id: issue_id}),
-         true <- Map.get(body, "errors", []) in [nil, []],
+    with {:ok, body} <- graphql(query, %{id: issue_id}) do
+      decode_comment_scan_signal(body, issue_id)
+    end
+  end
+
+  defp decode_comment_scan_signal(body, issue_id) do
+    with true <- Map.get(body, "errors", []) in [nil, []],
          nodes when is_list(nodes) <- get_in(body, ["data", "issue", "comments", "nodes"]),
-         true <- length(nodes) <= 1 and Enum.all?(nodes, &(is_binary(&1["id"]) and is_binary(&1["body"]))) do
-      {:ok, nodes}
+         true <- length(nodes) <= 1 and Enum.all?(nodes, &(is_binary(&1["id"]) and is_binary(&1["body"]))),
+         {:ok, comments} <- normalize_comments(nodes),
+         true <- Enum.all?(comments, &(&1.issue_id == issue_id)) do
+      {:ok, comments}
     else
-      {:error, _} = error -> error
-      _ -> {:error, :comment_scan_signal_unavailable}
+      _ -> incomplete_comments(:comment_scan_signal_unavailable, observed_comments(body, issue_id))
     end
   end
 
@@ -634,18 +653,36 @@ defmodule SymphonyElixir.Linear.Client do
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
 
   defp fetch_issue_comments_page(issue_id, after_cursor, acc_comments, seen) do
-    with {:ok, response} <-
-           graphql(@issue_comments_query, %{id: issue_id, first: @issue_page_size, after: after_cursor}),
-         {:ok, comments, page_info} <- decode_issue_comments_page_response(response),
-         true <- Enum.all?(comments, &(&1.issue_id in [nil, issue_id])) do
-      updated = acc_comments ++ comments
+    case graphql(@issue_comments_query, %{id: issue_id, first: @issue_page_size, after: after_cursor}) do
+      {:ok, response} ->
+        observed = acc_comments ++ observed_comments(response, issue_id)
+        continue_comment_page(response, issue_id, observed, seen)
 
-      continue_comments(next_page_cursor(page_info), issue_id, updated, seen)
-    else
-      {:error, reason} -> incomplete_comments(reason, acc_comments)
-      false -> incomplete_comments(:linear_comment_issue_mismatch, acc_comments)
+      {:error, reason} ->
+        incomplete_comments(reason, acc_comments)
     end
   end
+
+  defp continue_comment_page(response, issue_id, observed, seen) do
+    with {:ok, comments, page_info} <- decode_issue_comments_page_response(response),
+         true <- Enum.all?(comments, &(&1.issue_id in [nil, issue_id])) do
+      continue_comments(next_page_cursor(page_info), issue_id, observed, seen)
+    else
+      {:error, reason} -> incomplete_comments(reason, observed)
+      false -> incomplete_comments(:linear_comment_issue_mismatch, observed)
+    end
+  end
+
+  defp observed_comments(%{"data" => %{"issue" => %{"comments" => %{"nodes" => nodes}}}}, issue_id) when is_list(nodes) do
+    Enum.flat_map(nodes, fn node ->
+      case CommentVersion.normalize(node) do
+        {:ok, %{issue_id: id} = comment} when id in [nil, issue_id] -> [comment]
+        _ -> []
+      end
+    end)
+  end
+
+  defp observed_comments(_response, _issue_id), do: []
 
   defp continue_comments({:ok, cursor}, issue_id, comments, seen) do
     if Map.has_key?(seen, cursor),

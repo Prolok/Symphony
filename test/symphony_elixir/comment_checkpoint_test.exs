@@ -3,7 +3,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
   alias Absinthe.Language, as: L
   alias Absinthe.Phase.Parse
   alias SymphonyElixir.Codex.{CommentTool, DynamicTool, MCPServer, MergeTool}
-  alias SymphonyElixir.{CommentCheckpoint, Workpad}
+  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, Workpad}
   alias SymphonyElixir.Linear.{Adapter, CommentActionGuard, CommentMutations, CommentVersion, WriteContext}
 
   setup do
@@ -65,6 +65,17 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert workpad_body() =~ "Rückfrage"
     assert :ok = CommentCheckpoint.before_action(issue)
     assert {:ok, %{"inputs" => []}} = CommentCheckpoint.checkpoint(issue)
+  end
+
+  test "pending handoff errors contain identifiers while full source text stays in the checkpoint", %{issue: issue} do
+    establish(issue)
+    body = "VERTRAULICHER_KOMMENTARTEXT_677"
+    source = human("private", body)
+    assert {:error, reason} = Adapter.update_issue_state(issue.id, "PreReview (AI)")
+    assert inspect(reason) =~ "comment_inputs_pending"
+    assert inspect(reason) =~ CommentVersion.key(source)
+    refute inspect(reason) =~ body
+    assert {:ok, %{"inputs" => [%{"source" => %{"body" => ^body}}]}} = CommentCheckpoint.checkpoint(issue)
   end
 
   test "MCP/dynamic checkpoints share delivery and errors; invalid or foreign issue arguments fail closed", %{issue: issue} do
@@ -182,8 +193,10 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     on_exit(fn ->
       System.put_env("PATH", previous_path)
       System.delete_env("SYMPHONY_TEST_MERGE_COUNTER")
+      System.delete_env("SYMPHONY_TEST_MERGE_LIMIT_ONCE")
     end)
 
+    bind_git_context(root)
     opts = [labels: fn _ -> {:ok, []} end]
     args = %{"issue_id" => issue.id, "head_sha" => String.duplicate("a", 40)}
     assert {:error, :bound_merge_timeout} = MergeTool.invoke(args, Keyword.put(opts, :timeout_ms, 0))
@@ -195,6 +208,14 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert {:error, {:bound_merge_incomplete, 9, _}} = MergeTool.invoke(args, opts)
     refute File.exists?(marker)
     Process.delete(:scan_failure)
+    System.put_env("SYMPHONY_TEST_MERGE_LIMIT_ONCE", Path.join(root, "rate-limit-once"))
+    assert {:error, {:bound_merge_incomplete, _, _}} = MergeTool.invoke(args, opts)
+    refute File.exists?(marker)
+    human("during-backoff", "Frische Korrektur nach Rate-Limit")
+    assert {:error, {:bound_merge_incomplete, 9, _}} = MergeTool.invoke(args, opts)
+    refute File.exists?(marker)
+    assert {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
+    assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [result(key)])
     response = MCPServer.handle_request(%{"jsonrpc" => "2.0", "id" => 10, "method" => "tools/call", "params" => %{"name" => "symphony_merge", "arguments" => args}}, opts)
     refute response["result"]["isError"]
     [request] = marker |> File.read!() |> String.split("\n", trim: true) |> Enum.map(&Jason.decode!/1)
@@ -211,6 +232,89 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     refute MergeTool.handle_checkpoint(request, issue, [])["ok"]
     Process.put(:label_pages, %{nil => {:error, :offline}})
     refute MergeTool.handle_checkpoint(request, issue, [])["ok"]
+  end
+
+  test "bound merge reports missing Python and refuses incomplete remote workspace context", %{issue: issue} do
+    Process.put(:phase, "Merge (AI)")
+    root = Path.join(Path.dirname(Workflow.workflow_file_path()), "workspaces")
+    File.mkdir_p!(Path.join(root, issue.identifier))
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: root)
+    args = %{"issue_id" => issue.id, "head_sha" => String.duplicate("a", 40)}
+
+    for workspace <- [nil, "relative/" <> issue.identifier, "/remote/other", "/remote/\n" <> issue.identifier] do
+      WriteContext.with_context(%{worker_host: "worker-01", workspace_path: workspace}, fn ->
+        assert {:error, :merge_workspace_unverified} = MergeTool.invoke(args)
+      end)
+    end
+
+    old_path = System.fetch_env!("PATH")
+    System.put_env("PATH", root)
+
+    try do
+      assert {:error, :python_not_found} = MergeTool.invoke(args)
+    after
+      System.put_env("PATH", old_path)
+    end
+  end
+
+  @tag timeout: 60_000
+  test "dynamic merge uses the bound SSH worker even when its workspace does not exist locally", %{issue: issue} do
+    Process.put(:phase, "Merge (AI)")
+    issue = %{issue | state: "Merge (AI)"}
+    root = Path.dirname(Workflow.workflow_file_path())
+    remote_root = "~/.symphony-remote-workspaces"
+    remote_workspace = "/remote/home/.symphony-remote-workspaces/" <> issue.identifier
+    worker_workspace = Path.join(root, "worker")
+    File.mkdir_p!(worker_workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: remote_root)
+    bin = Path.join(root, "commands")
+    File.mkdir_p!(bin)
+    fixture = Path.expand("../support/linear_app/merge_counter.py", __DIR__)
+
+    for command <- ["git", "gh"] do
+      target = Path.join(bin, command)
+      File.cp!(fixture, target)
+      File.chmod!(target, 0o755)
+    end
+
+    ssh = Path.join(bin, "ssh")
+
+    File.write!(ssh, """
+    #!/usr/bin/env python3
+    import os, shlex, sys
+    assert sys.argv[1:5] == ['-T', '-p', '2200', 'worker-01'], sys.argv
+    command = shlex.split(sys.argv[-1])[2]
+    assert #{inspect(remote_workspace)} in command
+    command = command.replace(#{inspect(remote_workspace)}, #{inspect(worker_workspace)})
+    os.execvp('bash', ['bash', '-c', command])
+    """)
+
+    File.chmod!(ssh, 0o755)
+    previous_path = System.fetch_env!("PATH")
+    marker = Path.join(root, "remote-merge.jsonl")
+    System.put_env("PATH", bin <> ":" <> previous_path)
+    System.put_env("SYMPHONY_TEST_MERGE_COUNTER", marker)
+
+    on_exit(fn ->
+      System.put_env("PATH", previous_path)
+      System.delete_env("SYMPHONY_TEST_MERGE_COUNTER")
+    end)
+
+    bind_git_context(root)
+    refute File.dir?(remote_workspace)
+    establish(issue)
+    args = %{"issue_id" => issue.id, "head_sha" => String.duplicate("a", 40)}
+    context = %{worker_host: "worker-01:2200", workspace_path: remote_workspace}
+
+    WriteContext.with_context(context, fn ->
+      Process.put(:scan_failure, true)
+      refute DynamicTool.execute("symphony_merge", args, labels: fn _ -> {:ok, []} end)["success"]
+      refute File.exists?(marker)
+      Process.delete(:scan_failure)
+      assert DynamicTool.execute("symphony_merge", args, labels: fn _ -> {:ok, []} end)["success"]
+    end)
+
+    assert length(String.split(File.read!(marker), "\n", trim: true)) == 1
   end
 
   test "checkpoint recovers an unconfirmed runtime write and refuses corrupt input state", %{issue: issue} do
@@ -268,6 +372,28 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert {:noreply, completed} = Orchestrator.handle_info({:retry_issue, issue.id, token}, state)
     assert completed.retry_attempts == %{}
     assert_received :status_mutation
+  end
+
+  defp bind_git_context(root) do
+    expected = Path.join(root, "git-config")
+    previous = ProjectContext.current()
+    {:ok, workflow} = Workflow.current()
+
+    context = %ProjectContext{
+      root: root,
+      workflow_path: Workflow.workflow_file_path(),
+      workflow: workflow,
+      settings: Config.settings!(),
+      env: %{"GH_CONFIG_DIR" => expected, "GIT_SSH_COMMAND" => "ssh -F " <> expected, "LINEAR_APP_SECRET" => "synthetic-secret"}
+    }
+
+    System.put_env("SYMPHONY_TEST_EXPECT_GIT_ENV", expected)
+    ProjectContext.bind(context)
+
+    on_exit(fn ->
+      ProjectContext.bind(previous)
+      System.delete_env("SYMPHONY_TEST_EXPECT_GIT_ENV")
+    end)
   end
 
   defp establish(issue) do
@@ -336,7 +462,17 @@ defmodule SymphonyElixir.CommentCheckpointTest do
   defp issue_response(vars) do
     nodes =
       if vars.ids == ["issue"],
-        do: [%{"id" => "issue", "identifier" => "PRO-1", "title" => "", "state" => %{"name" => Process.get(:phase)}, "assignee" => %{"id" => "human", "email" => "dev@example.com", "app" => false}}],
+        do: [
+          %{
+            "id" => "issue",
+            "identifier" => "PRO-1",
+            "title" => "",
+            "project" => %{"slugId" => Config.settings!().tracker.project_slug},
+            "team" => %{"key" => Config.settings!().tracker.team_key},
+            "state" => %{"name" => Process.get(:phase)},
+            "assignee" => %{"id" => "human", "email" => "dev@example.com", "app" => false}
+          }
+        ],
         else: []
 
     data(%{"issues" => %{"nodes" => nodes}})

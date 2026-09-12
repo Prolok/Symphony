@@ -4,7 +4,8 @@ defmodule SymphonyElixir.Linear.CommentVersion do
   @spec key(map()) :: String.t()
   def key(comment) do
     raw = raw(comment)
-    fingerprint = digest([raw["updatedAt"], raw["editedAt"], raw["body"], raw["parentId"], raw["resolvedAt"], raw["archivedAt"]])
+    observed = [raw["updatedAt"], raw["editedAt"], raw["body"], raw["parentId"], raw["resolvedAt"], raw["archivedAt"]]
+    fingerprint = digest(if(raw["deleted"] == true, do: observed ++ ["deleted"], else: observed))
     raw["id"] <> ":" <> fingerprint
   end
 

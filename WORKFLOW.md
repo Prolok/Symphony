@@ -901,7 +901,10 @@ Ergebnis im einen Workpad. `outcome` ist `übernommen`, `Rückfrage`,
 der neueren Quellversion). Die Bestätigung einer Vorgängerversion erledigt keinen
 Edit. Empfang und Auflösen allein bestätigen nichts. Bei `deleted: true` den
 Quellinhalt nicht neu ausführen; begonnene Auswirkungen einordnen, nicht pauschal
-rückgängig machen. Keine separaten Empfangskommentare erstellen.
+rückgängig machen. War die Quelle bereits zugestellt oder bestätigt, bekommt ihre
+nachgewiesene Löschung einen eigenen Quellschlüssel zur Einordnung; die bisherige
+Bestätigung bleibt erhalten und erledigt diesen Eingang nicht. Keine separaten
+Empfangskommentare erstellen.
 
 Eigene bestätigte App-Ausgaben bleiben Kontext. Abweichende eigene Ausgaben und
 unklare Herkunft sichtbar einordnen; Kommentare erteilen keine zusätzlichen
@@ -911,15 +914,23 @@ verarbeitet ausschließlich der Hauptworker über die bestehenden Scope-Gates.
 
 Vorwärtsführende `issueUpdate(stateId)`-Aktionen prüfen den Eingang im gemeinsamen
 Client unmittelbar frisch. Offene Eingaben und unvollständige/fehlgeschlagene
-Scans blockieren die Mutation. Rückgaben nach Planung/BLOCKER und Abbruch bleiben
+Scans blockieren die Mutation. Der Aktionsfehler nennt nur Quellschlüssel;
+Kommentartexte über `symphony_comments` am nächsten Checkpoint abrufen.
+Rückgaben nach Planung/BLOCKER und Abbruch bleiben
 möglich. Der bestehende Land-Pfad führt den Merge ausschließlich über das gebundene
 `symphony_merge` mit `head_sha` aus; es prüft GitHub-Gates, aktuelle Linear-Labels
-und den Kommentareingang vor der tatsächlichen Merge-Anforderung. Bei neuer
-Eingabe deren Ergebnis bearbeiten und danach erneut frisch prüfen.
+und den Kommentareingang vor der tatsächlichen Merge-Anforderung. Bei SSH-Workern
+läuft der Land-Prozess im gebundenen entfernten Workspace; der frische Linear-Check
+bleibt im zuständigen Symphony-Prozess. Bei neuer
+Eingabe deren Ergebnis bearbeiten und danach erneut frisch prüfen. Eine durch
+GitHub-Rate-Limit gescheiterte Merge-Anforderung wird nicht intern wiederholt;
+ein erneuter gebundener Merge durchläuft sämtliche Gates und Checkpoints frisch.
 
 Garantiert werden API-seitig beobachtete Fassungen. Zwischen Polls vollständig
 überschriebene Zwischenstände sind nicht rekonstruierbar. Paginierung wird auf
-sichtbare Änderungen geprüft, liefert aber keinen atomaren Snapshot. Zwischen
+sichtbare Änderungen geprüft; auch die in Vor-/Nachscan-Signalen gelesenen
+Fassungen bleiben bei einem unvollständigen Scan erhalten. Die Abfrage liefert
+keinen atomaren Snapshot. Zwischen
 letzter API-Antwort und Status-/GitHub-Aktion verbleibt ein unvermeidbares
 Zeitfenster; keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
 

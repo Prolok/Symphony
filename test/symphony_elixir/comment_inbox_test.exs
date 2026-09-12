@@ -80,6 +80,49 @@ defmodule SymphonyElixir.CommentInboxTest do
     assert length(CommentInbox.pending(state)) == 2
   end
 
+  test "deletion after acknowledgement has an independent restartable assessment", ctx do
+    establish(ctx)
+    source = comment("done", "Änderung übernehmen")
+    scan(ctx, [source])
+    deliver(ctx)
+    ack(ctx, CommentVersion.key(source))
+    assert {:ok, state} = scan(ctx, [])
+    refute CommentInbox.ready?(state)
+    assert [deletion] = CommentInbox.pending(state)
+    assert deletion["deleted"]
+    assert deletion["key"] != CommentVersion.key(source)
+    assert deletion["previous_result"] == result(source)
+    assert {:ok, state} = ack(ctx, CommentVersion.key(source))
+    refute CommentInbox.ready?(state)
+    assert {:ok, state} = Task.async(fn -> deliver(ctx) end) |> Task.await()
+    assert [%{"key" => key, "deleted" => true}] = CommentInbox.pending(state)
+    assert {:ok, state} = ack(ctx, key, "Begonnene Auswirkungen eingeordnet; nichts erneut ausgeführt")
+    assert CommentInbox.ready?(state)
+    assert {:ok, state} = scan(ctx, [])
+    assert CommentInbox.pending(state) == []
+  end
+
+  test "deletion cannot be swallowed by an acknowledgement of the delivered baseline", ctx do
+    source = comment("historical", "Offener Hinweis")
+    scan(ctx, [source])
+    {:ok, state} = deliver(ctx)
+    baseline = state["baseline"]["key"]
+    scan(ctx, [])
+    assert {:ok, state} = ack(ctx, baseline)
+    assert [%{"deleted" => true}] = CommentInbox.pending(state)
+  end
+
+  test "deleting one source preserves another independently open input", ctx do
+    establish(ctx)
+    deleted = comment("deleted", "Erste Eingabe")
+    retained = comment("retained", "Unabhängige Eingabe")
+    scan(ctx, [deleted, retained])
+    assert {:ok, state} = scan(ctx, [retained])
+    assert state["versions"][CommentVersion.key(deleted)]["deleted"]
+    refute state["versions"][CommentVersion.key(retained)]["deleted"]
+    assert length(CommentInbox.pending(state)) == 2
+  end
+
   test "a historical source deleted before baseline processing is visibly withdrawn at delivery", ctx do
     source = comment("historical", "Noch offener Hinweis")
     assert {:ok, _} = scan(ctx, [source])

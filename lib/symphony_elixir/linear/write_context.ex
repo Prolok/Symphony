@@ -19,7 +19,7 @@ defmodule SymphonyElixir.Linear.WriteContext do
     normalized =
       context
       |> Map.new(fn {key, value} -> {to_string(key), value} end)
-      |> Map.take(~w(issue_id issue_identifier phase run_id session_id thread_id turn_id tool_call_id))
+      |> Map.take(~w(issue_id issue_identifier phase run_id session_id thread_id turn_id tool_call_id worker_host workspace_path))
       |> Map.reject(fn {_key, value} -> not (is_binary(value) or is_number(value)) end)
 
     Process.put(@key, Map.merge(current(), normalized))

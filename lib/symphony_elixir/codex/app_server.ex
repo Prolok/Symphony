@@ -111,6 +111,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           |> Map.merge(%{
             issue_id: Map.get(issue, :id),
             issue_identifier: Map.get(issue, :identifier),
+            workspace_path: workspace,
             session_id: session_id,
             thread_id: thread_id,
             turn_id: turn_id

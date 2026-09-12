@@ -48,7 +48,8 @@ defmodule SymphonyElixir.CommentCheckpoint do
       :ok
     else
       with {:ok, delivered} <- CommentInbox.deliver(app_binding(), issue, WriteContext.current(), opts) do
-        {:error, {:comment_inputs_pending, payload(delivered)}}
+        summary = %{"input_keys" => Enum.map(CommentInbox.pending(delivered), & &1["key"]), "last_successful_scan" => delivered["last_successful_scan"]}
+        {:error, {:comment_inputs_pending, summary}}
       end
     end
   end

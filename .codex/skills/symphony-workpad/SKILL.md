@@ -101,5 +101,7 @@ Das Tool ergänzt `### Kommentareingang` im bestehenden Workpad. Diesen Abschnit
 und seine Quellen-/Ergebnismarker bei späteren Workpad-Updates erhalten.
 Ein Edit benötigt eine eigene Bestätigung; Auflösen ist kein fachlicher Abschluss.
 Gelöschte Quellen nicht neu ausführen; begonnene Auswirkungen einordnen.
+Ein eigener Löschungs-Quellschlüssel nach vorheriger Zustellung/Bestätigung
+benötigt ein eigenes Ergebnis; das frühere Ergebnis bleibt erhalten.
 Keine zusätzlichen Empfangskommentare. Technische Review-Subagenten erhalten
 weiterhin keinen ungefilterten Kommentar-/Workpad-Kontext.

@@ -16,6 +16,24 @@ SPEC.loader.exec_module(land)
 
 
 class AppLabelGateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_addressed_commented_review_summary_does_not_require_new_reviewer_action(self):
+        review = {"id": 17, "state": "COMMENTED", "body": "Bitte Fehlerpfad prüfen",
+                  "submitted_at": "2026-09-12T10:00:00Z", "user": {"login": "human"}}
+        reply = {"body": "[codex] Fehlerpfad korrigiert und validiert.",
+                 "created_at": "2026-09-12T11:00:00Z", "user": {"login": "author"}}
+        with self.assertRaises(SystemExit):
+            land.raise_on_human_feedback([], [], [review], None)
+        land.raise_on_human_feedback([reply], [], [review], None)
+        for changed in [dict(review, state="CHANGES_REQUESTED"),
+                        dict(review, submitted_at="2026-09-12T12:00:00Z")]:
+            with self.assertRaises(SystemExit):
+                land.raise_on_human_feedback([reply], [], [changed], None)
+        earlier_request = dict(review, state="CHANGES_REQUESTED", submitted_at="2026-09-12T09:00:00Z")
+        with self.assertRaises(SystemExit):
+            land.raise_on_human_feedback([reply], [], [earlier_request, review], None)
+        later_approval = dict(review, state="APPROVED", submitted_at="2026-09-12T12:00:00Z")
+        land.raise_on_human_feedback([reply], [], [earlier_request, review, later_approval], None)
+
     async def test_app_watch_hands_live_label_gate_to_the_bound_tool_without_claiming_completion(self):
         pr = land.PrInfo(1, "https://example.invalid/pull/1", "a" * 40, "MERGEABLE", "CLEAN")
         evidence = land.MergePreflightEvidence("symphony/PRO-1", pr.head_sha, True, pr)

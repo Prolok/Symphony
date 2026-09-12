@@ -60,5 +60,7 @@ logging is configured.
 `issue_identifier`, den bekannten `session_id` und `last_successful_scan`.
 Erfolg nennt die Anzahl offener Versionen, Fehler die vorhandene API-/Rate-Limit-
 Klassifikation. Kommentartexte gehören in den gebundenen Eingang bzw. das
-Workpad, nicht in normale Betriebslogs. Der letzte vollständige Stand bleibt bei
+Workpad, nicht in normale Betriebslogs. `comment_inputs_pending` enthält deshalb
+nur Quellschlüssel und den letzten erfolgreichen Scan; die Quellen bleiben über
+den gebundenen Kommentar-Checkpoint abrufbar. Der letzte vollständige Stand bleibt bei
 Fehlern bestehen; Empfang ist kein fachlicher Verarbeitungsnachweis.

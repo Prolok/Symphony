@@ -27,6 +27,7 @@ defmodule SymphonyScriptTest do
       refute File.exists?(Path.join(repo_dir, ".mix-calls"))
       refute File.exists?(Path.join(repo_dir, "_build"))
       refute File.exists?(Path.join(home_dir, ".local/bin"))
+      await_service_unlock(home_dir)
     end
   end
 
@@ -137,11 +138,14 @@ defmodule SymphonyScriptTest do
       File.write!(Path.join(bin_dir, "codex"), """
       #!/bin/bash
       set -eu
-      [[ "$*" == *app-server* ]]
-      [[ "$CODEX_HOME" == "$SYMPHONY_RELEASE_ROOT/.symphony/codex" ]]
-      [[ "$SYMPHONY_LINEAR_AUTH_MODE" == app ]]
-      [[ "$*" == *SYMPHONY_PYTHON* ]]
-      [[ -n "$SYMPHONY_LINEAR_BINDING_HASH" ]]
+      # Bash 3.2 does not apply errexit to a failed [[ ... ]] expression.
+      [[ "$*" == *app-server* ]] || exit 1
+      [[ "$CODEX_HOME" == "$SYMPHONY_RELEASE_ROOT/.symphony/codex/projects/"* ]] || exit 1
+      [[ -L "$CODEX_HOME/sessions" ]] || exit 1
+      [[ "$(readlink "$CODEX_HOME/sessions")" == "$SYMPHONY_CODEX_STATE_ROOT/sessions" ]] || exit 1
+      [[ "$SYMPHONY_LINEAR_AUTH_MODE" == app ]] || exit 1
+      [[ "$*" == *SYMPHONY_PYTHON* ]] || exit 1
+      [[ -n "$SYMPHONY_LINEAR_BINDING_HASH" ]] || exit 1
       printf 'codex-app-bound\\n' >> #{shell_quote(trace)}
       "$SYMPHONY_RELEASE_ROOT/sym-codex-mcp"
       printf 'mcp-helper-started\\n' >> #{shell_quote(trace)}
@@ -495,6 +499,7 @@ defmodule SymphonyScriptTest do
       refute File.exists?(Path.join(repo_dir, "_build"))
       refute File.exists?(Path.join(home_dir, ".local/bin"))
       File.ln_s!(target, path)
+      await_service_unlock(home_dir)
     end
   end
 
@@ -514,6 +519,7 @@ defmodule SymphonyScriptTest do
       refute output =~ "MUTATED"
       refute File.exists?(Path.join(repo_dir, ".mix-calls"))
       refute File.exists?(Path.join(home_dir, ".local/bin"))
+      await_service_unlock(home_dir)
     end
 
     File.rm!(Path.join(bin_dir, "runtime/escript"))
@@ -755,6 +761,21 @@ defmodule SymphonyScriptTest do
 
   defp maybe_put_cd(opts, nil), do: opts
   defp maybe_put_cd(opts, cd), do: Keyword.put(opts, :cd, cd)
+
+  defp await_service_unlock(home_dir) do
+    # The detached guardian observes owner exit asynchronously. Sequential
+    # preflight cases must await its kernel-lock release before reusing HOME.
+    script = """
+    import fcntl, pathlib, signal, sys
+    path = pathlib.Path(sys.argv[1]) / ".cache/symphony/service.lock"
+    if path.exists():
+        signal.alarm(5)
+        with path.open() as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+    """
+
+    assert {_, 0} = System.cmd(System.find_executable("python3"), ["-c", script, home_dir], stderr_to_stdout: true)
+  end
 
   defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
 end

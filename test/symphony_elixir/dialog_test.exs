@@ -1367,6 +1367,7 @@ defmodule SymphonyElixir.DialogTest do
       )
 
       previous_answer = %{
+        id: "comment-previous-answer",
         body: "### Antwort Symphony\n\n[Session thread-existing]\n\nPrevious answer",
         created_at: ~U[2026-05-19 10:00:00Z]
       }

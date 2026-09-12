@@ -1181,6 +1181,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "application startup preflight loads env files from .symphony before validating assignee" do
+    System.delete_env("SYMPHONY_LINEAR_ENV_DIR")
     previous_linear_assignee = System.get_env("LINEAR_ASSIGNEE")
     previous_workflow_path = Workflow.workflow_file_path()
     original_cwd = File.cwd!()
@@ -1226,6 +1227,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "application startup preflight returns env file errors from .symphony under the invocation directory" do
+    System.delete_env("SYMPHONY_LINEAR_ENV_DIR")
     previous_linear_assignee = System.get_env("LINEAR_ASSIGNEE")
     previous_workflow_path = Workflow.workflow_file_path()
     original_cwd = File.cwd!()

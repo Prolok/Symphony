@@ -138,3 +138,47 @@ versionierten Skills; persönliche lokale Skill-Erweiterungen werden nicht
 in den gemeinsamen Lauf importiert. Gesprächs-/Session-History, Wiederaufnahme
 und Tracker-/Journalzustand bleiben erhalten. Bereits geladener Alt-Kontext
 wird dadurch nicht rückwirkend entfernt.
+
+## Dauerhafter Kommentareingang
+
+Reguläre übernommene aktive Issues werden im vorhandenen Polltakt (standardmäßig
+30 Sekunden) gescannt. Die erste vollständige Beobachtung ist historische
+Baseline. Der Worker erhält sie einmal zur Übernahme noch offener Hinweise;
+bereits zuvor erkannte offene Versionen bleiben erhalten. Manuelle Gates und
+Dialog-AI werden durch diesen Eingang nicht dispatcht.
+
+Unter dem vorhandenen projektlokalen `state_root/inputs/` hält `DurableState`
+pro Issue die Bindung, beobachtete Quellversionen, Baseline, letzten vollständigen
+Abruf, Scanfehler und Zustände `recognized`, `delivered`, `processed` fest.
+Die bestehende OS-Journal-Sperre serialisiert Scan/Ack; Beobachtungen werden mit
+App-Schreibvorgängen serialisiert und unbestätigte Schreibbelege abgeglichen.
+Ein fehlgeschlagener Scan ersetzt keinen vollständigen Stand. Schon gelesene
+Seiten bleiben als offene Beobachtungen erhalten. Ein verschwundener Kommentar
+benötigt zusätzlich eine direkte Nicht-gefunden-Antwort bei weiterhin
+sichtbarem Issue, bevor er als gelöscht eingeordnet wird.
+
+`symphony_comments` liefert sichere Checkpoints und schreibt versionsbezogene
+fachliche Ergebnisse in `### Kommentareingang` des einen Workpads. Nach einem
+Crash wird unbestätigte Arbeit erneut zugestellt. Ein bestätigter Workpad-Write
+mit noch fehlendem lokalem Ack lässt sich anhand seines Ergebnismarkers
+idempotent wiederholen. Die Marker und den Abschnitt bei Workpad-Updates erhalten.
+Eigene App-Ausgaben werden am letzten bestätigten vollständigen Schreibstand
+erkannt; Rückedits auf frühere Texte bleiben sichtbar. Andere Integrationen
+aktivieren keine Arbeit. Technische Review-Subagenten bleiben isoliert.
+Linear erhöht auch bei einer Thread-Antwort den `updatedAt`-Wert des
+Elternkommentars. Unveränderter bestätigter App-Inhalt bleibt dabei Kontext;
+die menschliche Antwort besitzt ihre eigene Quellversion.
+
+Statusaktionen laufen durch den frischen zentralen Check. `symphony_merge` führt
+den vorhandenen Land-Helper in einem gebundenen Prozess aus und beantwortet dessen
+letzten Checkpoint unmittelbar vor dem GitHub-Merge. Linear-Zugang verbleibt im
+App-Runtime-Prozess; der Helper erhält keine Secrets. Manuelle GitHub-Approvals,
+PR-/Remote-/Head-, CI- und Review-Gates bleiben bestehen. Offene Eingaben,
+fehlgeschlagene Scans oder geänderte Labels verhindern den Abschluss.
+
+Logs `Comment scan completed/failed` nennen Projektroot, Issue-/Session-Kontext,
+letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Rate-Limits folgen
+der bestehenden Fehlerklassifikation und werden beim nächsten Poll/Checkpoint
+wieder geprüft. Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
+zwischen Polls und keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
+Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehen.

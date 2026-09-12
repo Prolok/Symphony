@@ -3,7 +3,10 @@ defmodule SymphonyElixir.Codex.MCPServer do
   Minimal stdio MCP server exposing Symphony's `linear_graphql` tool.
   """
 
+  alias SymphonyElixir.Codex.CommentTool
+  alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.Codex.LinearGraphqlTool
+  alias SymphonyElixir.Codex.MergeTool
   alias SymphonyElixir.{EnvFile, Workflow}
 
   @protocol_version "2025-06-18"
@@ -136,7 +139,7 @@ defmodule SymphonyElixir.Codex.MCPServer do
         jsonrpc_result(request_id, %{})
 
       {"tools/list", request_id} when not is_nil(request_id) ->
-        jsonrpc_result(request_id, %{"tools" => [LinearGraphqlTool.mcp_tool()]})
+        jsonrpc_result(request_id, %{"tools" => DynamicTool.tool_specs()})
 
       {"tools/call", request_id} when not is_nil(request_id) ->
         handle_tool_call(request_id, Map.get(request, "params"), opts)
@@ -151,6 +154,16 @@ defmodule SymphonyElixir.Codex.MCPServer do
 
   def handle_request(%{"id" => id}, _opts), do: jsonrpc_error(id, -32_600, "Invalid Request")
   def handle_request(_request, _opts), do: jsonrpc_error(nil, -32_600, "Invalid Request")
+
+  defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)
+       when name in ["symphony_merge", "symphony_linear.symphony_merge"] do
+    jsonrpc_result(id, MergeTool.mcp_call(arguments, opts))
+  end
+
+  defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)
+       when name in ["symphony_comments", "symphony_linear.symphony_comments"] do
+    jsonrpc_result(id, CommentTool.mcp_call(arguments, opts))
+  end
 
   defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)
        when is_binary(name) do

@@ -127,7 +127,7 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
            }) == nil
   end
 
-  test "tools/list exposes only linear_graphql" do
+  test "tools/list exposes the shared Linear, comment and bound merge tools" do
     response =
       MCPServer.handle_request(%{
         "jsonrpc" => "2.0",
@@ -148,7 +148,9 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
                    "variables" => _variables
                  }
                }
-             }
+             },
+             %{"name" => "symphony_comments"},
+             %{"name" => "symphony_merge"}
            ] = get_in(response, ["result", "tools"])
 
     assert description =~ "Linear"

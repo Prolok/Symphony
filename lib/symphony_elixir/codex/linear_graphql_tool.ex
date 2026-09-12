@@ -162,6 +162,10 @@ defmodule SymphonyElixir.Codex.LinearGraphqlTool do
     }
   end
 
+  defp tool_error_payload({:comment_inputs_pending, checkpoint}) do
+    %{"error" => %{"message" => "Offene Kommentare vor dem Handoff fachlich bearbeiten und versionsbezogen bestätigen.", "checkpoint" => checkpoint}}
+  end
+
   defp tool_error_payload(:invalid_arguments) do
     %{
       "error" => %{

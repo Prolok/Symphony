@@ -1,4 +1,5 @@
 defmodule SymCodexMcpScriptTest do
+  alias SymphonyElixir.Codex.{CommentTool, MergeTool}
   use ExUnit.Case
 
   @script_path Path.expand("../sym-codex-mcp", __DIR__)
@@ -133,7 +134,11 @@ defmodule SymCodexMcpScriptTest do
              }
            }
 
-    assert get_in(tools_list, ["result", "tools"]) == [
+    assert [linear_tool, comment_tool, merge_tool] = get_in(tools_list, ["result", "tools"])
+    assert comment_tool == CommentTool.tool_spec()
+    assert merge_tool == MergeTool.tool_spec()
+
+    assert [linear_tool] == [
              %{
                "name" => "linear_graphql",
                "description" => "Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.\n",

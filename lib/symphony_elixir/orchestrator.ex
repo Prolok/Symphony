@@ -7,6 +7,9 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
+  alias SymphonyElixir.CommentCheckpoint
+  alias SymphonyElixir.Linear.WriteContext
+
   alias SymphonyElixir.{
     AgentRunner,
     Config,
@@ -73,6 +76,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       dialog_observations: %{},
+      comment_scans: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -139,13 +143,21 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def terminate(_reason, %State{external_poll: true, running: running}) do
+  def terminate(_reason, %State{external_poll: true, running: running, comment_scans: scans}) do
+    stop_comment_scans(scans)
+
     Enum.each(running, fn {_id, entry} ->
       Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, entry.pid)
     end)
   end
 
+  def terminate(_reason, %State{comment_scans: scans}), do: stop_comment_scans(scans)
+
   def terminate(_reason, _state), do: :ok
+
+  defp stop_comment_scans(scans) do
+    Enum.each(scans, fn {_id, pid} -> Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) end)
+  end
 
   @impl true
   def handle_info({:project_poll, context}, state) do
@@ -192,6 +204,7 @@ defmodule SymphonyElixir.Orchestrator do
     state = refresh_runtime_config(state)
     previous_state = state
     state = maybe_dispatch(state)
+    state = scan_running_comments(state)
     state = maybe_touch_activity_for_state_change(previous_state, state)
     state = maybe_request_idle_shutdown(state)
 
@@ -3486,6 +3499,10 @@ defmodule SymphonyElixir.Orchestrator do
 
         {:noreply, state |> complete_issue(issue_id, issue.state) |> release_issue_claim(issue_id)}
 
+      {:error, {:comment_inputs_pending, _inputs}} ->
+        Logger.info("Resuming main worker for pending review input: #{issue_context(issue)}")
+        handle_active_retry(state, issue, attempt, metadata)
+
       {:error, reason} ->
         Logger.warning("Failed clean review handoff from recovered subagent result; retrying without dispatch: #{issue_context(issue)} next_state=#{next_state} reason=#{inspect(reason)}")
 
@@ -3779,6 +3796,41 @@ defmodule SymphonyElixir.Orchestrator do
         tick_token: tick_token,
         next_poll_due_at_ms: System.monotonic_time(:millisecond) + delay_ms
     }
+  end
+
+  defp scan_running_comments(state) do
+    context = SymphonyElixir.ProjectContext.current()
+    stop_comment_scans(Map.drop(state.comment_scans, Map.keys(state.running)))
+    scans = Map.take(state.comment_scans, Map.keys(state.running))
+    scans = Enum.reduce(state.running, scans, &maybe_start_comment_scan(&1, &2, context))
+    %{state | comment_scans: scans}
+  end
+
+  defp maybe_start_comment_scan({id, entry}, scans, context) do
+    previous = scans[id]
+
+    if CommentCheckpoint.active?(entry.issue) and not (is_pid(previous) and Process.alive?(previous)),
+      do: start_comment_scan(id, entry, scans, context),
+      else: scans
+  end
+
+  defp start_comment_scan(id, entry, scans, context) do
+    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn -> run_comment_scan(entry, context) end) do
+      {:ok, pid} ->
+        Map.put(scans, id, pid)
+
+      {:error, reason} ->
+        Logger.warning("Comment scan start failed issue_id=#{id} issue_identifier=#{entry.issue.identifier} reason=#{inspect(reason)}")
+        scans
+    end
+  end
+
+  defp run_comment_scan(entry, context) do
+    SymphonyElixir.ProjectContext.with_context(context, fn ->
+      WriteContext.with_context(%{issue_id: entry.issue.id, issue_identifier: entry.issue.identifier, session_id: entry[:session_id]}, fn ->
+        CommentCheckpoint.scan(entry.issue)
+      end)
+    end)
   end
 
   defp schedule_poll_cycle_start do

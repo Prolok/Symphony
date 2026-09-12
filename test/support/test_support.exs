@@ -129,6 +129,9 @@ defmodule SymphonyElixir.TestSupport do
           )
 
         File.mkdir_p!(workflow_root)
+        # Runtime-owned comment state must never be read from the developer's
+        # checkout when a fixture validates its synthetic app configuration.
+        System.put_env("SYMPHONY_LINEAR_ENV_DIR", Path.join(workflow_root, ".symphony"))
         workflow_file = Path.join(workflow_root, "WORKFLOW.md")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)

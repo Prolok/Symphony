@@ -53,3 +53,12 @@ logging is configured.
 - Is this event tied to a Codex session? Include `session_id`.
 - Is the failure reason present and concise?
 - Is the message format consistent with existing lifecycle logs?
+
+## Kommentar-Checkpoints
+
+`Comment scan completed/failed` enthält `project_root`, `issue_id`,
+`issue_identifier`, den bekannten `session_id` und `last_successful_scan`.
+Erfolg nennt die Anzahl offener Versionen, Fehler die vorhandene API-/Rate-Limit-
+Klassifikation. Kommentartexte gehören in den gebundenen Eingang bzw. das
+Workpad, nicht in normale Betriebslogs. Der letzte vollständige Stand bleibt bei
+Fehlern bestehen; Empfang ist kein fachlicher Verarbeitungsnachweis.

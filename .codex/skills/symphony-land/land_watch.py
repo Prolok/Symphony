@@ -5,6 +5,7 @@ import os
 import random
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -27,6 +28,9 @@ ISSUE_IDENTIFIER_ENV = "SYMPHONY_ISSUE_IDENTIFIER"
 MANUAL_REVIEW_LABEL_ENV = "SYMPHONY_ISSUE_LABELS_JSON"
 MANUAL_REVIEW_BLOCKER_EXIT = 7
 APP_LABEL_LOOKUP_EXIT = 8
+COMMENT_CHECKPOINT_EXIT = 9
+BOUND_REQUEST = "SYMPHONY_BOUND_REQUEST "
+bound_request = None
 DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 
 
@@ -500,6 +504,11 @@ def issue_labels_from_json(raw: str | None) -> list[str] | None:
 async def current_issue_labels(snapshot_labels: list[str] | None = None) -> list[str]:
     if current_issue_identifier() is None:
         raise LabelRefreshError("Missing issue identity for the App label gate.")
+    if bound_request is not None:
+        result = bound_request("labels")
+        if result.get("ok") is True and isinstance(result.get("labels"), list):
+            return result["labels"]
+        raise LabelRefreshError("Bound live label lookup failed.")
     raise AppLabelLookupRequired("Live labels must be read through the bound Linear tool.")
 
 
@@ -991,8 +1000,51 @@ async def watch_pr() -> None:
         raise_on_missing_manual_review_approval(labels, current, reviews)
 
 
+def request_bound_checkpoint(operation: str) -> dict:
+    print(BOUND_REQUEST + json.dumps({"operation": operation}), flush=True)
+    line = sys.stdin.readline()
+    if not line:
+        raise RuntimeError("Bound runtime disconnected before merge.")
+    result = json.loads(line)
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid bound checkpoint response.")
+    return result
+
+
+async def merge_bound(expected_head: str, title: str) -> None:
+    """The trusted runtime owns the pipe; no credential or approval token is passed to the shell."""
+    global bound_request
+    bound_request = request_bound_checkpoint
+    await watch_pr()
+    evidence = await require_merge_preflight()
+    current = evidence.pr
+    if evidence.branch != f"symphony/{current_issue_identifier()}":
+        raise RuntimeError("Branch does not belong to the bound issue.")
+    if current.head_sha != expected_head or await run_git("status", "--porcelain"):
+        raise RuntimeError("Merge head changed or workspace is dirty.")
+    labels = await current_issue_labels()
+    issue_comments, review_comments, reviews, review_request_at = await fetch_review_context(current.number)
+    raise_on_human_feedback(issue_comments, review_comments, reviews, review_request_at)
+    raise_on_missing_manual_review_approval(labels, current, reviews)
+    # The final fresh Linear scan executes in the bound parent, after GitHub
+    # gates. This remaining API/action interval cannot be made atomic.
+    checkpoint = bound_request("merge")
+    if checkpoint.get("ok") is not True:
+        raise SystemExit(COMMENT_CHECKPOINT_EXIT)
+    if checkpoint.get("labels") != labels:
+        raise RuntimeError("Linear labels changed during merge checks; repeat the bound merge.")
+    await run_gh("pr", "merge", str(current.number), "--merge", "--match-head-commit", expected_head, "--subject", title)
+    result = json.loads(await run_gh("pr", "view", str(current.number), "--json", "state,mergeCommit,url"))
+    if result.get("state") != "MERGED" or not (result.get("mergeCommit") or {}).get("oid"):
+        raise RuntimeError("Merge result is not confirmed.")
+    print("SYMPHONY_MERGE_RESULT " + json.dumps(result), flush=True)
+
+
 if __name__ == "__main__":
     try:
-        asyncio.run(watch_pr())
+        if len(sys.argv) == 4 and sys.argv[1] == "--bound-merge":
+            asyncio.run(merge_bound(sys.argv[2], sys.argv[3]))
+        else:
+            asyncio.run(watch_pr())
     except SystemExit as exc:
         raise SystemExit(exc.code) from None

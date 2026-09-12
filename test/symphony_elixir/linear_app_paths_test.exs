@@ -253,6 +253,14 @@ defmodule SymphonyElixir.LinearAppPathsTest do
     query = payload[:query] || payload["query"]
 
     cond do
+      query =~ "SymphonyCommentAction" ->
+        states = %{"nodes" => [%{"id" => "state", "name" => "Planung"}], "pageInfo" => %{"hasNextPage" => false}}
+        issue = %{"id" => "issue", "team" => %{"states" => states}}
+        {:ok, %{status: 200, body: %{"data" => %{"issue" => issue}}}}
+
+      query =~ "SymphonyLinearIssuesById" ->
+        {:ok, %{status: 200, body: %{"data" => %{"issues" => %{"nodes" => [%{"id" => "issue", "state" => %{"name" => "Review (AI)"}}]}}}}}
+
       query =~ "SymphonyLinearIssueComments" ->
         {:ok, %{status: 200, body: %{"data" => %{"issue" => %{"comments" => %{"nodes" => Process.get(:workpad_comments), "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}}}
 

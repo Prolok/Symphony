@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "Du arbeitest an einem Ticket dieses Repositorys."
   @repo_workflow_file Path.expand("../../WORKFLOW.md", __DIR__)
-  @test_isolation_env_names ["LINEAR_PROJECT_SLUG", "LINEAR_TEAM_KEY", "SYMPHONY_LINEAR_SECRET_ACCESS"]
+  # A caller's app-specific Codex home must not change default-path fixtures.
+  @test_isolation_env_names ["CODEX_HOME", "LINEAR_PROJECT_SLUG", "LINEAR_TEAM_KEY", "SYMPHONY_LINEAR_SECRET_ACCESS"]
 
   # Script fixtures always use the system shell and system utilities. Python is
   # an explicit dependency, so pin only that executable from the host PATH.

@@ -1,9 +1,12 @@
 import asyncio
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -16,6 +19,60 @@ SPEC.loader.exec_module(land)
 
 
 class AppLabelGateTest(unittest.IsolatedAsyncioTestCase):
+    async def test_github_children_use_origin_despite_an_upstream_default_and_preserve_explicit_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            origin = "https://github.com/example/project.git"
+            for arguments in (("remote", "add", "origin", origin),
+                              ("remote", "add", "upstream", "https://github.com/example/upstream.git"),
+                              ("config", "remote.upstream.gh-resolved", "base")):
+                subprocess.run(["git", "-C", str(root), *arguments], check=True)
+            gh = root / "gh"
+            gh.write_text(f"#!{sys.executable}\nimport json, os, sys\n"
+                          "print(json.dumps({'repo': os.environ.get('GH_REPO'), 'args': sys.argv[1:]}))\n")
+            gh.chmod(0o755)
+            previous = Path.cwd()
+            try:
+                os.chdir(root)
+                with mock.patch.dict(os.environ, {"PATH": f"{root}{os.pathsep}{os.environ['PATH']}"}, clear=True):
+                    for configured in (None, "", "example/explicit-project"):
+                        with self.subTest(configured=configured):
+                            if configured is None:
+                                os.environ.pop("GH_REPO", None)
+                            else:
+                                os.environ["GH_REPO"] = configured
+                            for args in (("pr", "view", "symphony/PRO-1"),
+                                         ("api", "repos/{owner}/{repo}/pulls/1/comments"),
+                                         ("pr", "merge", "1", "--match-head-commit", "a" * 40)):
+                                result = json.loads(await land.run_gh(*args))
+                                self.assertEqual(result, {"repo": configured or origin, "args": list(args)})
+                            self.assertEqual(os.environ.get("GH_REPO"), configured)
+                    os.environ.pop("GH_REPO", None)
+                    subprocess.run(["git", "remote", "remove", "origin"], check=True)
+                    with self.assertRaisesRegex(RuntimeError, "origin"):
+                        await land.run_gh("pr", "view", "symphony/PRO-1")
+            finally:
+                os.chdir(previous)
+
+    async def test_addressed_commented_review_summary_does_not_require_new_reviewer_action(self):
+        review = {"id": 17, "state": "COMMENTED", "body": "Bitte Fehlerpfad prüfen",
+                  "submitted_at": "2026-09-12T10:00:00Z", "user": {"login": "human"}}
+        reply = {"body": "[codex] Fehlerpfad korrigiert und validiert.",
+                 "created_at": "2026-09-12T11:00:00Z", "user": {"login": "author"}}
+        with self.assertRaises(SystemExit):
+            land.raise_on_human_feedback([], [], [review], None)
+        land.raise_on_human_feedback([reply], [], [review], None)
+        for changed in [dict(review, state="CHANGES_REQUESTED"),
+                        dict(review, submitted_at="2026-09-12T12:00:00Z")]:
+            with self.assertRaises(SystemExit):
+                land.raise_on_human_feedback([reply], [], [changed], None)
+        earlier_request = dict(review, state="CHANGES_REQUESTED", submitted_at="2026-09-12T09:00:00Z")
+        with self.assertRaises(SystemExit):
+            land.raise_on_human_feedback([reply], [], [earlier_request, review], None)
+        later_approval = dict(review, state="APPROVED", submitted_at="2026-09-12T12:00:00Z")
+        land.raise_on_human_feedback([reply], [], [earlier_request, review, later_approval], None)
+
     async def test_app_watch_hands_live_label_gate_to_the_bound_tool_without_claiming_completion(self):
         pr = land.PrInfo(1, "https://example.invalid/pull/1", "a" * 40, "MERGEABLE", "CLEAN")
         evidence = land.MergePreflightEvidence("symphony/PRO-1", pr.head_sha, True, pr)

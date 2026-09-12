@@ -12,6 +12,8 @@ concurrency:
 
 jobs:
   make-all:
+    # Symphony validates locally in Test (AI); Dependabot and other PRs use CI.
+    if: ${{ !startsWith(github.head_ref, 'symphony/') }}
     name: make all (${{ matrix.os }})
     strategy:
       fail-fast: false

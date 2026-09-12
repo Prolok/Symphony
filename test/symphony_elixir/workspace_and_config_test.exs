@@ -1284,7 +1284,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "data" => %{
                  "issue" => %{
                    "comments" => %{
-                     "nodes" => [%{"body" => "older note"}],
+                     "nodes" => [%{"id" => "older-comment", "body" => "older note"}],
                      "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-1"}
                    }
                  }
@@ -1300,7 +1300,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                "data" => %{
                  "issue" => %{
                    "comments" => %{
-                     "nodes" => [%{"body" => "## Symphony Workpad\n\npresent"}],
+                     "nodes" => [%{"id" => "workpad-comment", "body" => "## Symphony Workpad\n\npresent"}],
                      "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
                    }
                  }

@@ -62,8 +62,10 @@ Betreiberübergabe vorhandener Daten.
 ### Voraussetzungen
 
 - Linux (Ubuntu 24.04) oder macOS 26; die CI prüft Ubuntu x86_64 und macOS
-  arm64 mit `make all`, auch für `symphony/*`-PRs. Ältere OS-Versionen sind
-  nicht Teil dieser Testmatrix.
+  arm64 mit `make all` für Dependabot-Updates und andere Nicht-Symphony-PRs.
+  Bei `symphony/*`-PRs wird der CI-Testjob vor der Matrixausführung übersprungen;
+  maßgeblich bleibt das lokale `make all` in `Test (AI)`. Ältere OS-Versionen
+  sind nicht Teil dieser Testmatrix.
 - Bash ab 3.2: Auf macOS genügt `/bin/bash` mit den BSD-Systemwerkzeugen;
   GNU-Coreutils und ein externes `flock` sind nicht erforderlich.
 - `mise` ab 2026.3.17 und die installierte Toolchain aus `mise.toml`
@@ -75,6 +77,13 @@ Betreiberübergabe vorhandener Daten.
   zsh aus.
 - Zugriff auf Linear
 - Fuer den vollen PR- und Merge-Ablauf zusaetzlich `gh`
+
+Das automatische `make all` benötigt keine echten Linear-/OpenAI-Zugangsdaten
+oder privaten `.env.local`-Dateien. Authentifizierungs- und Prozessfälle nutzen
+kontrollierte Testgegenstellen mit synthetischen Credentials. Echte End-to-End-
+Tests (`SYMPHONY_RUN_LIVE_E2E=1`) und tokenfreie Codex-Starttests
+(`SYMPHONY_TEST_REAL_CODEX=1`) sind separate Opt-ins und gehören nicht zur
+Dependabot-CI; der verpflichtende Produkt-Smoke erfolgt im Symphony-Ablauf.
 
 ### Einrichtung
 

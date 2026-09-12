@@ -31,6 +31,9 @@ Nur im Merge-Schritt des Workflows verwenden.
    für genau diesen Branch muss existieren und die PR-Head-SHA muss dem
    lokalen `HEAD` entsprechen. Fehlenden Remote-Branch, fehlende PR oder
    PR-Head-Mismatch nicht als mergefähig behandeln.
+   Ohne explizites `GH_REPO` bindet der Land-Helper seine GitHub-Aufrufe an
+   die URL von `origin`; eine GitHub-CLI-Standardauswahl von `upstream`
+   ersetzt diese Projektbindung nicht. Explizites `GH_REPO` bleibt erhalten.
 2. Keine pauschalen lokalen Volltests in `Merge (AI)` ausführen. Vorhandene
    Test-Evidenz aus `Test (AI)` ist das maßgebliche lokale Gate. Wenn
    GitHub-Checks durch bewusste Skip-Policy `skipped` sind, ersetzt das keine
@@ -82,8 +85,15 @@ Nur im Merge-Schritt des Workflows verwenden.
    Kein Dispatch-Snapshot, kein Shell-/Mix-Fallback und keine Lockerung der
    Secret-Abschirmung. Kein lokaler Tracker-Refresh über die Modell-Shell.
 10. Wenn GitHub-Checks bestanden oder gemäß Skip-/Neutral-Policy akzeptabel sind
-   und Feedback erledigt ist, mit Merge-Commit-Betreff
-   `<IssueId>: <IssueTitle>` mergen.
+   und Feedback erledigt ist, das gebundene Tool `symphony_merge` mit
+   `head_sha` (aktuelle lokale/PR-Head-SHA) und optional `issue_id` aufrufen.
+   Dieses führt den bestehenden Land-Helper, Live-Label-/Approval-Gates und
+   unmittelbar vor der tatsächlichen Merge-Anforderung einen frischen
+   Kommentarcheck aus. Merge-Betreff bleibt `<IssueId>: <IssueTitle>`.
+   Bei offenen Eingaben `symphony_comments` (`checkpoint`, danach
+   `acknowledge` mit Quellversion/Ergebnis) verwenden und den gebundenen Merge
+   erneut aufrufen. Scan-/Vollständigkeitsfehler verhindern den Merge.
+   Nur dessen bestätigtes `MERGED`-Ergebnis mit `mergeCommit.oid` ist Evidenz.
 11. Nach erfolgreichem Merge vor jedem Statuswechsel im Workpad-Verlauf eine
     eindeutige Zeile im Format `Merge-Evidenz: PR #<nummer> gemergt,
     Merge-Commit <sha>.` dokumentieren.
@@ -123,6 +133,11 @@ verschieben.
 - Codex-Reviews kommen als Issue-Kommentare mit `## Codex Review`; darauf im
   Issue-Thread antworten.
 - Alle Agent-Kommentare beginnen mit `[codex]`.
+- Menschliche Review-Zusammenfassungen im Zustand `COMMENTED` nach Bearbeitung
+  im PR-Issue-Thread mit einer `[codex]`-Ergebnisantwort dokumentieren. Wie bei
+  sonstigem Issue-Feedback berücksichtigt der Helper deren Zeitstand; spätere
+  Reviews bleiben offen. `CHANGES_REQUESTED` und das separate Manual-Approval-Gate
+  werden dadurch nicht aufgehoben.
 - Für jedes Feedback entscheiden: akzeptieren, zurückstellen oder ablehnen. Bei
   correctness-Feedback konkrete Validierung liefern.
 - File-changing Review-Fixes in `Merge (AI)` immer mit Commit-SHA und Ergebnis
@@ -174,3 +189,8 @@ final beenden; im selben Turn die Merge-/Watch-Schleife fortsetzen oder einen
 echten Blocker dokumentieren. Bei `agent.max_turns` Abweichungen dokumentieren
 und ohne Statuswechsel stoppen; `agent.max_turns` ist kein normaler
 Phasenabschluss.
+
+Der Watch-Helper allein erteilt weiterhin keine Merge-Freigabe. Exit `9` im
+gebundenen Pfad bedeutet fehlgeschlagenen Kommentarcheckpoint; Eingaben prüfen
+oder den Scan nach Erholung der API wiederholen. Das API-/Aktionszeitfenster ist
+nicht atomar; `--match-head-commit` bewahrt zusätzlich die bestehende Head-Bindung.

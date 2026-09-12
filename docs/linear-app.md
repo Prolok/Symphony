@@ -138,3 +138,68 @@ versionierten Skills; persönliche lokale Skill-Erweiterungen werden nicht
 in den gemeinsamen Lauf importiert. Gesprächs-/Session-History, Wiederaufnahme
 und Tracker-/Journalzustand bleiben erhalten. Bereits geladener Alt-Kontext
 wird dadurch nicht rückwirkend entfernt.
+
+## Dauerhafter Kommentareingang
+
+Reguläre übernommene aktive Issues werden im vorhandenen Polltakt (standardmäßig
+30 Sekunden) gescannt. Die erste vollständige Beobachtung ist historische
+Baseline. Der Worker erhält sie einmal zur Übernahme noch offener Hinweise;
+bereits zuvor erkannte offene Versionen bleiben erhalten. Manuelle Gates und
+Dialog-AI werden durch diesen Eingang nicht dispatcht.
+
+Unter dem vorhandenen projektlokalen `state_root/inputs/` hält `DurableState`
+pro Issue die Bindung, beobachtete Quellversionen (auch aus Vor-/Nachscan-Signalen), Baseline, letzten vollständigen
+Abruf, Scanfehler und Zustände `recognized`, `delivered`, `processed` fest.
+Die bestehende OS-Journal-Sperre serialisiert Scan/Ack; Beobachtungen werden mit
+App-Schreibvorgängen serialisiert und unbestätigte Schreibbelege abgeglichen.
+Ein fehlgeschlagener Scan ersetzt keinen vollständigen Stand. Schon gelesene
+Seiten bleiben als offene Beobachtungen erhalten. Das gilt auch für gültige
+Quellen innerhalb einer Seite mit GraphQL-Teilfehlern, ungültigen anderen Zeilen
+oder fehlenden Seitenmetadaten; der Scan bleibt dabei unvollständig.
+Ein verschwundener Kommentar
+benötigt zusätzlich eine direkte Nicht-gefunden-Antwort bei weiterhin
+sichtbarem Issue, bevor er als gelöscht eingeordnet wird. Nach vorheriger
+Zustellung oder Bestätigung erhält die Löschung einen eigenen Quellschlüssel;
+der Worker ordnet mögliche begonnene Auswirkungen ein. Frühere Ergebnisse
+bleiben erhalten und bestätigen die Löschung nicht mit.
+
+`symphony_comments` liefert sichere Checkpoints und schreibt versionsbezogene
+fachliche Ergebnisse in `### Kommentareingang` des einen Workpads. Nach einem
+Crash wird unbestätigte Arbeit erneut zugestellt. Ein bestätigter Workpad-Write
+mit noch fehlendem lokalem Ack lässt sich anhand seines Ergebnismarkers
+idempotent wiederholen. Die Marker und den Abschnitt bei Workpad-Updates erhalten.
+Eigene App-Ausgaben werden am letzten bestätigten vollständigen Schreibstand
+erkannt; Rückedits auf frühere Texte bleiben sichtbar. Andere Integrationen
+aktivieren keine Arbeit. Technische Review-Subagenten bleiben isoliert.
+Linear erhöht auch bei einer Thread-Antwort den `updatedAt`-Wert des
+Elternkommentars. Unveränderter bestätigter App-Inhalt bleibt dabei Kontext;
+die menschliche Antwort besitzt ihre eigene Quellversion.
+
+Statusaktionen laufen durch den frischen zentralen Check. `symphony_merge` führt
+den vorhandenen Land-Helper in einem gebundenen Prozess aus und beantwortet dessen
+letzten Checkpoint unmittelbar vor dem GitHub-Merge. Linear-Zugang verbleibt im
+App-Runtime-Prozess; der Helper erhält keine Secrets. Bei SSH-Workern wird der
+Helper über den bestehenden SSH-Transport im gebundenen, bereits auf dem Worker
+aufgelösten Workspace (auch bei relativen oder `~/`-Roots)
+gestartet; Checkpoint-Anfragen kommen über denselben Prozesskanal zurück.
+Beide Starts übernehmen die gebundene Projektumgebung, einschließlich Git-/GitHub-
+Konfiguration. Linear-Secrets werden vor der Übergabe entfernt.
+Ohne explizites `GH_REPO` bindet der Land-Helper sämtliche GitHub-Kindprozesse
+an die URL von `origin`. Eine bestehende GitHub-CLI-Standardauswahl von
+`upstream` wird dabei nicht als Projektbindung verwendet; die lokale
+Git-Konfiguration bleibt unverändert. Explizites `GH_REPO` bleibt erhalten.
+Der MCP-Start übernimmt den gebundenen `SYMPHONY_PROJECT_WORKTREES_ROOT`
+explizit; die isolierte Runtime ersetzt nicht den Workspace des Fachprojekts.
+Manuelle GitHub-Approvals,
+PR-/Remote-/Head-, CI- und Review-Gates bleiben bestehen. Offene Eingaben,
+fehlgeschlagene Scans oder geänderte Labels verhindern den Abschluss. Ein
+GitHub-Rate-Limit bei der Merge-Anforderung beendet den Versuch; die Wiederholung
+über `symphony_merge` prüft sämtliche Gates frisch. Nur lesende GitHub-Aufrufe
+wiederholen Rate-Limits intern mit Backoff.
+
+Logs `Comment scan completed/failed` nennen Projektroot, Issue-/Session-Kontext,
+letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Rate-Limits folgen
+der bestehenden Fehlerklassifikation und werden beim nächsten Poll/Checkpoint
+wieder geprüft. Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
+zwischen Polls und keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
+Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehen.

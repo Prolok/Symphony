@@ -108,7 +108,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
           String.contains?(query, "SymphonyLinearIssuesById") ->
             %{"issues" => %{"nodes" => Enum.map(vars.ids, &Map.fetch!(by_id, &1))}}
 
-          String.contains?(query, "SymphonyLinearIssueComments") ->
+          String.contains?(query, "SymphonyLinearIssueComments") or String.contains?(query, "SymphonyCommentScanSignal") ->
             %{"issue" => %{"comments" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}
 
           String.contains?(query, "SymphonyIssueUpdateInputFields") ->
@@ -150,6 +150,11 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
       assert receipt["state_root"] == Path.join(context.root, ".symphony/state/codex/symphony")
       assert receipt["secret_visible"] == false
       assert receipt["public_value"] == context.name
+      [input_file] = Path.wildcard(Path.join([context.settings.tracker.app["state_root"], "inputs", "*.json"]))
+      input = input_file |> File.read!() |> Jason.decode!()
+      assert input["binding"]["issue_id"] == issue["id"]
+      assert input["binding"]["workspace_id"] == context.settings.tracker.app["workspace_id"]
+      assert input["baseline"]["status"] == "delivered"
     end
 
     refute_receive {:page, _, _, _}, 100

@@ -5,6 +5,7 @@ import os
 import random
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -27,6 +28,9 @@ ISSUE_IDENTIFIER_ENV = "SYMPHONY_ISSUE_IDENTIFIER"
 MANUAL_REVIEW_LABEL_ENV = "SYMPHONY_ISSUE_LABELS_JSON"
 MANUAL_REVIEW_BLOCKER_EXIT = 7
 APP_LABEL_LOOKUP_EXIT = 8
+COMMENT_CHECKPOINT_EXIT = 9
+BOUND_REQUEST = "SYMPHONY_BOUND_REQUEST "
+bound_request = None
 DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
 
 
@@ -101,15 +105,22 @@ async def run_git(*args: str) -> str:
 
 
 async def run_gh(*args: str) -> str:
+    env = os.environ.copy()
+    if not env.get("GH_REPO"):
+        env["GH_REPO"] = (await run_git("remote", "get-url", "origin")).strip()
+    # A merge retry must re-enter merge_bound and its fresh runtime gates.
+    # Read-only GitHub calls may keep their bounded rate-limit backoff.
+    attempts = 1 if args[:2] == ("pr", "merge") else MAX_GH_RETRIES
     max_delay = BASE_GH_BACKOFF_SECONDS * (2 ** (MAX_GH_RETRIES - 1))
     delay_seconds = BASE_GH_BACKOFF_SECONDS
     last_error = "gh command failed"
-    for attempt in range(1, MAX_GH_RETRIES + 1):
+    for attempt in range(1, attempts + 1):
         proc = await asyncio.create_subprocess_exec(
             "gh",
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode == 0:
@@ -118,7 +129,7 @@ async def run_gh(*args: str) -> str:
         if not is_rate_limit_error(error):
             raise RuntimeError(error)
         last_error = error
-        if attempt >= MAX_GH_RETRIES:
+        if attempt >= attempts:
             break
         jitter = random.uniform(0, delay_seconds)
         await asyncio.sleep(min(delay_seconds + jitter, max_delay))
@@ -500,6 +511,11 @@ def issue_labels_from_json(raw: str | None) -> list[str] | None:
 async def current_issue_labels(snapshot_labels: list[str] | None = None) -> list[str]:
     if current_issue_identifier() is None:
         raise LabelRefreshError("Missing issue identity for the App label gate.")
+    if bound_request is not None:
+        result = bound_request("labels")
+        if result.get("ok") is True and isinstance(result.get("labels"), list):
+            return result["labels"]
+        raise LabelRefreshError("Bound live label lookup failed.")
     raise AppLabelLookupRequired("Live labels must be read through the bound Linear tool.")
 
 
@@ -795,11 +811,22 @@ def raise_on_missing_manual_review_approval(
 def filter_blocking_reviews(
     reviews: list[dict[str, Any]],
     review_requested_at: datetime | None,
+    latest_ack: datetime | None = None,
 ) -> list[dict[str, Any]]:
+    candidates = dedupe_reviews(reviews)
+    for decisive in latest_decisive_reviews(reviews):
+        if review_state(decisive) == "CHANGES_REQUESTED" and decisive not in candidates:
+            candidates.append(decisive)
     return [
         review
-        for review in dedupe_reviews(reviews)
+        for review in candidates
         if is_blocking_review(review, review_requested_at)
+        and not (
+            review_state(review) == "COMMENTED"
+            and latest_ack is not None
+            and review_timestamp(review) is not None
+            and review_timestamp(review) <= latest_ack
+        )
     ]
 
 
@@ -838,7 +865,7 @@ def raise_on_human_feedback(
             "and note in your root-level update.",
         )
         raise SystemExit(2)
-    blocking_reviews = filter_blocking_reviews(reviews, review_request_at)
+    blocking_reviews = filter_blocking_reviews(reviews, review_request_at, latest_codex_issue_reply_time(issue_comments))
     if blocking_reviews:
         print("Review states/comments detected. Address before merge.")
         print(
@@ -991,8 +1018,51 @@ async def watch_pr() -> None:
         raise_on_missing_manual_review_approval(labels, current, reviews)
 
 
+def request_bound_checkpoint(operation: str) -> dict:
+    print(BOUND_REQUEST + json.dumps({"operation": operation}), flush=True)
+    line = sys.stdin.readline()
+    if not line:
+        raise RuntimeError("Bound runtime disconnected before merge.")
+    result = json.loads(line)
+    if not isinstance(result, dict):
+        raise RuntimeError("Invalid bound checkpoint response.")
+    return result
+
+
+async def merge_bound(expected_head: str, title: str) -> None:
+    """The trusted runtime owns the pipe; no credential or approval token is passed to the shell."""
+    global bound_request
+    bound_request = request_bound_checkpoint
+    await watch_pr()
+    evidence = await require_merge_preflight()
+    current = evidence.pr
+    if evidence.branch != f"symphony/{current_issue_identifier()}":
+        raise RuntimeError("Branch does not belong to the bound issue.")
+    if current.head_sha != expected_head or await run_git("status", "--porcelain"):
+        raise RuntimeError("Merge head changed or workspace is dirty.")
+    labels = await current_issue_labels()
+    issue_comments, review_comments, reviews, review_request_at = await fetch_review_context(current.number)
+    raise_on_human_feedback(issue_comments, review_comments, reviews, review_request_at)
+    raise_on_missing_manual_review_approval(labels, current, reviews)
+    # The final fresh Linear scan executes in the bound parent, after GitHub
+    # gates. This remaining API/action interval cannot be made atomic.
+    checkpoint = bound_request("merge")
+    if checkpoint.get("ok") is not True:
+        raise SystemExit(COMMENT_CHECKPOINT_EXIT)
+    if checkpoint.get("labels") != labels:
+        raise RuntimeError("Linear labels changed during merge checks; repeat the bound merge.")
+    await run_gh("pr", "merge", str(current.number), "--merge", "--match-head-commit", expected_head, "--subject", title)
+    result = json.loads(await run_gh("pr", "view", str(current.number), "--json", "state,mergeCommit,url"))
+    if result.get("state") != "MERGED" or not (result.get("mergeCommit") or {}).get("oid"):
+        raise RuntimeError("Merge result is not confirmed.")
+    print("SYMPHONY_MERGE_RESULT " + json.dumps(result), flush=True)
+
+
 if __name__ == "__main__":
     try:
-        asyncio.run(watch_pr())
+        if len(sys.argv) == 4 and sys.argv[1] == "--bound-merge":
+            asyncio.run(merge_bound(sys.argv[2], sys.argv[3]))
+        else:
+            asyncio.run(watch_pr())
     except SystemExit as exc:
         raise SystemExit(exc.code) from None

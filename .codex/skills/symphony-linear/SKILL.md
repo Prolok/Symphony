@@ -144,3 +144,19 @@ Nutze gezielte Introspection, wenn Mutations-, Feld- oder Input-Formen unklar
 sind. Für Uploads: `fileUpload` holen, Bytes per `curl -X PUT` mit gelieferten
 Headern senden und `assetUrl` in Kommentar-Mutationen verwenden. Keine
 Shell-Helper mit Raw-Tokens einführen.
+
+## Kommentar- und Aktionscheckpoint
+
+`symphony_comments` ist über denselben gebundenen DynamicTool-/MCP-Transport
+verfügbar. `checkpoint` liest den aktuellen Eingang; `acknowledge` hält benannte
+zugestellte Versionen mit fachlichem Ergebnis im Workpad fest. Details und
+Baseline-Vertrag stehen in `symphony-workpad` und `WORKFLOW.md`.
+
+Eine abgelehnte vorwärtsführende Statusmutation mit `comment_inputs_pending`
+nennt nur die offenen Quellschlüssel. Die vollständigen Quellen über einen
+frischen Kommentar-Checkpoint abrufen und fachlich bearbeiten.
+API-/Rate-Limit-Fehler sind kein vollständiger Scan und kein
+Löschbeleg. Keinen alternativen Mutationspfad zur Umgehung benutzen. Kommentare
+an manuellen Gates aktivieren keine Arbeit und erteilen keine Freigaben.
+Für den bestehenden Land-Aktionsweg `symphony_merge` verwenden; Shell-`gh pr merge`
+ersetzt den gebundenen frischen Kommentarcheck nicht.

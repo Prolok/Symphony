@@ -86,3 +86,22 @@ widersprüchlich war.
   Review-Finding-Fix-Kommentare; sie ersetzen das Workpad nicht.
 - Ein separater Blocker-Kommentar ist bei bestehendem Workpad nur letzte Stufe,
   wenn kein erlaubter Toolpfad den vorhandenen Kommentar aktualisieren kann.
+
+## Versionsbezogene Eingaben
+
+Bei regulären aktiven Issues den Eingang mit `symphony_comments` (`checkpoint`)
+bei Phasenstart/Fortsetzung, nach Meilensteinen und vor Handoffs frisch lesen.
+Die einmalige Baseline enthält historische Kommentare und Workpad; noch relevante
+offene Hinweise konsolidieren und den Startbeleg einmal bestätigen.
+
+Fachliche Ergebnisse über `acknowledge` mit `results: [{key, outcome, reason}]`
+speichern. Zulässige Ergebnisse: `übernommen`, `Rückfrage`, `nicht anwendbar`
+(mit Begründung), `ersetzt` (mit `replacement` auf eine neuere Quellversion).
+Das Tool ergänzt `### Kommentareingang` im bestehenden Workpad. Diesen Abschnitt
+und seine Quellen-/Ergebnismarker bei späteren Workpad-Updates erhalten.
+Ein Edit benötigt eine eigene Bestätigung; Auflösen ist kein fachlicher Abschluss.
+Gelöschte Quellen nicht neu ausführen; begonnene Auswirkungen einordnen.
+Ein eigener Löschungs-Quellschlüssel nach vorheriger Zustellung/Bestätigung
+benötigt ein eigenes Ergebnis; das frühere Ergebnis bleibt erhalten.
+Keine zusätzlichen Empfangskommentare. Technische Review-Subagenten erhalten
+weiterhin keinen ungefilterten Kommentar-/Workpad-Kontext.

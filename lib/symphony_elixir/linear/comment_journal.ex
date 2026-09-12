@@ -90,14 +90,57 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     end
   end
 
+  @doc "Serialize a full observation with writes; reconcile outstanding receipts before classifying echoes."
+  @spec observe(map(), (map() -> term()) | nil, (-> term())) :: term()
+  def observe(binding, request, callback) do
+    IssueLease.with_journal_lock(binding["state_root"], fn ->
+      with :ok <- reconcile_observation(binding, request) do
+        callback.()
+      end
+    end)
+  end
+
+  defp reconcile_observation(_binding, nil), do: :ok
+
+  defp reconcile_observation(binding, request) do
+    with {:ok, records} <- intents(binding),
+         {:ok, _results} <- collect(Enum.reject(records, &(confirmed?(binding, &1) or rejected?(binding, &1))), &confirm_remote(binding, &1, request)) do
+      :ok
+    end
+  end
+
   defp classify_records(records, binding, comment) do
     matches = Enum.filter(records, &(&1["comment_id"] == comment["id"] and not rejected?(binding, &1)))
+    latest = Enum.max_by(matches, &{&1["written_at"], &1["operation_id"]}, fn -> nil end)
 
-    cond do
-      Enum.any?(matches, &matches?(&1, comment, binding)) -> :own
-      matches != [] or get_in(comment, ["user", "id"]) == binding["user_id"] -> :pending
-      true -> :foreign
+    case latest do
+      nil ->
+        if get_in(comment, ["user", "id"]) == binding["user_id"], do: :pending, else: :foreign
+
+      record ->
+        classify_confirmed(binding, record, comment)
     end
+  end
+
+  defp classify_confirmed(binding, record, comment) do
+    case DurableState.read(path(binding, record, "confirmed")) do
+      {:ok, %{"comment" => confirmed}} ->
+        if matches?(record, comment, binding) and confirmed_version?(confirmed, comment), do: :own, else: :pending
+
+      {:error, :enoent} ->
+        :pending
+
+      _ ->
+        {:error, :comment_journal_corrupt}
+    end
+  end
+
+  defp confirmed_version?(confirmed, comment) do
+    # Linear also bumps a parent comment's updatedAt when a reply is added.
+    # Compare the confirmed write content; that thread activity is no foreign edit.
+    Enum.all?(Map.take(confirmed, ~w(body bodyData quotedText resolvingUser resolvingComment)), fn {key, value} ->
+      Map.fetch(comment, key) == {:ok, value}
+    end)
   end
 
   defp recover_before_write(binding, receipts, request) do

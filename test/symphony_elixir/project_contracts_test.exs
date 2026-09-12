@@ -4,6 +4,19 @@ defmodule SymphonyElixir.ProjectContractsTest do
   alias SymphonyElixir.Linear.LocalState
   alias SymphonyElixir.{ProjectContext, ProjectSelection}
 
+  setup_all do
+    # Periodic application polls must not consume these global client fixtures.
+    if Process.whereis(Orchestrator) do
+      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, Orchestrator)
+
+      on_exit(fn ->
+        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, Orchestrator)
+      end)
+    end
+
+    :ok
+  end
+
   setup do
     root = Path.dirname(Workflow.workflow_file_path())
 

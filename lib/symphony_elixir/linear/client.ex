@@ -5,10 +5,11 @@ defmodule SymphonyElixir.Linear.Client do
 
   require Logger
   alias SymphonyElixir.Linear.AppAuth
+  alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.WriteContext
 
   alias SymphonyElixir.{Config, Dialog, Linear.Issue, ProjectContext}
-  alias SymphonyElixir.Linear.Assignees
+  alias SymphonyElixir.Linear.{Assignees, CommentVersion}
 
   @issue_page_size 50
   @typep page_cursors :: %{optional(String.t()) => true}
@@ -92,17 +93,32 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @comment_selection """
+  id
+  body
+  user { id app }
+  issue { id }
+  parentId
+  editedAt
+  resolvedAt
+  archivedAt
+  botActor { id type }
+  externalUser { id }
+  onBehalfOf { id app }
+  bodyData
+  quotedText
+  resolvingUser { id }
+  resolvingComment { id }
+  createdAt
+  updatedAt
+  """
+
   @issue_comments_query """
   query SymphonyLinearIssueComments($id: String!, $first: Int!, $after: String) {
     issue(id: $id) {
       comments(first: $first, after: $after, includeArchived: true) {
         nodes {
-          id
-          body
-          user { id }
-          issue { id }
-          createdAt
-          updatedAt
+          #{@comment_selection}
         }
         pageInfo {
           hasNextPage
@@ -419,7 +435,49 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec fetch_issue_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
   def fetch_issue_comments(issue_id) when is_binary(issue_id) do
-    fetch_issue_comments_page(issue_id, nil, [])
+    fetch_issue_comments_page(issue_id, nil, [], %{})
+  end
+
+  @doc "Detect visible changes during pagination; preserve observed versions without claiming a complete scan."
+  @spec scan_issue_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def scan_issue_comments(issue_id) do
+    with {:ok, before} <- comment_scan_signal(issue_id) do
+      scan_comment_pages(fetch_issue_comments(issue_id), issue_id, before)
+    end
+  end
+
+  defp scan_comment_pages({:ok, comments}, issue_id, before) do
+    finish_comment_scan(comment_scan_signal(issue_id), before, before ++ comments)
+  end
+
+  defp scan_comment_pages({:error, {:comment_scan_incomplete, reason, comments}}, _issue_id, before),
+    do: incomplete_comments(reason, before ++ comments)
+
+  defp scan_comment_pages({:error, reason}, _issue_id, before), do: incomplete_comments(reason, before)
+
+  defp finish_comment_scan({:ok, signal}, signal, comments), do: {:ok, Enum.uniq_by(comments, &CommentVersion.key/1)}
+  defp finish_comment_scan({:ok, after_scan}, _before, comments), do: incomplete_comments(:comment_scan_changed, comments ++ after_scan)
+  defp finish_comment_scan({:error, {:comment_scan_incomplete, reason, observed}}, _before, comments), do: incomplete_comments(reason, comments ++ observed)
+  defp finish_comment_scan({:error, reason}, _before, comments), do: incomplete_comments(reason, comments)
+
+  defp comment_scan_signal(issue_id) do
+    query = "query SymphonyCommentScanSignal($id: String!) { issue(id: $id) { comments(first: 1, orderBy: updatedAt, includeArchived: true) { nodes { #{@comment_selection} } } } }"
+
+    with {:ok, body} <- graphql(query, %{id: issue_id}) do
+      decode_comment_scan_signal(body, issue_id)
+    end
+  end
+
+  defp decode_comment_scan_signal(body, issue_id) do
+    with true <- Map.get(body, "errors", []) in [nil, []],
+         nodes when is_list(nodes) <- get_in(body, ["data", "issue", "comments", "nodes"]),
+         true <- length(nodes) <= 1 and Enum.all?(nodes, &(is_binary(&1["id"]) and is_binary(&1["body"]))),
+         {:ok, comments} <- normalize_comments(nodes),
+         true <- Enum.all?(comments, &(&1.issue_id == issue_id)) do
+      {:ok, comments}
+    else
+      _ -> incomplete_comments(:comment_scan_signal_unavailable, observed_comments(body, issue_id))
+    end
   end
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -434,7 +492,13 @@ defmodule SymphonyElixir.Linear.Client do
         Application.get_env(:symphony_elixir, :linear_client_request_fun, &post_graphql_request/2)
       )
 
-    case authenticated_request(payload, request_fun) do
+    with :ok <- CommentActionGuard.check(payload) do
+      graphql_response(authenticated_request(payload, request_fun), payload)
+    end
+  end
+
+  defp graphql_response(result, payload) do
+    case result do
       {:ok, %{status: 200, body: body}} ->
         {:ok, body}
 
@@ -588,30 +652,84 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
 
-  defp fetch_issue_comments_page(issue_id, after_cursor, acc_comments) do
-    with {:ok, response} <-
-           graphql(@issue_comments_query, %{id: issue_id, first: @issue_page_size, after: after_cursor}),
-         {:ok, comments, page_info} <- decode_issue_comments_page_response(response) do
-      issue_comment_page_result(issue_id, comments, page_info, acc_comments)
-    else
+  defp fetch_issue_comments_page(issue_id, after_cursor, acc_comments, seen) do
+    case graphql(@issue_comments_query, %{id: issue_id, first: @issue_page_size, after: after_cursor}) do
+      {:ok, response} ->
+        observed = acc_comments ++ observed_comments(response, issue_id)
+        continue_comment_page(response, issue_id, observed, seen)
+
       {:error, reason} ->
-        {:error, reason}
+        incomplete_comments(reason, acc_comments)
     end
   end
 
-  defp issue_comment_page_result(issue_id, comments, page_info, acc_comments) do
-    updated_acc = prepend_page_issues(comments, acc_comments)
-
-    case next_page_cursor(page_info) do
-      {:ok, next_cursor} ->
-        fetch_issue_comments_page(issue_id, next_cursor, updated_acc)
-
-      :done ->
-        {:ok, finalize_paginated_issues(updated_acc)}
-
-      {:error, reason} ->
-        {:error, reason}
+  defp continue_comment_page(response, issue_id, observed, seen) do
+    with {:ok, comments, page_info} <- decode_issue_comments_page_response(response),
+         true <- Enum.all?(comments, &(&1.issue_id in [nil, issue_id])) do
+      continue_comments(next_page_cursor(page_info), issue_id, observed, seen)
+    else
+      {:error, reason} -> incomplete_comments(reason, observed)
+      false -> incomplete_comments(:linear_comment_issue_mismatch, observed)
     end
+  end
+
+  defp observed_comments(%{"data" => %{"issue" => %{"comments" => %{"nodes" => nodes}}}}, issue_id) when is_list(nodes) do
+    Enum.flat_map(nodes, fn node ->
+      case CommentVersion.normalize(node) do
+        {:ok, %{issue_id: id} = comment} when id in [nil, issue_id] -> [comment]
+        _ -> []
+      end
+    end)
+  end
+
+  defp observed_comments(_response, _issue_id), do: []
+
+  defp continue_comments({:ok, cursor}, issue_id, comments, seen) do
+    if Map.has_key?(seen, cursor),
+      do: incomplete_comments(:linear_invalid_page_cursor, comments),
+      else: fetch_issue_comments_page(issue_id, cursor, comments, Map.put(seen, cursor, true))
+  end
+
+  defp continue_comments(:done, _issue_id, comments, _seen), do: {:ok, Enum.uniq_by(comments, &CommentVersion.key/1)}
+  defp continue_comments({:error, reason}, _issue_id, comments, _seen), do: incomplete_comments(reason, comments)
+
+  defp incomplete_comments(reason, []), do: {:error, reason}
+  defp incomplete_comments(reason, comments), do: {:error, {:comment_scan_incomplete, reason, Enum.uniq_by(comments, &CommentVersion.key/1)}}
+
+  @doc "A complete issue scan plus a direct missing entity response is required to mark deletion."
+  @spec confirm_comment_absence(String.t(), String.t()) :: :deleted | {:present, map()} | {:error, term()}
+  def confirm_comment_absence(issue_id, comment_id) do
+    with {:ok, issue} <- graphql("query($id: String!) { issue(id: $id) { id } }", %{id: issue_id}),
+         true <- Map.get(issue, "errors", []) in [nil, []],
+         ^issue_id <- get_in(issue, ["data", "issue", "id"]),
+         {:ok, body} <- graphql("query($id: String!) { comment(id: $id) { id } }", %{id: comment_id}) do
+      absent_comment_result(body, comment_id)
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :comment_absence_unverified}
+    end
+  end
+
+  defp absent_comment_result(body, id) do
+    errors = Map.get(body, "errors", []) || []
+
+    case get_in(body, ["data", "comment"]) do
+      %{"id" => ^id} = comment when errors == [] ->
+        {:present, comment}
+
+      nil ->
+        if errors != [] and Enum.all?(errors, &missing_comment_error?/1),
+          do: :deleted,
+          else: {:error, :comment_absence_unverified}
+
+      _ ->
+        {:error, :comment_absence_unverified}
+    end
+  end
+
+  defp missing_comment_error?(error) do
+    error["path"] == ["comment"] and error["message"] == "Entity not found: Comment" and
+      get_in(error, ["extensions", "code"]) == "INPUT_ERROR"
   end
 
   defp do_fetch_issue_states(ids, scope, assignee_filter) do
@@ -942,6 +1060,10 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp decode_linear_page_response(response, assignee_filter), do: decode_linear_response(response, assignee_filter)
 
+  defp decode_issue_comments_page_response(%{"errors" => errors}) when is_list(errors) and errors != [] do
+    {:error, {:linear_graphql_errors, errors}}
+  end
+
   defp decode_issue_comments_page_response(%{
          "data" => %{
            "issue" => %{
@@ -951,16 +1073,22 @@ defmodule SymphonyElixir.Linear.Client do
              }
            }
          }
-       }) do
-    {:ok, extract_comments(nodes), %{has_next_page: has_next_page == true, end_cursor: end_cursor}}
+       })
+       when is_list(nodes) and is_boolean(has_next_page) do
+    with {:ok, comments} <- normalize_comments(nodes) do
+      {:ok, comments, %{has_next_page: has_next_page, end_cursor: end_cursor}}
+    end
   end
 
-  defp decode_issue_comments_page_response(%{"errors" => errors}) do
-    {:error, {:linear_graphql_errors, errors}}
-  end
+  defp decode_issue_comments_page_response(_unknown), do: {:error, :linear_unknown_payload}
 
-  defp decode_issue_comments_page_response(_unknown) do
-    {:error, :linear_unknown_payload}
+  defp normalize_comments(nodes) do
+    Enum.reduce_while(nodes, {:ok, []}, fn node, {:ok, acc} ->
+      case CommentVersion.normalize(node) do
+        {:ok, comment} -> {:cont, {:ok, acc ++ [comment]}}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   defp first_issue([%Issue{} = issue | _rest], _identifier), do: {:ok, issue}
@@ -1209,14 +1337,6 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp extract_labels(_), do: []
 
-  defp extract_comments(comments) when is_list(comments) do
-    comments
-    |> Enum.map(&normalize_comment/1)
-    |> Enum.reject(&is_nil/1)
-  end
-
-  defp extract_comments(_), do: []
-
   defp extract_last_comment_signal(%{"comments" => %{"nodes" => comments}}) when is_list(comments) do
     comments
     |> Enum.map(&normalize_comment_signal/1)
@@ -1255,19 +1375,6 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp normalize_comment_signal(_comment), do: nil
-
-  defp normalize_comment(%{"body" => body} = comment) when is_binary(body) do
-    %{
-      id: comment["id"],
-      body: body,
-      user_id: get_in(comment, ["user", "id"]),
-      issue_id: get_in(comment, ["issue", "id"]),
-      created_at: parse_datetime(comment["createdAt"]),
-      updated_at: parse_datetime(comment["updatedAt"])
-    }
-  end
-
-  defp normalize_comment(_comment), do: nil
 
   defp normalize_comment_id(id) when is_binary(id) do
     case String.trim(id) do

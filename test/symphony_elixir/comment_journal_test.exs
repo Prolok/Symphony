@@ -343,6 +343,8 @@ defmodule SymphonyElixir.CommentJournalTest do
     created = Process.get(:remote_comments)["new"]
     assert created["body"] === body
     assert CommentJournal.classify(binding, created) == :own
+    # A real Linear thread reply changes parent updatedAt without editing it.
+    assert CommentJournal.classify(binding, Map.put(created, "updatedAt", "2026-09-12T13:43:46.536Z")) == :own
     assert length(journal_files(binding, "confirmed")) == 1
 
     edited_body = body <> "\nErgänzung\n\n"
@@ -351,12 +353,16 @@ defmodule SymphonyElixir.CommentJournalTest do
     edited = Process.get(:remote_comments)["new"]
     assert edited["body"] === edited_body
     assert CommentJournal.classify(binding, edited) == :own
+    assert CommentJournal.classify(binding, created) == :pending
     assert length(journal_files(binding, "confirmed")) == 2
     [edit_intent] = Enum.filter(journal_records(binding), &(&1["operation"] == "commentUpdate"))
     assert edit_intent["previous_version"] == created["updatedAt"]
     assert {:ok, _} = CommentJournal.execute(binding, variable_create("later", "Weiter\n"), request)
     assert map_size(Process.get(:remote_comments)) == 2
     assert length(journal_files(binding, "confirmed")) == 3
+    [latest] = Enum.filter(journal_files(binding, "confirmed"), fn path -> get_in(Jason.decode!(File.read!(path)), ["comment", "id"]) == "later" end)
+    File.write!(latest, "broken")
+    assert {:error, :comment_journal_corrupt} = CommentJournal.classify(binding, Process.get(:remote_comments)["later"])
   end
 
   test "legacy newline conflicts block writes until exact operator repair and cannot cause duplicate creation", %{binding: binding} do
@@ -494,7 +500,7 @@ defmodule SymphonyElixir.CommentJournalTest do
       assert {:ok, ^response} = CommentJournal.execute(binding, create_payload(), fn _ -> {:ok, response} end)
       [record] = journal_records(binding)
       assert journal_files(binding, "rejected") != [] == rejected?
-      assert CommentJournal.classify(binding, comment(record)) == if(rejected?, do: :pending, else: :own)
+      assert CommentJournal.classify(binding, comment(record)) == :pending
 
       if rejected? do
         no_lookup = fn _ -> flunk("rejected intent must not be looked up") end
@@ -589,7 +595,7 @@ defmodule SymphonyElixir.CommentJournalTest do
       record = path |> File.read!() |> Jason.decode!()
       assert payload["query"] =~ record["comment_id"]
       comment = comment(record)
-      assert CommentJournal.classify(binding, comment) == :own
+      assert CommentJournal.classify(binding, comment) == :pending
       Process.put(:written_comment, comment)
       response(%{"commentCreate" => %{"symphonyReceipt" => comment}})
     end

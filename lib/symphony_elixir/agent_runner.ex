@@ -5,6 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
 
+  alias SymphonyElixir.CommentCheckpoint
   alias SymphonyElixir.Linear.IssueLease
   alias SymphonyElixir.Linear.WriteContext
 
@@ -686,13 +687,15 @@ defmodule SymphonyElixir.AgentRunner do
         previous_turn_outcome
       )
 
-    turn_context.app_session
-    |> AppServer.run_turn(
-      prompt,
-      issue,
-      on_message: codex_message_handler(turn_context.codex_update_recipient, issue)
-    )
-    |> handle_turn_result(turn_context, issue, turn_number)
+    with {:ok, comments} <- CommentCheckpoint.prompt(issue) do
+      turn_context.app_session
+      |> AppServer.run_turn(
+        prompt <> comments,
+        issue,
+        on_message: codex_message_handler(turn_context.codex_update_recipient, issue)
+      )
+      |> handle_turn_result(turn_context, issue, turn_number)
+    end
   end
 
   defp handle_turn_result({:ok, turn_session}, turn_context, issue, turn_number) do

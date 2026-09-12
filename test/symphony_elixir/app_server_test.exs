@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Linear.WriteContext
 
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
@@ -744,7 +745,7 @@ defmodule SymphonyElixir.AppServerTest do
           if payload["method"] == "thread/resume", do: payload
         end)
 
-      assert [%{"name" => "linear_graphql"}] = get_in(resume_payload, ["params", "dynamicTools"])
+      assert [%{"name" => "linear_graphql"}, %{"name" => "symphony_comments"}, %{"name" => "symphony_merge"}] = get_in(resume_payload, ["params", "dynamicTools"])
     after
       File.rm_rf(test_root)
     end
@@ -998,7 +999,9 @@ defmodule SymphonyElixir.AppServerTest do
                          "description" => description,
                          "inputSchema" => %{"required" => ["query"]},
                          "name" => "linear_graphql"
-                       }
+                       },
+                       %{"name" => "symphony_comments"},
+                       %{"name" => "symphony_merge"}
                      ] ->
                        description =~ "Linear"
 
@@ -1991,6 +1994,9 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-remote"}}}'
             ;;
           4)
+            printf '%s\\n' '{"id":44,"method":"item/tool/call","params":{"tool":"symphony_merge","arguments":{}}}'
+            ;;
+          5)
             printf '%s\\n' '{"method":"turn/completed"}'
             exit 0
             ;;
@@ -2018,13 +2024,21 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["Requires Manual Review", "backend"]
       }
 
+      parent = self()
+
       assert {:ok, _result} =
                AppServer.run(
                  remote_workspace,
                  "Run remote worker",
                  issue,
-                 worker_host: "worker-01:2200"
+                 worker_host: "worker-01:2200",
+                 tool_executor: fn "symphony_merge", %{} ->
+                   send(parent, {:merge_context, WriteContext.current()})
+                   %{"success" => true, "output" => "controlled"}
+                 end
                )
+
+      assert_received {:merge_context, %{"worker_host" => "worker-01:2200", "workspace_path" => ^remote_workspace, "issue_id" => "issue-remote"}}
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)

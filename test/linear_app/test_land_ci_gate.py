@@ -26,7 +26,11 @@ class CiApi:
         self.runs = {HEAD: [], BASE: []}
         self.statuses = {HEAD: [], BASE: []}
         self.suites = {HEAD: [], BASE: []}
+        self.suite_runs = {}
+        self.status_history = None
         self.workflows = []
+        self.app = {'id': 7, 'slug': 'external-ci'}
+        self.bot = {'id': 70, 'login': 'external-ci[bot]', 'type': 'Bot'}
         self.trees = {sha: {'sha': 'e' * 40, 'truncated': False, 'tree': []} for sha in (HEAD, BASE)}
         self.overrides = {}
         self.calls = []
@@ -35,6 +39,10 @@ class CiApi:
         self.calls.append(args)
         if args[1] == 'graphql':
             return json.dumps(self.graph)
+        if args[-1] == 'apps/external-ci':
+            return json.dumps(self.app)
+        if args[-1] == 'users/external-ci%5Bbot%5D':
+            return json.dumps(self.bot)
         endpoint = next(arg for arg in args if arg.startswith('repos/'))
         if endpoint in self.overrides:
             result = self.overrides[endpoint]
@@ -45,12 +53,20 @@ class CiApi:
         if '/rules/branches/' in endpoint:
             assert endpoint.endswith('release%2Ftest'), endpoint
             payload = self.rules
+        elif '/check-suites/' in endpoint and endpoint.endswith('/check-runs'):
+            runs = self.suite_runs.get(int(endpoint.split('/')[-2]), [])
+            payload = dict(total_count=len(runs), check_runs=runs)
         elif '/check-runs' in endpoint:
             payload = dict(total_count=len(self.runs[sha]), check_runs=self.runs[sha])
         elif '/check-suites' in endpoint:
             payload = dict(total_count=len(self.suites[sha]), check_suites=self.suites[sha])
         elif endpoint.endswith('/status'):
-            payload = dict(sha=sha, total_count=len(self.statuses[sha]), statuses=self.statuses[sha])
+            # The combined endpoint returns simple-commit-status, without creator.
+            statuses = [{key: value for key, value in status.items() if key != 'creator'}
+                        for status in self.statuses[sha]]
+            payload = dict(sha=sha, total_count=len(statuses), statuses=statuses)
+        elif endpoint.endswith('/statuses'):
+            payload = self.status_history if self.status_history is not None else self.statuses[sha]
         elif '/actions/workflows' in endpoint:
             payload = dict(total_count=len(self.workflows), workflows=self.workflows)
         elif '/git/trees/' in endpoint:
@@ -89,7 +105,7 @@ class CiEvidenceTest(unittest.IsolatedAsyncioTestCase):
                     api.trees[sha]['tree'] = [dict(path='.github/workflows/ci.yaml', type='blob', sha='f' * 40)]
                 elif signal in ('suite', 'base_suite'):
                     sha = HEAD if signal == 'suite' else BASE
-                    api.suites[sha] = [dict(id=1, head_sha=sha, status='queued')]
+                    api.suites[sha] = [dict(id=1, head_sha=sha, status='queued', latest_check_runs_count=1, app={'id': 7, 'slug': 'external-ci'})]
                 elif signal == 'base_run':
                     api.runs[BASE] = [run(sha=BASE)]
                 else:
@@ -106,7 +122,7 @@ class CiEvidenceTest(unittest.IsolatedAsyncioTestCase):
                     api = CiApi()
                     api.runs[HEAD] = [run('lint')]
                     if classic:
-                        api.ref['branchProtectionRule'] = dict(requiresStatusChecks=True, requiredStatusChecks=[dict(context='required', app={'databaseId': app} if app else None)])
+                        api.ref['branchProtectionRule'] = dict(requiresStatusChecks=True, requiredStatusChecks=[dict(context='required', app={'databaseId': app} if app else None)], requiresDeployments=False, requiredDeploymentEnvironments=[])
                     else:
                         api.rules = [dict(ruleset_id=7, ruleset_source_type='Organization', type='required_status_checks', parameters={'required_status_checks': [dict(context='required', integration_id=app)]})]
                     self.assertTrue((await self.summary(api)).pending)
@@ -137,7 +153,8 @@ class CiEvidenceTest(unittest.IsolatedAsyncioTestCase):
             for status, conclusion, failed in [('queued', None, False), ('completed', 'failure', True), ('completed', None, True)]:
                 api = CiApi()
                 api.runs[HEAD] = checks
-                api.suites[HEAD] = [dict(id=1, head_sha=HEAD, status=status, conclusion=conclusion)]
+                api.suites[HEAD] = [dict(id=1, head_sha=HEAD, status=status, conclusion=conclusion, latest_check_runs_count=1, app={'id': 7, 'slug': 'external-ci'})]
+                api.suite_runs[1] = [dict(run(app=7, conclusion=conclusion), check_suite={'id': 1}, status=status)]
                 summary = await self.summary(api)
                 self.assertFalse(summary.no_ci)
                 self.assertEqual(summary.failed, failed)
@@ -146,8 +163,174 @@ class CiEvidenceTest(unittest.IsolatedAsyncioTestCase):
     async def test_classic_protection_without_status_requirements_allows_no_ci(self):
         for checks in ([], None):
             api = CiApi()
-            api.ref['branchProtectionRule'] = dict(requiresStatusChecks=False, requiredStatusChecks=checks)
+            api.ref['branchProtectionRule'] = dict(requiresStatusChecks=False, requiredStatusChecks=checks, requiresDeployments=False, requiredDeploymentEnvironments=[])
             self.assertTrue((await self.summary(api)).no_ci)
+
+    def rerun_api(self):
+        api = CiApi()
+        old = dict(run(conclusion='failure', app=7, identity=10), check_suite={'id': 1},
+                   started_at='2026-09-12T19:00:00Z', completed_at='2026-09-12T19:01:00Z')
+        new = dict(run(app=7, identity=20), check_suite={'id': 2},
+                   started_at='2026-09-12T19:02:00Z', completed_at='2026-09-12T19:03:00Z')
+        api.runs[HEAD] = [new]
+        api.suite_runs[1] = [old]
+        api.suites[HEAD] = [dict(id=1, head_sha=HEAD, status='completed', conclusion='failure',
+                                latest_check_runs_count=1, app={'id': 7, 'slug': 'github-actions'}),
+                            dict(id=2, head_sha=HEAD, status='completed', conclusion='success',
+                                 latest_check_runs_count=1, app={'id': 7, 'slug': 'github-actions'})]
+        return api
+
+    async def test_replaced_failed_suite_does_not_block_successful_rerun(self):
+        api = self.rerun_api()
+        summary = await self.summary(api)
+        self.assertFalse(summary.failed or summary.pending or summary.no_ci, summary.failures)
+        self.assertEqual(summary.accepted_counts['success'], 1)
+        # The commit endpoint may also return the older job; summary and suites
+        # must agree about its replacement without counting its result twice.
+        api.runs[HEAD].extend(api.suite_runs[1])
+        summary = await self.summary(api)
+        self.assertFalse(summary.failed or summary.pending)
+        self.assertEqual(summary.accepted_counts['success'], 1)
+        event = asyncio.Event()
+        with mock.patch.object(land, 'run_gh', api), redirect_stdout(io.StringIO()), \
+             mock.patch.object(land.asyncio, 'sleep', mock.AsyncMock(side_effect=AssertionError('replaced suite waited'))):
+            await land.wait_for_checks(PR, event)
+        self.assertTrue(event.is_set())
+
+    async def test_unreplaced_or_uncertain_suites_still_block(self):
+        for change in ('other_name', 'other_app', 'older_result', 'missing_time', 'missing_suite',
+                       'pending_suite', 'pending_run', 'failed_run', 'pending_old_suite',
+                       'unknown_conclusion', 'unreplaced_job', 'no_jobs'):
+            with self.subTest(change=change):
+                api = self.rerun_api()
+                current = api.runs[HEAD][0]
+                if change == 'other_name': current['name'] = 'unrelated'
+                elif change == 'other_app': current['app']['id'] = 8
+                elif change == 'older_result': current['completed_at'] = '2026-09-12T18:00:00Z'
+                elif change == 'missing_time':
+                    del current['completed_at']
+                    del current['started_at']
+                elif change == 'missing_suite': del current['check_suite']
+                elif change == 'pending_suite': api.suites[HEAD][1]['status'] = 'in_progress'
+                elif change == 'pending_run': current['status'] = 'in_progress'
+                elif change == 'failed_run': current['conclusion'] = 'failure'
+                elif change == 'pending_old_suite': api.suites[HEAD][0]['status'] = 'in_progress'
+                elif change == 'unknown_conclusion': api.suites[HEAD][0]['conclusion'] = None
+                elif change == 'unreplaced_job':
+                    api.suite_runs[1].append(dict(api.suite_runs[1][0], id=11, name='other-job'))
+                    api.suites[HEAD][0]['latest_check_runs_count'] = 2
+                else:
+                    api.suite_runs[1] = []
+                    api.suites[HEAD][0]['latest_check_runs_count'] = 0
+                summary = await self.summary(api)
+                self.assertTrue(summary.failed or summary.pending)
+                self.assertFalse(summary.no_ci)
+        for change in ('wrong_head', 'wrong_app', 'wrong_suite', 'count_changed', 'partial_page', 'api_error'):
+            with self.subTest(change=change):
+                api = self.rerun_api()
+                old = api.suite_runs[1][0]
+                if change == 'wrong_head': old['head_sha'] = BASE
+                elif change == 'wrong_app': old['app']['id'] = 8
+                elif change == 'wrong_suite': old['check_suite']['id'] = 3
+                elif change == 'count_changed': api.suites[HEAD][0]['latest_check_runs_count'] = 2
+                else:
+                    api.overrides['repos/{owner}/{repo}/check-suites/1/check-runs'] = (
+                        RuntimeError('HTTP 403') if change == 'api_error' else [dict(total_count=1, check_runs=[])])
+                with self.assertRaises(land.CiEvidenceError):
+                    await self.summary(api)
+
+    async def test_empty_automatic_suites_do_not_hold_green_jobs_open(self):
+        api = CiApi()
+        api.runs[HEAD] = [run()]
+        api.suites[HEAD] = [dict(id=1, head_sha=HEAD, status='queued', conclusion=None,
+                                latest_check_runs_count=0, app={'id': 7, 'slug': 'external-ci'})]
+        event = asyncio.Event()
+        with mock.patch.object(land, 'run_gh', api), redirect_stdout(io.StringIO()), \
+             mock.patch.object(land.asyncio, 'sleep', mock.AsyncMock(side_effect=AssertionError('unused suite waited'))):
+            await land.wait_for_checks(PR, event)
+        self.assertTrue(event.is_set())
+        self.assertFalse((await self.summary(api)).no_ci)
+        api.runs[HEAD] = []
+        self.assertTrue((await self.summary(api)).pending)
+        self.assertFalse((await self.summary(api)).no_ci)
+        api.runs[HEAD] = [run()]
+        api.rules = [dict(ruleset_id=1, type='required_status_checks',
+                         parameters={'required_status_checks': [dict(context='missing')]} )]
+        self.assertTrue((await self.summary(api)).pending)
+        api.rules = []
+        api.suites[HEAD][0]['app'] = {'id': 15368, 'slug': 'github-actions'}
+        self.assertTrue((await self.summary(api)).pending)
+        self.assertTrue((await self.summary(api)).failures)
+        for field in ('app', 'latest_check_runs_count'):
+            broken = CiApi()
+            broken.runs[HEAD] = [run()]
+            broken.suites[HEAD] = [dict(api.suites[HEAD][0])]
+            del broken.suites[HEAD][0][field]
+            with self.assertRaises(land.CiEvidenceError):
+                await self.summary(broken)
+
+    async def test_app_bound_commit_status_uses_verified_bot_identity(self):
+        for classic in (False, True):
+            api = CiApi()
+            if classic:
+                api.ref['branchProtectionRule'] = dict(requiresStatusChecks=True,
+                    requiredStatusChecks=[dict(context='external-ci', app={'databaseId': 7})],
+                    requiresDeployments=False, requiredDeploymentEnvironments=[])
+            else:
+                api.rules = [dict(ruleset_id=7, type='required_status_checks',
+                                 parameters={'required_status_checks': [dict(context='external-ci', integration_id=7)]})]
+            api.statuses[HEAD] = [dict(id=1, context='external-ci', state='success', creator=dict(api.bot))]
+            self.assertFalse((await self.summary(api)).pending)
+            api.app['id'] = 8
+            self.assertTrue((await self.summary(api)).pending)
+            api.app['id'] = 7
+            api.bot['id'] = 71
+            with self.assertRaises(land.CiEvidenceError):
+                await self.summary(api)
+            api.bot['id'] = 70
+            api.statuses[HEAD][0]['creator'] = {'id': 70, 'login': 'external-ci[bot]', 'type': 'User'}
+            self.assertTrue((await self.summary(api)).pending)
+            api.statuses[HEAD][0]['creator'] = dict(api.bot)
+            api.app = {'id': 7}
+            with self.assertRaises(land.CiEvidenceError):
+                await self.summary(api)
+        with mock.patch.object(land, 'run_gh', mock.AsyncMock(side_effect=RuntimeError('HTTP 403'))):
+            with self.assertRaisesRegex(land.CiEvidenceError, 'lookup failed'):
+                await land.attribute_status_apps(api.statuses[HEAD], [('external-ci', 7)], HEAD)
+
+    async def test_classic_deployment_requirements_cannot_be_no_ci(self):
+        for fields in ({}, {'requiresDeployments': True, 'requiredDeploymentEnvironments': ['staging']},
+                       {'requiresDeployments': False, 'requiredDeploymentEnvironments': ['staging']},
+                       {'requiresDeployments': False}, {'requiresDeployments': None, 'requiredDeploymentEnvironments': []}):
+            api = CiApi()
+            api.ref['branchProtectionRule'] = dict(requiresStatusChecks=False, requiredStatusChecks=[], **fields)
+            with self.assertRaises(land.CiEvidenceError):
+                await self.summary(api)
+
+    async def test_status_history_is_paginated_and_bound_to_the_current_status(self):
+        api = CiApi()
+        api.rules = [dict(ruleset_id=7, type='required_status_checks',
+                         parameters={'required_status_checks': [dict(context='external-ci', integration_id=7)]})]
+        status = dict(id=101, context='external-ci', state='success', creator=dict(api.bot))
+        api.statuses[HEAD] = [status]
+        # Full history includes obsolete failures; only the current status may
+        # supply the author. Exercise a matched status on the second API page.
+        history = [dict(id=300 - i, context='other', state='failure') for i in range(100)] + [status,
+                   dict(id=100, context='external-ci', state='failure', creator={'id': 99, 'type': 'User', 'login': 'human'})]
+        endpoint = f'repos/{{owner}}/{{repo}}/commits/{HEAD}/statuses'
+        api.overrides[endpoint] = [history[:100], history[100:]]
+        self.assertFalse((await self.summary(api)).pending)
+        call = next(call for call in api.calls if endpoint in call)
+        self.assertIn('--paginate', call)
+        self.assertIn('--slurp', call)
+        for pages in ([[dict(status, id=102), status]], [[dict(status, context='other')]],
+                      [[dict(status, state='failure')]], [[dict(status, creator=None)]],
+                      [[status, status]], [[status], [history[-1]]], [], [{}], [[]],
+                      RuntimeError('HTTP 403'), RuntimeError('HTTP 429 rate limit')):
+            with self.subTest(pages=pages):
+                api.overrides[endpoint] = pages
+                with self.assertRaises(land.CiEvidenceError):
+                    await self.summary(api)
 
     async def test_expected_ci_can_arrive_and_missing_ci_times_out_truthfully(self):
         api = CiApi()

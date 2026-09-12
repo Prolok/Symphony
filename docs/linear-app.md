@@ -206,6 +206,15 @@ belegt fehlende klassische Protection; ein REST-404 oder eine Rechte-/API-Lücke
 tut dies nicht. Erforderliche Statuskontexte und gegebenenfalls deren App werden
 auch dann geprüft, wenn andere Checks bereits grün sind. Unbekannte oder weitere
 CI-erzwingende Regeln (etwa erforderliche Workflows) bleiben konservativ gesperrt.
+Das gilt auch für klassisch erforderliche Deployments; fehlende Deploymentfelder
+sind kein Negativnachweis. Bei appgebundenen Commitstatusmeldungen liest der
+Helper die Autoridentität aus der vollständig paginierten `/commits/<sha>/statuses`-
+Historie; der kombinierte `/status`-Endpunkt enthält keinen Autor. Der neueste
+Historieneintrag des Kontexts muss zur aktuellen Status-ID und zum Ergebnis
+passen; fehlende Einträge oder Änderungen zwischen den Abfragen blockieren.
+Der Helper verifiziert den Bot-Autor über `users/<app-slug>[bot]` und
+`apps/<app-slug>` einschließlich Benutzer-/App-ID. Menschliche Autoren erfüllen
+keine App-Bindung; unbekannte Herkunft oder fehlgeschlagene Lookups blockieren.
 
 No-CI verlangt zusätzlich ein leeres Actions-Workflowinventar (auch deaktivierte
 Workflows zählen), keine `.github/workflows/*.yml`-/`*.yaml`-Dateien an PR-Head
@@ -216,6 +225,15 @@ vollständige Git-Bäume werden geprüft; Fehler und abgeschnittene Antworten
 erlauben keinen Negativnachweis. Vorhandene CI ohne Ergebnisse bleibt im
 Warte-/Fehlerpfad. Die Meldung lautet bei bestätigtem No-CI „GitHub CI not
 configured and not required“; sie ersetzt keine lokalen Tests oder Reviews.
+Automatisch erzeugte externe Suites mit `queued`, ohne Ergebnis und mit
+`latest_check_runs_count=0` halten vorhandene grüne Checks nicht offen. Sie
+belegen aber auch kein No-CI. Fehlende Pflichtchecks, Actions-Suites ohne Jobs
+und tatsächlich laufende oder nicht ersetzte fehlgeschlagene Suites blockieren.
+Eine abgeschlossene Fehlersuite entfällt nur, wenn ihre vollständig gelesenen
+Jobs gemäß der bestehenden Jobname-/App-Zuordnung durch neuere akzeptierte Jobs
+in abgeschlossenen akzeptierten Suites derselben SHA ersetzt sind. Suite-/Job-IDs,
+Zeitfolge und Jobanzahl müssen passen; unersetzte Jobs, leere Fehlersuites und
+unbekannte Ergebnisse oder Teilantworten bleiben gesperrt.
 `symphony_merge` wiederholt die CI-Prüfung nach den Label-/Review-Gates und prüft
 PR-/Base-/Head-, Remote- und Workspace-Konsistenz vor dem letzten Linear-Checkpoint.
 Es gibt keine gespeicherte No-CI-Freigabe, zusätzliche Skip-Option oder Änderung

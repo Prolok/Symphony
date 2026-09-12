@@ -264,7 +264,8 @@ async def ci_json(*args: str) -> Any:
         raise CiEvidenceError(f"CI evidence lookup failed: {error}; merge blocked") from error
 
 
-async def ci_pages(endpoint: str, key: str | None = None, sha: str | None = None) -> list[dict[str, Any]]:
+async def ci_pages(endpoint: str, key: str | None = None, sha: str | None = None,
+                   *, item_ids: bool = False) -> list[dict[str, Any]]:
     # gh follows every Link header; slurp preserves page boundaries for validation.
     pages = await ci_json("api", "--method", "GET", "--paginate", "--slurp",
                           f"repos/{{owner}}/{{repo}}/{endpoint}", "-f", "per_page=100")
@@ -288,8 +289,8 @@ async def ci_pages(endpoint: str, key: str | None = None, sha: str | None = None
         ci_require(all(isinstance(item, dict) for item in batch), "invalid API item")
         items.extend(batch)
     ci_require(total is None or total == len(items), "incomplete API count")
-    identities = [item.get("id") if key else (item.get("ruleset_id"), item.get("type")) for item in items]
-    if key:
+    identities = [item.get("id") if key or item_ids else (item.get("ruleset_id"), item.get("type")) for item in items]
+    if key or item_ids:
         ci_require(all(positive_id(identity) for identity in identities), "missing API item identity")
     else:
         ci_require(all(positive_id(identity[0]) and isinstance(identity[1], str) for identity in identities), "missing rule identity")
@@ -309,6 +310,10 @@ async def get_check_suites(sha: str) -> list[dict[str, Any]]:
     suites = await ci_pages(f"commits/{sha}/check-suites", "check_suites")
     ci_require(all(suite.get("head_sha") == sha for suite in suites), "suite head mismatch")
     ci_require(all(suite.get("status") in {"queued", "in_progress", "completed", "waiting", "pending", "requested"} for suite in suites), "unknown suite status")
+    ci_require(all(type(suite.get("latest_check_runs_count")) is int and suite["latest_check_runs_count"] >= 0
+                   and isinstance(suite.get("app"), dict) and positive_id(suite["app"].get("id"))
+                   and isinstance(suite["app"].get("slug"), str) and suite["app"]["slug"]
+                   for suite in suites), "suite check count/app missing")
     return suites
 
 
@@ -333,7 +338,10 @@ async def required_ci_checks(pr: PrInfo) -> list[tuple[str, int | None]]:
         repository(owner: $owner, name: $name) {
           ref(qualifiedName: $ref) {
             name target { oid }
-            branchProtectionRule { requiresStatusChecks requiredStatusChecks { context app { databaseId } } }
+            branchProtectionRule {
+              requiresStatusChecks requiredStatusChecks { context app { databaseId } }
+              requiresDeployments requiredDeploymentEnvironments
+            }
           }
         }
       }
@@ -349,6 +357,9 @@ async def required_ci_checks(pr: PrInfo) -> list[tuple[str, int | None]]:
     classic = ref["branchProtectionRule"]
     if classic is not None:
         ci_require(isinstance(classic, dict) and type(classic.get("requiresStatusChecks")) is bool, "invalid classic protection")
+        ci_require(classic.get("requiresDeployments") is False
+                   and classic.get("requiredDeploymentEnvironments") == [],
+                   "classic deployment requirements present or unknown")
         ci_require("requiredStatusChecks" in classic, "classic status requirements missing")
         checks = classic.get("requiredStatusChecks")
         if checks is None and classic["requiresStatusChecks"] is False:
@@ -390,10 +401,85 @@ async def has_workflow_files(sha: str) -> bool:
     return any(re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", entry["path"]) for entry in entries)
 
 
+async def attribute_status_apps(statuses: list[dict[str, Any]], required: list[tuple[str, int | None]], sha: str) -> None:
+    # Commit statuses omit app.id. Resolve installation-token authors via the
+    # documented <app-slug>[bot] account, verifying both bot and application IDs.
+    contexts = {context for context, app in required if app is not None}
+    if not any(status["context"] in contexts for status in statuses):
+        return
+    # The combined /status endpoint omits creator. /statuses includes the
+    # author and returns history newest first; bind that history to this snapshot.
+    history = await ci_pages(f"commits/{sha}/statuses", item_ids=True)
+    latest: dict[str, dict[str, Any]] = {}
+    for status in history:
+        ci_require(isinstance(status.get("context"), str) and status["context"], "status context missing")
+        ci_require(status.get("state") in {"pending", "success", "failure", "error"}, "unknown commit status")
+        latest.setdefault(status["context"], status)
+    identities: dict[str, tuple[int, int]] = {}
+    for status in statuses:
+        if status["context"] not in contexts:
+            continue
+        full_status = latest.get(status["context"])
+        ci_require(full_status is not None and full_status["id"] == status["id"]
+                   and full_status["state"] == status["state"], "required status history mismatch")
+        creator = full_status.get("creator")
+        ci_require(isinstance(creator, dict) and positive_id(creator.get("id"))
+                   and isinstance(creator.get("login"), str) and creator.get("type") in {"Bot", "User"},
+                   "required status creator unavailable")
+        if creator["type"] != "Bot":
+            continue
+        login = creator["login"]
+        ci_require(login.endswith("[bot]") and len(login) > 5, "required status app identity unknown")
+        slug = login[:-5]
+        if login not in identities:
+            app = await ci_json("api", "--method", "GET", f"apps/{quote(slug, safe='')}")
+            bot = await ci_json("api", "--method", "GET", f"users/{quote(login, safe='')}")
+            ci_require(isinstance(app, dict) and app.get("slug") == slug and positive_id(app.get("id")), "status app lookup mismatch")
+            ci_require(isinstance(bot, dict) and bot.get("login") == login and bot.get("type") == "Bot"
+                       and positive_id(bot.get("id")), "status bot lookup mismatch")
+            identities[login] = (bot["id"], app["id"])
+        bot_id, app_id = identities[login]
+        ci_require(creator["id"] == bot_id, "status creator identity mismatch")
+        status["app"] = {"id": app_id}
+
+
+async def failed_suite_replaced(suite: dict[str, Any], runs: list[dict[str, Any]],
+                                suites: list[dict[str, Any]]) -> bool:
+    # Preserve the existing latest-job (name/app) semantics for completed suites.
+    # Never discard an entire app's older suites based on an unrelated green job.
+    if not suite["latest_check_runs_count"] or suite.get("conclusion") not in {
+        "failure", "timed_out", "cancelled", "action_required", "stale", "startup_failure",
+    }:
+        return False
+    old_runs = await ci_pages(f"check-suites/{suite['id']}/check-runs", "check_runs")
+    ci_require(len(old_runs) == suite["latest_check_runs_count"], "suite check count changed")
+    for old in old_runs:
+        ci_require(old.get("head_sha") == suite["head_sha"]
+                   and (old.get("check_suite") or {}).get("id") == suite["id"]
+                   and (old.get("app") or {}).get("id") == suite["app"]["id"]
+                   and isinstance(old.get("name"), str) and old["name"], "suite check identity mismatch")
+    current = dedupe_check_runs(runs)
+    accepted_suites = {item["id"] for item in suites if item["status"] == "completed"
+                       and item.get("conclusion") in {"success", "skipped", "neutral"}
+                       and item["app"]["id"] == suite["app"]["id"]}
+    for old in old_runs:
+        replacements = [run for run in current if run["name"] == old["name"]
+                        and run["app"]["id"] == suite["app"]["id"] and run["id"] > old["id"]
+                        and (run.get("check_suite") or {}).get("id") in accepted_suites
+                        and run["status"] == "completed" and run.get("conclusion") in {"success", "skipped", "neutral"}]
+        if old.get("status") != "completed" or not replacements:
+            return False
+        old_time, new_time = check_timestamp(old), check_timestamp(replacements[0])
+        if old_time is None or new_time is None or new_time <= old_time:
+            return False
+    return True
+
+
 async def collect_ci_summary(pr: PrInfo) -> CheckSummary:
     required = await required_ci_checks(pr)
     runs = await get_check_runs(pr.head_sha)
     statuses = await get_commit_statuses(pr.head_sha)
+    await attribute_status_apps(statuses, required, pr.head_sha)
     suites = await get_check_suites(pr.head_sha)
     # Keep status contexts separate from check names and bind required checks to
     # their app when specified. A same-named result from another app cannot pass.
@@ -408,9 +494,19 @@ async def collect_ci_summary(pr: PrInfo) -> CheckSummary:
         summary.pending = True
         summary.failures = [f"required check missing: {name}" for name in missing] + summary.failures
     for suite in suites:
+        # GitHub auto-creates empty queued suites for installed check-writing
+        # apps. They are no running job and must not hold green checks open.
+        # Actions suites can represent an expected workflow awaiting its jobs.
+        if (suite["status"] == "queued" and suite.get("conclusion") is None
+                and suite["latest_check_runs_count"] == 0 and suite["app"]["slug"] != "github-actions"):
+            continue
         if suite["status"] != "completed":
             summary.pending = True
+            if suite["latest_check_runs_count"] == 0:
+                summary.failures.append(f"CI expected: check suite {suite['id']} has no check runs")
         elif suite.get("conclusion") not in {"success", "skipped", "neutral"}:
+            if await failed_suite_replaced(suite, runs, suites):
+                continue
             summary.failed = True
             summary.failures.append(f"check suite {suite['id']}: {suite.get('conclusion') or 'missing conclusion'}")
     if checks or required:

@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 POLL_SECONDS = 10
 CHECKS_APPEAR_TIMEOUT_SECONDS = 120
@@ -42,6 +43,9 @@ class PrInfo:
     mergeable: str | None
     merge_state: str | None
     author_login: str | None = None
+    base_branch: str | None = None
+    base_sha: str | None = None
+    state: str = "OPEN"
 
 
 @dataclass
@@ -50,6 +54,7 @@ class CheckSummary:
     failed: bool
     failures: list[str]
     accepted_counts: dict[str, int]
+    no_ci: bool = False
 
 
 @dataclass
@@ -144,7 +149,7 @@ async def get_pr_info(branch: str | None = None) -> PrInfo:
     args.extend(
         [
             "--json",
-            "number,url,headRefOid,mergeable,mergeStateStatus,author",
+            "number,url,headRefOid,baseRefName,baseRefOid,state,mergeable,mergeStateStatus,author",
         ],
     )
     try:
@@ -163,6 +168,9 @@ async def get_pr_info(branch: str | None = None) -> PrInfo:
         mergeable=parsed.get("mergeable"),
         merge_state=parsed.get("mergeStateStatus"),
         author_login=author.get("login"),
+        base_branch=parsed["baseRefName"],
+        base_sha=parsed["baseRefOid"],
+        state=parsed["state"],
     )
 
 
@@ -223,29 +231,206 @@ async def get_reviews(pr_number: int) -> list[dict[str, Any]]:
 
 
 async def get_check_runs(head_sha: str) -> list[dict[str, Any]]:
-    page = 1
-    check_runs: list[dict[str, Any]] = []
-    while True:
-        data = await run_gh(
-            "api",
-            "--method",
-            "GET",
-            f"repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs",
-            "-f",
-            "per_page=100",
-            "-f",
-            f"page={page}",
-        )
-        payload = json.loads(data)
-        batch = payload.get("check_runs", [])
-        if not batch:
-            break
-        check_runs.extend(batch)
-        total_count = payload.get("total_count")
-        if total_count is not None and len(check_runs) >= total_count:
-            break
-        page += 1
-    return check_runs
+    runs = await ci_pages(f"commits/{head_sha}/check-runs", "check_runs")
+    for run in runs:
+        ci_require(run.get("head_sha") == head_sha, "check head mismatch")
+        ci_require(isinstance(run.get("name"), str) and run["name"], "check name missing")
+        ci_require(run.get("status") in {"queued", "in_progress", "completed", "waiting", "pending", "requested"}, "unknown check status")
+        ci_require(isinstance(run.get("app"), dict) and positive_id(run["app"].get("id")), "check app missing")
+    return runs
+
+
+class CiEvidenceError(RuntimeError):
+    pass
+
+
+def ci_require(condition: Any, reason: str) -> None:
+    if not condition:
+        raise CiEvidenceError(f"CI policy/evidence unknown: {reason}; merge blocked")
+
+
+def positive_id(value: Any) -> bool:
+    return type(value) is int and value > 0
+
+
+def git_sha(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
+async def ci_json(*args: str) -> Any:
+    try:
+        return json.loads(await run_gh(*args))
+    except (RuntimeError, ValueError) as error:
+        raise CiEvidenceError(f"CI evidence lookup failed: {error}; merge blocked") from error
+
+
+async def ci_pages(endpoint: str, key: str | None = None, sha: str | None = None) -> list[dict[str, Any]]:
+    # gh follows every Link header; slurp preserves page boundaries for validation.
+    pages = await ci_json("api", "--method", "GET", "--paginate", "--slurp",
+                          f"repos/{{owner}}/{{repo}}/{endpoint}", "-f", "per_page=100")
+    ci_require(isinstance(pages, list) and pages, "missing API pages")
+    items: list[dict[str, Any]] = []
+    total = None
+    for index, page in enumerate(pages):
+        if key is not None:
+            ci_require(isinstance(page, dict), "invalid API page")
+            count = page.get("total_count")
+            ci_require(type(count) is int and count >= 0, "missing total_count")
+            ci_require(total is None or total == count, "total_count changed during pagination")
+            total = count
+            if sha is not None:
+                ci_require(page.get("sha") == sha, "status head mismatch")
+            batch = page.get(key)
+        else:
+            batch = page
+        ci_require(isinstance(batch, list) and len(batch) <= 100, "invalid API collection")
+        ci_require(index == len(pages) - 1 or len(batch) == 100, "incomplete API page")
+        ci_require(all(isinstance(item, dict) for item in batch), "invalid API item")
+        items.extend(batch)
+    ci_require(total is None or total == len(items), "incomplete API count")
+    identities = [item.get("id") if key else (item.get("ruleset_id"), item.get("type")) for item in items]
+    if key:
+        ci_require(all(positive_id(identity) for identity in identities), "missing API item identity")
+    else:
+        ci_require(all(positive_id(identity[0]) and isinstance(identity[1], str) for identity in identities), "missing rule identity")
+    ci_require(len(set(identities)) == len(identities), "duplicate API items/pages")
+    return items
+
+
+async def get_commit_statuses(sha: str) -> list[dict[str, Any]]:
+    statuses = await ci_pages(f"commits/{sha}/status", "statuses", sha)
+    for status in statuses:
+        ci_require(isinstance(status.get("context"), str) and status["context"], "status context missing")
+        ci_require(status.get("state") in {"pending", "success", "failure", "error"}, "unknown commit status")
+    return statuses
+
+
+async def get_check_suites(sha: str) -> list[dict[str, Any]]:
+    suites = await ci_pages(f"commits/{sha}/check-suites", "check_suites")
+    ci_require(all(suite.get("head_sha") == sha for suite in suites), "suite head mismatch")
+    ci_require(all(suite.get("status") in {"queued", "in_progress", "completed", "waiting", "pending", "requested"} for suite in suites), "unknown suite status")
+    return suites
+
+
+# These rules do not require a CI result. GitHub still enforces their other gates.
+NON_CI_RULES = {
+    "creation", "update", "deletion", "non_fast_forward", "required_linear_history",
+    "required_signatures", "pull_request", "commit_message_pattern",
+    "commit_author_email_pattern", "committer_email_pattern", "branch_name_pattern",
+    "tag_name_pattern", "file_path_restriction", "max_file_path_length",
+    "file_extension_restriction", "max_file_size",
+}
+
+
+async def required_ci_checks(pr: PrInfo) -> list[tuple[str, int | None]]:
+    ci_require(isinstance(pr.base_branch, str) and pr.base_branch, "PR base branch missing")
+    ci_require(git_sha(pr.base_sha) and git_sha(pr.head_sha), "PR base/head SHA missing")
+    # Ref.branchProtectionRule identifies the applicable classic rule. A successful
+    # explicit null is absence; a REST 404 (which can hide permissions) is not.
+    payload = await ci_json("api", "graphql", "-F", "owner={owner}", "-F", "name={repo}",
+                            "-f", f"ref=refs/heads/{pr.base_branch}", "-f", "query=" + """
+      query($owner: String!, $name: String!, $ref: String!) {
+        repository(owner: $owner, name: $name) {
+          ref(qualifiedName: $ref) {
+            name target { oid }
+            branchProtectionRule { requiresStatusChecks requiredStatusChecks { context app { databaseId } } }
+          }
+        }
+      }
+    """)
+    ci_require(isinstance(payload, dict) and not payload.get("errors"), "GraphQL policy errors")
+    ci_require(isinstance(payload.get("data"), dict), "GraphQL data missing")
+    repository = payload["data"].get("repository")
+    ci_require(isinstance(repository, dict) and isinstance(repository.get("ref"), dict), "base ref unavailable")
+    ref = repository["ref"]
+    ci_require(ref.get("name") == pr.base_branch and isinstance(ref.get("target"), dict) and ref["target"].get("oid") == pr.base_sha, "base changed during policy lookup")
+    ci_require("branchProtectionRule" in ref, "classic protection missing")
+    required: list[tuple[str, int | None]] = []
+    classic = ref["branchProtectionRule"]
+    if classic is not None:
+        ci_require(isinstance(classic, dict) and type(classic.get("requiresStatusChecks")) is bool, "invalid classic protection")
+        ci_require("requiredStatusChecks" in classic, "classic status requirements missing")
+        checks = classic.get("requiredStatusChecks")
+        if checks is None and classic["requiresStatusChecks"] is False:
+            checks = []
+        ci_require(isinstance(checks, list), "classic status requirements missing")
+        ci_require(classic["requiresStatusChecks"] or not checks, "inconsistent classic protection")
+        for check in checks:
+            ci_require(isinstance(check, dict) and "app" in check, "classic check app missing")
+            app = check["app"]
+            ci_require(app is None or isinstance(app, dict) and positive_id(app.get("databaseId")), "invalid required app")
+            required.append((check.get("context"), app["databaseId"] if app else None))
+        ci_require(not classic["requiresStatusChecks"] or checks, "classic required checks unspecified")
+    rules = await ci_pages(f"rules/branches/{quote(pr.base_branch, safe='')}")
+    for rule in rules:
+        kind = rule.get("type")
+        if kind == "required_status_checks":
+            parameters = rule.get("parameters")
+            ci_require(isinstance(parameters, dict) and isinstance(parameters.get("required_status_checks"), list), "ruleset checks missing")
+            for check in parameters["required_status_checks"]:
+                ci_require(isinstance(check, dict), "invalid required check")
+                app = check.get("integration_id")
+                ci_require(app is None or positive_id(app), "invalid required integration")
+                required.append((check.get("context"), app))
+        else:
+            ci_require(kind in NON_CI_RULES, f"unsupported rule {kind}")
+    ci_require(all(isinstance(context, str) and context for context, _ in required), "required context missing")
+    return required
+
+
+async def has_workflow_files(sha: str) -> bool:
+    tree = await ci_json("api", "--method", "GET", f"repos/{{owner}}/{{repo}}/git/trees/{sha}", "-f", "recursive=1")
+    ci_require(isinstance(tree, dict) and tree.get("truncated") is False and isinstance(tree.get("tree"), list), "incomplete workflow tree")
+    ci_require(git_sha(tree.get("sha")), "workflow tree identity missing")
+    entries = tree["tree"]
+    ci_require(all(isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"]
+                   and entry.get("type") in {"tree", "blob", "commit"} and git_sha(entry.get("sha"))
+                   for entry in entries), "invalid workflow tree entry")
+    ci_require(len({entry["path"] for entry in entries}) == len(entries), "duplicate workflow tree entries")
+    return any(re.fullmatch(r"\.github/workflows/[^/]+\.ya?ml", entry["path"]) for entry in entries)
+
+
+async def collect_ci_summary(pr: PrInfo) -> CheckSummary:
+    required = await required_ci_checks(pr)
+    runs = await get_check_runs(pr.head_sha)
+    statuses = await get_commit_statuses(pr.head_sha)
+    suites = await get_check_suites(pr.head_sha)
+    # Keep status contexts separate from check names and bind required checks to
+    # their app when specified. A same-named result from another app cannot pass.
+    checks = runs + [dict(status, name=status["context"],
+                         status="in_progress" if status["state"] == "pending" else "completed",
+                         conclusion=status["state"], ci_source="status") for status in statuses]
+    summary = summarize_checks(checks)
+    missing = [context for context, app in required if not any(
+        check["name"] == context and (app is None or (check.get("app") or {}).get("id") == app)
+        for check in checks)]
+    if missing:
+        summary.pending = True
+        summary.failures = [f"required check missing: {name}" for name in missing] + summary.failures
+    for suite in suites:
+        if suite["status"] != "completed":
+            summary.pending = True
+        elif suite.get("conclusion") not in {"success", "skipped", "neutral"}:
+            summary.failed = True
+            summary.failures.append(f"check suite {suite['id']}: {suite.get('conclusion') or 'missing conclusion'}")
+    if checks or required:
+        return summary
+    if summary.failed:
+        return summary
+    reasons = []
+    if suites:
+        reasons.append("head check suites")
+    if await ci_pages("actions/workflows", "workflows"):
+        reasons.append("configured Actions workflows (including disabled)")
+    for sha in dict.fromkeys([pr.base_sha, pr.head_sha]):
+        if await has_workflow_files(sha):
+            reasons.append(f"workflow files at {short_sha(sha)}")
+    if await get_check_runs(pr.base_sha) or await get_commit_statuses(pr.base_sha) or await get_check_suites(pr.base_sha):
+        reasons.append("CI signals at PR base")
+    if reasons:
+        summary.failures = ["CI expected: " + ", ".join(reasons)]
+        return summary
+    return CheckSummary(False, False, [], {}, no_ci=True)
 
 
 def parse_time(value: str) -> datetime:
@@ -269,9 +454,9 @@ def check_timestamp(check: dict[str, Any]) -> datetime | None:
 
 
 def dedupe_check_runs(check_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    latest_by_name: dict[str, dict[str, Any]] = {}
+    latest_by_name: dict[tuple, dict[str, Any]] = {}
     for check in check_runs:
-        name = check.get("name", "unknown")
+        name = (check.get("name", "unknown"), check.get("ci_source", "check"), (check.get("app") or {}).get("id"))
         timestamp = check_timestamp(check)
         if name not in latest_by_name:
             latest_by_name[name] = check
@@ -323,6 +508,8 @@ def summarize_checks(check_runs: list[dict[str, Any]]) -> CheckSummary:
 
 
 def check_summary_message(summary: CheckSummary) -> str:
+    if summary.no_ci:
+        return "GitHub CI not configured and not required; local Test (AI) evidence remains the gate."
     success = summary.accepted_counts.get("success", 0)
     skipped = summary.accepted_counts.get("skipped", 0)
     neutral = summary.accepted_counts.get("neutral", 0)
@@ -390,6 +577,8 @@ def merge_preflight_failures(evidence: MergePreflightEvidence) -> list[str]:
         failures.append(
             "No open GitHub PR found for the current branch; run symphony-push to create or update it before merge",
         )
+    elif evidence.pr.state != "OPEN":
+        failures.append("GitHub PR is not open.")
     elif evidence.pr.head_sha != evidence.local_head:
         failures.append(
             "PR head mismatch: "
@@ -905,25 +1094,21 @@ async def wait_for_codex(pr_number: int, checks_done: asyncio.Event) -> None:
                 raise SystemExit(2)
         if checks_done.is_set():
             return
-        await asyncio.sleep(POLL_SECONDS)
+        try:
+            await asyncio.wait_for(checks_done.wait(), timeout=POLL_SECONDS)
+        except asyncio.TimeoutError:
+            pass
 
 
-async def wait_for_checks(head_sha: str, checks_done: asyncio.Event) -> None:
-    print("Waiting for CI checks...", flush=True)
-    empty_seconds = 0
+async def wait_for_checks(pr: PrInfo, checks_done: asyncio.Event) -> None:
+    print("Checking GitHub CI requirements and results...", flush=True)
+    missing_seconds = 0
     while True:
-        check_runs = await get_check_runs(head_sha)
-        if not check_runs:
-            empty_seconds += POLL_SECONDS
-            if empty_seconds >= CHECKS_APPEAR_TIMEOUT_SECONDS:
-                print(
-                    "No checks detected after 120s; check CI configuration",
-                )
-                raise SystemExit(3)
-            await asyncio.sleep(POLL_SECONDS)
-            continue
-        empty_seconds = 0
-        summary = summarize_checks(check_runs)
+        try:
+            summary = await collect_ci_summary(pr)
+        except CiEvidenceError as error:
+            print(str(error), flush=True)
+            raise SystemExit(3) from error
         if summary.failed:
             print("Checks failed:")
             for failure in summary.failures:
@@ -933,6 +1118,14 @@ async def wait_for_checks(head_sha: str, checks_done: asyncio.Event) -> None:
             print(check_summary_message(summary))
             checks_done.set()
             return
+        if summary.failures:
+            missing_seconds += POLL_SECONDS
+            print("; ".join(summary.failures), flush=True)
+            if missing_seconds >= CHECKS_APPEAR_TIMEOUT_SECONDS:
+                print("Expected GitHub CI checks still missing after 120s; merge blocked.")
+                raise SystemExit(3)
+        else:
+            missing_seconds = 0
         await asyncio.sleep(POLL_SECONDS)
 
 
@@ -949,7 +1142,7 @@ async def watch_pr() -> None:
     head_sha = pr.head_sha
     checks_done = asyncio.Event()
     codex_task = asyncio.create_task(wait_for_codex(pr.number, checks_done))
-    checks_task = asyncio.create_task(wait_for_checks(head_sha, checks_done))
+    checks_task = asyncio.create_task(wait_for_checks(pr, checks_done))
 
     async def head_monitor() -> None:
         while True:
@@ -960,8 +1153,8 @@ async def watch_pr() -> None:
                     "before running land_watch again.",
                 )
                 raise SystemExit(5)
-            if current.head_sha != head_sha:
-                print("PR head updated; pull/amend/force-push to retrigger CI")
+            if (current.head_sha, current.base_branch, current.base_sha, current.state) != (head_sha, pr.base_branch, pr.base_sha, "OPEN"):
+                print("PR head/base/state updated; repeat the land checks")
                 raise SystemExit(4)
             await asyncio.sleep(POLL_SECONDS)
 
@@ -1044,6 +1237,19 @@ async def merge_bound(expected_head: str, title: str) -> None:
     issue_comments, review_comments, reviews, review_request_at = await fetch_review_context(current.number)
     raise_on_human_feedback(issue_comments, review_comments, reviews, review_request_at)
     raise_on_missing_manual_review_approval(labels, current, reviews)
+    # Do not reuse the watch decision after labels/reviews or across attempts.
+    summary = await collect_ci_summary(current)
+    if summary.failed or summary.pending:
+        raise CiEvidenceError("GitHub CI changed or remains incomplete; repeat the bound merge.")
+    fresh = await require_merge_preflight()
+    if (fresh.branch != evidence.branch or fresh.pr != current
+            or current.mergeable != "MERGEABLE" or current.merge_state not in {"CLEAN", "HAS_HOOKS"}
+            or await run_git("status", "--porcelain")):
+        raise RuntimeError("PR/base/head/mergeability changed or workspace is dirty; repeat the bound merge.")
+    remote = (await run_git("ls-remote", "--exit-code", "--heads", "origin", evidence.branch)).split()
+    if remote != [expected_head, f"refs/heads/{evidence.branch}"]:
+        raise RuntimeError("Remote branch head does not match the tested merge head.")
+    print(check_summary_message(summary), flush=True)
     # The final fresh Linear scan executes in the bound parent, after GitHub
     # gates. This remaining API/action interval cannot be made atomic.
     checkpoint = bound_request("merge")

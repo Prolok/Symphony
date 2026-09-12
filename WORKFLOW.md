@@ -759,6 +759,13 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
 1. Öffne den globalen Skill `symphony-land` und befolge den dort definierten Ablauf.
 2. Lokale Volltests werden in `Merge (AI)` nicht pauschal ausgeführt; das vollständige lokale Gate bleibt Aufgabe von `Test (AI)`.
 3. GitHub-Checks mit `skipped` ersetzen keine bestandene CI. Wenn GitHub-CI für diesen Push bewusst übersprungen wurde, ist `skipped` nur gemäß Policy akzeptabel; die lokale Test-Evidenz aus `Test (AI)` bleibt dann das maßgebliche Gate. `neutral` muss ausdrücklich neutral/akzeptiert oder blockierend klassifiziert sein; echte Fehler bleiben blockierend.
+   Leere Checks sind nur bei vollständig belegtem No-CI zulässig: Für das
+   gebundene Repository und den aktuellen PR-Zielbranch sind keine Checks
+   erforderlich und keine CI-Konfiguration oder CI-Signale vorhanden. Der
+   Land-Helper prüft dies vor `symphony_merge` erneut; unbekannte Policy,
+   unvollständige Abfragen und fehlende erwartete CI blockieren. No-CI als
+   „nicht konfiguriert und nicht erforderlich“ melden; lokale Test-/Review-Gates
+   bleiben bestehen. API-Details stehen in `docs/linear-app.md`.
 4. Vor dem Merge müssen PR-/Remote-Evidenz und lokaler Stand konsistent sein:
    aktueller Branch `symphony/<Issue>`, vorhandener Remote-Branch
    `origin/symphony/<Issue>`, offene PR für diesen Branch und PR-Head-SHA gleich

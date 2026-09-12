@@ -59,6 +59,12 @@ Nur im Merge-Schritt des Workflows verwenden.
    eine Behebung Dateiänderungen erfordert, Fix umsetzen, committen, pushen,
    nach `Test (AI)` zurückverschieben und stoppen; reine CI-Neuläufe ohne
    Dateiänderungen dürfen weiter beobachtet werden.
+   Bei leeren Checks den No-CI-Nachweis des Helpers verwenden: „GitHub CI not
+   configured and not required“ ist keine bestandene CI. Nur vollständig
+   bestätigte fehlende CI-Konfiguration und nicht erforderliche Checks erlauben
+   diesen Pfad; die lokale Test-Evidenz bleibt Pflicht. Erwartete fehlende CI
+   und unbekannte/unvollständige Policy bleiben blockierend. API-Details stehen
+   in `docs/linear-app.md`; im bestätigten No-CI-Fall keine CI-Einrichtung fordern.
 9. Wenn das Linear-Label `Requires Manual Review` gesetzt ist, nach sauberer
    PR-/Remote-Preflight-Evidenz, erledigtem Review-Feedback und akzeptablen
    GitHub-Checks ein gültiges menschliches GitHub-Approval auf der aktuellen
@@ -84,10 +90,12 @@ Nur im Merge-Schritt des Workflows verwenden.
    Scheitert der erlaubte Live-Lookup, bleibt der Label-Lookup-Blocker bestehen.
    Kein Dispatch-Snapshot, kein Shell-/Mix-Fallback und keine Lockerung der
    Secret-Abschirmung. Kein lokaler Tracker-Refresh über die Modell-Shell.
-10. Wenn GitHub-Checks bestanden oder gemäß Skip-/Neutral-Policy akzeptabel sind
+10. Wenn GitHub-Checks bestanden, gemäß Skip-/Neutral-Policy akzeptabel oder
+   durch den Helper nachweislich nicht konfiguriert und nicht erforderlich sind
    und Feedback erledigt ist, das gebundene Tool `symphony_merge` mit
    `head_sha` (aktuelle lokale/PR-Head-SHA) und optional `issue_id` aufrufen.
    Dieses führt den bestehenden Land-Helper, Live-Label-/Approval-Gates und
+   eine erneute CI-Evidenzprüfung für den aktuellen PR-/Base-/Head-Stand sowie
    unmittelbar vor der tatsächlichen Merge-Anforderung einen frischen
    Kommentarcheck aus. Merge-Betreff bleibt `<IssueId>: <IssueTitle>`.
    Bei offenen Eingaben `symphony_comments` (`checkpoint`, danach

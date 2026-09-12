@@ -197,6 +197,30 @@ GitHub-Rate-Limit bei der Merge-Anforderung beendet den Versuch; die Wiederholun
 über `symphony_merge` prüft sämtliche Gates frisch. Nur lesende GitHub-Aufrufe
 wiederholen Rate-Limits intern mit Backoff.
 
+Der Land-Helper unterscheidet bestandene/akzeptierte Checks von No-CI.
+Für No-CI liest er im selben gebundenen GitHub-Repository die aktiven Regeln
+des konkreten PR-Zielbranches (`rules/branches`, einschließlich übergeordneter
+Rulesets) und die klassische Protection über GraphQL
+`Ref.branchProtectionRule`. Nur eine fehlerfreie Antwort mit explizitem `null`
+belegt fehlende klassische Protection; ein REST-404 oder eine Rechte-/API-Lücke
+tut dies nicht. Erforderliche Statuskontexte und gegebenenfalls deren App werden
+auch dann geprüft, wenn andere Checks bereits grün sind. Unbekannte oder weitere
+CI-erzwingende Regeln (etwa erforderliche Workflows) bleiben konservativ gesperrt.
+
+No-CI verlangt zusätzlich ein leeres Actions-Workflowinventar (auch deaktivierte
+Workflows zählen), keine `.github/workflows/*.yml`-/`*.yaml`-Dateien an PR-Head
+und Base sowie keine Check-Runs, Commitstatusmeldungen oder Check-Suites an
+diesen beiden Ständen. Ein kombinierter Commitstatus `pending` ohne einzelne
+Statusmeldungen belegt keine laufende CI. Paginierung, Identitäten, Zähler und
+vollständige Git-Bäume werden geprüft; Fehler und abgeschnittene Antworten
+erlauben keinen Negativnachweis. Vorhandene CI ohne Ergebnisse bleibt im
+Warte-/Fehlerpfad. Die Meldung lautet bei bestätigtem No-CI „GitHub CI not
+configured and not required“; sie ersetzt keine lokalen Tests oder Reviews.
+`symphony_merge` wiederholt die CI-Prüfung nach den Label-/Review-Gates und prüft
+PR-/Base-/Head-, Remote- und Workspace-Konsistenz vor dem letzten Linear-Checkpoint.
+Es gibt keine gespeicherte No-CI-Freigabe, zusätzliche Skip-Option oder Änderung
+der Repositoryschutzregeln. Das verbleibende API-/Aktionsfenster bleibt bestehen.
+
 Logs `Comment scan completed/failed` nennen Projektroot, Issue-/Session-Kontext,
 letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Rate-Limits folgen
 der bestehenden Fehlerklassifikation und werden beim nächsten Poll/Checkpoint

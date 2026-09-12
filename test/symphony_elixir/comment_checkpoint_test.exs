@@ -168,7 +168,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
   end
 
   @tag timeout: 60_000
-  test "bound MCP merge runs the real land process and sends no merge command until a fresh checkpoint passes", %{issue: issue} do
+  test "bound MCP no-CI merge runs the real land process and sends no merge command until all fresh gates pass", %{issue: issue} do
     issue = %{issue | state: "Merge (AI)"}
     Process.put(:phase, issue.state)
     root = Path.dirname(Workflow.workflow_file_path())
@@ -189,11 +189,13 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     marker = Path.join(root, "merge-requests.jsonl")
     System.put_env("PATH", bin <> ":" <> previous_path)
     System.put_env("SYMPHONY_TEST_MERGE_COUNTER", marker)
+    System.put_env("SYMPHONY_TEST_CI_MODE", "no_ci")
 
     on_exit(fn ->
       System.put_env("PATH", previous_path)
       System.delete_env("SYMPHONY_TEST_MERGE_COUNTER")
       System.delete_env("SYMPHONY_TEST_MERGE_LIMIT_ONCE")
+      System.delete_env("SYMPHONY_TEST_CI_MODE")
     end)
 
     bind_git_context(root)
@@ -201,9 +203,24 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     args = %{"issue_id" => issue.id, "head_sha" => String.duplicate("a", 40)}
     assert {:error, :bound_merge_timeout} = MergeTool.invoke(args, Keyword.put(opts, :timeout_ms, 0))
     refute File.exists?(marker)
-    assert {:error, {:bound_merge_incomplete, 9, _}} = MergeTool.invoke(args, opts)
+    assert {:error, {:bound_merge_incomplete, 9, no_ci_output}} = MergeTool.invoke(args, opts)
+    assert no_ci_output =~ "GitHub CI not configured and not required"
+    refute no_ci_output =~ "GitHub checks passed"
     refute File.exists?(marker)
     establish(issue)
+
+    for mode <- ["incomplete", "unknown_policy"] do
+      System.put_env("SYMPHONY_TEST_CI_MODE", mode)
+      assert {:error, {:bound_merge_incomplete, _, output}} = MergeTool.invoke(args, opts)
+      assert output =~ "CI policy/evidence unknown"
+      refute File.exists?(marker)
+    end
+
+    System.put_env("SYMPHONY_TEST_CI_MODE", "no_ci")
+    assert {:error, {:bound_merge_incomplete, 7, _}} = MergeTool.invoke(args, labels: fn _ -> {:ok, ["Requires Manual Review"]} end)
+    refute File.exists?(marker)
+    assert {:error, {:bound_merge_incomplete, 7, _}} = MergeTool.invoke(args, labels: fn _ -> {:error, :offline} end)
+    refute File.exists?(marker)
     Process.put(:scan_failure, true)
     assert {:error, {:bound_merge_incomplete, 9, _}} = MergeTool.invoke(args, opts)
     refute File.exists?(marker)

@@ -26,7 +26,7 @@ class AppLabelGateTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(land, "get_pr_info", mock.AsyncMock(return_value=pr)), \
              mock.patch.object(land, "wait_for_codex", mock.AsyncMock()), \
              mock.patch.object(land, "wait_for_checks", mock.AsyncMock()), \
-             mock.patch.object(land, "run_tracker_label_refresh", mock.AsyncMock(side_effect=RuntimeError("linear_secret_access_denied"))) as refresh:
+             mock.patch.object(asyncio, "create_subprocess_exec", mock.AsyncMock(side_effect=AssertionError("forbidden child"))) as refresh:
             with self.assertRaises(SystemExit) as result:
                 await land.watch_pr()
             self.assertEqual(result.exception.code, 8)
@@ -37,10 +37,8 @@ class AppLabelGateTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_app_refresh_never_starts_a_mix_child_or_accepts_the_dispatch_snapshot(self):
         with mock.patch.dict(os.environ, {"SYMPHONY_LINEAR_AUTH_MODE": "app", "SYMPHONY_ISSUE_IDENTIFIER": "PRO-1"}), \
-             mock.patch.object(land, "source_repo_root", mock.AsyncMock(return_value=str(REPO))), \
-             mock.patch.object(land, "workflow_execution_root", mock.AsyncMock(return_value=str(REPO))), \
              mock.patch.object(asyncio, "create_subprocess_exec", mock.AsyncMock(side_effect=AssertionError("forbidden child"))) as child:
-            for call in (land.run_tracker_label_refresh(), land.current_issue_labels([])):
+            for call in (land.current_issue_labels([]), land.current_issue_labels(["backend"])):
                 with self.assertRaisesRegex(land.LabelRefreshError, "bound Linear tool"):
                     await call
             child.assert_not_called()

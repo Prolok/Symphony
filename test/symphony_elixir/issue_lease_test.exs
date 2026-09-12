@@ -41,8 +41,9 @@ defmodule SymphonyElixir.IssueLeaseTest do
     assert :ok = IssueLease.with_lock("workspace", "issue", fn -> :ok end)
   end
 
-  test "legacy worker keeps its previous path without introducing an app lease" do
-    assert :legacy = IssueLease.run(%Issue{id: "issue"}, fn -> :legacy end)
+  test "in-memory fixtures run without a Linear issue lease" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    assert :memory = IssueLease.run(%Issue{id: "issue"}, fn -> :memory end)
   end
 
   test "helper backend failure is unavailable, never a competing issue owner", %{helper_dir: helper_dir} do

@@ -33,18 +33,29 @@ Wenn ein zuvor vorgeschlagenes Umsetzungsticket ausdrücklich bestätigt wird,
 darf der Dialog-AI-Pfad dieses Ticket in Linear erstellen, verknüpfen und das
 Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
 
-## Eigene Linear-App-Identität
+## Eine Instanz für alle Projekte
 
-Der gemeinsame neue `WORKFLOW.md` nutzt `auth_mode: app`. Seine App-Bindung kommt
-aus der versionierten Fachprojekt-`.symphony/.env`. Secret und persönliche
-Werte einschließlich `LINEAR_ASSIGNEE` (E-Mail oder UUID) bleiben in `.env.local`. Im gemeinsamen Symphony-Root liegen
-die `SYM_CODEX_*`-Startwerte und `SYM_MAXIMUM_REVIEW_ITERATIONS`; parallele Projekte dürfen verschiedene
-Linear-Workspaces/Apps mit getrennten Zustands- und Sessionpfaden verwenden.
-Die [Betriebsanleitung](docs/linear-app.md) beschreibt Einrichtung, Root-/Release-
-Ladepfad und die optionale spätere Workpad-Übergabe. Alte Versionen, unveränderte
-alte Workflows ohne `auth_mode` und explizites `legacy` bleiben kompatibel.
-Synthetische Tests und administrative beziehungsweise praktische Abnahme werden
-getrennt dokumentiert.
+Eine Symphony-Instanz pro Entwicklerrechner entdeckt alle direkten Unterverzeichnisse
+mit `.symphony` unter `SYM_PROJECT_ROOT`. Die Variable steht in `.env` bzw.
+`.env.local` im Symphony-Code-Root; Standard ist `~/QuantHub`, mehrere Roots werden
+mit Komma getrennt, etwa `~/QuantHub,~/ProjectHub`. Pfade werden normalisiert und
+dedupliziert. Verschachtelte Worktrees werden nicht durchsucht.
+
+Jedes Projekt behält seine `.symphony/.env(.local)`, eigenen Hooks, Worktrees,
+Sessions und Journale. Ein gemeinsamer Kandidatenrequest pro Linear-Workspace und
+API-Seite verknüpft die Scope-, Status- und Assignee-Auswahl projektweise.
+Innerhalb eines Workspaces müssen alle Projekte dieselbe verifizierte App-Bindung
+und dieselben Client Credentials verwenden. Widersprüche stoppen den Start.
+Verschiedene Workspaces werden getrennt abgefragt.
+Worktree-Roots müssen je Projekt getrennt sein; gleiche oder ineinander liegende
+Pfade werden beim Start abgewiesen. `workspace.root: $SYMPHONY_PROJECT_WORKTREES_ROOT`
+liefert einen projektspezifischen Root. Gesamt-, Status- und SSH-Hostlimits gelten
+gemeinsam für den Dienst.
+
+Symphony unterstützt ausschließlich OAuth2 Client Credentials. Persönliche API-Keys,
+PKCE und Legacy-Workflows sind keine Authentifizierungswege. Die
+[Betriebsanleitung](docs/linear-app.md) beschreibt Einrichtung und einmalige
+Betreiberübergabe vorhandener Daten.
 
 ## Installation und Inbetriebnahme
 
@@ -57,11 +68,7 @@ getrennt dokumentiert.
   GNU-Coreutils und ein externes `flock` sind nicht erforderlich.
 - `mise` ab 2026.3.17 und die installierte Toolchain aus `mise.toml`
   (Erlang/OTP 28, Elixir 1.19.5 für OTP 28)
-- Git ab 2.31, Python ab 3.11 als `python3` für den App-Modus (Legacy: 3.10), Make und Codex CLI im `PATH`
-- Das vollständige Entwicklungsgate `make all` prüft beide Modi und benötigt
-  immer Python 3.11+. Auf einem Legacy-Rechner mit Python 3.10 wird ein
-  bestätigtes Autoupdate vor dem Pull zurückgestellt und der vorhandene Stand
-  gestartet; dabei wird kein Test übersprungen und kein Update als geprüft ausgegeben.
+- Git ab 2.31, Python ab 3.11 als `python3`, Make und Codex CLI im `PATH`
 - Build-Werkzeuge: unter macOS die Xcode Command Line Tools
   (`xcode-select --install`), unter Ubuntu `build-essential`. Für lokale
   Plattformtests zusätzlich zsh; sie führen die Hilfsbefehle aus Bash und
@@ -79,75 +86,43 @@ getrennt dokumentiert.
    ./scripts/mix-gate setup
    ```
 
-2. Die öffentliche App-/Projektbindung in [.symphony/.env](.symphony/.env)
-   versionieren: `LINEAR_APP_CLIENT_ID`, `LINEAR_APP_WORKSPACE_ID`,
-   `LINEAR_APP_USER_ID`, Projektscope und die feste Projektkennung
-   `LINEAR_APP_INSTALLATION_ID=symphony`. Der Zustandspfad wird automatisch als
-   `<gebundener Fachprojektroot>/.symphony/state` abgeleitet; kein konfigurierbarer Override.
+2. In jedem Fachprojekt die öffentliche App-/Projektbindung in `.symphony/.env`
+   konfigurieren: `LINEAR_APP_CLIENT_ID`, `LINEAR_APP_WORKSPACE_ID`,
+   `LINEAR_APP_USER_ID` und genau einen Scope (`LINEAR_PROJECT_SLUG` oder
+   `LINEAR_TEAM_KEY`). Die [Projektvorlage](.symphony/.env) enthält die Felder.
+   Das Client-Secret `LINEAR_APP_SECRET` und persönliche Zuständigkeiten stehen
+   ausschließlich in der privaten `.symphony/.env.local`.
 
-   In der privaten `.symphony/.env.local` bleiben `LINEAR_APP_SECRET`,
-   der vorhandene menschliche `LINEAR_ASSIGNEE`
-   und lokale Overrides. Keine zusätzliche Secret-Auswahlvariable ist nötig.
-   Ein leeres Secret genügt nicht zum Start. Einzelheiten:
-   [Einrichtung](docs/linear-app.md#normale-einrichtung).
+   `LINEAR_ASSIGNEE` akzeptiert mehrere menschliche E-Mail-Adressen oder UUIDs,
+   etwa `person@example.com,second@example.com`; Leerzeichen und Duplikate werden
+   entfernt. App-Identitäten und `me` sind nicht zulässig. Verschiedene Rechner
+   verwenden getrennte Assignee-Auswahlen. `--yolo` berücksichtigt wie bisher alle
+   passenden Issues unabhängig von der Zuständigkeit.
 
-   Die Projektkennung bleibt auch auf getrennten Entwicklerrechnern gleich.
-   Sie bezeichnet lokale Sessions/Journalmetadaten; Issue-Leases sind hostlokal.
-   Persönliche Assignee-/Issue-Auswahl trennt die Arbeitsumfänge.
+   Projekt-Scope begrenzt auf ein Linear-Projekt; Team-Scope auf das exakte Team
+   einschließlich Issues ohne Projekt. Beide Scopes zugleich oder kein Scope
+   ergeben einen Konfigurationsfehler. Projektbindungen ändern sich erst mit einem
+   neuen Dienststart. Hooks erhalten den richtigen Projektroot; Create-/Remove-
+   Hooks kommen aus dessen `.symphony`-Verzeichnis.
 
-   Die übrige Fachprojektkonfiguration bleibt erhalten; persönliche Werte und
-   Zugangsdaten gehören in `.symphony/.env.local`, öffentliche Defaults in `.symphony/.env`:
+   Zustand liegt unter `<Projekt>/.symphony/state`; die interne Kennung lautet
+   immer `symphony`. `LINEAR_APP_INSTALLATION_ID` ist keine Benutzereinstellung.
+   Vorhandene abweichende Zustandsverzeichnisse werden mit konkretem
+   [Übergabehinweis](docs/linear-app.md#einmalige-betreiberübergabe) abgewiesen,
+   nicht automatisch verändert oder gelöscht.
 
-   - `LINEAR_API_KEY` nur für alte Workflows oder explizites `legacy`
-   - genau eine Scope-Variable: `LINEAR_PROJECT_SLUG` oder `LINEAR_TEAM_KEY`
-   - `LINEAR_TEST_PROJECT_SLUG` für den Project-Slug, den Worktrees als
-     `LINEAR_PROJECT_SLUG` verwenden
-   - `LINEAR_ASSIGNEE`
-   - `SYMPHONY_PROJECT_ROOT`
-   - `SYMPHONY_PROJECT_WORKTREES_ROOT`
-
-   Jedes aufrufende Repository wählt seinen Linear-Scope in der eigenen
-   `.symphony/.env` oder `.symphony/.env.local` aus. Genau eine der beiden
-   Variablen erhält einen Wert, die andere bleibt leer:
-
-   ```env
-   # Project-Scope
-   LINEAR_PROJECT_SLUG=my-project
-   LINEAR_TEAM_KEY=
-
-   # Team-Scope (alternativ)
-   LINEAR_PROJECT_SLUG=
-   LINEAR_TEAM_KEY=QAI
-   ```
-
-   Die zentrale `WORKFLOW.md` muss dafür nicht pro Repository umgeschaltet
-   werden: Fehlt dort `tracker.project_slug` oder `tracker.team_key`, verwendet
-   Symphony als Fallback `LINEAR_PROJECT_SLUG` beziehungsweise
-   `LINEAR_TEAM_KEY`. Direkte Workflow-Werte und explizite `$ENV`-Referenzen
-   bleiben unterstützt und haben für das jeweilige Feld Vorrang vor dem
-   Fallback.
-
-   Der Project-Scope verarbeitet nur Issues des angegebenen Linear-Projects.
-   Der Team-Scope verarbeitet alle Issues des exakt angegebenen Teams über
-   sämtliche Projects hinweg, einschließlich Issues ohne Project. Issues
-   anderer Teams und von Subteams sind nicht enthalten. Für den Team-Modus
-   werden keine Projects vorab aufgelistet. Sind nach der Auflösung beide
-   Scopes gesetzt oder beide leer, bricht Symphony beim Start mit einem
-   Konfigurationsfehler ab.
-
-   `sym-codex <TicketId>` priorisiert für den Linear-MCP-Zugriff die
-   `.symphony/.env(.local)` des aufrufenden Projekt-Roots auch gegenüber
-   geerbten Shell-Werten. Dadurch können
-   Projekte im Legacy-Modus parallel mit unterschiedlichen `LINEAR_API_KEY`-Werten
-   arbeiten; das App-Secret wird erst im Auth-/MCP-Prozess gelesen; das Symphony-Source-Repository bleibt der Fallback, wenn kein
-   Projekt-Root übergeben wird.
+   `sym-codex Projekt:PRO-123` und `sym-watch Projekt:PRO-123` erlauben eine
+   eindeutige Projektqualifizierung. Eine unqualifizierte Kennung verwendet den
+   vorhandenen Projektkontext bzw. muss projektübergreifend eindeutig sein.
+   Mehrdeutige Kennungen werden abgewiesen. Die Oberfläche zeigt beispielsweise
+   `Projects: QuantInvest, LinearBridge`.
 
    Das von `sym-codex` verwendete Codex-Startprofil wird dagegen aus `.env`
    und optional `.env.local` im ursprünglichen Symphony-Root geladen, nicht aus
    `.symphony/.env(.local)`. Ein isolierter Release hält die nicht geheimen
    Werte in seinem versiegelten Root-Konfigurationssnapshot fest. Unterstützt werden:
-   - `SYM_CODEX_MODEL`, Standard `gpt-5.6-sol`
-   - `SYM_CODEX_REASONING_EFFORT`, Standard `high`; zusätzliche unterstützte
+   - `SYM_CODEX_MODEL`, Standard `gpt-6-astra`
+   - `SYM_CODEX_REASONING_EFFORT`, Standard `xhigh`; zusätzliche unterstützte
      Werte umfassen `max` und `ultra`
    - `SYM_CODEX_SERVICE_TIER`, Standard `flex`
    - `SYM_CODEX_HUMAN_SERVICE_TIER`, Standard `priority`
@@ -174,7 +149,12 @@ getrennt dokumentiert.
    ./symphony
    ```
 
-Der reguläre Einstieg ist `./symphony`. Der Wrapper prüft zuerst die benötigten
+Der reguläre Einstieg ist `./symphony`. Ein nichtblockierender OS-Lock unter
+`~/.cache/symphony/service.lock` verhindert weitere Dienststarts desselben Benutzers
+aus anderen Checkouts oder mit anderen Ports. Der Zweitstart endet sofort mit
+„Symphony läuft bereits“, vor Build, Linkregistrierung oder Dispatch. Der Lock wird
+über das Dienstende hinaus nicht gehalten; die Lockdatei bleibt bestehen. Manuelle
+Helfer starten keinen zweiten Dienst. Danach prüft der Wrapper die benötigten
 Werkzeuge und die installierte Toolchain und aktiviert `mise.toml` ausschließlich
 für den laufenden Prozess und seine Kinder. Ein aktiviertes Shellprofil oder ein
 schon global erreichbares `escript` ist nicht nötig. Fehlende Voraussetzungen
@@ -346,3 +326,15 @@ Wenn `Planung (AI)` oder die spätere Umsetzung Klärungsbedarf erkennt, verläu
 - `AGENTS.md`: Repository-spezifische Regeln für Codex
 - `docs/`: ergänzende Implementierungsnotizen, aktuell zu Logging und Token Accounting
 - `.codex/skills/`: mitgelieferte Codex-Skills; `symphony-*`-Skills definieren gemeinsame Workflow-Abläufe, `sym-*`-Skills repositoryspezifische Ergänzungen
+
+## Gemeinsame Wissensbasis ohne lokales Codex-Memory
+
+Frische Symphony-/Codex-Prozesse erzwingen `features.memories=false`,
+`memories.generate_memories=false` und `memories.use_memories=false`.
+Persönliche Memory-Dateien werden weder importiert noch gelöscht. Die
+gemeinsame Wissensbasis bilden versionierte AGENTS-, Workflow-, Skill- und
+Projektdateien sowie Ticket und Workpad. Der Release übernimmt seine
+versionierten Skills; persönliche lokale Skill-Erweiterungen werden nicht
+in den gemeinsamen Lauf importiert. Gesprächs-/Session-History, Wiederaufnahme
+und Tracker-/Journalzustand bleiben erhalten. Bereits geladener Alt-Kontext
+wird dadurch nicht rückwirkend entfernt.

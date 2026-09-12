@@ -8,7 +8,7 @@ defmodule SymphonyElixir.Linear.AppAuth do
   use GenServer
 
   alias SymphonyElixir.Config
-  alias SymphonyElixir.Linear.CommentJournal
+  alias SymphonyElixir.Linear.{Assignees, CommentJournal}
 
   @identity_query "query SymphonyAppIdentity { viewer { id app email organization { id } } }"
   @expiry_margin 120
@@ -23,21 +23,16 @@ defmodule SymphonyElixir.Linear.AppAuth do
       not Regex.match?(~r/\A[A-Za-z0-9_-]+\z/, app["installation_id"]) -> {:error, :invalid_linear_installation_id}
       Path.type(app["state_root"]) != :absolute -> {:error, :invalid_linear_app_state_root}
       not valid_issue_scope?(app["allowed_issue_ids"]) -> {:error, :invalid_linear_app_issue_scope}
-      not human_assignee?(assignee, app["user_id"]) -> {:error, :linear_app_requires_human_assignee}
+      not valid_assignees?(assignee, app["user_id"]) -> {:error, :linear_app_requires_human_assignee}
       true -> :ok
     end
   end
 
   def validate(_tracker), do: {:error, :invalid_linear_app_configuration}
 
-  defp human_assignee?(assignee, app_user) when is_binary(assignee) do
-    normalized = assignee |> String.trim() |> String.downcase()
-
-    normalized not in ["", "me", String.downcase(app_user)] and
-      (String.contains?(normalized, "@") or match?({:ok, _}, Ecto.UUID.cast(normalized)))
+  defp valid_assignees?(assignee, app_user) do
+    (Config.yolo?() and Assignees.parse(assignee) == []) or Assignees.human?(assignee, app_user)
   end
-
-  defp human_assignee?(_assignee, _app_user), do: false
 
   defp valid_issue_scope?(nil), do: true
   defp valid_issue_scope?(ids) when is_list(ids), do: Enum.all?(ids, &match?({:ok, _}, Ecto.UUID.cast(&1)))
@@ -226,7 +221,7 @@ defmodule SymphonyElixir.Linear.AppAuth do
       user != binding["user_id"] or workspace != binding["workspace_id"] or Map.get(body, "errors", []) not in [nil, []] ->
         {:error, :linear_app_identity_mismatch}
 
-      is_binary(viewer["email"]) and String.downcase(String.trim(assignee)) == String.downcase(viewer["email"]) ->
+      is_binary(viewer["email"]) and String.downcase(viewer["email"]) in Assignees.parse(assignee) ->
         {:error, :linear_app_requires_human_assignee}
 
       true ->

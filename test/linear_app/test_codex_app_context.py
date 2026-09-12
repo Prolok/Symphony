@@ -107,9 +107,31 @@ class AppContextTest(unittest.TestCase):
     def test_preparation_trusts_only_the_authorized_project_without_personal_config(self):
         target = context.prepare(self.release, self.original, [], self.project)
         self.assertEqual(tomllib.loads((target / "config.toml").read_text()), {
-            "features": {"apps": False},
+            "features": {"apps": False, "memories": False},
+            "memories": {"generate_memories": False, "use_memories": False},
             "projects": {str(self.project.resolve()): {"trust_level": "trusted"}},
         })
+
+    def test_multiple_project_homes_keep_sessions_and_personal_memory_separate(self):
+        (self.original / "memories").mkdir()
+        (self.original / "memories/MEMORY.md").write_text("synthetic personal memory")
+        base = context.prepare(self.release, self.original, [], self.project)
+        projects = [self.project, self.root / "second"]
+        projects[1].mkdir()
+        states = [self.root / "first-state", self.root / "second-state"]
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            homes = list(workers.map(lambda pair: context.project_home(base, *pair), zip(states, projects)))
+        self.assertNotEqual(*homes)
+        for home, state, project in zip(homes, states, projects):
+            self.assertEqual((home / "sessions").resolve(), (state / "sessions").resolve())
+            self.assertFalse((home / "memories").exists())
+            config = tomllib.loads((home / "config.toml").read_text())
+            self.assertFalse(config["features"]["memories"])
+            self.assertEqual(config["memories"], {"generate_memories": False, "use_memories": False})
+            (state / "sessions/retained.jsonl").write_text("retained session")
+            self.assertEqual(context.project_home(base, state, project), home)
+            self.assertEqual((home / "sessions/retained.jsonl").read_text(), "retained session")
+        self.assertEqual((self.original / "memories/MEMORY.md").read_text(), "synthetic personal memory")
 
     def test_non_git_project_uses_only_its_canonical_directory(self):
         # The fixture must stay outside parent Git discovery even when TMPDIR
@@ -121,6 +143,28 @@ class AppContextTest(unittest.TestCase):
             self.assertEqual(tomllib.loads((target / "config.toml").read_text())["projects"], {
                 str(Path(directory).resolve()): {"trust_level": "trusted"},
             })
+
+    def test_project_home_rejects_modified_config_without_changing_sessions(self):
+        base = context.prepare(self.release, self.original, [], self.project)
+        state = self.root / "state"
+        home = context.project_home(base, state, self.project)
+        retained = state / "sessions/retained.jsonl"
+        retained.write_text("retained")
+        config = home / "config.toml"
+        config.write_text(config.read_text() + '\n[mcp_servers.foreign]\ncommand="foreign"\n[plugins.foreign]\nenabled=true\n')
+        with self.assertRaisesRegex(RuntimeError, "changed project configuration"):
+            context.project_home(base, state, self.project)
+        self.assertEqual(retained.read_text(), "retained")
+
+    def test_launch_overrides_disable_extra_mcp_and_plugins_in_effective_home(self):
+        base = context.prepare(self.release, self.original, [], self.project)
+        home = context.project_home(base, self.root / "state", self.project)
+        config = home / "config.toml"
+        config.write_text(config.read_text() + '\n[mcp_servers.foreign]\ncommand="foreign"\n[plugins.foreign]\nenabled=true\n')
+        args = context.launch_config(self.release, home, self.project, self.personal,
+                                     {"SYMPHONY_LINEAR_CLIENT_SECRET_ENV": "SYNTHETIC_SECRET"})
+        self.assertIn('mcp_servers={"foreign"={enabled=false}}', args)
+        self.assertIn('plugins={"foreign"={enabled=false}}', args)
 
     def test_project_trust_uses_git_common_root_from_subdirectories_and_worktrees(self):
         def git(*args):

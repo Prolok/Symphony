@@ -498,21 +498,9 @@ def issue_labels_from_json(raw: str | None) -> list[str] | None:
 
 
 async def current_issue_labels(snapshot_labels: list[str] | None = None) -> list[str]:
-    require_legacy_label_refresh()
-    snapshot = issue_labels_from_env() if snapshot_labels is None else snapshot_labels
     if current_issue_identifier() is None:
-        return snapshot
-    live_labels = await fetch_current_issue_labels()
-    if live_labels is None:
-        raise LabelRefreshError("Could not refresh current Linear issue labels before merge.")
-    return live_labels
-
-
-def require_legacy_label_refresh() -> None:
-    if os.environ.get("SYMPHONY_LINEAR_AUTH_MODE") == "app":
-        if current_issue_identifier() is None:
-            raise LabelRefreshError("Missing issue identity for the App label gate.")
-        raise AppLabelLookupRequired("Live labels must be read through the bound Linear tool.")
+        raise LabelRefreshError("Missing issue identity for the App label gate.")
+    raise AppLabelLookupRequired("Live labels must be read through the bound Linear tool.")
 
 
 def current_issue_identifier() -> str | None:
@@ -520,120 +508,6 @@ def current_issue_identifier() -> str | None:
     if issue_identifier is None or not issue_identifier.strip():
         return None
     return issue_identifier
-
-
-async def fetch_current_issue_labels() -> list[str] | None:
-    if current_issue_identifier() is None:
-        return None
-    try:
-        output = await run_tracker_label_refresh()
-    except RuntimeError as error:
-        raise LabelRefreshError(
-            "Could not refresh current Linear issue labels before merge: "
-            f"{error}",
-        ) from error
-    labels = issue_labels_from_refresh_output(output)
-    if labels is None:
-        raise LabelRefreshError(
-            "Could not parse refreshed Linear issue labels before merge.",
-        )
-    return labels
-
-
-def issue_labels_from_refresh_output(output: str) -> list[str] | None:
-    for line in reversed(output.splitlines()):
-        labels = issue_labels_from_json(line.strip())
-        if labels is not None:
-            return labels
-    return None
-
-
-async def run_tracker_label_refresh() -> str:
-    require_legacy_label_refresh()
-    source_root = await source_repo_root()
-    workflow_root = await workflow_execution_root()
-    elixir = """
-issue_identifier = System.fetch_env!("SYMPHONY_ISSUE_IDENTIFIER")
-
-case System.get_env("SYMPHONY_WORKFLOW_FILE") do
-  value when is_binary(value) ->
-    case String.trim(value) do
-      "" -> :ok
-      workflow_file -> SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
-    end
-
-  _ ->
-    :ok
-end
-
-repo_root =
-  case System.get_env("SYMPHONY_SOURCE_REPO") do
-    value when is_binary(value) ->
-      case String.trim(value) do
-        "" -> nil
-        trimmed -> trimmed
-      end
-
-    _ ->
-      nil
-  end ||
-    System.cmd("git", ["rev-parse", "--show-toplevel"])
-    |> elem(0)
-    |> String.trim()
-
-:ok = SymphonyElixir.EnvFile.load(SymphonyElixir.EnvFile.config_dir(repo_root), override_existing: true)
-{:ok, _} = Application.ensure_all_started(:req)
-
-case SymphonyElixir.Tracker.fetch_issue_by_identifier(issue_identifier) do
-  {:ok, issue} ->
-    IO.puts(Jason.encode!(Map.get(issue, :labels, [])))
-
-  {:error, reason} ->
-    IO.warn("failed to refresh Linear issue labels: #{inspect(reason)}")
-    System.halt(1)
-end
-"""
-    command = (
-        ["mise", "exec", "--", "mix", "run", "--no-start", "-e", elixir]
-        if shutil.which("mise")
-        else ["mix", "run", "--no-start", "-e", elixir]
-    )
-    child_env = os.environ.copy()
-    child_env[SOURCE_REPO_ENV] = source_root
-    proc = await asyncio.create_subprocess_exec(
-        *command,
-        cwd=workflow_root,
-        env=child_env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode == 0:
-        return stdout.decode()
-    error = stderr.decode().strip() or stdout.decode().strip() or "label refresh failed"
-    raise RuntimeError(error)
-
-
-async def source_repo_root() -> str:
-    source_repo = os.environ.get(SOURCE_REPO_ENV)
-    if source_repo is not None and source_repo.strip():
-        return source_repo.strip()
-    return (await run_git("rev-parse", "--show-toplevel")).strip()
-
-
-async def workflow_execution_root() -> str:
-    workflow_dir = os.environ.get(WORKFLOW_DIR_ENV)
-    workflow_root = (
-        workflow_dir.strip()
-        if workflow_dir is not None and workflow_dir.strip()
-        else (await run_git("rev-parse", "--show-toplevel")).strip()
-    )
-    if not os.path.isfile(os.path.join(workflow_root, "mix.exs")):
-        raise RuntimeError(
-            "Could not find a Symphony Mix project for label refresh at "
-            f"{workflow_root}",
-        )
-    return workflow_root
 
 
 def normalize_label_name(label: str) -> str:

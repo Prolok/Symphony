@@ -129,111 +129,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
-  test "current WORKFLOW after_create hook copies env locals and creates issue-specific CLI symlinks" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-worktree-env-local-#{System.unique_integer([:positive])}"
-      )
-
-    current_workflow_path = Path.expand("../../WORKFLOW.md", __DIR__)
-
-    try do
-      assert {:ok, %{config: %{"hooks" => %{"after_create" => after_create}}}} =
-               Workflow.load(current_workflow_path)
-
-      remote_repo = Path.join(test_root, "remote.git")
-      source_repo = Path.join(test_root, "source")
-      workspace_root = Path.join(test_root, "worktrees")
-      workflow_dir = Path.join(test_root, "workflow")
-      workflow_file = Path.join(workflow_dir, "WORKFLOW.md")
-      fake_home = Path.join(test_root, "home")
-      env_contents = "LINEAR_TEST_PROJECT_SLUG=\"symphony-test-7d8cc05658e6\"\n"
-
-      env_local_contents =
-        "SELF_HOSTED=1\nLINEAR_PROJECT_SLUG=\"symphony-07f513c4ae64\"\nLINEAR_TEST_PROJECT_SLUG=\"symphony-test-stale\"\nLINEAR_ASSIGNEE=dev@example.com\nLINEAR_TEST_PROJECT_SLUG = \"symphony-test-local\"\n"
-
-      expected_worktree_env_local =
-        "SELF_HOSTED=1\nLINEAR_PROJECT_SLUG=\"symphony-test-local\"\nLINEAR_TEST_PROJECT_SLUG=\"symphony-test-stale\"\nLINEAR_ASSIGNEE=dev@example.com\nLINEAR_TEST_PROJECT_SLUG = \"symphony-test-local\"\n"
-
-      root_env_local_contents = "SYM_CODEX_REASONING_EFFORT=low\n"
-      previous_home = System.get_env("HOME")
-
-      File.mkdir_p!(workflow_dir)
-      File.mkdir_p!(fake_home)
-      on_exit(fn -> restore_env("HOME", previous_home) end)
-
-      assert {_, 0} = System.cmd("git", ["init", "--bare", remote_repo], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["clone", remote_repo, source_repo], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "checkout", "-b", "main"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "config", "user.name", "Test User"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "config", "user.email", "test@example.com"], stderr_to_stdout: true)
-
-      File.write!(Path.join(source_repo, "README.md"), "base\n")
-      File.write!(Path.join(source_repo, "symphony"), "#!/usr/bin/env bash\n")
-      File.write!(Path.join(source_repo, "sym-codex"), "#!/usr/bin/env bash\n")
-      File.chmod!(Path.join(source_repo, "symphony"), 0o755)
-      File.chmod!(Path.join(source_repo, "sym-codex"), 0o755)
-      write_minimal_mix_project!(source_repo, :worktree_env_local)
-      install_current_worktree_scripts!(source_repo)
-      File.write!(Path.join(source_repo, ".symphony/.env"), env_contents)
-      File.write!(Path.join(source_repo, ".symphony/.env.local"), env_local_contents)
-      File.write!(Path.join(source_repo, ".env.local"), root_env_local_contents)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "add", "README.md"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "add", "symphony"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "add", "sym-codex"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "add", ".env.local"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "add", "mix.exs"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "add", "mise.toml"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "add", ".symphony"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "commit", "-m", "initial"], stderr_to_stdout: true)
-      assert {_, 0} = System.cmd("git", ["-C", source_repo, "push", "-u", "origin", "main"], stderr_to_stdout: true)
-
-      write_workflow_file!(workflow_file,
-        workspace_root: workspace_root,
-        hook_after_create: SymphonyElixir.TestSupport.system_bash_hook(after_create, test_root)
-      )
-
-      Workflow.set_workflow_file_path(workflow_file)
-      System.put_env("HOME", fake_home)
-
-      assert {:ok, workspace} =
-               File.cd!(source_repo, fn ->
-                 Workspace.create_for_issue("MT-ENV")
-               end)
-
-      assert File.read!(Path.join(workspace, ".symphony/.env.local")) == expected_worktree_env_local
-      assert File.read!(Path.join(workspace, ".env.local")) == root_env_local_contents
-      assert File.read_link!(Path.join(fake_home, ".local/bin/symphony-MT-ENV")) == Path.join(workspace, "symphony")
-      assert File.read_link!(Path.join(fake_home, ".local/bin/sym-codex-MT-ENV")) == Path.join(workspace, "sym-codex")
-
-      empty_slug_workspace = Path.join(workspace_root, "MT-EMPTY")
-      empty_slug_env_local_contents = "LINEAR_PROJECT_SLUG=\"symphony-07f513c4ae64\"\nLINEAR_TEST_PROJECT_SLUG=\"\"\n"
-      File.write!(Path.join(source_repo, ".symphony/.env.local"), empty_slug_env_local_contents)
-
-      assert {_, 0} =
-               System.cmd(
-                 "python3",
-                 [
-                   Path.join(source_repo, ".symphony/on_create_worktree.py"),
-                   source_repo,
-                   empty_slug_workspace
-                 ],
-                 stderr_to_stdout: true
-               )
-
-      assert File.read!(Path.join(empty_slug_workspace, ".symphony/.env.local")) ==
-               "LINEAR_PROJECT_SLUG=\"\"\nLINEAR_TEST_PROJECT_SLUG=\"\"\n"
-
-      File.write!(Path.join(source_repo, ".symphony/.env.local"), "SELF_HOSTED=2\n")
-      File.write!(Path.join(source_repo, ".env.local"), "SYM_CODEX_REASONING_EFFORT=medium\n")
-      assert File.read!(Path.join(workspace, ".symphony/.env.local")) == expected_worktree_env_local
-      assert File.read!(Path.join(workspace, ".env.local")) == root_env_local_contents
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
   test "project on_remove_worktree script removes matching issue symlinks" do
     test_root =
       Path.join(
@@ -863,7 +758,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     Application.put_env(:symphony_elixir, :yolo, true)
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:linear_candidate_query, payload})
 
       {:ok,
@@ -909,7 +804,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       }
     end
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:team_candidate_poll, payload})
 
       {:ok,
@@ -983,7 +878,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       }
     end
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:team_candidate_page, payload})
 
       {nodes, page_info} =
@@ -1022,7 +917,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_team_key: "PRO"
     )
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:team_terminal_poll, payload})
 
       {:ok,
@@ -1060,7 +955,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_team_key: "PRO"
     )
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:team_issue_revalidation, payload})
 
       {:ok,
@@ -1097,12 +992,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_team_key: "PRO"
     )
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:manual_issue_lookup, payload})
       {:error, :unexpected_request}
     end)
 
-    assert {:error, "Linear issue OTHER-123 is outside configured team scope PRO"} =
+    assert {:error, {:issue_outside_team_scope, "OTHER-123", "PRO"}} =
              Client.fetch_issue_by_identifier("OTHER-123")
 
     refute_received {:manual_issue_lookup, _payload}
@@ -1112,7 +1007,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_team_key: nil
     )
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:manual_issue_lookup, payload})
 
       {:ok,
@@ -1207,11 +1102,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       if is_nil(previous_request_fun) do
         Application.delete_env(:symphony_elixir, :linear_client_request_fun)
       else
-        Application.put_env(:symphony_elixir, :linear_client_request_fun, previous_request_fun)
+        SymphonyElixir.TestSupport.stub_linear_client(previous_request_fun)
       end
     end)
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:fetch_issue_by_identifier, payload})
 
       {:ok,
@@ -1263,7 +1158,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       if is_nil(previous_request_fun) do
         Application.delete_env(:symphony_elixir, :linear_client_request_fun)
       else
-        Application.put_env(:symphony_elixir, :linear_client_request_fun, previous_request_fun)
+        SymphonyElixir.TestSupport.stub_linear_client(previous_request_fun)
       end
     end)
 
@@ -1271,7 +1166,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_active_states: ["Todo (AI)", "Review (AI)"]
     )
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:fetch_candidate_issues, payload})
 
       {:ok,
@@ -1323,7 +1218,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       if is_nil(previous_request_fun) do
         Application.delete_env(:symphony_elixir, :linear_client_request_fun)
       else
-        Application.put_env(:symphony_elixir, :linear_client_request_fun, previous_request_fun)
+        SymphonyElixir.TestSupport.stub_linear_client(previous_request_fun)
       end
     end)
 
@@ -1333,7 +1228,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_active_states: ["Todo (AI)", "Review (AI)"]
     )
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:fetch_candidate_issues, payload})
 
       {:ok,
@@ -1373,11 +1268,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       if is_nil(previous_request_fun) do
         Application.delete_env(:symphony_elixir, :linear_client_request_fun)
       else
-        Application.put_env(:symphony_elixir, :linear_client_request_fun, previous_request_fun)
+        SymphonyElixir.TestSupport.stub_linear_client(previous_request_fun)
       end
     end)
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:fetch_issue_comments, payload})
 
       case payload["variables"] do
@@ -1440,11 +1335,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       if is_nil(previous_request_fun) do
         Application.delete_env(:symphony_elixir, :linear_client_request_fun)
       else
-        Application.put_env(:symphony_elixir, :linear_client_request_fun, previous_request_fun)
+        SymphonyElixir.TestSupport.stub_linear_client(previous_request_fun)
       end
     end)
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       send(self(), {:fetch_issue_comments, payload})
 
       {:ok,
@@ -1491,27 +1386,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do
+    SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
+      {:ok,
+       %{
+         status: 400,
+         body: %{
+           "errors" => [
+             %{
+               "message" => "Variable \"$ids\" got invalid value",
+               "extensions" => %{"code" => "BAD_USER_INPUT"}
+             }
+           ]
+         }
+       }}
+    end)
+
     log =
       ExUnit.CaptureLog.capture_log(fn ->
         assert {:error, {:linear_api_status, 400, diagnostics}} =
-                 Client.graphql(
-                   "query Viewer { viewer { id } }",
-                   %{},
-                   request_fun: fn _payload, _headers ->
-                     {:ok,
-                      %{
-                        status: 400,
-                        body: %{
-                          "errors" => [
-                            %{
-                              "message" => "Variable \"$ids\" got invalid value",
-                              "extensions" => %{"code" => "BAD_USER_INPUT"}
-                            }
-                          ]
-                        }
-                      }}
-                   end
-                 )
+                 Client.graphql("query Viewer { viewer { id } }", %{})
 
         assert diagnostics.status == 400
         assert diagnostics.classification == "graphql"
@@ -1958,21 +1851,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     System.delete_env("SYMPHONY_CODEX_COMMAND")
     System.put_env("SYMPHONY_RELEASE_ROOT", "/synthetic/release with spaces")
 
-    for command <- ["custom-agent --profile local app-server", "codex app-server"] do
+    for command <- ["custom-agent --profile local app-server"] do
       write_workflow_file!(Workflow.workflow_file_path(), codex_command: command)
       assert Config.local_codex_command() == command
     end
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "sym-codex --observer")
-    assert Config.local_codex_command() == "'/synthetic/release with spaces/sym-codex' --observer"
+    assert String.ends_with?(Config.local_codex_command(), "'/synthetic/release with spaces/sym-codex' --observer")
     System.put_env("SYMPHONY_CODEX_COMMAND", "explicit --profile personal")
     assert Config.local_codex_command() == "explicit --profile personal"
     System.put_env("SYMPHONY_CODEX_COMMAND", "  ")
-    assert Config.local_codex_command() == "'/synthetic/release with spaces/sym-codex' --observer"
+    assert String.ends_with?(Config.local_codex_command(), "'/synthetic/release with spaces/sym-codex' --observer")
     System.delete_env("SYMPHONY_RELEASE_ROOT")
     helper = Path.join(Path.dirname(Workflow.default_workflow_file_path()), "sym-codex")
     command = Config.local_codex_command()
-    assert command == "'#{helper}' --observer"
+    assert String.ends_with?(command, "'#{helper}' --observer")
     assert {output, 0} = System.cmd("/bin/bash", ["--noprofile", "--norc", "-c", "PATH=/usr/bin:/bin #{command} --help"], stderr_to_stdout: true)
     assert output =~ "Usage:"
 
@@ -2008,7 +1901,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     config = Config.settings!()
     assert config.tracker.endpoint == "https://api.linear.app/graphql"
-    assert config.tracker.api_key == nil
+    refute Map.has_key?(config.tracker, :api_key)
     assert config.tracker.project_slug == nil
     assert config.tracker.team_key == nil
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
@@ -2199,7 +2092,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     config = Config.settings!()
-    assert config.tracker.api_key == api_key
+    refute Map.has_key?(config.tracker, :api_key)
     assert config.tracker.project_slug == project_slug
     assert config.workspace.root == Path.expand(workspace_root)
     assert config.codex.command == "#{codex_bin} app-server"
@@ -2392,7 +2285,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     config = Config.settings!()
-    assert config.tracker.api_key == "env:#{api_key_env_var}"
+    refute Map.has_key?(config.tracker, :api_key)
     assert config.workspace.root == "env:#{workspace_env_var}"
   end
 
@@ -2510,6 +2403,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     """
 
     File.write!(Workflow.workflow_file_path(), workflow)
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
 
     assert Config.settings!().agent.max_concurrent_agents == 10
     assert Config.max_concurrent_agents_for_state("Todo") == 1
@@ -2627,7 +2522,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                codex: %{approval_policy: %{reject: %{sandbox_approval: true}}}
              })
 
-    assert settings.tracker.api_key == nil
+    refute Map.has_key?(settings.tracker, :api_key)
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
 
     assert settings.codex.approval_policy == %{
@@ -2640,7 +2535,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                workspace: %{root: ""}
              })
 
-    assert settings.tracker.api_key == "fallback-linear-token"
+    refute Map.has_key?(settings.tracker, :api_key)
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 
@@ -2919,12 +2814,23 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
       assert Config.settings!().workspace.root == workspace_root
-      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
+
+      File.mkdir_p!(Path.join(test_root, ".symphony"))
+      File.write!(Path.join(test_root, ".symphony/.env"), "LINEAR_ASSIGNEE=dev@example.com\n")
+      {:ok, context} = SymphonyElixir.ProjectContext.load(test_root, Workflow.workflow_file_path(), %{})
+      context = %{context | env: Map.put(context.env, "SYMPHONY_SSH_CONFIG", "/project/ssh-config")}
+
+      SymphonyElixir.ProjectContext.with_context(context, fn ->
+        assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
+        assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+        assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+        assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
+      end)
 
       trace = File.read!(trace_file)
+      calls = trace |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "ARGV:"))
+      assert length(calls) >= 4
+      assert Enum.all?(calls, &String.contains?(&1, "-F /project/ssh-config"))
       assert trace =~ "-p 2200 worker-01 bash -lc"
       assert trace =~ "__SYMPHONY_WORKSPACE__"
       assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"

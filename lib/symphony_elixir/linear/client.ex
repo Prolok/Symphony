@@ -7,9 +7,11 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.Linear.AppAuth
   alias SymphonyElixir.Linear.WriteContext
 
-  alias SymphonyElixir.{Config, Dialog, Linear.Issue}
+  alias SymphonyElixir.{Config, Dialog, Linear.Issue, ProjectContext}
+  alias SymphonyElixir.Linear.Assignees
 
   @issue_page_size 50
+  @typep page_cursors :: %{optional(String.t()) => true}
   @max_error_body_log_bytes 1_000
   @manual_in_progress_state_name "In Arbeit"
   @manual_approval_state_names ["Freigabe Implementierung", "Freigabe Review"]
@@ -28,7 +30,10 @@ defmodule SymphonyElixir.Linear.Client do
   assignee {
     id
     email
+    app
   }
+  project { id slugId }
+  team { id key }
   labels {
     nodes {
       name
@@ -87,15 +92,6 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
-  @viewer_query """
-  query SymphonyLinearViewer {
-    viewer {
-      id
-      email
-    }
-  }
-  """
-
   @issue_comments_query """
   query SymphonyLinearIssueComments($id: String!, $first: Int!, $after: String) {
     issue(id: $id) {
@@ -121,15 +117,231 @@ defmodule SymphonyElixir.Linear.Client do
   def fetch_candidate_issues do
     tracker = Config.settings!().tracker
 
-    if missing_legacy_token?(tracker) do
-      {:error, :missing_linear_api_token}
-    else
-      with {:ok, scope} <- Config.linear_scope(tracker),
-           {:ok, assignee_filter} <- routing_assignee_filter(),
-           {:ok, issues} <- do_fetch_by_states(scope, candidate_state_names(tracker.active_states), assignee_filter),
-           :ok <- validate_candidate_scope(tracker, issues) do
-        {:ok, issues}
+    with {:ok, scope} <- Config.linear_scope(tracker),
+         {:ok, assignee_filter} <- routing_assignee_filter(),
+         {:ok, issues} <- do_fetch_by_states(scope, candidate_state_names(tracker.active_states), assignee_filter),
+         :ok <- validate_candidate_scope(tracker, issues) do
+      {:ok, issues}
+    end
+  end
+
+  @doc "Fetch every configured scope in one candidate request per workspace and page."
+  @spec fetch_project_candidates([ProjectContext.t()]) :: {:ok, map()} | {:error, term()}
+  def fetch_project_candidates(contexts) do
+    with :ok <- validate_workspace_bindings(contexts) do
+      contexts
+      |> Enum.group_by(& &1.settings.tracker.app["workspace_id"])
+      |> Enum.reduce_while({:ok, %{}}, &collect_workspace_candidates/2)
+    end
+  end
+
+  @spec verify_project_assignees([ProjectContext.t()]) :: :ok | {:error, term()}
+  def verify_project_assignees(contexts) do
+    contexts
+    |> Enum.group_by(& &1.settings.tracker.app["workspace_id"])
+    |> Enum.reduce_while(:ok, &verify_workspace_assignees/2)
+  end
+
+  defp verify_workspace_assignees({workspace, [first | _] = contexts}, :ok) do
+    configured = contexts |> Enum.flat_map(&Assignees.parse(&1.settings.tracker.assignee)) |> Enum.uniq()
+    result = ProjectContext.with_context(first, fn -> fetch_assignees(configured, nil, %{}, []) end)
+
+    case result do
+      {:ok, users} ->
+        if Enum.all?(configured, &verified_human?(&1, users)), do: {:cont, :ok}, else: {:halt, {:error, {:linear_assignees_not_human_or_unavailable, workspace, configured}}}
+
+      error ->
+        {:halt, error}
+    end
+  end
+
+  defp verified_human?(value, users) do
+    Enum.any?(users, fn user ->
+      user["app"] == false and value in [user["id"], String.downcase(user["email"] || "")]
+    end)
+  end
+
+  @spec fetch_assignees([String.t()], String.t() | nil, page_cursors(), [map()]) :: {:ok, [map()]} | {:error, term()}
+  defp fetch_assignees([], _cursor, _seen, _users), do: {:ok, []}
+
+  defp fetch_assignees(configured, cursor, seen, users) do
+    query = """
+    query SymphonyHumanAssignees($filter: UserFilter!, $after: String) {
+      users(filter: $filter, first: 100, after: $after) {
+        nodes { id email app }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    """
+
+    variables = %{filter: Assignees.filter(Enum.join(configured, ",")), after: cursor}
+
+    with {:ok, %{"data" => %{"users" => %{"nodes" => nodes, "pageInfo" => page}}} = body} <- graphql(query, variables),
+         true <- Map.get(body, "errors", []) in [nil, []] do
+      next = page["endCursor"]
+
+      cond do
+        page["hasNextPage"] == false -> {:ok, users ++ nodes}
+        not is_binary(next) or next == "" or Map.has_key?(seen, next) -> {:error, :linear_invalid_page_cursor}
+        true -> fetch_assignees(configured, next, Map.put(seen, next, true), users ++ nodes)
       end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :linear_unknown_payload}
+    end
+  end
+
+  @spec validate_workspace_bindings([ProjectContext.t()]) :: :ok | {:error, term()}
+  def validate_workspace_bindings(contexts) do
+    contexts
+    |> Enum.group_by(& &1.settings.tracker.app["workspace_id"])
+    |> Enum.reduce_while(:ok, &validate_workspace_group/2)
+  end
+
+  defp collect_workspace_candidates({_workspace, projects}, {:ok, acc}) do
+    case fetch_workspace_candidates(projects) do
+      {:ok, found} -> {:cont, {:ok, Map.merge(acc, found)}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp validate_workspace_group({workspace, projects}, :ok) do
+    bindings = Enum.uniq_by(projects, &workspace_binding/1)
+    scopes = Enum.map(projects, &Config.linear_scope(&1.settings.tracker))
+
+    result =
+      cond do
+        length(bindings) != 1 -> {:error, {:conflicting_workspace_app_binding, workspace}}
+        length(Enum.uniq(scopes)) != length(scopes) -> {:error, {:duplicate_workspace_scope, workspace}}
+        true -> shared_credentials(projects)
+      end
+
+    case result do
+      :ok -> {:cont, :ok}
+      error -> {:halt, error}
+    end
+  end
+
+  defp workspace_binding(context) do
+    tracker = context.settings.tracker
+    {tracker.endpoint, Map.take(tracker.app, ~w(client_id workspace_id user_id client_secret_env))}
+  end
+
+  defp shared_credentials(projects) do
+    Enum.reduce_while(projects, {:ok, MapSet.new()}, fn context, {:ok, fingerprints} ->
+      case Config.linear_client_secret(context.settings.tracker.app) do
+        {:ok, secret} -> {:cont, {:ok, MapSet.put(fingerprints, :crypto.hash(:sha256, secret))}}
+        {:error, reason} -> {:halt, {:error, {:project_app_credentials_unavailable, context.root, reason}}}
+      end
+    end)
+    |> case do
+      {:ok, fingerprints} ->
+        if MapSet.size(fingerprints) == 1, do: :ok, else: {:error, :conflicting_workspace_app_credentials}
+
+      error ->
+        error
+    end
+  end
+
+  defp fetch_workspace_candidates([first | _] = projects) do
+    filter = %{"or" => Enum.map(projects, &project_candidate_filter/1)}
+
+    with {:ok, nodes} <- ProjectContext.with_context(first, fn -> fetch_workspace_page(filter, nil, %{}, []) end),
+         :ok <- validate_unambiguous_candidates(nodes, projects) do
+      Enum.reduce_while(projects, {:ok, %{}}, &collect_project_candidates(&1, &2, nodes))
+    end
+  end
+
+  defp validate_unambiguous_candidates(nodes, projects) do
+    if Enum.any?(nodes, fn node -> Enum.count(projects, &project_candidate?(node, &1)) > 1 end), do: {:error, :ambiguous_workspace_project_scope}, else: :ok
+  end
+
+  defp collect_project_candidates(context, {:ok, acc}, nodes) do
+    case ProjectContext.with_context(context, fn -> normalize_project_candidates(context, nodes) end) do
+      {:ok, issues} -> {:cont, {:ok, Map.put(acc, context.id, issues)}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp normalize_project_candidates(context, nodes) do
+    with {:ok, assignee_filter} <- routing_assignee_filter() do
+      issues = nodes |> Enum.filter(&project_candidate?(&1, context)) |> Enum.map(&normalize_issue(&1, assignee_filter))
+
+      case validate_candidate_scope(context.settings.tracker, issues) do
+        :ok -> {:ok, issues}
+        error -> error
+      end
+    end
+  end
+
+  defp project_candidate_filter(context) do
+    tracker = context.settings.tracker
+    {:ok, scope} = Config.linear_scope(tracker)
+
+    filter =
+      scope_filter(scope)
+      |> Map.put("state", %{"name" => %{"in" => candidate_state_names(tracker.active_states)}})
+      |> restrict_candidate_ids(tracker.app["allowed_issue_ids"])
+
+    filter = if Config.yolo?(), do: filter, else: Map.put(filter, "assignee", Map.put(Assignees.filter(tracker.assignee), "app", %{"eq" => false}))
+
+    # Linear propagates the enclosing OR to fields in a branch. Explicit AND
+    # groups keep each project's scope, states and assignees correlated.
+    %{"and" => Enum.map(filter, fn {field, value} -> %{field => value} end)}
+  end
+
+  defp restrict_candidate_ids(filter, ids) when is_list(ids), do: Map.put(filter, "id", %{"in" => ids})
+  defp restrict_candidate_ids(filter, _ids), do: filter
+
+  defp scope_filter({:project, slug}), do: %{"project" => %{"slugId" => %{"eq" => slug}}}
+  defp scope_filter({:team, key}), do: %{"team" => %{"key" => %{"eq" => key}}}
+
+  defp project_candidate?(node, context) do
+    tracker = context.settings.tracker
+
+    scope_matches =
+      case Config.linear_scope(tracker) do
+        {:ok, {:project, slug}} -> get_in(node, ["project", "slugId"]) == slug
+        {:ok, {:team, key}} -> get_in(node, ["team", "key"]) == key
+      end
+
+    scope_matches and get_in(node, ["state", "name"]) in candidate_state_names(tracker.active_states) and
+      project_assignee_matches?(node, tracker.assignee)
+  end
+
+  defp project_assignee_matches?(node, assignee) do
+    if Config.yolo?() do
+      true
+    else
+      {:ok, filter} = build_assignee_filter(assignee)
+      get_in(node, ["assignee", "app"]) != true and assigned_to_worker?(node["assignee"], filter)
+    end
+  end
+
+  @spec fetch_workspace_page(map(), String.t() | nil, page_cursors(), [map()]) :: {:ok, [map()]} | {:error, term()}
+  defp fetch_workspace_page(filter, cursor, seen, acc) do
+    query = """
+    query SymphonyWorkspacePoll($filter: IssueFilter!, $first: Int!, $relationFirst: Int!, $after: String) {
+      issues(filter: $filter, first: $first, after: $after) {
+        nodes { #{@issue_selection} }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+    """
+
+    with {:ok, %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => page}}} = body} <-
+           graphql(query, %{filter: filter, first: @issue_page_size, relationFirst: @issue_page_size, after: cursor}),
+         true <- Map.get(body, "errors", []) in [nil, []] do
+      next = page["endCursor"]
+
+      cond do
+        page["hasNextPage"] == false -> {:ok, acc ++ nodes}
+        not is_binary(next) or next == "" or Map.has_key?(seen, next) -> {:error, :linear_invalid_page_cursor}
+        true -> fetch_workspace_page(filter, next, Map.put(seen, next, true), acc ++ nodes)
+      end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :linear_unknown_payload}
     end
   end
 
@@ -140,20 +352,6 @@ defmodule SymphonyElixir.Linear.Client do
 
   def validate_candidate_scope(_tracker, _issues), do: :ok
 
-  @spec resolve_legacy_assignee() :: {:ok, String.t()} | {:error, term()}
-  def resolve_legacy_assignee do
-    if Config.settings!().tracker.auth_mode == "legacy" do
-      with {:ok, %{"data" => %{"viewer" => %{"id" => id}}} = body} <- graphql(@viewer_query),
-           true <- Map.get(body, "errors", []) in [nil, []] do
-        {:ok, id}
-      else
-        _ -> {:error, :linear_assignee_resolution_failed}
-      end
-    else
-      {:error, :linear_assignee_requires_legacy_identity}
-    end
-  end
-
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
     normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
@@ -163,8 +361,6 @@ defmodule SymphonyElixir.Linear.Client do
       states -> fetch_issues_by_states(Config.settings!().tracker, states)
     end
   end
-
-  defp fetch_issues_by_states(%{auth_mode: "legacy", api_key: nil}, _state_names), do: {:error, :missing_linear_api_token}
 
   defp fetch_issues_by_states(tracker, state_names) do
     with {:ok, scope} <- Config.linear_scope(tracker) do
@@ -195,26 +391,22 @@ defmodule SymphonyElixir.Linear.Client do
     normalized_identifier = String.trim(identifier)
     tracker = Config.settings!().tracker
 
-    cond do
-      missing_legacy_token?(tracker) ->
-        {:error, :missing_linear_api_token}
-
-      normalized_identifier == "" ->
-        {:error, :missing_issue_identifier}
-
-      true ->
-        with {:ok, scope} <- Config.linear_scope(tracker),
-             {:ok, team_key, issue_number} <- split_issue_identifier(normalized_identifier),
-             :ok <- validate_identifier_scope(scope, normalized_identifier, team_key),
-             {:ok, body} <-
-               graphql(@query_by_identifier, %{
-                 teamKey: team_key,
-                 number: issue_number,
-                 relationFirst: @issue_page_size
-               }),
-             {:ok, issues} <- decode_linear_response(body, nil) do
-          first_issue(issues, normalized_identifier)
-        end
+    if normalized_identifier == "" do
+      {:error, :missing_issue_identifier}
+    else
+      with {:ok, scope} <- Config.linear_scope(tracker),
+           {:ok, team_key, issue_number} <- split_issue_identifier(normalized_identifier),
+           :ok <- validate_identifier_scope(scope, normalized_identifier, team_key),
+           {:ok, body} <-
+             graphql(@query_by_identifier, %{
+               teamKey: team_key,
+               number: issue_number,
+               relationFirst: @issue_page_size
+             }),
+           {:ok, issues} <- decode_linear_response(body, nil) do
+        issues = Enum.filter(issues, & &1.assigned_to_worker)
+        first_issue(issues, normalized_identifier)
+      end
     end
   end
 
@@ -264,16 +456,8 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp authenticated_request(payload, request_fun) do
-    case Config.settings!().tracker do
-      %{auth_mode: "app"} = tracker ->
-        AppAuth.request(tracker, payload, request_fun, context: WriteContext.current())
-
-      _tracker ->
-        with {:ok, headers} <- graphql_headers(), do: request_fun.(payload, headers)
-    end
+    AppAuth.request(Config.settings!().tracker, payload, request_fun, context: WriteContext.current())
   end
-
-  defp missing_legacy_token?(tracker), do: tracker.auth_mode == "legacy" and is_nil(tracker.api_key)
 
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
@@ -713,26 +897,12 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp graphql_headers do
-    case Config.settings!().tracker.api_key do
-      nil ->
-        {:error, :missing_linear_api_token}
-
-      token ->
-        {:ok,
-         [
-           {"Authorization", token},
-           {"Content-Type", "application/json"}
-         ]}
-    end
-  end
-
   defp post_graphql_request(payload, headers) do
     Req.post(Config.settings!().tracker.endpoint,
       headers: headers,
       json: payload,
-      redirect: Config.settings!().tracker.auth_mode != "app",
-      retry: if(Config.settings!().tracker.auth_mode == "app", do: false, else: :safe_transient),
+      redirect: false,
+      retry: false,
       connect_options: [timeout: 30_000]
     )
   end
@@ -811,7 +981,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp validate_identifier_scope({:team, team_key}, _identifier, team_key), do: :ok
 
   defp validate_identifier_scope({:team, team_key}, identifier, _identifier_team_key) do
-    {:error, "Linear issue #{identifier} is outside configured team scope #{team_key}"}
+    {:error, {:issue_outside_team_scope, identifier, team_key}}
   end
 
   defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})
@@ -824,6 +994,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp normalize_issue(issue, assignee_filter) when is_map(issue) do
     assignee = issue["assignee"]
+    context = ProjectContext.current()
 
     %Issue{
       id: issue["id"],
@@ -835,10 +1006,13 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      project_context_id: context && context.id,
+      project_name: context && context.name,
+      workspace_id: context && context.settings.tracker.app["workspace_id"],
       last_comment_signal: extract_last_comment_signal(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
-      assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
+      assigned_to_worker: assigned_to_worker?(assignee, assignee_filter) and issue_in_context?(issue, context),
       created_at: parse_datetime(issue["createdAt"]),
       updated_at: parse_datetime(issue["updatedAt"])
     }
@@ -846,10 +1020,25 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp normalize_issue(_issue, _assignee_filter), do: nil
 
+  defp issue_in_context?(_issue, nil), do: true
+
+  defp issue_in_context?(issue, context) do
+    case Config.linear_scope(context.settings.tracker) do
+      {:ok, {:project, slug}} -> get_in(issue, ["project", "slugId"]) == slug
+      {:ok, {:team, key}} -> get_in(issue, ["team", "key"]) == key
+    end
+  end
+
   defp assignee_field(%{} = assignee, field) when is_binary(field), do: assignee[field]
   defp assignee_field(_assignee, _field), do: nil
 
   defp assigned_to_worker?(_assignee, nil), do: true
+
+  defp assigned_to_worker?(%{"app" => true}, _filter), do: false
+
+  defp assigned_to_worker?(assignee, %{mode: :any, filters: filters}) do
+    Enum.any?(filters, &assigned_to_worker?(assignee, &1))
+  end
 
   defp assigned_to_worker?(%{} = assignee, %{mode: :id, value: value}) when is_binary(value) do
     assignee_id(assignee) == value
@@ -880,34 +1069,29 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp build_assignee_filter(assignee) when is_binary(assignee) do
+    case Assignees.parse(assignee) do
+      [] ->
+        {:ok, nil}
+
+      [single] ->
+        build_single_assignee_filter(single)
+
+      values ->
+        filters = Enum.map(values, &%{configured_assignee: &1, mode: assignee_filter_mode(&1), value: &1})
+        if "me" in values, do: {:error, :linear_app_requires_human_assignee}, else: {:ok, %{mode: :any, filters: filters}}
+    end
+  end
+
+  defp build_single_assignee_filter(assignee) do
     case normalize_assignee_config_value(assignee) do
       nil ->
         {:ok, nil}
 
       "me" ->
-        resolve_viewer_assignee_filter()
+        {:error, :linear_app_requires_human_assignee}
 
       normalized ->
         {:ok, %{configured_assignee: assignee, mode: assignee_filter_mode(normalized), value: normalized}}
-    end
-  end
-
-  defp resolve_viewer_assignee_filter do
-    case graphql(@viewer_query, %{}) do
-      {:ok, %{"data" => %{"viewer" => viewer}}} when is_map(viewer) ->
-        case assignee_id(viewer) do
-          nil ->
-            {:error, :missing_linear_viewer_identity}
-
-          viewer_id ->
-            {:ok, %{configured_assignee: "me", mode: :id, value: viewer_id}}
-        end
-
-      {:ok, _body} ->
-        {:error, :missing_linear_viewer_identity}
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
@@ -957,6 +1141,16 @@ defmodule SymphonyElixir.Linear.Client do
   defp issue_states_query_variables({:team, team_key}), do: %{teamKey: team_key}
 
   defp candidate_query_assignee_filter(nil), do: ""
+
+  defp candidate_query_assignee_filter(%{mode: :any, filters: filters}) do
+    branches =
+      Enum.map_join(filters, ", ", fn filter ->
+        field = if filter.mode == :email, do: "email: {eqIgnoreCase: #{Jason.encode!(filter.value)}}", else: "id: {eq: #{Jason.encode!(filter.value)}}"
+        "{#{field}}"
+      end)
+
+    ", assignee: {or: [#{branches}]}"
+  end
 
   defp candidate_query_assignee_filter(%{mode: :id, value: value}) when is_binary(value) do
     ", assignee: {id: {eq: #{graphql_string_literal(value)}}}"

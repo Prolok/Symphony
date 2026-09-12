@@ -29,10 +29,11 @@ defmodule SymphonyElixir.LinearAppAuthTest do
     {:ok, tracker: tracker, cache: cache, token_request: token_request, counter: counter}
   end
 
-  test "legacy config remains default while app settings exclude credentials and removed provider fields" do
-    assert {:ok, legacy} = Schema.parse(%{"tracker" => %{"api_key" => "synthetic-personal"}})
-    assert legacy.tracker.auth_mode == "legacy"
-    assert legacy.tracker.api_key == "synthetic-personal"
+  test "client credentials is the only auth contract and settings exclude credentials and removed provider fields" do
+    assert {:ok, default} = Schema.parse(%{"tracker" => %{"api_key" => "synthetic-personal"}})
+    assert default.tracker.auth_mode == "app"
+    refute Map.has_key?(default.tracker, :api_key)
+    assert {:error, _} = Schema.parse(%{"tracker" => %{"auth_mode" => "legacy"}})
 
     assert {:ok, app} =
              Schema.parse(%{
@@ -43,8 +44,9 @@ defmodule SymphonyElixir.LinearAppAuthTest do
                }
              })
 
-    assert app.tracker.api_key == nil
-    assert app.tracker.app == %{"client_secret_env" => "TEST_SECRET"}
+    refute Map.has_key?(app.tracker, :api_key)
+    assert app.tracker.app["client_secret_env"] == "TEST_SECRET"
+    assert app.tracker.app["installation_id"] == "symphony"
     refute inspect(app) =~ "synthetic-"
     assert {:error, {:invalid_workflow_config, _}} = Schema.parse(%{"tracker" => %{"auth_mode" => "typo"}})
     assert {:error, {:invalid_workflow_config, _}} = Schema.parse(%{"tracker" => %{"app" => "invalid"}})

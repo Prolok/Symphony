@@ -13,6 +13,7 @@ defmodule SymphonyElixirWeb.Presenter do
       %{} = snapshot ->
         %{
           generated_at: generated_at,
+          projects: Map.get(snapshot, :projects, []),
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying)
@@ -31,21 +32,48 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
+  @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found | :ambiguous_issue_identifier}
   def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
-        running = Enum.find(snapshot.running, &(&1.identifier == issue_identifier))
-        retry = Enum.find(snapshot.retrying, &(&1.identifier == issue_identifier))
-
-        if is_nil(running) and is_nil(retry) do
-          {:error, :issue_not_found}
-        else
-          {:ok, issue_payload_body(issue_identifier, running, retry)}
-        end
+        project_issue_payload(snapshot, issue_identifier)
 
       _ ->
         {:error, :issue_not_found}
+    end
+  end
+
+  defp project_issue_payload(snapshot, reference) do
+    identities =
+      (snapshot.running ++ snapshot.retrying)
+      |> Enum.filter(&matches_reference?(&1, split_reference(reference)))
+      |> Enum.uniq_by(&entry_identity/1)
+
+    case identities do
+      [] ->
+        {:error, :issue_not_found}
+
+      [entry] ->
+        running = Enum.find(snapshot.running, &(entry_identity(&1) == entry_identity(entry)))
+        retry = Enum.find(snapshot.retrying, &(entry_identity(&1) == entry_identity(entry)))
+        {:ok, issue_payload_body(reference, running, retry)}
+
+      _ ->
+        {:error, :ambiguous_issue_identifier}
+    end
+  end
+
+  defp entry_identity(entry), do: {Map.get(entry, :project_root), entry.issue_id}
+
+  defp matches_reference?(entry, {project, identifier}) do
+    entry.identifier == identifier and
+      (is_nil(project) or project in [Map.get(entry, :project), Map.get(entry, :project_root)])
+  end
+
+  defp split_reference(reference) do
+    case String.split(reference, ":", parts: 2) do
+      [identifier] -> {nil, identifier}
+      [project, identifier] -> {project, identifier}
     end
   end
 
@@ -97,6 +125,8 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp running_entry_payload(entry) do
     %{
+      project: Map.get(entry, :project),
+      issue_reference: issue_reference(entry),
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       state: entry.state,
@@ -116,8 +146,17 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
+  defp issue_reference(entry) do
+    case Map.get(entry, :project_qualifier, Map.get(entry, :project)) do
+      nil -> entry.identifier
+      project -> project <> ":" <> entry.identifier
+    end
+  end
+
   defp retry_entry_payload(entry) do
     %{
+      project: Map.get(entry, :project),
+      issue_reference: issue_reference(entry),
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       attempt: entry.attempt,

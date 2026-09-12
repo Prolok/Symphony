@@ -114,7 +114,7 @@ defmodule SymphonyElixir.LinearAppPathsTest do
     System.put_env(env)
     File.write!(Path.join(root, ".env.local"), "LINEAR_API_KEY=synthetic-personal\n")
     assert :ok = EnvFile.load(root, override_existing: true)
-    assert Config.settings!().tracker.api_key == nil
+    refute Map.has_key?(Config.settings!().tracker, :api_key)
     assert :ok = Tracker.create_comment("issue", "fallback reply")
     File.write!(Path.join(root, ".env.local"), "SYMPHONY_LINEAR_AUTH_MODE=legacy\n")
     assert {:error, :linear_runtime_binding_changed} = EnvFile.load(root, override_existing: true)
@@ -140,14 +140,13 @@ defmodule SymphonyElixir.LinearAppPathsTest do
   end
 
   test "human scope remains explicit and unexpected candidates including dialog stop activation", %{binding: binding} do
-    assert {:error, :linear_assignee_requires_legacy_identity} = Client.resolve_legacy_assignee()
     tracker = %{auth_mode: "app", app: Map.put(binding, "allowed_issue_ids", ["only"])}
     assert :ok = Client.validate_candidate_scope(tracker, [%Issue{id: "only"}])
 
     assert {:error, :linear_app_candidate_scope_changed} =
              Client.validate_candidate_scope(tracker, [%Issue{id: "extra", state: "Todo (Dialog-AI)"}])
 
-    assert :ok = Client.validate_candidate_scope(%{auth_mode: "legacy"}, [%Issue{id: "extra"}])
+    assert :ok = Client.validate_candidate_scope(%{auth_mode: "app", app: %{}}, [%Issue{id: "extra"}])
   end
 
   test "app polling retains existing email and UUID filters and human routing", %{workflow: workflow, config: config} do

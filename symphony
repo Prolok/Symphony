@@ -5,6 +5,9 @@ SCRIPT_INVOCATION_NAME="$(basename -- "${BASH_SOURCE[0]}")"
 command -v python3 >/dev/null 2>&1 || { echo "symphony: python3 not found in PATH" >&2; exit 127; }
 SCRIPT_PATH="$("${SYMPHONY_PYTHON:-python3}" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}")"
 SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${SYMPHONY_SERVICE_OWNER_PID:-}" != "$$" ]]; then
+  exec "${SYMPHONY_PYTHON:-python3}" "$SCRIPT_DIR/scripts/service-lock.py" run /bin/bash "${BASH_SOURCE[0]}" "$@"
+fi
 SKILLS_DIR="$SCRIPT_DIR/.codex/skills"
 USER_SKILLS_DIR="$HOME/.codex/skills"
 USER_BIN_DIR="$HOME/.local/bin"

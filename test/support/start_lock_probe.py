@@ -62,49 +62,21 @@ if os.environ.get("HOLD_SERVICE") == "1":
     assert first.poll() is None, first.communicate()
     second = start(other if mode == "independent" else repo)
 
-    if mode in ("independent", "service"):
-        output, _ = second.communicate(timeout=30)
-        assert second.returncode == 0, output
-        assert first.poll() is None
-        if mode == "service":
-            first.terminate()
-        else:
-            (repo / ".release").touch()
+    output, _ = second.communicate(timeout=5)
+    assert second.returncode == 1 and "Symphony läuft bereits" in output, output
+    assert first.poll() is None
+    if mode == "service":
+        first.terminate()
         output, _ = first.communicate(timeout=30)
-        assert first.returncode == (-signal.SIGTERM if mode == "service" else 0), output
+        assert first.returncode == -signal.SIGTERM, output
+    elif mode == "independent":
+        (repo / ".release").touch()
+        output, _ = first.communicate(timeout=30)
+        assert first.returncode == 0, output
     else:
-        waiting = threading.Event()
-        lines = []
-
-        def collect():
-            for line in second.stdout:
-                lines.append(line)
-                if "Warte auf Start-Lock" in line:
-                    waiting.set()
-
-        reader = threading.Thread(target=collect)
-        reader.start()
-        assert waiting.wait(30), lines
-        assert first.poll() is None
-        assert second.poll() is None
-
-        if mode == "holder":
-            os.kill(first.pid, signum)
-            output, _ = first.communicate(timeout=15)
-            assert first.returncode == 128 + signum, output
-            assert second.wait(timeout=30) == 0, lines
-        elif mode == "waiter":
-            os.kill(second.pid, signum)
-            assert second.wait(timeout=15) == 128 + signum, lines
-            assert first.poll() is None
-            (repo / ".release").touch()
-            output, _ = first.communicate(timeout=30)
-            assert first.returncode == 0, output
-        else:
-            raise AssertionError(mode)
-
-        reader.join(timeout=5)
-        assert not reader.is_alive()
+        os.kill(first.pid, signum)
+        output, _ = first.communicate(timeout=30)
+        assert first.returncode == 128 + signum, output
 
     # The build grandchild must no longer be running after lock handoff.
     child_pid = (repo / ".child-pid").read_text() if mode != "service" else None
@@ -117,9 +89,16 @@ if os.environ.get("HOLD_SERVICE") == "1":
 
     if child_pid:
         wait_until(child_stopped)
-    third = start(repo)
-    output, _ = third.communicate(timeout=30)
-    assert third.returncode == 0, output
+    # The guardian observes parent exit asynchronously; retry only the lock
+    # rejection while waiting for release, never an actual launch failure.
+    deadline = time.monotonic() + 5
+    while True:
+        third = start(repo)
+        output, _ = third.communicate(timeout=30)
+        if third.returncode == 0:
+            break
+        assert "Symphony läuft bereits" in output and time.monotonic() < deadline, output
+        time.sleep(0.02)
     print("lock probe passed: " + mode)
 finally:
     (repo / ".release").touch()

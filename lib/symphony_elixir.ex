@@ -18,13 +18,26 @@ defmodule SymphonyElixir.Application do
   """
 
   use Application
-  alias SymphonyElixir.{Config, EnvFile}
+  alias SymphonyElixir.{Config, EnvFile, ProjectContext}
 
   @spec startup_preflight() :: :ok | {:error, term()}
   def startup_preflight do
-    case EnvFile.load_runtime(EnvFile.bound_config_dir()) do
-      :ok -> Config.validate_startup_requirements()
-      {:error, reason} -> {:error, reason}
+    case SymphonyElixir.Projects.configured() do
+      [] ->
+        case EnvFile.load_runtime(EnvFile.bound_config_dir()) do
+          :ok -> Config.validate_startup_requirements()
+          {:error, reason} -> {:error, reason}
+        end
+
+      contexts ->
+        Enum.reduce_while(contexts, :ok, &validate_context/2)
+    end
+  end
+
+  defp validate_context(context, :ok) do
+    case ProjectContext.with_context(context, &Config.validate_startup_requirements/0) do
+      :ok -> {:cont, :ok}
+      error -> {:halt, error}
     end
   end
 
@@ -36,7 +49,7 @@ defmodule SymphonyElixir.Application do
         {Phoenix.PubSub, name: SymphonyElixir.PubSub},
         {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
         SymphonyElixir.WorkflowStore,
-        SymphonyElixir.Orchestrator,
+        orchestrator_child(),
         SymphonyElixir.HttpServer,
         SymphonyElixir.StatusDashboard
       ]
@@ -58,5 +71,12 @@ defmodule SymphonyElixir.Application do
   defp maybe_run_startup_preflight do
     (Application.get_env(:symphony_elixir, :run_startup_preflight_on_boot, true) &&
        startup_preflight()) || :ok
+  end
+
+  defp orchestrator_child do
+    case SymphonyElixir.Projects.configured() do
+      [] -> SymphonyElixir.Orchestrator
+      contexts -> {SymphonyElixir.ProjectSupervisor, contexts: contexts}
+    end
   end
 end

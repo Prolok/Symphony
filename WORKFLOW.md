@@ -3,14 +3,12 @@ tracker:
   kind: linear
   # App-Bindung und Secret aus .symphony/.env.local des jeweiligen Fachprojekts.
   # Secret erst im Auth-Prozess lesen; client_secret_env enthält nur den Namen.
-  # Alte Workflows ohne auth_mode sowie explizites legacy bleiben kompatibel.
   auth_mode: app
   app:
     client_id: $LINEAR_APP_CLIENT_ID
     client_secret_env: LINEAR_APP_SECRET
     workspace_id: $LINEAR_APP_WORKSPACE_ID
     user_id: $LINEAR_APP_USER_ID
-    installation_id: $LINEAR_APP_INSTALLATION_ID
   # Der Scope wird repository-lokal über LINEAR_PROJECT_SLUG/LINEAR_TEAM_KEY gewählt;
   # fehlende Tracker-Felder erhalten den jeweils gleichnamigen Env-Fallback.
   project_slug: $LINEAR_PROJECT_SLUG
@@ -59,14 +57,10 @@ hooks:
     if git -C "$source_repo" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
       git -C "$workspace" pull --ff-only origin "$branch"
     fi
-    if [ -n "${SYMPHONY_RELEASE_ROOT:-}" ]; then
-      python3 "$SYMPHONY_RELEASE_ROOT/.symphony/on_create_worktree.py" "$source_repo" "$workspace"
-    else
-      python3 "$workspace/.symphony/on_create_worktree.py" "$source_repo" "$workspace"
-    fi
+    python3 "$source_repo/.symphony/on_create_worktree.py" "$source_repo" "$workspace"
   before_remove: |
     workspace="$PWD"
-    python3 "$workspace/.symphony/on_remove_worktree.py" "$SYMPHONY_PROJECT_ROOT" "$workspace"
+    python3 "$SYMPHONY_PROJECT_ROOT/.symphony/on_remove_worktree.py" "$SYMPHONY_PROJECT_ROOT" "$workspace"
     # Closes open PRs, deletes the matching remote and local branches, and removes the linked worktree.
     cd "$SYMPHONY_WORKFLOW_DIR" && mise exec -- mix workspace.before_remove --workspace "$workspace" --source-repo "$SYMPHONY_PROJECT_ROOT"
 agent:
@@ -205,7 +199,7 @@ Zusätzliche Review-Hinweise:
 
 Der reguläre Einstieg ist `./symphony` unter Linux oder macOS; die
 Plattformmatrix und Installation stehen in `README.md`. System-Bash 3.2 und
-BSD-Werkzeuge genügen. Python 3.11+ im App-Modus (Legacy: 3.10+), Git 2.31+,
+BSD-Werkzeuge genügen. Python 3.11+, Git 2.31+,
 Make, Codex CLI und mise 2026.3.17+ müssen erreichbar und die Toolchain aus
 `mise.toml` installiert sein.
 Der Wrapper prüft diese Voraussetzungen vor Autoupdate, Build und
@@ -215,14 +209,11 @@ Der lokale gebundene App-Worker erhält den aktivierten Toolchain-PATH nach
 dem Shell-Login erneut. Die Release- und App-Helper verwenden über
 `SYMPHONY_PYTHON` den absolut gebundenen, geprüften Interpreter, auch nach
 Aktivierung einer Projekt-venv und im gebundenen Linear-MCP. Die Projekt-venv
-bleibt für Projektwerkzeuge aktiv. Legacy-, Custom-Codex- und SSH-Aufrufe
+bleibt für Projektwerkzeuge aktiv. Custom-Codex- und SSH-Aufrufe
 behalten ihren Shell-Vertrag; lokale Toolchain-Pfade werden nicht über SSH
 exportiert. Fehlt die passende Python-Laufzeit, stoppt der Launcher vor
 Autoupdate, Build und Dienststart mit einer kurzen Anforderungsmeldung.
-Das vollständige `make all` benötigt für die App-/Legacy-Testmatrix Python
-3.11+, auch bei Legacy-Konfiguration. Mit Legacy-Python 3.10 bleibt der Start
-möglich; ein angenommenes Autoupdate wird vor dem Pull sichtbar zurückgestellt,
-weil das vollständige Update-Gate dort nicht ausführbar ist.
+`make all` verwendet dieselbe Python-Mindestversion 3.11.
 Der direkte Aufruf von `bin/symphony` benötigt dagegen bereits erreichbares
 `escript`, etwa über `mise exec -- bin/symphony`. Der lokale Standard-Worker
 wird auch ohne Release-Variable an den Helfer des ermittelten Symphony-Checkouts
@@ -237,16 +228,31 @@ Mix-Artefakte an den aufgelösten Symphony-Checkout gebunden bleiben.
 Der eigenständige Release-Checkout übernimmt den aktuellen Arbeitsstand samt
 gestagten Löschungen, Umbenennungen und Datei-/Verzeichniswechseln;
 ignorierte Dateien werden nicht übernommen.
-Die öffentlichen Rootwerte `SYM_CODEX_*` und `SYM_MAXIMUM_REVIEW_ITERATIONS`
+Die öffentlichen Rootwerte `SYM_PROJECT_ROOT`, `SYM_CODEX_*` und `SYM_MAXIMUM_REVIEW_ITERATIONS`
 werden mit ihren lokalen Overrides im Release-Snapshot gebunden. Spätere
 Rootänderungen gelten erst für einen neuen Release; Fachprojektdateien
 überschreiben weder Modellstartwerte noch das Reviewbudget.
-Im App-Modus bereitet der autorisierte Projektstart vor dem Versiegeln des
-Releases genau eine lokale Codex-Trust-Freigabe für den Fachprojektroot vor
-(bei Git-Worktrees den Git-common-root). Dadurch verändert der erste
-`thread/start` die versiegelte Konfiguration nicht. Persönliche MCPs und
-Plugins bleiben gesperrt; die Manifestprüfung gilt weiterhin für die gesamte
-vorbereitete `config.toml`.
+Akzeptierte Workflow-Reloads erzeugen neue Projektkontexte für Polling und
+künftige Worker; bereits laufende Worker behalten ihren bisherigen Snapshot.
+Die gemeinsame Dashboard-Konfiguration folgt dem akzeptierten Reload;
+ihr Snapshot gilt nur während der Laufzeit des zugehörigen Pollers.
+Auth-/Scope- und Worktreeroot-Wechsel erfordern einen Neustart, ungültige Änderungen
+ersetzen keinen zuletzt gültigen Projektkontext. Externe Workflowdateien ändern
+den gebundenen Mix-/Release-Ausführungsroot nicht.
+Öffentliche Projektvariablen stehen projektbezogenen Hooks und Workerprozessen
+zur Verfügung; Kommando- und SSH-Konfigurations-Overrides werden im selben Kontext aufgelöst.
+Die Dienstkapazität, Statuslimits und SSH-Hostlimits gelten gemeinsam für alle Projekte;
+Workerstarts werden atomar zugelassen und nach Worker- oder Eigentümerende freigegeben.
+Aufgelöste Worktree-Roots verschiedener Projekte dürfen sich nicht überschneiden;
+der Start lehnt gleiche oder ineinander liegende Roots auch über Symlinks ab.
+Verwende dafür etwa `workspace.root: $SYMPHONY_PROJECT_WORKTREES_ROOT`.
+Der Release versiegelt das gemeinsame Codex-Startprofil und die kopierten
+Skills. Jedes Fachprojekt erhält ein eigenes Codex-Home mit genau seiner
+Trust-Freigabe (bei Git-Worktrees den Git-common-root). Die daraus erzeugte
+`config.toml` wird vor jedem Start vollständig gegen den erwarteten Inhalt
+geprüft; Abweichungen brechen den Start ab, vorhandene Sessions bleiben erhalten.
+Persönliche MCPs und Plugins bleiben gesperrt. Die gemeinsame Basiskonfiguration
+und Skills bleiben zusätzlich durch das Release-Manifest abgesichert.
 Reguläre Release-Starts erzeugen keine globalen Issue-Befehle. Für manuelle
 Ticketstarts aus dem Fachprojektroot den absoluten `sym-codex`-Pfad der
 gewünschten Installation mit Ticket-ID verwenden. Nur Hooks außerhalb eines
@@ -279,6 +285,35 @@ Issue-Owner werden weiterhin sofort mit `issue_already_owned` abgewiesen.
 Der gebundene Linear-MCP überträgt UTF-8-JSON als unveränderte Bytes mit genau
 einer Protokollzeile pro Nachricht, einschließlich Unicode und Text-Whitespace.
 
+### Projekte und gemeinsamer Dienst
+
+`SYM_PROJECT_ROOT` aus `.env`/`.env.local` im Symphony-Code-Root enthält die
+kommaseparierten Basisroots (Standard `~/QuantHub`). Nur direkte
+Unterverzeichnisse mit `.symphony` werden entdeckt; kanonische Pfade werden
+dedupliziert. Jeder Projektkontext erhält eigene App-Bindung, Scope,
+Assignee-Liste, Hooks, Worktrees, Sessions und lokalen Zustand. Parallele
+Projektarbeit schaltet weder Prozessumgebung noch CWD global um.
+
+Alle Projekte desselben Linear-Workspace müssen dieselbe verifizierte App
+und dieselben Client Credentials verwenden. Der gemeinsame Kandidatenpoll
+verknüpft Scope, Status und menschliche Assignees projektweise und fragt je
+Workspace und API-Seite einmal ab. `LINEAR_ASSIGNEE` enthält eine getrimmte,
+deduplizierte Liste menschlicher E-Mails/UUIDs; `me` und App-Benutzer sind
+unzulässig. Der bestehende `--yolo`-Sonderfall bleibt erhalten.
+
+Vor Update, Build und Registrierung erwirbt `./symphony` nichtblockierend
+`~/.cache/symphony/service.lock`. Ein konkurrierender Dienststart endet mit
+„Symphony läuft bereits“. Die Sperre bleibt bis Dienstende erhalten, auch
+über den Build hinaus. Manuelle Helfer sind keine zweiten Dienste.
+
+Die interne Zustandskennung ist konstant `symphony`. Für abweichenden
+Altzustand gilt die einmalige Betreiberübergabe in `docs/linear-app.md`;
+keine automatische Löschung, keine beliebigen Installations-IDs. Die
+versionierten Modellvorgaben sind `gpt-6-astra` und `xhigh`; Service-Tiers,
+Reviewbudget und Workflow-Gates bleiben unverändert. `sym-codex` und
+`sym-watch` akzeptieren `Projekt:Ticketkennung`; mehrdeutige Treffer
+verlangen eine eindeutige Projektqualifizierung.
+
 ### Linear-Zugriff
 
 CLI, MCP und manuelle Skripthelfer aktivieren den ausgewählten Workflow vor
@@ -288,9 +323,9 @@ vom Export ausgeschlossen.
 
 Der Agent sollte mit Linear kommunizieren können, entweder über einen konfigurierten Linear-MCP-Server oder über das injizierte Tool `linear_graphql`. HTTP 401, HTTP 403 ohne Rate-Limit-Signal oder als `auth` klassifizierte `linear_graphql`-Fehler gelten dabei wie fehlender Linear-Zugriff für den normalen Tool-Pfad. `classification: "rate_limited"`, `extensionsCodes` wie `RATELIMITED` und `rateLimit.limited: true` sind dagegen Rate-Limit-Signale und kein fehlender Linear-Zugriff; bloße nicht erschöpfte `rateLimit`-Header ohne `limited: true` bleiben Diagnosehinweise.
 
-Im App-Modus nutze ausschließlich das injizierte `linear_graphql` bzw. das gebundene `symphony_linear`-MCP; fällt ein Tooltransport aus, nutze den verfügbaren anderen gebundenen Transport. Fehlen oder scheitern beide, stoppe und melde den Blocker sichtbar in der Abschlussnachricht. Versuche Kommentar und Status nur über einen noch funktionierenden erlaubten Toolpfad; behaupte keine Speicherung ohne bestätigten Schreibzugriff. Greife nicht auf private Envdateien zu, umgehe nicht die Secret-Abschirmung und verwende keinen persönlichen Tokenfallback. Das geschützte Betreiberwerkzeug `scripts/linear-app` ist kein Modell-Shell-Ersatz. Die lokalen Shell-/Mix-/Update-Skript-Fallbacks für Linear-Zugriff gelten nur im Legacy-Modus.
+Im App-Modus nutze ausschließlich das injizierte `linear_graphql` bzw. das gebundene `symphony_linear`-MCP; fällt ein Tooltransport aus, nutze den verfügbaren anderen gebundenen Transport. Fehlen oder scheitern beide, stoppe und melde den Blocker sichtbar in der Abschlussnachricht. Versuche Kommentar und Status nur über einen noch funktionierenden erlaubten Toolpfad; behaupte keine Speicherung ohne bestätigten Schreibzugriff. Greife nicht auf private Envdateien zu, umgehe nicht die Secret-Abschirmung und verwende keinen persönlichen Tokenfallback. Das geschützte Betreiberwerkzeug `scripts/linear-app` ist kein Modell-Shell-Ersatz.
 
-Wenn im Legacy-Modus kein regulärer Kommentar-Edit-Pfad verfügbar ist, nutze den lokalen Repo-Tracker-Fallback über `mise exec -- mix run --no-start -e` und `SymphonyElixir.Tracker`/`SymphonyElixir.Workpad`. Löse dafür den Source-/Config-Root zuerst im ursprünglichen Zielrepo-Kontext über `SYMPHONY_SOURCE_REPO` auf; nur wenn diese Variable fehlt oder leer ist, darf dort vor jedem Verzeichniswechsel `git rev-parse --show-toplevel` verwendet werden. Starte den Mix-Child anschließend aus `SYMPHONY_WORKFLOW_DIR`, übergib ihm den aufgelösten Source-Root explizit als `SYMPHONY_SOURCE_REPO`, aktiviere die durch `SYMPHONY_WORKFLOW_FILE` bezeichnete Workflowkonfiguration und lade `.symphony/.env(.local)` vom Source-Root per `SymphonyElixir.EnvFile.load(SymphonyElixir.EnvFile.config_dir(source_repo), override_existing: true)`. Starte danach nur `:req` per `Application.ensure_all_started(:req)`. Unterscheide dann per vollständig paginierter `workpad_exists?/1`-Prüfung zwischen Erstkontakt und bestehendem Workpad: Existiert noch kein Workpad, erstelle den kanonischen `## Symphony Workpad`-Kommentar und schreibe den Blocker-Hinweis dort hinein, bevor du das Issue nach `BLOCKER` verschiebst; existiert bereits ein Workpad, aktualisiere genau diesen Kommentar mit `SymphonyElixir.Workpad.update_tracker_workpad/2`, verifiziere das Ergebnis über den Rückgabewert und persistiere danach den Statuswechsel. Nur wenn auch dieser sichere Workpad-Update-Helfer scheitert, erstelle einen dedizierten Blocker-Kommentar außerhalb des Workpads, persistiere den Statuswechsel nach `BLOCKER` und halte in der Abschlussnachricht fest, dass der vorhandene Workpad-Kommentar auch per lokalem Update-Helfer nicht aktualisiert werden konnte. Erst wenn auch dieser lokale Schreibpfad scheitert, stoppe sofort und melde den fehlenden Linear-Zugriff in der Abschlussnachricht.
+
 
 Wenn du einen Ticket-Key wie `PRO-190` hast und zuerst nur Status, Titel und die interne Linear-`id` brauchst, verwende für die erste Anfrage einen bereits abgesicherten schema-konformen Bootstrap und führe erst danach breitere Folgeabfragen aus:
 
@@ -762,12 +797,8 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
    gegebenenfalls erforderliche menschliche Approval und den unveränderten
    lokalen/Remote-/PR-Head prüfen und die Evidenz im Workpad halten. Kein
    Shell-/Mix-Fallback im App-Modus.
-   Nur im Legacy-Modus startet der Live-Refresh `mix run` aus dem durch `SYMPHONY_WORKFLOW_DIR`
-   bezeichneten Symphony-Mix-Kontext und aktiviert dort vor dem Tracker-Zugriff
-   die durch `SYMPHONY_WORKFLOW_FILE` bezeichnete Workflowkonfiguration. Die
-   projektspezifische Env-Konfiguration wird davon getrennt weiterhin aus dem
-   durch `SYMPHONY_SOURCE_REPO` bezeichneten Zielrepo geladen; der injizierte
-   `SYMPHONY_ISSUE_LABELS_JSON`-Snapshot ist kein Ersatz für diesen Live-Lookup.
+   Der injizierte `SYMPHONY_ISSUE_LABELS_JSON`-Snapshot ersetzt keinen Live-Lookup.
+
 10. Nach erfolgreichem PR-Merge dokumentiere vor jedem Abschluss nach `Review`
    eine eindeutige `Merge-Evidenz` im Workpad-Verlauf: PR-Nummer oder PR-URL,
    gemergter Zustand und Merge-Commit-SHA müssen enthalten sein.
@@ -844,9 +875,7 @@ Nutze dies nur, wenn der Abschluss durch fehlende erforderliche Tools oder fehle
   - warum dadurch erforderliche Validierung blockiert wird,
   - welche exakte menschliche Aktion zum Entblocken nötig ist.
 - Im App-Modus gilt der Zugriff ausschließlich über das injizierte `linear_graphql` bzw. das gebundene `symphony_linear`-MCP gemäß `Linear-Zugriff`: Fällt ein Tooltransport aus, nutze den verfügbaren anderen gebundenen Transport. Fehlen oder scheitern beide, stoppe und melde den Blocker sichtbar in der Abschlussnachricht; lokale Fallbacks sind ausgeschlossen.
-- Nur im Legacy-Modus: Wenn kein Linear-MCP-Server und kein `linear_graphql` bereits vor dem ersten Workpad-Zugriff verfügbar sind, nutze stattdessen den lokalen Repo-Tracker-Fallback: Löse im ursprünglichen Zielrepo-Kontext zuerst `SYMPHONY_SOURCE_REPO` beziehungsweise bei fehlendem oder leerem Wert per `git rev-parse --show-toplevel` den Source-/Config-Root auf. Starte danach `mise exec -- mix run --no-start -e` aus `SYMPHONY_WORKFLOW_DIR`, übergib dem Child den aufgelösten Source-Root explizit als `SYMPHONY_SOURCE_REPO`, aktiviere `SYMPHONY_WORKFLOW_FILE`, lade die projektspezifische Env-Konfiguration mit `SymphonyElixir.EnvFile.load(SymphonyElixir.EnvFile.config_dir(source_repo), override_existing: true)` und starte `Application.ensure_all_started(:req)`. Führe danach `SymphonyElixir.Tracker.fetch_issue_by_identifier/1`, die vollständig paginierte `workpad_exists?/1`-Prüfung, `SymphonyElixir.Workpad.update_tracker_workpad/2`, `create_comment/2` und `update_issue_state/2` aus, um zuerst zwischen Erstkontakt und bestehendem Workpad zu unterscheiden. Wenn `workpad_exists?/1` bestätigt, dass noch kein Workpad existiert, erstelle den kanonischen `## Symphony Workpad`-Kommentar mit dem Blocker-Hinweis darin; existiert bereits ein Workpad, aktualisiere diesen Kommentar mit dem vollständigen neuen Workpad-Body über `SymphonyElixir.Workpad.update_tracker_workpad/2`. Persistiere anschließend den Statuswechsel nach `BLOCKER`.
-- Nur im Legacy-Modus: Wenn der eine Workpad-Kommentar bereits existiert und später der Comment-Edit-Pfad ausfällt, nutze den lokalen Tracker-Fallback ebenfalls über `mise exec -- mix run --no-start -e` mit derselben getrennten Workflow-/Source-/Env-/`:req`-Bootstrap-Sequenz, um den vorhandenen Workpad-Kommentar per `SymphonyElixir.Workpad.update_tracker_workpad/2` zu aktualisieren und den Statuswechsel nach `BLOCKER` zu persistieren. Halte in der Abschlussnachricht zusätzlich fest, falls dieser lokale Update-Helfer nicht verfügbar war oder scheiterte.
-- Erstelle einen dedizierten Blocker-Kommentar außerhalb des Workpads nur noch als letzte Stufe, wenn ein bestehender Workpad-Kommentar weder über den regulären Edit-Pfad noch über einen anderen erlaubten Toolpfad (im Legacy-Modus auch `SymphonyElixir.Workpad.update_tracker_workpad/2`) aktualisiert werden kann.
+- Erstelle einen dedizierten Blocker-Kommentar außerhalb des Workpads nur noch als letzte Stufe, wenn ein bestehender Workpad-Kommentar weder über den regulären Edit-Pfad noch über einen anderen erlaubten Toolpfad aktualisiert werden kann.
 - Wenn kein im jeweiligen Modus erlaubter Schreibpfad funktioniert, dokumentiere den Blocker in der Abschlussnachricht; ohne irgendeinen funktionierenden Schreibpfad können weder Statuswechsel noch Blocker-Hinweis persistiert werden. Behaupte eine Speicherung nur nach bestätigtem Schreibzugriff.
 - Halte den Hinweis knapp und handlungsorientiert; füge außerhalb des Workpads nur dann einen zusätzlichen Top-Level-Kommentar hinzu, wenn dieser dedizierte Blocker-Kommentar gemäß diesem Escape Hatch erforderlich ist.
 
@@ -872,7 +901,7 @@ der globale Skill `symphony-planning` die maßgebliche Quelle.
 - Bearbeite den Issue-Body/die Beschreibung nicht für Planung oder Fortschrittsverfolgung. Ausnahmen sind nur die automatisierte Beschreibungspflege in `Planung (AI)` und das einmalige `Erstkontakt-Protokoll für neue Items`.
 - Verwende pro Issue genau einen persistierenden Workpad-Kommentar (`## Symphony Workpad`).
 - Von aufgerufenen Skills ausdrücklich geforderte separate Nachvollziehbarkeitskommentare sind neben dem Workpad zulässig; sie ersetzen den Workpad-Kommentar nicht und zählen nicht als zusätzliche Workpads. Im Review-Kontext bedeutet das kombinierte Nach-Fix-Kommentare pro behandeltem Finding, keine getrennten Vorab-Finding-Kommentare plus spätere Fix-Kommentare.
-- Wenn Kommentarbearbeitung in der Sitzung nicht verfügbar ist, verwende im Legacy-Modus das Update-Skript; dort gilt ein Blocker erst, wenn sowohl MCP-Bearbeitung als auch skriptbasierte Bearbeitung nicht verfügbar sind. Im App-Modus gilt ausschließlich der gebundene Toolzugriff aus `Linear-Zugriff`: verbleibenden gebundenen Transport nutzen, bei Ausfall beider Transporte sichtbar stoppen; kein Shell-/Mix-/Update-Skript-Fallback.
+- Wenn Kommentarbearbeitung in der Sitzung nicht verfügbar ist, nutze den verbleibenden gebundenen Linear-Transport. Sind beide Transporte ausgefallen, melde den Blocker sichtbar; kein Shell-/Mix-/Update-Skript-Fallback.
 - Automatische Commits sind ausschließlich in `Test (AI)` und `Merge (AI)` zulässig. Die einzige zusätzliche Ausnahme ist der einmalige Einstiegssnapshot `<Issue-Key> Review (AI) Autocommit` beim ersten Eintritt in `Review (AI)`. Verwende sonst nur `<Issue-Key> Test (AI) Autocommit` oder `<Issue-Key> Merge (AI) Autocommit`.
 - Automatische Commit-Nachrichten verwenden als Betreff `<Issue-Key> <Status> Autocommit` und zusätzlich einen kurzen Body. Der Body hält fest, dass der Commit im genannten Schritt erstellt wurde, den bis dahin offenen Arbeitsstand sichert und kein Nachweis für den Abschluss dieses Schritts ist.
 - Der vorgeschaltete `symphony-pull` darf uncommittete Änderungen nur staschen und wiederherstellen, nicht committen.
@@ -883,3 +912,15 @@ der globale Skill `symphony-planning` die maßgebliche Quelle.
 - In `BLOCKER` keine weiteren Codeänderungen vornehmen und kein regelmäßiges Polling ausführen; warten, bis ein Mensch den Blocker gelöst und das Ticket weiter verschoben hat.
 - Wenn der Status terminal ist (`Fertig` oder `Abgebrochen`), nichts tun und beenden.
 - Halte den Ticket-Text knapp, spezifisch und reviewer-orientiert.
+
+## Gemeinsame Wissensbasis ohne lokales Codex-Memory
+
+Frische Symphony-/Codex-Prozesse erzwingen `features.memories=false`,
+`memories.generate_memories=false` und `memories.use_memories=false`.
+Persönliche Memory-Dateien werden weder importiert noch gelöscht. Die
+gemeinsame Wissensbasis bilden versionierte AGENTS-, Workflow-, Skill- und
+Projektdateien sowie Ticket und Workpad. Der Release übernimmt seine
+versionierten Skills; persönliche lokale Skill-Erweiterungen werden nicht
+in den gemeinsamen Lauf importiert. Gesprächs-/Session-History, Wiederaufnahme
+und Tracker-/Journalzustand bleiben erhalten. Bereits geladener Alt-Kontext
+wird dadurch nicht rückwirkend entfernt.

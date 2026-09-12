@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
-  alias SymphonyElixir.{PathSafety, RuntimePaths}
+  alias SymphonyElixir.{PathSafety, ProjectContext, RuntimePaths}
 
   @primary_key false
   @linear_project_slug_env "LINEAR_PROJECT_SLUG"
@@ -62,8 +62,7 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:kind, :string)
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
-      field(:api_key, :string)
-      field(:auth_mode, :string, default: "legacy")
+      field(:auth_mode, :string, default: "app")
       field(:app, :map, default: %{})
       field(:project_slug, :string)
       field(:team_key, :string)
@@ -76,16 +75,16 @@ defmodule SymphonyElixir.Config.Schema do
     def changeset(schema, attrs) do
       attrs =
         Map.update(attrs, "app", %{}, fn app ->
-          if is_map(app), do: Map.take(app, ~w(client_id client_secret_env workspace_id user_id installation_id allowed_issue_ids)), else: app
+          if is_map(app), do: Map.take(app, ~w(client_id client_secret_env workspace_id user_id allowed_issue_ids)), else: app
         end)
 
       schema
       |> cast(
         attrs,
-        ~w(kind endpoint api_key auth_mode app project_slug team_key assignee active_states terminal_states)a,
+        ~w(kind endpoint auth_mode app project_slug team_key assignee active_states terminal_states)a,
         empty_values: []
       )
-      |> validate_inclusion(:auth_mode, ["legacy", "app"])
+      |> validate_inclusion(:auth_mode, ["app"])
     end
   end
 
@@ -402,11 +401,10 @@ defmodule SymphonyElixir.Config.Schema do
   defp finalize_settings(settings) do
     tracker = %{
       settings.tracker
-      | api_key: resolve_api_key(settings.tracker),
-        app: resolve_app_binding(settings.tracker),
+      | app: resolve_app_binding(settings.tracker),
         project_slug: resolve_linear_scope_setting(settings.tracker.project_slug, @linear_project_slug_env),
         team_key: resolve_linear_scope_setting(settings.tracker.team_key, @linear_team_key_env),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE")),
+        assignee: resolve_secret_setting(settings.tracker.assignee, ProjectContext.env("LINEAR_ASSIGNEE")),
         active_states: filter_managed_states(settings.tracker.active_states)
     }
 
@@ -426,31 +424,25 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp resolve_app_binding(%{auth_mode: "app", app: app}) do
     Map.new(app, fn
-      {key, value} when key in ~w(client_id client_secret_env workspace_id user_id installation_id) ->
+      {key, value} when key in ~w(client_id client_secret_env workspace_id user_id) ->
         {key, resolve_secret_setting(value, nil)}
 
       entry ->
         entry
     end)
+    |> Map.put("installation_id", "symphony")
     |> bind_project_state()
   end
 
-  defp resolve_app_binding(tracker), do: tracker.app
-
   defp bind_project_state(app) do
-    case System.get_env("SYMPHONY_LINEAR_ENV_DIR") do
+    case ProjectContext.env("SYMPHONY_LINEAR_ENV_DIR") do
       config_dir when is_binary(config_dir) and config_dir != "" ->
-        Map.put(app, "state_root", Path.join(config_dir, "state"))
+        app |> Map.put("state_root", Path.join(config_dir, "state")) |> Map.put("env_dir", config_dir)
 
       _ ->
-        app
+        config_dir = SymphonyElixir.EnvFile.bound_config_dir()
+        app |> Map.put("state_root", Path.join(config_dir, "state")) |> Map.put("env_dir", config_dir)
     end
-  end
-
-  defp resolve_api_key(%{auth_mode: "app"}), do: nil
-
-  defp resolve_api_key(tracker) do
-    resolve_secret_setting(tracker.api_key, System.get_env("LINEAR_API_KEY"))
   end
 
   defp filter_managed_states(states) when is_list(states) do
@@ -509,7 +501,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp resolve_linear_scope_setting(nil, env_name) do
     env_name
-    |> System.get_env()
+    |> ProjectContext.env()
     |> normalize_secret_value()
   end
 
@@ -571,7 +563,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp runtime_env_value(env_name) when is_binary(env_name) do
-    System.get_env(env_name) || RuntimePaths.resolve_builtin_env(env_name)
+    ProjectContext.env(env_name) || RuntimePaths.resolve_builtin_env(env_name)
   end
 
   defp normalize_secret_value(value) when is_binary(value) do

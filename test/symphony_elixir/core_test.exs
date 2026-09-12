@@ -318,13 +318,13 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "after_create") =~ "git -C \"$source_repo\" config \"branch.$branch.merge\" \"refs/heads/$branch\""
 
     assert Map.get(hooks, "after_create") =~
-             "python3 \"$workspace/.symphony/on_create_worktree.py\" \"$source_repo\" \"$workspace\""
+             "python3 \"$source_repo/.symphony/on_create_worktree.py\" \"$source_repo\" \"$workspace\""
 
     refute Map.has_key?(hooks, "on_worktree_commit")
     assert Map.get(hooks, "before_remove") =~ "workspace=\"$PWD\""
 
     assert Map.get(hooks, "before_remove") =~
-             "python3 \"$workspace/.symphony/on_remove_worktree.py\" \"$SYMPHONY_PROJECT_ROOT\" \"$workspace\""
+             "python3 \"$SYMPHONY_PROJECT_ROOT/.symphony/on_remove_worktree.py\" \"$SYMPHONY_PROJECT_ROOT\" \"$workspace\""
 
     assert Map.get(hooks, "before_remove") =~ "cd \"$SYMPHONY_WORKFLOW_DIR\" && mise exec -- mix workspace.before_remove --workspace \"$workspace\" --source-repo \"$SYMPHONY_PROJECT_ROOT\""
     codex = Map.get(config, "codex", %{})
@@ -338,21 +338,9 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Wenn ein frischer Branch benötigt wird, erstelle oder verwende genau `symphony/{{ issue.identifier }}` von `origin/main`."
     assert prompt =~ "Im App-Modus nutze ausschließlich das injizierte `linear_graphql` bzw. das gebundene `symphony_linear`-MCP"
     assert prompt =~ "Das geschützte Betreiberwerkzeug `scripts/linear-app` ist kein Modell-Shell-Ersatz."
-    assert prompt =~ "Die lokalen Shell-/Mix-/Update-Skript-Fallbacks für Linear-Zugriff gelten nur im Legacy-Modus."
-    assert prompt =~ "Wenn im Legacy-Modus kein regulärer Kommentar-Edit-Pfad verfügbar ist"
-    assert prompt =~ "mise exec -- mix run --no-start -e"
-    assert prompt =~ "Source-/Config-Root zuerst im ursprünglichen Zielrepo-Kontext"
-    assert prompt =~ "dort vor jedem Verzeichniswechsel `git rev-parse --show-toplevel`"
-    assert prompt =~ "Mix-Child anschließend aus `SYMPHONY_WORKFLOW_DIR`"
-    assert prompt =~ "durch `SYMPHONY_WORKFLOW_FILE` bezeichnete Workflowkonfiguration"
-    assert prompt =~ "git rev-parse --show-toplevel"
-
-    assert prompt =~
-             "SymphonyElixir.EnvFile.load(SymphonyElixir.EnvFile.config_dir(source_repo), override_existing: true)"
-
-    assert prompt =~ "Application.ensure_all_started(:req)"
-    assert prompt =~ "vollständig paginierter `workpad_exists?/1`-Prüfung"
-    assert prompt =~ "SymphonyElixir.Workpad.update_tracker_workpad/2"
+    assert prompt =~ "kein Shell-/Mix-/Update-Skript-Fallback"
+    assert prompt =~ "features.memories=false"
+    assert prompt =~ "SYM_PROJECT_ROOT"
     assert prompt =~ "verwende für die erste Anfrage einen bereits abgesicherten schema-konformen Bootstrap"
     assert prompt =~ "query BootstrapIssue($key: String!)"
     assert prompt =~ "query BootstrapIssueByTeamAndNumber($teamKey: String!, $number: Float!)"
@@ -360,9 +348,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Nutze die dabei zurückgegebene interne `id` anschließend für eng begrenzte Folgeabfragen über `issue(id: $id)`."
     assert prompt =~ "Verwende in dieser ersten Anfrage keine spekulativen Felder oder Filter wie `links` oder `issues(filter: { identifier: ... })`"
     assert prompt =~ "führe zuerst gezielte Introspection über den in der Session verfügbaren Linear-Zugriff aus."
-    assert prompt =~ "Wenn der eine Workpad-Kommentar bereits existiert und später der Comment-Edit-Pfad ausfällt"
     assert prompt =~ "einen dedizierten Blocker-Kommentar außerhalb des Workpads"
-    assert prompt =~ "erstelle den kanonischen `## Symphony Workpad`-Kommentar"
     assert prompt =~ "falls vor dem ersten Workpad-Bootstrap noch kein Workpad existiert"
     assert prompt =~ "Wenn die aktuelle Linear-API `branchName` in `IssueUpdateInput` unterstützt"
     assert prompt =~ "der lokale Branchname und die dazugehörige PR bleiben maßgeblich."
@@ -784,50 +770,26 @@ defmodule SymphonyElixir.CoreTest do
         "backend",
     ]
     assert module.issue_labels_from_env("not-json") == []
-    assert module.issue_labels_from_refresh_output(
-        "Compiling 3 files (.ex)\\n[\\\"Requires Manual Review\\\"]\\n"
-    ) == ["Requires Manual Review"]
-    refresh_source = __import__("inspect").getsource(module.run_tracker_label_refresh)
-    assert refresh_source.index('issue_identifier = System.fetch_env!("SYMPHONY_ISSUE_IDENTIFIER")') < (
-        refresh_source.index("EnvFile.load")
-    )
-    assert "fetch_issue_by_identifier(issue_identifier)" in refresh_source
-    assert refresh_source.index("Workflow.set_workflow_file_path") < (
-        refresh_source.index("EnvFile.load")
-    )
-    assert "cwd=workflow_root" in refresh_source
-    assert "env=child_env" in refresh_source
     assert module.requires_manual_review([" requires manual review "])
     assert module.requires_manual_review(["REQUIRES MANUAL REVIEW"])
     assert not module.requires_manual_review(['Require \"Freigabe Review\"'])
     assert not module.requires_manual_review(["Benötigt Freigabe Review"])
     assert not module.requires_manual_review(["Skip \\"Freigabe Review\\""])
 
-    async def live_labels():
-        return ["Requires Manual Review"]
-
-    async def missing_live_labels():
-        return None
-
     os.environ.pop(module.ISSUE_IDENTIFIER_ENV, None)
-    module.fetch_current_issue_labels = live_labels
-    assert __import__("asyncio").run(module.current_issue_labels(["backend"])) == ["backend"]
-    os.environ[module.ISSUE_IDENTIFIER_ENV] = "PRO-580"
-    assert __import__("asyncio").run(module.current_issue_labels(["backend"])) == [
-        "Requires Manual Review",
-    ]
-    module.fetch_current_issue_labels = missing_live_labels
     try:
         __import__("asyncio").run(module.current_issue_labels(["backend"]))
     except module.LabelRefreshError as error:
-        assert "Could not refresh current Linear issue labels" in str(error)
+        assert "Missing issue identity" in str(error)
     else:
-        raise AssertionError("expected label refresh failure to block")
-    os.environ.pop(module.ISSUE_IDENTIFIER_ENV, None)
-    assert __import__("asyncio").run(module.current_issue_labels(["backend"])) == ["backend"]
-    os.environ[module.SOURCE_REPO_ENV] = "/tmp/symphony-source"
-    assert __import__("asyncio").run(module.source_repo_root()) == "/tmp/symphony-source"
-    os.environ.pop(module.SOURCE_REPO_ENV, None)
+        raise AssertionError("missing identity must block")
+    os.environ[module.ISSUE_IDENTIFIER_ENV] = "PRO-580"
+    try:
+        __import__("asyncio").run(module.current_issue_labels(["backend"]))
+    except module.AppLabelLookupRequired:
+        pass
+    else:
+        raise AssertionError("snapshot must never replace bound live label lookup")
 
     assert module.has_valid_manual_approval(
         [review("reviewer", "APPROVED")],
@@ -914,139 +876,6 @@ defmodule SymphonyElixir.CoreTest do
     assert status == 0, output
   end
 
-  test "land watch label refresh separates workflow and source roots" do
-    helper_path = Path.expand("../../.codex/skills/symphony-land/land_watch.py", __DIR__)
-
-    script = """
-    import asyncio
-    import importlib.util
-    import os
-    import pathlib
-    import sys
-    import tempfile
-
-    spec = importlib.util.spec_from_file_location("land_watch", #{inspect(helper_path)})
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-
-    with tempfile.TemporaryDirectory() as test_root:
-        root = pathlib.Path(test_root)
-        workflow_root = root / "workflow"
-        source_root = root / "target"
-        active_workflow = root / "external" / "WORKFLOW.md"
-        trace_path = root / "refresh.trace"
-        (workflow_root / "lib").mkdir(parents=True)
-        (source_root / ".symphony").mkdir(parents=True)
-        active_workflow.parent.mkdir(parents=True)
-
-        (workflow_root / "mix.exs").write_text('''
-    defmodule LabelRefreshFixture.MixProject do
-      use Mix.Project
-
-      def project do
-        [app: :req, version: "0.1.0", elixir: "~> 1.19"]
-      end
-    end
-    ''')
-        (workflow_root / "lib" / "label_refresh_fixture.ex").write_text('''
-    defmodule SymphonyElixir.Workflow do
-      def set_workflow_file_path(workflow_file) do
-        [key, value] =
-          workflow_file
-          |> File.read!()
-          |> String.trim()
-          |> String.split("=", parts: 2)
-
-        System.put_env(key, value)
-
-        File.write!(
-          System.fetch_env!("REFRESH_TRACE"),
-          "workflow_file=" <> workflow_file <> "\\n",
-          [:append]
-        )
-
-        :ok
-      end
-    end
-
-    defmodule SymphonyElixir.EnvFile do
-      def config_dir(repo_root), do: Path.join(repo_root, ".symphony")
-
-      def load(config_dir, override_existing: true) do
-        [key, value] =
-          config_dir
-          |> Path.join(".env")
-          |> File.read!()
-          |> String.trim()
-          |> String.split("=", parts: 2)
-
-        System.put_env(key, value)
-
-        File.write!(
-          System.fetch_env!("REFRESH_TRACE"),
-          "cwd=" <> File.cwd!() <> "\\nconfig_dir=" <> config_dir <> "\\n",
-          [:append]
-        )
-
-        :ok
-      end
-    end
-
-    defmodule SymphonyElixir.Tracker do
-      def fetch_issue_by_identifier(identifier) do
-        File.write!(
-          System.fetch_env!("REFRESH_TRACE"),
-          "issue=" <> identifier <> "\\n",
-          [:append]
-        )
-
-        {:ok,
-         %{
-           labels: [
-             System.fetch_env!("PROJECT_CONFIG_SENTINEL"),
-             System.fetch_env!("WORKFLOW_CONFIG_SENTINEL")
-           ]
-         }}
-      end
-    end
-
-    defmodule Jason do
-      def encode!(labels), do: inspect(labels)
-    end
-    ''')
-        (source_root / ".symphony" / ".env").write_text(
-            "PROJECT_CONFIG_SENTINEL=loaded-from-target\\n"
-        )
-        active_workflow.write_text(
-            "WORKFLOW_CONFIG_SENTINEL=loaded-from-external-workflow\\n"
-        )
-
-        assert not (source_root / "mix.exs").exists()
-        os.environ[module.WORKFLOW_DIR_ENV] = str(workflow_root)
-        os.environ[module.WORKFLOW_FILE_ENV] = str(active_workflow)
-        os.environ[module.SOURCE_REPO_ENV] = str(source_root)
-        os.environ[module.ISSUE_IDENTIFIER_ENV] = "PRO-603"
-        os.environ["REFRESH_TRACE"] = str(trace_path)
-        module.shutil.which = lambda command: None if command == "mise" else None
-
-        output = asyncio.run(module.run_tracker_label_refresh())
-        trace = trace_path.read_text()
-
-        assert module.issue_labels_from_refresh_output(output) == [
-            "loaded-from-target",
-            "loaded-from-external-workflow",
-        ]
-        assert f"cwd={workflow_root}" in trace
-        assert f"workflow_file={active_workflow}" in trace
-        assert f"config_dir={source_root / '.symphony'}" in trace
-        assert "issue=PRO-603" in trace
-    """
-
-    {output, status} = System.cmd("python3", ["-B", "-c", script], stderr_to_stdout: true)
-    assert status == 0, output
-  end
-
   test "repo-local symphony-linear skill documents schema-valid issue lookup patterns and fallback" do
     skill_path = Path.expand("../../.codex/skills/symphony-linear/SKILL.md", __DIR__)
     skill = File.read!(skill_path)
@@ -1058,17 +887,7 @@ defmodule SymphonyElixir.CoreTest do
     assert skill =~ "orientieren willst, splitte den Identifier in"
     assert skill =~ "Nutze keinen Fallback `issues(filter: { identifier: ... })`"
     assert skill =~ "wie `links` in die erste Anfrage aufzunehmen."
-    assert skill =~ ~S|source_repo="${SYMPHONY_SOURCE_REPO:-}"|
-    assert skill =~ ~S|source_repo="$(git rev-parse --show-toplevel)"|
-    assert skill =~ ~S|cd "$SYMPHONY_WORKFLOW_DIR"|
-    {source_index, _length} = :binary.match(skill, ~S|source_repo="${SYMPHONY_SOURCE_REPO:-}"|)
-    {cd_index, _length} = :binary.match(skill, ~S|cd "$SYMPHONY_WORKFLOW_DIR"|)
-    assert source_index < cd_index
-
-    assert skill =~ ~S|SYMPHONY_SOURCE_REPO="$source_repo" ISSUE_KEY=PRO-496|
-    assert skill =~ "SymphonyElixir.Workflow.set_workflow_file_path"
-    assert skill =~ "System.fetch_env!(\"SYMPHONY_SOURCE_REPO\")"
-    assert skill =~ "SymphonyElixir.EnvFile.config_dir(source_repo)"
+    assert skill =~ "Keine Shell-/Mix-/Update-Skript-Fallbacks"
     refute skill =~ "query IssueByIdentifier($identifier: String!)"
     refute skill =~ "links {\n"
   end
@@ -1292,7 +1111,7 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, :status_overview_not_found} = Workflow.status_overview_from_prompt(prompt)
   end
 
-  test "linear api token resolves from LINEAR_API_KEY env var" do
+  test "personal LINEAR_API_KEY does not enter the app configuration" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     env_api_key = "test-linear-api-key"
 
@@ -1305,7 +1124,7 @@ defmodule SymphonyElixir.CoreTest do
       codex_command: "/bin/sh app-server"
     )
 
-    assert Config.settings!().tracker.api_key == env_api_key
+    refute Map.has_key?(Config.settings!().tracker, :api_key)
     assert Config.settings!().tracker.project_slug == "project"
     assert :ok = Config.validate!()
   end
@@ -6086,7 +5905,7 @@ defmodule SymphonyElixir.CoreTest do
 
       Application.put_env(:symphony_elixir, :yolo, false)
 
-      Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+      SymphonyElixir.TestSupport.stub_linear_client(fn payload, headers ->
         send(parent, {:linear_request, payload, headers})
 
         {:ok,
@@ -6105,7 +5924,7 @@ defmodule SymphonyElixir.CoreTest do
 
       assert {:ok, []} = Client.fetch_candidate_issues()
       assert_receive {:linear_request, %{"variables" => %{stateNames: state_names}}, headers}
-      assert {"Authorization", "token"} in headers
+      assert {"Authorization", "Bearer synthetic-app-token"} in headers
 
       assert MapSet.subset?(
                MapSet.new(["Todo (AI)", "Review (AI)", "In Arbeit", "Freigabe Implementierung", "Freigabe Review"]),
@@ -6603,6 +6422,8 @@ defmodule SymphonyElixir.CoreTest do
       """
     )
 
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    {:ok, _} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
     assert :ok = WorkflowStore.force_reload()
 
     assert_raise RuntimeError,
@@ -7128,7 +6949,7 @@ defmodule SymphonyElixir.CoreTest do
                project_root
              )
 
-    assert Config.settings!().tracker.api_key == "project-root-key"
+    refute Map.has_key?(Config.settings!().tracker, :api_key)
   end
 
   test "script support exposes the workflow step alongside the manual prompt context" do
@@ -7629,6 +7450,7 @@ defmodule SymphonyElixir.CoreTest do
       File.chmod!(codex_binary, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         codex_command: "#{codex_binary} app-server"
@@ -7713,6 +7535,7 @@ defmodule SymphonyElixir.CoreTest do
       File.chmod!(codex_binary, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         codex_command: "#{codex_binary} app-server"
@@ -8324,6 +8147,7 @@ defmodule SymphonyElixir.CoreTest do
       File.chmod!(fake_ssh, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
         workspace_root: "~/.symphony-remote-workspaces",
         worker_ssh_hosts: ["worker-a", "worker-b"]
       )
@@ -8406,6 +8230,7 @@ defmodule SymphonyElixir.CoreTest do
       on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
 
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         codex_command: "#{codex_binary} app-server",
@@ -8549,6 +8374,7 @@ defmodule SymphonyElixir.CoreTest do
       on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
 
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         codex_command: "#{codex_binary} app-server",
@@ -8673,6 +8499,7 @@ defmodule SymphonyElixir.CoreTest do
       on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
 
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         codex_command: "#{codex_binary} app-server",
@@ -13285,6 +13112,7 @@ defmodule SymphonyElixir.CoreTest do
       on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
 
       write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
         workspace_root: workspace_root,
         hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
         codex_command: "#{codex_binary} app-server",

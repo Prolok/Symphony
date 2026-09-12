@@ -22,7 +22,7 @@ sym_codex_stderr() {
 sym_codex_usage() {
   cat >&2 <<'EOF'
 Usage:
-  sym-codex [<issue.identifier>]
+  sym-codex [<Project:issue.identifier> | <issue.identifier>]
   sym-codex --observer [<issue.identifier>]
 
 Direct execution runs Codex in the selected worktree.
@@ -34,8 +34,8 @@ EOF
 SYM_CODEX_PROMPT=""
 SYM_CODEX_WORKFLOW_STEP=""
 SYM_CODEX_SESSION_ID=""
-SYM_CODEX_MODEL_DEFAULT="gpt-5.6-sol"
-SYM_CODEX_REASONING_EFFORT_DEFAULT="high"
+SYM_CODEX_MODEL_DEFAULT="gpt-6-astra"
+SYM_CODEX_REASONING_EFFORT_DEFAULT="xhigh"
 SYM_CODEX_SERVICE_TIER_DEFAULT="flex"
 SYM_CODEX_HUMAN_SERVICE_TIER_DEFAULT="priority"
 
@@ -246,11 +246,7 @@ sym_codex_build_manual_prompt() {
             %{run_id: Ecto.UUID.generate(), phase: workflow_step},
             &SymphonyElixir.Config.linear_runtime_env/0
           )
-          if runtime_env == %{} do
-            IO.write("SYM_CODEX_CONTEXT_V2\n")
-          else
-            IO.write("SYM_CODEX_CONTEXT_V3\n" <> Jason.encode!(runtime_env) <> "\n")
-          end
+          IO.write("SYM_CODEX_CONTEXT_V3\n" <> Jason.encode!(runtime_env) <> "\n")
           IO.write((workflow_step || "") <> "\n")
           IO.write((session_id || "") <> "\n")
           IO.write("SYM_CODEX_PROMPT_V1\n")
@@ -323,20 +319,15 @@ sym_codex_resolve_dialog_workspace() {
 
 sym_codex_parse_manual_prompt_context() {
   local prompt_context="$1"
-  local context_v1_prefix=$'SYM_CODEX_CONTEXT_V1\n'
-  local context_v2_prefix=$'SYM_CODEX_CONTEXT_V2\n'
-  local context_v3_prefix=$'SYM_CODEX_CONTEXT_V3\n'
+  local context_prefix=$'SYM_CODEX_CONTEXT_V3\n'
   local prompt_marker=$'\nSYM_CODEX_PROMPT_V1\n'
   local terminal_prompt_marker=$'\nSYM_CODEX_PROMPT_V1'
-  local metadata=""
-  local remainder=""
   local newline=$'\n'
-
-  if [[ "$prompt_context" == "$context_v3_prefix"* ]]; then
-    remainder="${prompt_context#"$context_v3_prefix"}"
-    local runtime_json="${remainder%%"$newline"*}"
-    local runtime_entries name value
-    runtime_entries="$("${SYMPHONY_PYTHON:-python3}" -c '
+  [[ "$prompt_context" == "$context_prefix"* ]] || sym_codex_die "missing app runtime context"
+  local remainder="${prompt_context#"$context_prefix"}"
+  local runtime_json="${remainder%%"$newline"*}"
+  local runtime_entries name value metadata
+  runtime_entries="$("${SYMPHONY_PYTHON:-python3}" -c '
 import json,sys
 data=json.loads(sys.argv[1])
 allowed={"SYMPHONY_LINEAR_AUTH_MODE","SYMPHONY_LINEAR_CLIENT_SECRET_ENV","SYMPHONY_LINEAR_BINDING_HASH","SYMPHONY_CODEX_STATE_ROOT","SYMPHONY_RUN_ID","SYMPHONY_PHASE"}
@@ -345,61 +336,22 @@ for key,value in data.items():
     assert isinstance(value,str) and "\n" not in value and "\r" not in value
     print(key+"="+value)
 ' "$runtime_json")" || sym_codex_die "invalid app runtime context"
-    while IFS='=' read -r name value; do
-      export "$name=$value"
-    done <<< "$runtime_entries"
-    prompt_context="$context_v2_prefix${remainder#*"$newline"}"
-  fi
-
-  if [[ "$prompt_context" == "$context_v2_prefix"* ]] && [[ "$prompt_context" == *"$prompt_marker"* ]]; then
-    remainder="${prompt_context#"$context_v2_prefix"}"
+  while IFS='=' read -r name value; do
+    export "$name=$value"
+  done <<< "$runtime_entries"
+  remainder="${remainder#*"$newline"}"
+  if [[ "$remainder" == *"$prompt_marker"* ]]; then
     metadata="${remainder%%"$prompt_marker"*}"
     SYM_CODEX_PROMPT="${remainder#*"$prompt_marker"}"
-    SYM_CODEX_WORKFLOW_STEP="${metadata%%"$newline"*}"
-
-    if [[ "$metadata" == *"$newline"* ]]; then
-      SYM_CODEX_SESSION_ID="${metadata#*"$newline"}"
-    else
-      SYM_CODEX_SESSION_ID=""
-    fi
-
-    return 0
-  fi
-
-  if [[ "$prompt_context" == "$context_v2_prefix"* ]] && [[ "$prompt_context" == *"$terminal_prompt_marker" ]]; then
-    remainder="${prompt_context#"$context_v2_prefix"}"
+  elif [[ "$remainder" == *"$terminal_prompt_marker" ]]; then
     metadata="${remainder%%"$terminal_prompt_marker"*}"
     SYM_CODEX_PROMPT=""
-    SYM_CODEX_WORKFLOW_STEP="${metadata%%"$newline"*}"
-
-    if [[ "$metadata" == *"$newline"* ]]; then
-      SYM_CODEX_SESSION_ID="${metadata#*"$newline"}"
-    else
-      SYM_CODEX_SESSION_ID=""
-    fi
-
-    return 0
+  else
+    sym_codex_die "invalid app prompt context"
   fi
+  SYM_CODEX_WORKFLOW_STEP="${metadata%%"$newline"*}"
+  SYM_CODEX_SESSION_ID="${metadata#*"$newline"}"
 
-  if [[ "$prompt_context" == "$context_v1_prefix"* ]] && [[ "$prompt_context" == *"$prompt_marker"* ]]; then
-    remainder="${prompt_context#"$context_v1_prefix"}"
-    SYM_CODEX_WORKFLOW_STEP="${remainder%%"$prompt_marker"*}"
-    SYM_CODEX_SESSION_ID=""
-    SYM_CODEX_PROMPT="${remainder#*"$prompt_marker"}"
-    return 0
-  fi
-
-  if [[ "$prompt_context" == "$context_v1_prefix"* ]] && [[ "$prompt_context" == *"$terminal_prompt_marker" ]]; then
-    remainder="${prompt_context#"$context_v1_prefix"}"
-    SYM_CODEX_WORKFLOW_STEP="${remainder%%"$terminal_prompt_marker"*}"
-    SYM_CODEX_SESSION_ID=""
-    SYM_CODEX_PROMPT=""
-    return 0
-  fi
-
-  SYM_CODEX_WORKFLOW_STEP=""
-  SYM_CODEX_SESSION_ID=""
-  SYM_CODEX_PROMPT="$prompt_context"
 }
 
 sym_codex_trim() {
@@ -732,6 +684,17 @@ sym_codex_run_release() {
   return "$status"
 }
 
+sym_codex_select_project() {
+  local source_repo="$1" workflow="$2" reference="$3" caller_cwd="$4"
+  sym_codex_run_mix "$source_repo" run --no-compile --no-start -e '
+    [root, workflow, reference, cwd] = System.argv()
+    case SymphonyElixir.ProjectSelection.command_selection(root, workflow, reference, cwd) do
+      {:ok, selection} -> IO.puts(Jason.encode!(selection))
+      {:error, reason} -> IO.puts(:stderr, "sym-codex: " <> inspect(reason)); System.halt(1)
+    end
+  ' -- "${SYMPHONY_ROOT_DIR:-$source_repo}" "$workflow" "$reference" "$caller_cwd"
+}
+
 sym_codex_run() {
   local original_args=("$@")
   local observer_mode=0
@@ -747,7 +710,9 @@ sym_codex_run() {
   local prompt=""
   local workflow_step=""
   local service_tier=""
-  local -a codex_args=(--config shell_environment_policy.inherit=all)
+  local project_selection=""
+  local -a codex_args=(--config shell_environment_policy.inherit=all
+    --config features.memories=false --config memories.generate_memories=false --config memories.use_memories=false)
 
   while (($# > 0)); do
     case "$1" in
@@ -786,8 +751,7 @@ sym_codex_run() {
   fi
 
   if [[ -z "${SYMPHONY_RELEASE_ROOT:-}" && ! -f "$source_repo/.symphony-release.json" &&
-        -f "$source_repo/scripts/installation-release.py" ]] &&
-      "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" app-workflow "$source_repo"; then
+        -f "$source_repo/scripts/installation-release.py" ]]; then
     sym_codex_run_release "$source_repo" "${original_args[@]}"
     return "$?"
   fi
@@ -810,6 +774,12 @@ sym_codex_run() {
     workflow_file="${SYMPHONY_WORKFLOW_FILE:-$workflow_file}"
     interactive_workflow_file="${SYMPHONY_WORKFLOW_INTERACTIVE_FILE:-$interactive_workflow_file}"
     dialog_workflow_file="${SYMPHONY_WORKFLOW_DIALOG_FILE:-$dialog_workflow_file}"
+  fi
+
+  if [[ -n "$issue_identifier" ]] && (( ! observer_mode )); then
+    project_selection="$(sym_codex_select_project "$source_repo" "$workflow_file" "$issue_identifier" "$(pwd -P)")" || return 1
+    project_root="$(printf '%s' "$project_selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project_root"])')" || return 1
+    issue_identifier="$(printf '%s' "$project_selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["identifier"])')" || return 1
   fi
 
   if [[ -z "$issue_identifier" ]]; then
@@ -865,7 +835,7 @@ sym_codex_run() {
   fi
 
   sym_codex_load_launch_env "$source_repo"
-  if (( observer_mode )) && [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" ]] && [[ -z "${SYMPHONY_LINEAR_AUTH_MODE:-}" ]]; then
+  if (( observer_mode )) && [[ -z "${SYMPHONY_LINEAR_AUTH_MODE:-}" ]]; then
     # A directly invoked observer must derive app mode from its workflow too.
     prompt_context="$(
       sym_codex_prepare_mix "$source_repo" &&
@@ -874,13 +844,12 @@ sym_codex_run() {
         :ok = SymphonyElixir.Workflow.set_workflow_file_path(workflow)
         :ok = SymphonyElixir.EnvFile.load_runtime(SymphonyElixir.EnvFile.config_dir(project))
         runtime_env = SymphonyElixir.Config.linear_runtime_env()
-        if runtime_env != %{}, do: IO.write("SYM_CODEX_CONTEXT_V3\n" <> Jason.encode!(runtime_env) <> "\n\n\nSYM_CODEX_PROMPT_V1\n")
+        IO.write("SYM_CODEX_CONTEXT_V3\n" <> Jason.encode!(runtime_env) <> "\n\n\nSYM_CODEX_PROMPT_V1\n")
       ' -- "$workflow_file" "$project_root"
     )" || sym_codex_die "cannot bind observer runtime context"
-    if [[ -n "$prompt_context" ]]; then
-      sym_codex_parse_manual_prompt_context "$prompt_context"
-    fi
+    sym_codex_parse_manual_prompt_context "$prompt_context"
   fi
+  [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app ]] || sym_codex_die "missing app runtime binding"
   # Capture the helper interpreter before activating any project venv, also
   # for manual invocations that did not pass through the service launcher.
   SYMPHONY_PYTHON="$("${SYMPHONY_PYTHON:-python3}" -c 'import os,sys; print(os.path.abspath(sys.executable))' 2>/dev/null)" ||
@@ -950,21 +919,13 @@ sym_codex_run() {
     sym_codex_activate_venv "$project_root" "$workspace" "$source_repo"
     (
       unset MIX_DEPS_PATH MIX_BUILD_ROOT MIX_BUILD_PATH
-      if [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app ]]; then
-        "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
-      else
-        codex "${codex_args[@]}"
-      fi
+      "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
     )
     return $?
   fi
 
   sym_codex_activate_venv "$project_root" "$workspace" "$source_repo"
-  if [[ "${SYMPHONY_LINEAR_AUTH_MODE:-}" == app ]]; then
-    exec env -u MIX_DEPS_PATH -u MIX_BUILD_ROOT -u MIX_BUILD_PATH "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
-  fi
-
-  exec env -u MIX_DEPS_PATH -u MIX_BUILD_ROOT -u MIX_BUILD_PATH codex "${codex_args[@]}"
+  exec env -u MIX_DEPS_PATH -u MIX_BUILD_ROOT -u MIX_BUILD_PATH "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/codex-app-context.py" "${codex_args[@]}"
 }
 
 sym_codex_run "$@"

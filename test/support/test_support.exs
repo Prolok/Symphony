@@ -112,6 +112,9 @@ defmodule SymphonyElixir.TestSupport do
 
       setup do
         runtime_env_snapshot = SymphonyElixir.TestSupport.scrub_symphony_runtime_env()
+        System.put_env("SYMPHONY_TEST_LINEAR_SECRET", "synthetic-secret")
+        previous_req_options = Req.default_options()
+        if pid = Process.whereis(SymphonyElixir.Linear.AppAuth), do: GenServer.stop(pid)
 
         SymphonyElixir.TestSupport.ensure_application_started()
         # Each fixture is a fresh installation. The shipped workflow now uses
@@ -133,6 +136,8 @@ defmodule SymphonyElixir.TestSupport do
         stop_default_http_server()
 
         on_exit(fn ->
+          System.delete_env("SYMPHONY_TEST_LINEAR_SECRET")
+          Req.default_options(previous_req_options)
           Application.delete_env(:symphony_elixir, :workflow_file_path)
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :yolo)
@@ -154,7 +159,16 @@ defmodule SymphonyElixir.TestSupport do
 
     if Process.whereis(SymphonyElixir.WorkflowStore) do
       try do
-        SymphonyElixir.WorkflowStore.force_reload()
+        case SymphonyElixir.WorkflowStore.force_reload() do
+          {:error, :auth_binding_change_requires_restart} ->
+            # A fixture change is a new configured runtime. Live app bindings
+            # correctly require restart instead of switching identity in place.
+            Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+            Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+
+          result ->
+            result
+        end
       catch
         :exit, _reason -> :ok
       end
@@ -241,7 +255,6 @@ defmodule SymphonyElixir.TestSupport do
         [
           tracker_kind: "linear",
           tracker_endpoint: "https://api.linear.app/graphql",
-          tracker_api_token: "token",
           tracker_project_slug: "project",
           tracker_team_key: nil,
           tracker_assignee: "dev@example.com",
@@ -290,7 +303,6 @@ defmodule SymphonyElixir.TestSupport do
 
     tracker_kind = Keyword.get(config, :tracker_kind)
     tracker_endpoint = Keyword.get(config, :tracker_endpoint)
-    tracker_api_token = Keyword.get(config, :tracker_api_token)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
     tracker_team_key = Keyword.get(config, :tracker_team_key)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
@@ -331,7 +343,12 @@ defmodule SymphonyElixir.TestSupport do
         "tracker:",
         "  kind: #{yaml_value(tracker_kind)}",
         "  endpoint: #{yaml_value(tracker_endpoint)}",
-        "  api_key: #{yaml_value(tracker_api_token)}",
+        "  auth_mode: app",
+        "  app:",
+        "    client_id: synthetic-client",
+        "    client_secret_env: SYMPHONY_TEST_LINEAR_SECRET",
+        "    workspace_id: synthetic-workspace",
+        "    user_id: synthetic-app",
         "  project_slug: #{yaml_value(tracker_project_slug)}",
         "  team_key: #{yaml_value(tracker_team_key)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
@@ -372,6 +389,30 @@ defmodule SymphonyElixir.TestSupport do
       |> Enum.reject(&(&1 in [nil, ""]))
 
     Enum.join(sections, "\n") <> "\n"
+  end
+
+  def stub_linear_client(request) do
+    if pid = Process.whereis(SymphonyElixir.Linear.AppAuth), do: GenServer.stop(pid)
+
+    Req.default_options(
+      plug: fn conn ->
+        if conn.host == "api.linear.app" and conn.request_path == "/oauth/token" do
+          Req.Test.json(conn, %{"access_token" => "synthetic-app-token", "token_type" => "Bearer", "expires_in" => 3600, "scope" => "read,write"})
+        else
+          raise "unexpected HTTP request in Linear fixture"
+        end
+      end
+    )
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+      query = payload[:query] || payload["query"]
+
+      if String.contains?(query, "SymphonyAppIdentity") do
+        {:ok, %{status: 200, body: %{"data" => %{"viewer" => %{"id" => "synthetic-app", "app" => true, "organization" => %{"id" => "synthetic-workspace"}}}}}}
+      else
+        request.(payload, headers)
+      end
+    end)
   end
 
   defp yaml_value(value) when is_binary(value) do

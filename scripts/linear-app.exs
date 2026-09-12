@@ -35,7 +35,6 @@ result = with :ok <- Workflow.set_workflow_file_path(System.fetch_env!("SYMPHONY
   WriteContext.with_context(%{run_id: Ecto.UUID.generate(), phase: "Kontrollierte lokale Umstellung"}, fn ->
     case System.argv() do
       ["identity"] -> api.(:identity, %{})
-      ["resolve-assignee"] -> Client.resolve_legacy_assignee()
       ["candidates" | expected] ->
         with {:ok, issues} <- Tracker.fetch_candidate_issues(),
              true <- Enum.all?(issues, &(&1.identifier in expected)) do
@@ -63,7 +62,7 @@ result = with :ok <- Workflow.set_workflow_file_path(System.fetch_env!("SYMPHONY
               end
           end
         end)
-      _ -> {:error, :usage_identity_resolve_assignee_candidates_graphql_begin_retire_activate_ready}
+      _ -> {:error, :usage_identity_candidates_graphql_begin_retire_activate_ready}
     end
   end)
 end

@@ -3,11 +3,11 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
-  alias SymphonyElixir.Linear.AppAuth
+  alias SymphonyElixir.Linear.{AppAuth, LocalState}
   alias SymphonyElixir.Linear.WriteContext
 
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.{EnvFile, Workflow}
+  alias SymphonyElixir.{EnvFile, ProjectContext, Workflow}
 
   @type linear_scope :: {:project, String.t()} | {:team, String.t()}
 
@@ -33,6 +33,24 @@ defmodule SymphonyElixir.Config do
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
+    case ProjectContext.current() do
+      %ProjectContext{settings: %Schema{} = settings} ->
+        {:ok, settings}
+
+      %ProjectContext{} ->
+        resolve_settings()
+
+      nil ->
+        settings = SymphonyElixir.ProjectPoller.service_settings()
+
+        case settings || Application.get_env(:symphony_elixir, :service_settings) do
+          %Schema{} = settings -> {:ok, settings}
+          nil -> resolve_settings()
+        end
+    end
+  end
+
+  defp resolve_settings do
     case Workflow.current() do
       {:ok, %{config: config}} when is_map(config) ->
         with {:ok, settings} <- Schema.parse(config),
@@ -48,7 +66,7 @@ defmodule SymphonyElixir.Config do
   @doc "Reads only the referenced process secret; it never becomes part of settings."
   @spec linear_client_secret(map()) :: {:ok, String.t()} | {:error, atom()}
   def linear_client_secret(binding) do
-    SymphonyElixir.EnvFile.linear_secret(binding["client_secret_env"])
+    EnvFile.linear_secret(binding["client_secret_env"], binding["env_dir"] || ProjectContext.env("SYMPHONY_LINEAR_ENV_DIR"))
   end
 
   @doc "Non-secret environment names excluded from non-authentication children."
@@ -56,11 +74,11 @@ defmodule SymphonyElixir.Config do
   def linear_secret_env_names do
     configured =
       case linear_secret_reference() do
-        "$" <> name -> System.get_env(name)
+        "$" <> name -> ProjectContext.env(name)
         name -> name
       end
 
-    ["LINEAR_APP_SECRET", configured, System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")]
+    ["LINEAR_APP_SECRET", "LINEAR_API_KEY", configured, System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")]
     |> Enum.filter(&(is_binary(&1) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, &1)))
     |> Enum.uniq()
   end
@@ -69,7 +87,7 @@ defmodule SymphonyElixir.Config do
   @spec linear_secret_reference() :: String.t() | nil
   def linear_secret_reference do
     case Workflow.current() do
-      {:ok, %{config: %{"tracker" => %{"auth_mode" => "app", "app" => app}}}} -> app["client_secret_env"]
+      {:ok, %{config: %{"tracker" => %{"app" => app}}}} -> app["client_secret_env"]
       _ -> nil
     end
   end
@@ -85,7 +103,7 @@ defmodule SymphonyElixir.Config do
   def linear_runtime_env do
     tracker = settings!().tracker
 
-    if tracker.auth_mode == "app" do
+    if tracker.kind == "linear" do
       %{
         "SYMPHONY_LINEAR_AUTH_MODE" => tracker.auth_mode,
         "SYMPHONY_LINEAR_CLIENT_SECRET_ENV" => tracker.app["client_secret_env"],
@@ -167,7 +185,7 @@ defmodule SymphonyElixir.Config do
 
   @spec local_codex_command() :: String.t()
   def local_codex_command do
-    case System.get_env("SYMPHONY_CODEX_COMMAND") do
+    case ProjectContext.env("SYMPHONY_CODEX_COMMAND") || System.get_env("SYMPHONY_CODEX_COMMAND") do
       command when is_binary(command) ->
         case String.trim(command) do
           "" -> configured_local_codex_command()
@@ -179,15 +197,15 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @doc "Resolves the review budget from the environment and the active Symphony checkout."
+  @doc "Resolves the review budget from the bound project launch settings or the active Symphony root."
   @spec maximum_review_iterations!(Path.t()) :: pos_integer()
   def maximum_review_iterations!(symphony_root) do
     value =
-      case System.fetch_env("SYM_MAXIMUM_REVIEW_ITERATIONS") do
-        {:ok, value} ->
+      case ProjectContext.env("SYM_MAXIMUM_REVIEW_ITERATIONS") do
+        value when is_binary(value) ->
           value
 
-        :error ->
+        nil ->
           case EnvFile.read(symphony_root) do
             {:ok, values} -> Map.get(values, "SYM_MAXIMUM_REVIEW_ITERATIONS", "3")
             {:error, reason} -> raise ArgumentError, "Invalid SYM_MAXIMUM_REVIEW_ITERATIONS config: #{inspect(reason)}"
@@ -315,33 +333,26 @@ defmodule SymphonyElixir.Config do
 
   defp validate_linear_tracker(%{tracker: %{auth_mode: "app"} = tracker}) do
     with :ok <- AppAuth.validate(tracker),
+         :ok <- LocalState.validate(tracker.app),
          {:ok, _scope} <- linear_scope(tracker) do
       :ok
     end
   end
 
-  defp validate_linear_tracker(settings) do
-    if is_binary(settings.tracker.api_key) do
-      case linear_scope(settings.tracker) do
-        {:ok, _scope} -> validate_linear_assignee(settings.tracker.assignee)
-        {:error, reason} -> {:error, reason}
-      end
-    else
-      {:error, :missing_linear_api_token}
-    end
-  end
-
-  defp validate_linear_assignee(assignee) do
-    if yolo?() or is_binary(assignee), do: :ok, else: {:error, :missing_linear_assignee}
-  end
-
   @spec linear_scope(Schema.Tracker.t()) :: {:ok, linear_scope()} | {:error, term()}
   def linear_scope(%Schema.Tracker{project_slug: project_slug, team_key: team_key}) do
     case {project_slug, team_key} do
-      {project_slug, nil} when is_binary(project_slug) -> {:ok, {:project, project_slug}}
+      {project_slug, nil} when is_binary(project_slug) -> {:ok, {:project, canonical_project_slug(project_slug)}}
       {nil, team_key} when is_binary(team_key) -> {:ok, {:team, team_key}}
       {nil, nil} -> {:error, :missing_linear_scope}
       {_project_slug, _team_key} -> {:error, :multiple_linear_scopes}
+    end
+  end
+
+  defp canonical_project_slug(slug) do
+    case Regex.run(~r/(?:^|-)([a-f0-9]{12})$/, slug, capture: :all_but_first) do
+      [id] -> id
+      nil -> slug
     end
   end
 
@@ -356,7 +367,7 @@ defmodule SymphonyElixir.Config do
   defp validate_required_environment(_settings), do: :ok
 
   defp validate_required_assignee_environment do
-    case System.get_env("LINEAR_ASSIGNEE") do
+    case ProjectContext.env("LINEAR_ASSIGNEE") do
       value when is_binary(value) ->
         if String.trim(value) == "", do: {:error, :missing_linear_assignee_env}, else: :ok
 

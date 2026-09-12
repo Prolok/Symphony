@@ -1231,9 +1231,13 @@ defmodule SymphonyElixir.Workspace do
 
   defp run_remote_command(worker_host, script, timeout_ms)
        when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
+    context = SymphonyElixir.ProjectContext.current()
+
     task =
       Task.async(fn ->
-        SSH.run(worker_host, script, stderr_to_stdout: true)
+        SymphonyElixir.ProjectContext.with_context(context, fn ->
+          SSH.run(worker_host, script, stderr_to_stdout: true)
+        end)
       end)
 
     case Task.yield(task, timeout_ms) do

@@ -20,9 +20,11 @@ defmodule SymphonyElixir.PathSafety do
     {root, segments}
   end
 
-  defp resolve_segments(root, resolved_segments, []), do: {:ok, join_path(root, resolved_segments)}
+  defp resolve_segments(root, resolved_segments, segments, links \\ 0)
+  defp resolve_segments(_root, _resolved_segments, _segments, links) when links >= 40, do: {:error, :eloop}
+  defp resolve_segments(root, resolved_segments, [], _links), do: {:ok, join_path(root, resolved_segments)}
 
-  defp resolve_segments(root, resolved_segments, [segment | rest]) do
+  defp resolve_segments(root, resolved_segments, [segment | rest], links) do
     candidate_path = join_path(root, resolved_segments ++ [segment])
 
     case File.lstat(candidate_path) do
@@ -30,11 +32,11 @@ defmodule SymphonyElixir.PathSafety do
         with {:ok, target} <- :file.read_link_all(String.to_charlist(candidate_path)) do
           resolved_target = Path.expand(IO.chardata_to_string(target), join_path(root, resolved_segments))
           {target_root, target_segments} = split_absolute_path(resolved_target)
-          resolve_segments(target_root, [], target_segments ++ rest)
+          resolve_segments(target_root, [], target_segments ++ rest, links + 1)
         end
 
       {:ok, _stat} ->
-        resolve_segments(root, resolved_segments ++ [segment], rest)
+        resolve_segments(root, resolved_segments ++ [segment], rest, links)
 
       {:error, :enoent} ->
         {:ok, join_path(root, resolved_segments ++ [segment | rest])}

@@ -23,12 +23,6 @@ bei `symphony-planning`.
   anderen verwenden; sind beide nicht verfügbar, den Zugriffsblocker sichtbar
   melden. Kein Shell-/Mix-/Update-Skript-Fallback, keine privaten Envdateien
   laden und keine unbestätigte Workpad-/Statusspeicherung behaupten.
-- Nur im Legacy-Modus: Wenn der reguläre Linear-Edit-Pfad fehlt oder wegen HTTP 401, HTTP 403 ohne
-  Rate-Limit-Signal oder Auth ausfällt, aktualisiere bestehende Workpads lokal mit
-  `SymphonyElixir.Workpad.update_tracker_workpad/2`. Der Helfer sucht
-  vollständig paginiert genau einen Marker-Kommentar, lehnt leere,
-  markerlose oder probeartige Bodies ab und verifiziert das Update nach dem
-  Schreiben.
 - HTTP 403 mit `RATELIMITED`, `classification: "rate_limited"` oder
   `rateLimit.limited: true` ist ein Rate-Limit-Signal und kein fehlender
   Linear-Zugriff. Nicht erschöpfte `rateLimit`-Header ohne `limited: true` sind
@@ -90,6 +84,5 @@ widersprüchlich war.
   `WORKFLOW.md` oder aufgerufenen Skills verlangten Nachvollziehbarkeitskommentare,
   etwa für Originalbeschreibungen, Klärungsfragen oder kombinierte
   Review-Finding-Fix-Kommentare; sie ersetzen das Workpad nicht.
-- Im Legacy-Modus ist ein separater Blocker-Kommentar bei bestehendem Workpad nur letzte Stufe,
-  wenn sowohl reguläres Bearbeiten als auch
-  `SymphonyElixir.Workpad.update_tracker_workpad/2` scheitern.
+- Ein separater Blocker-Kommentar ist bei bestehendem Workpad nur letzte Stufe,
+  wenn kein erlaubter Toolpfad den vorhandenen Kommentar aktualisieren kann.

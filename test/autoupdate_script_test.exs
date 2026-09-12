@@ -67,7 +67,7 @@ defmodule AutoupdateScriptTest do
              "make args=all mix_deps=unset mix_build_root=unset mix_build_path=unset\n"
   end
 
-  test "Legacy Python 3.10 defers an accepted update before changing the checkout" do
+  test "unsupported Python defers an accepted update before changing the checkout" do
     %{root_dir: root_dir, seed_dir: seed_dir, worktree_dir: worktree_dir} = build_git_fixture!()
     %{bin_dir: bin_dir, make_log: make_log} = build_make_fixture!(root_dir)
     on_exit(fn -> File.rm_rf(root_dir) end)
@@ -96,7 +96,7 @@ defmodule AutoupdateScriptTest do
       System.cmd("/usr/bin/make", ["-f", Path.expand("../Makefile", __DIR__), "python-check"], env: SymphonyElixir.TestSupport.script_env(bin_dir), stderr_to_stdout: true)
 
     assert status != 0
-    assert output =~ "Python 3.11+ ist für die vollständige App-/Legacy-Testmatrix erforderlich"
+    assert output =~ "Python 3.11+ ist für die vollständige Testmatrix erforderlich"
   end
 
   defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"

@@ -25,7 +25,9 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    case evaluate(args) do
+    result = with :ok <- SymphonyElixir.ServiceMutex.acquire(), do: evaluate(args)
+
+    case result do
       :ok ->
         wait_for_shutdown()
 
@@ -94,7 +96,7 @@ defmodule SymphonyElixir.CLI do
       file_regular?: &File.regular?/1,
       load_env_files: &load_project_env_files/1,
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
-      validate_startup_requirements: &SymphonyElixir.Config.validate_startup_requirements/0,
+      validate_startup_requirements: &SymphonyElixir.Application.startup_preflight/0,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       set_yolo_mode: &set_yolo_mode/1,
@@ -102,8 +104,10 @@ defmodule SymphonyElixir.CLI do
     }
   end
 
-  defp load_project_env_files(env_files_dir) when is_binary(env_files_dir) do
-    EnvFile.load_runtime(env_files_dir)
+  defp load_project_env_files(_env_files_dir) do
+    workflow = Workflow.workflow_file_path()
+    root = System.get_env("SYMPHONY_ROOT_DIR") || SymphonyElixir.RuntimePaths.workflow_dir()
+    SymphonyElixir.Projects.prepare(root, workflow)
   end
 
   defp format_env_file_error({:invalid_env_file, path, line_number, reason}) do

@@ -2214,7 +2214,17 @@ defmodule SymphonyElixir.DialogTest do
        when is_list(initial_comments) and is_pid(parent) do
     {:ok, request_counter} = Agent.start_link(fn -> 0 end)
 
-    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+    # These fixtures exercise app writes too: keep the actual lease helper and
+    # durable receipts in a temporary project while controlling only HTTP.
+    runtime = Path.dirname(Workflow.workflow_file_path())
+    File.cp_r!(Path.expand("../../priv", __DIR__), Path.join(runtime, "priv"))
+    File.write!(Path.join(runtime, ".symphony-release.json"), "{}")
+    System.put_env("SYMPHONY_RELEASE_ROOT", runtime)
+    System.put_env("SYMPHONY_LINEAR_ENV_DIR", Path.join(runtime, ".symphony"))
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
       case payload["query"] do
         query when is_binary(query) ->
           linear_refresh_failing_response(query, payload, initial_comments, request_counter, parent)
@@ -2230,7 +2240,7 @@ defmodule SymphonyElixir.DialogTest do
       String.contains?(query, "SymphonyLinearIssueComments") ->
         count = Agent.get_and_update(request_counter, &{&1, &1 + 1})
 
-        if count == 0 do
+        if count < 2 do
           {:ok, %{status: 200, body: linear_comments_response(initial_comments)}}
         else
           {:error, :forced_comment_refresh_failure}
@@ -2239,7 +2249,16 @@ defmodule SymphonyElixir.DialogTest do
       String.contains?(query, "SymphonyCreateComment") ->
         variables = payload["variables"]
         send(parent, {:linear_comment_body, variables["body"] || variables[:body]})
-        {:ok, %{status: 200, body: %{"data" => %{"commentCreate" => %{"success" => true}}}}}
+
+        comment = %{
+          "id" => variables["id"] || variables[:id],
+          "body" => variables["body"] || variables[:body],
+          "updatedAt" => "2026-09-12T08:00:00Z",
+          "user" => %{"id" => "synthetic-app"},
+          "issue" => %{"id" => variables["issueId"] || variables[:issueId]}
+        }
+
+        {:ok, %{status: 200, body: %{"data" => %{"commentCreate" => %{"success" => true, "comment" => comment}}}}}
 
       true ->
         {:error, {:unexpected_query, query}}

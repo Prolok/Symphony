@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Bind app-mode Codex skills/configuration to one release, without Linear secrets."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 
 def skill_directories(root):
@@ -64,11 +66,47 @@ def prepare(release, original_home, skill_roots, project_dir):
     # The operator's project start authorizes this one repository, including its
     # worktrees. Codex otherwise persists this trust during thread/start, after
     # sealing, and the required MCP correctly rejects the changed release.
-    project = json.dumps(str(project_root(project_dir)), ensure_ascii=False)
-    (target / "config.toml").write_text(
-        '[features]\napps = false\n\n[projects.' + project + ']\ntrust_level = "trusted"\n'
-    )
+    (target / "config.toml").write_text(project_config(project_dir))
     (target / "skills.json").write_text(json.dumps(captured))
+    return target
+
+
+def project_config(project_dir):
+    project = json.dumps(str(project_root(project_dir)), ensure_ascii=False)
+    return ('[features]\napps = false\nmemories = false\n\n'
+            '[memories]\ngenerate_memories = false\nuse_memories = false\n\n'
+            '[projects.' + project + ']\ntrust_level = "trusted"\n')
+
+
+def project_home(base, state, project_dir):
+    # Each project needs a distinct Codex home: the pinned release is shared,
+    # but session links and Codex's local databases must never cross projects.
+    key = hashlib.sha256(str(state.resolve()).encode()).hexdigest()
+    target = base / "projects" / key
+    target.mkdir(parents=True, exist_ok=True, mode=0o700)
+    config = project_config(project_dir)
+    with tempfile.NamedTemporaryFile(mode="w", dir=target, delete=False) as output:
+        temporary = Path(output.name)
+        output.write(config)
+    try:
+        try:
+            os.link(temporary, target / "config.toml")
+        except FileExistsError:
+            pass
+    finally:
+        temporary.unlink()
+    if (target / "config.toml").is_symlink() or (target / "config.toml").read_text() != config:
+        raise RuntimeError("changed project configuration")
+    for name in ("skills.json", "skills", "auth.json"):
+        source = base / name
+        if source.exists():
+            try:
+                (target / name).symlink_to(source.resolve(), target_is_directory=source.is_dir())
+            except FileExistsError:
+                pass
+            if not (target / name).is_symlink() or (target / name).resolve() != source.resolve():
+                raise RuntimeError("changed project resource binding")
+    bind_sessions(target, state)
     return target
 
 
@@ -77,7 +115,7 @@ def launch_config(release, target, cwd, user_home, environment=None):
     environment = os.environ if environment is None else environment
     captured = json.loads((target / "skills.json").read_text())
     roots = [user_home / ".agents/skills", user_home / ".codex/skills", Path("/etc/codex/skills")]
-    configs = [Path("/etc/codex/config.toml")]
+    configs = [Path("/etc/codex/config.toml"), target / "config.toml"]
     for parent in [cwd, *cwd.parents]:
         roots.extend([parent / ".agents/skills", parent / ".codex/skills"])
         configs.append(parent / ".codex/config.toml")
@@ -90,7 +128,9 @@ def launch_config(release, target, cwd, user_home, environment=None):
     enabled = [{"path": entry["path"], "enabled": True} for entry in captured]
     settings = [{"path": path, "enabled": False} for path in sorted(disabled)] + enabled
     overrides = "[" + ",".join("{path=" + json.dumps(item["path"]) + ",enabled=" + str(item["enabled"]).lower() + "}" for item in settings) + "]"
-    args = ["--config", "skills.config=" + overrides, "--config", "features.apps=false"]
+    args = ["--config", "skills.config=" + overrides, "--config", "features.apps=false",
+            "--config", "features.memories=false", "--config", "memories.generate_memories=false",
+            "--config", "memories.use_memories=false"]
     disabled_servers, disabled_plugins = set(), set()
     for config in configs:
         if config.is_file():
@@ -160,7 +200,7 @@ def main():
     state = Path(os.environ["SYMPHONY_CODEX_STATE_ROOT"])
     if not state.is_absolute():
         raise RuntimeError("unbound session state")
-    bind_sessions(target, state)
+    target = project_home(target, state, Path(os.environ["SYMPHONY_PROJECT_ROOT"]))
     executable = shutil.which("codex")
     if not executable:
         raise RuntimeError("codex unavailable")

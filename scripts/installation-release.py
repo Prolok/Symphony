@@ -75,7 +75,7 @@ def capture_skills(release):
     original = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     # The launcher preserves the operator's project cwd through update/build.
     # Neither the release nor SYMPHONY_ROOT_DIR identifies that Fachprojekt.
-    module.prepare(release, original, [original / "skills", Path.home() / ".agents/skills", Path("/etc/codex/skills"), Path(release) / ".codex/skills"], Path.cwd())
+    module.prepare(release, original, [Path(release) / ".codex/skills"], Path.cwd())
 
 
 def seal(release):
@@ -112,11 +112,6 @@ def verify(release):
 
 def main():
     action, source, *args = sys.argv[1:]
-    if action == "app-workflow":
-        # Only selects release preparation, never credentials or auth semantics.
-        # Config.Schema remains the authoritative YAML/config validator.
-        front = (Path(source) / "WORKFLOW.md").read_text().split("---", 2)[1]
-        sys.exit(0 if re.search(r'[\"\x27]?auth_mode[\"\x27]?\s*:\s*[\"\x27]?app\b', front) else 1)
     if action == "verify":
         verify(source)
         return

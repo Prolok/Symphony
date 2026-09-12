@@ -195,6 +195,39 @@ defmodule SymphonyElixir.RootEnvTest do
     assert Config.maximum_review_iterations!(ctx.release) == 8
   end
 
+  test "project discovery reads the release snapshot without exporting root values", ctx do
+    previous = Application.get_env(:symphony_elixir, :project_contexts)
+    settings = Application.get_env(:symphony_elixir, :service_settings)
+
+    on_exit(fn ->
+      Application.put_env(:symphony_elixir, :project_contexts, previous || [])
+
+      if settings do
+        Application.put_env(:symphony_elixir, :service_settings, settings)
+      else
+        Application.delete_env(:symphony_elixir, :service_settings)
+      end
+    end)
+
+    base = Path.join(ctx.root, "projects")
+    project = Path.join(base, "Pinned")
+    File.mkdir_p!(Path.join(project, ".symphony"))
+    File.write!(Path.join(project, ".symphony/.env"), "LINEAR_ASSIGNEE=human@example.invalid\n")
+    File.write!(Path.join(ctx.source, ".env"), "SYM_CODEX_MODEL=old-source-model\n")
+    File.write!(Path.join(ctx.release, ".env"), "SYM_PROJECT_ROOT=#{base}\nSYM_CODEX_MODEL=release-model\n")
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=7\n")
+    assert :ok = EnvFile.snapshot_root(ctx.source, ctx.release)
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_PROJECT_ROOT=/not-the-pinned-root\n")
+    System.put_env("SYMPHONY_RELEASE_ROOT", ctx.release)
+    before_env = System.get_env()
+    assert :ok = SymphonyElixir.Projects.prepare(ctx.source, Workflow.workflow_file_path())
+    [context] = SymphonyElixir.Projects.configured()
+    assert context.root == project
+    assert context.env["SYM_CODEX_MODEL"] == "release-model"
+    assert context.env["SYM_MAXIMUM_REVIEW_ITERATIONS"] == "7"
+    assert System.get_env() == before_env
+  end
+
   test "non-auth children cannot regain project secret access by reloading config", ctx do
     File.write!(Path.join(ctx.source, ".env.local"), "LINEAR_APP_SECRET=synthetic-secret\n")
     System.put_env("SYMPHONY_LINEAR_SECRET_ACCESS", "denied")
@@ -268,8 +301,7 @@ defmodule SymphonyElixir.RootEnvTest do
       refute inspect(settings) =~ "synthetic-secret"
     end
 
-    assert {:ok, legacy} = Schema.parse(%{"tracker" => %{"auth_mode" => "legacy"}})
-    assert legacy.tracker.auth_mode == "legacy"
+    assert {:error, _} = Schema.parse(%{"tracker" => %{"auth_mode" => "legacy"}})
 
     issue_ids = ["00000000-0000-4000-8000-000000000002"]
     scoped_workflow = put_in(workflow.config, ["tracker", "app", "allowed_issue_ids"], issue_ids)

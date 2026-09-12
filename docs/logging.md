@@ -29,7 +29,8 @@ When logging Codex execution lifecycle events, include:
 ## Log Sink
 
 Application logs are written through `SymphonyElixir.LogFile` to a rotating
-single-line disk log. The relative log path is always `log/symphony.log`;
+single-line disk log shared by all discovered projects. Its default root is
+the service's starting working directory. The relative path is always `log/symphony.log`;
 `symphony --logs-root <path>` changes the root in front of that relative path,
 so the file is written below `<path>/log/symphony.log`. The handler keeps five
 files of up to 10 MiB each and removes the default console handler after disk

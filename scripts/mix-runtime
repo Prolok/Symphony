@@ -35,23 +35,16 @@ mix_runtime_bind_python() {
   # Bind the interpreter before mise or a project venv can change PATH. Keep
   # that binding through the private release's update/build/relaunch sequence.
   SYMPHONY_PYTHON="$("$python" -c '
-import os, pathlib, re, sys
-workflow = pathlib.Path(sys.argv[1]) / "WORKFLOW.md"
-parts = workflow.read_text().split("---", 2) if workflow.is_file() else []
-app = len(parts) == 3 and re.search(r"[\"\x27]?auth_mode[\"\x27]?\s*:\s*[\"\x27]?app\b", parts[1])
-if app and sys.version_info < (3, 11):
+import os, sys
+if sys.version_info < (3, 11):
     sys.exit(11)
-if sys.version_info < (3, 10):
-    sys.exit(10)
-if app:
-    import tomllib
+import tomllib
 print(os.path.abspath(sys.executable))
 ' "$repo_root" 2>/dev/null)" || status=$?
   case "$status" in
     0) export SYMPHONY_PYTHON ;;
-    10) mix_runtime_die "Python 3.10 oder neuer ist erforderlich" ;;
-    11) mix_runtime_die "Für den App-Modus ist Python 3.11 oder neuer erforderlich" ;;
-    *) mix_runtime_die "Python-Laufzeit nicht verfügbar; Python 3.11+ für App-Modus (Legacy: 3.10+) prüfen" ;;
+    11) mix_runtime_die "Python 3.11 oder neuer ist erforderlich" ;;
+    *) mix_runtime_die "Python-Laufzeit nicht verfügbar; Python 3.11+ prüfen" ;;
   esac
 }
 

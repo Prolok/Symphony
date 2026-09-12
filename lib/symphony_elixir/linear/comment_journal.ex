@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   unknown outcomes remain visible and cannot cause a blind duplicate creation.
   """
 
-  alias SymphonyElixir.Linear.{CommentMutations, DurableState, IssueLease}
+  alias SymphonyElixir.Linear.{CommentMutations, DurableState, IssueLease, LocalState}
   alias SymphonyElixir.Workpad
 
   @lookup "query SymphonyReceipt($id: String!) { comment(id: $id) { id body bodyData quotedText resolvingUser { id } resolvingComment { id } updatedAt user { id } issue { id identifier } } }"
@@ -263,11 +263,19 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp read_intent(binding, file) do
     with {:ok, record} <- DurableState.read(Path.join(directory(binding), file)),
-         true <- record["workspace_id"] == binding["workspace_id"] do
+         true <- record["workspace_id"] == binding["workspace_id"],
+         :ok <- matching_installation(record, binding) do
       {:ok, record}
     else
+      {:error, {:local_state_requires_handoff, _, _}} = error -> error
       _ -> {:error, :comment_journal_corrupt}
     end
+  end
+
+  defp matching_installation(record, binding) do
+    if record["installation_id"] == binding["installation_id"],
+      do: :ok,
+      else: {:error, {:local_state_requires_handoff, directory(binding), LocalState.handoff_message()}}
   end
 
   defp collect(items, fun) do

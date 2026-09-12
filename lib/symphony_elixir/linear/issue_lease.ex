@@ -1,7 +1,6 @@
 defmodule SymphonyElixir.Linear.IssueLease do
   @moduledoc """
-  Host-wide issue ownership for updated app workers. Legacy workers still
-  require the separately verified, disjoint scopes of the migration contract.
+  Host-local issue ownership for app workers.
   """
 
   alias SymphonyElixir.{Config, RuntimePaths, Tracker, Workpad}
@@ -10,7 +9,7 @@ defmodule SymphonyElixir.Linear.IssueLease do
   @spec run(map(), (-> term())) :: term()
   def run(issue, callback) do
     case Config.settings!().tracker do
-      %{auth_mode: "app", app: binding} ->
+      %{kind: "linear", auth_mode: "app", app: binding} ->
         with_lock(binding["workspace_id"], issue.id, fn -> run_ready(binding, issue, callback) end)
 
       _ ->

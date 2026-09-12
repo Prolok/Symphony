@@ -24,12 +24,13 @@ defmodule SymphonyElixir.HookRunner do
     formatted_log_context = format_log_context(log_context)
 
     Logger.info("Running workspace hook hook=#{hook_name}#{formatted_log_context}")
+    env = SymphonyElixir.Config.without_linear_secret(env)
 
     task =
       Task.async(fn ->
         System.cmd("sh", ["-lc", command],
           cd: cwd,
-          env: SymphonyElixir.Config.without_linear_secret(env),
+          env: env,
           stderr_to_stdout: true
         )
       end)

@@ -161,6 +161,10 @@ defmodule SymphonyElixir.Codex.Watch do
     render_waiting(config.issue_identifier, %{state | api_error?: false})
   end
 
+  defp render_poll_result({:ok, %{status: 409}}, _config, state) do
+    render_api_error("Mehrdeutige Ticketkennung; sym-watch Projekt:Ticketkennung verwenden.", state)
+  end
+
   defp render_poll_result({:ok, %{status: status}}, _config, state) do
     render_api_error("Observability API returned HTTP #{status}", state)
   end

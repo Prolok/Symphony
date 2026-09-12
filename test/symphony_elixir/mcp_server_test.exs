@@ -427,7 +427,7 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
 
     assert :ok = MCPServer.bootstrap(logger_configurer: fn -> :ok end)
     assert Workflow.workflow_file_path() == workflow_file
-    assert System.get_env("LINEAR_API_KEY") == "bootstrap-token"
+    assert System.get_env("LINEAR_API_KEY") == "inherited-shell-token"
   end
 
   test "bootstrap removes the stdout logger handler from the MCP protocol stream" do
@@ -494,7 +494,7 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
 
     assert :ok = MCPServer.bootstrap(logger_configurer: fn -> :ok end)
     assert Workflow.workflow_file_path() == workflow_file
-    assert System.get_env("LINEAR_API_KEY") == "project-token"
+    assert System.get_env("LINEAR_API_KEY") == "inherited-shell-token"
   end
 
   defp restore_default_logger({:ok, config}) do

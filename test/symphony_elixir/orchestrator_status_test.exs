@@ -954,12 +954,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator triggers an immediate poll cycle shortly after startup" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "",
+      tracker_kind: "memory",
       poll_interval_ms: 5_000
     )
 
-    # An explicit empty token prevents fallback to LINEAR_API_KEY and keeps the poll local.
-    assert {:error, :missing_linear_api_token} = Config.validate!()
+    assert :ok = Config.validate!()
 
     parent = self()
     poll_ref = make_ref()

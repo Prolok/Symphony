@@ -3,6 +3,29 @@ defmodule SymphonyElixir.EnvFileTest do
 
   alias SymphonyElixir.EnvFile
 
+  test "public reads exclude every occurrence of default and selected secret names" do
+    root = temp_project_root("repeated-secrets")
+    on_exit(fn -> File.rm_rf(root) end)
+
+    for name <- [".env", ".env.local"] do
+      File.write!(Path.join(root, name), """
+      LINEAR_APP_SECRET=synthetic-default
+      LINEAR_APP_SECRET=synthetic-repeat
+      LINEAR_API_KEY=synthetic-personal
+      LINEAR_API_KEY=synthetic-repeat
+      PRIVATE_TOKEN=synthetic-selected
+      PRIVATE_TOKEN=synthetic-repeat
+      SECRET_SELECTOR=PRIVATE_TOKEN
+      PUBLIC=visible
+      """)
+    end
+
+    for reference <- ["PRIVATE_TOKEN", "$SECRET_SELECTOR"] do
+      assert {:ok, values} = EnvFile.read_public(root, reference)
+      assert values == %{"PUBLIC" => "visible", "SECRET_SELECTOR" => "PRIVATE_TOKEN"}
+    end
+  end
+
   test "project loads cannot export or overwrite the Symphony root review budget" do
     root = temp_project_root("root-only-budget")
     env_dir = symphony_dir(root)
@@ -30,10 +53,10 @@ defmodule SymphonyElixir.EnvFileTest do
 
     assert {:ok, %{}} = EnvFile.read(root)
 
-    File.write!(Path.join(root, ".env"), "LINEAR_API_KEY=root-key\nSYM_MAXIMUM_REVIEW_ITERATIONS=3\n")
+    File.write!(Path.join(root, ".env"), "SYMPHONY_TEST_PUBLIC_VALUE=root-key\nSYM_MAXIMUM_REVIEW_ITERATIONS=3\n")
     File.write!(Path.join(root, ".env.local"), "export SYM_MAXIMUM_REVIEW_ITERATIONS = ' 5 ' # local\n")
 
-    assert {:ok, %{"LINEAR_API_KEY" => "root-key", "SYM_MAXIMUM_REVIEW_ITERATIONS" => " 5 "}} = EnvFile.read(root)
+    assert {:ok, %{"SYMPHONY_TEST_PUBLIC_VALUE" => "root-key", "SYM_MAXIMUM_REVIEW_ITERATIONS" => " 5 "}} = EnvFile.read(root)
     assert System.get_env() == before_env
 
     File.write!(Path.join(root, ".env.local"), "INVALID\n")
@@ -45,60 +68,60 @@ defmodule SymphonyElixir.EnvFileTest do
   test "loads .symphony/.env and lets .symphony/.env.local override repo defaults" do
     project_root = temp_project_root("load-order")
     env_dir = symphony_dir(project_root)
-    previous_api_key = System.get_env("LINEAR_API_KEY")
+    previous_api_key = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
     previous_assignee = System.get_env("LINEAR_ASSIGNEE")
 
     on_exit(fn ->
-      restore_env("LINEAR_API_KEY", previous_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_api_key)
       restore_env("LINEAR_ASSIGNEE", previous_assignee)
       File.rm_rf(project_root)
     end)
 
-    System.delete_env("LINEAR_API_KEY")
+    System.delete_env("SYMPHONY_TEST_PUBLIC_VALUE")
     System.delete_env("LINEAR_ASSIGNEE")
 
-    File.write!(Path.join(env_dir, ".env"), "LINEAR_API_KEY=shared-key\nLINEAR_ASSIGNEE=team@example.com\n")
+    File.write!(Path.join(env_dir, ".env"), "SYMPHONY_TEST_PUBLIC_VALUE=shared-key\nLINEAR_ASSIGNEE=team@example.com\n")
     File.write!(Path.join(env_dir, ".env.local"), "LINEAR_ASSIGNEE=dev@example.com\n")
 
     assert :ok = EnvFile.load(env_dir)
-    assert System.get_env("LINEAR_API_KEY") == "shared-key"
+    assert System.get_env("SYMPHONY_TEST_PUBLIC_VALUE") == "shared-key"
     assert System.get_env("LINEAR_ASSIGNEE") == "dev@example.com"
   end
 
   test "preserves externally provided env vars over .env files" do
     project_root = temp_project_root("preserve-system-env")
     env_dir = symphony_dir(project_root)
-    previous_api_key = System.get_env("LINEAR_API_KEY")
+    previous_api_key = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
 
     on_exit(fn ->
-      restore_env("LINEAR_API_KEY", previous_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_api_key)
       File.rm_rf(project_root)
     end)
 
-    System.put_env("LINEAR_API_KEY", "shell-key")
-    File.write!(Path.join(env_dir, ".env"), "LINEAR_API_KEY=repo-key\n")
-    File.write!(Path.join(env_dir, ".env.local"), "LINEAR_API_KEY=local-key\n")
+    System.put_env("SYMPHONY_TEST_PUBLIC_VALUE", "shell-key")
+    File.write!(Path.join(env_dir, ".env"), "SYMPHONY_TEST_PUBLIC_VALUE=repo-key\n")
+    File.write!(Path.join(env_dir, ".env.local"), "SYMPHONY_TEST_PUBLIC_VALUE=local-key\n")
 
     assert :ok = EnvFile.load(env_dir)
-    assert System.get_env("LINEAR_API_KEY") == "shell-key"
+    assert System.get_env("SYMPHONY_TEST_PUBLIC_VALUE") == "shell-key"
   end
 
   test "can explicitly let project env files override inherited env vars" do
     project_root = temp_project_root("override-system-env")
     env_dir = symphony_dir(project_root)
-    previous_api_key = System.get_env("LINEAR_API_KEY")
+    previous_api_key = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
 
     on_exit(fn ->
-      restore_env("LINEAR_API_KEY", previous_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_api_key)
       File.rm_rf(project_root)
     end)
 
-    System.put_env("LINEAR_API_KEY", "shell-key")
-    File.write!(Path.join(env_dir, ".env"), "LINEAR_API_KEY=repo-key\n")
-    File.write!(Path.join(env_dir, ".env.local"), "LINEAR_API_KEY=local-key\n")
+    System.put_env("SYMPHONY_TEST_PUBLIC_VALUE", "shell-key")
+    File.write!(Path.join(env_dir, ".env"), "SYMPHONY_TEST_PUBLIC_VALUE=repo-key\n")
+    File.write!(Path.join(env_dir, ".env.local"), "SYMPHONY_TEST_PUBLIC_VALUE=local-key\n")
 
     assert :ok = EnvFile.load(env_dir, override_existing: true)
-    assert System.get_env("LINEAR_API_KEY") == "local-key"
+    assert System.get_env("SYMPHONY_TEST_PUBLIC_VALUE") == "local-key"
   end
 
   test "supports quoted values and comments" do
@@ -130,7 +153,7 @@ defmodule SymphonyElixir.EnvFileTest do
       File.rm_rf(project_root)
     end)
 
-    File.write!(Path.join(env_dir, ".env"), "LINEAR_API_KEY\n")
+    File.write!(Path.join(env_dir, ".env"), "SYMPHONY_TEST_PUBLIC_VALUE\n")
 
     assert {:error, {:invalid_env_file, path, 1, :missing_assignment}} = EnvFile.load(env_dir)
     assert path == Path.join(env_dir, ".env")
@@ -139,14 +162,14 @@ defmodule SymphonyElixir.EnvFileTest do
   test "ignores blank lines and full-line comments" do
     project_root = temp_project_root("comments")
     env_dir = symphony_dir(project_root)
-    previous_api_key = System.get_env("LINEAR_API_KEY")
+    previous_api_key = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
     previous_exported = System.get_env("EXPORTED_KEY")
     previous_empty = System.get_env("EMPTY_VALUE")
     previous_single = System.get_env("SINGLE_QUOTED")
     previous_double = System.get_env("DOUBLE_ESCAPED")
 
     on_exit(fn ->
-      restore_env("LINEAR_API_KEY", previous_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_api_key)
       restore_env("EXPORTED_KEY", previous_exported)
       restore_env("EMPTY_VALUE", previous_empty)
       restore_env("SINGLE_QUOTED", previous_single)
@@ -154,7 +177,7 @@ defmodule SymphonyElixir.EnvFileTest do
       File.rm_rf(project_root)
     end)
 
-    System.delete_env("LINEAR_API_KEY")
+    System.delete_env("SYMPHONY_TEST_PUBLIC_VALUE")
     System.delete_env("EXPORTED_KEY")
     System.delete_env("EMPTY_VALUE")
     System.delete_env("SINGLE_QUOTED")
@@ -165,7 +188,7 @@ defmodule SymphonyElixir.EnvFileTest do
       [
         "\n",
         "# shared comment\n",
-        "LINEAR_API_KEY=comment-key\n",
+        "SYMPHONY_TEST_PUBLIC_VALUE=comment-key\n",
         "export EXPORTED_KEY=exported\n",
         "EMPTY_VALUE=\n",
         "SINGLE_QUOTED='single quoted value'\n",
@@ -174,7 +197,7 @@ defmodule SymphonyElixir.EnvFileTest do
     )
 
     assert :ok = EnvFile.load(env_dir)
-    assert System.get_env("LINEAR_API_KEY") == "comment-key"
+    assert System.get_env("SYMPHONY_TEST_PUBLIC_VALUE") == "comment-key"
     assert System.get_env("EXPORTED_KEY") == "exported"
     assert System.get_env("EMPTY_VALUE") == ""
     assert System.get_env("SINGLE_QUOTED") == "single quoted value"
@@ -201,7 +224,7 @@ defmodule SymphonyElixir.EnvFileTest do
       File.rm_rf(project_root)
     end)
 
-    File.write!(env_path, "LINEAR_API_KEY=secret\n")
+    File.write!(env_path, "SYMPHONY_TEST_PUBLIC_VALUE=secret\n")
     File.chmod!(env_path, 0o000)
 
     assert {:error, {:env_file_read_failed, path, reason}} = EnvFile.load(symphony_dir(project_root))
@@ -217,7 +240,7 @@ defmodule SymphonyElixir.EnvFileTest do
       File.rm_rf(project_root)
     end)
 
-    File.write!(Path.join(env_dir, ".env"), ~s(LINEAR_API_KEY="value" trailing\n))
+    File.write!(Path.join(env_dir, ".env"), ~s(SYMPHONY_TEST_PUBLIC_VALUE="value" trailing\n))
 
     assert {:error, {:invalid_env_file, path, 1, :trailing_characters}} = EnvFile.load(env_dir)
     assert path == Path.join(env_dir, ".env")
@@ -231,7 +254,7 @@ defmodule SymphonyElixir.EnvFileTest do
       File.rm_rf(project_root)
     end)
 
-    File.write!(Path.join(env_dir, ".env"), ~s(LINEAR_API_KEY="value\n))
+    File.write!(Path.join(env_dir, ".env"), ~s(SYMPHONY_TEST_PUBLIC_VALUE="value\n))
 
     assert {:error, {:invalid_env_file, path, 1, :unterminated_quote}} = EnvFile.load(env_dir)
     assert path == Path.join(env_dir, ".env")
@@ -245,7 +268,7 @@ defmodule SymphonyElixir.EnvFileTest do
       File.rm_rf(project_root)
     end)
 
-    File.write!(Path.join(env_dir, ".env"), ~s(LINEAR_API_KEY="\\x"\n))
+    File.write!(Path.join(env_dir, ".env"), ~s(SYMPHONY_TEST_PUBLIC_VALUE="\\x"\n))
 
     assert {:error, {:invalid_env_file, path, 1, :invalid_escape_sequence}} = EnvFile.load(env_dir)
     assert path == Path.join(env_dir, ".env")

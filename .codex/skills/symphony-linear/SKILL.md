@@ -138,61 +138,6 @@ kein direkter API-Key und keine Tokenabfrage. Providerfehler sichtbar behandeln.
 Der App-Client erfasst Kommentar-IDs/Fassungen selbst; offene Schreibabsichten
 anhand der gemeldeten Kommentar-ID abgleichen und keine blinde Neuanlage auslösen.
 
-Ein versiegelter Legacy-Lauf (`SYMPHONY_RELEASE_ROOT`) verwendet beim Mix-Fallback
-zusätzlich `--no-compile`, damit seine Build-Artefakte unverändert bleiben.
-Workflow-, Source- und Env-Roots weiterhin getrennt gemäß folgendem Bootstrap
-auflösen. Den gebundenen Auth-Modus/Hash nicht löschen oder ersetzen.
-
-## Lokaler Workpad-Fallback (nur Legacy)
-
-Wenn der reguläre Kommentar-Edit-Pfad wegen fehlendem Tool, HTTP 401, HTTP 403
-ohne Rate-Limit-Signal oder Auth-Ausfall nicht nutzbar ist, aktualisiere einen
-bestehenden Workpad-Kommentar lokal über den Tracker-Helfer. HTTP 403 mit
-`RATELIMITED`, `classification: "rate_limited"` oder `rateLimit.limited: true`
-ist ein Rate-Limit-Signal und kein fehlender Linear-Zugriff. Nicht erschöpfte
-`rateLimit`-Header ohne `limited: true` sind nur Diagnosehinweise. Der Body muss
-den Marker `## Symphony Workpad` enthalten und darf kein leerer
-Probe-/Placeholder-Body sein.
-
-```bash
-source_repo="${SYMPHONY_SOURCE_REPO:-}"
-if [ -z "${source_repo//[[:space:]]/}" ]; then
-  source_repo="$(git rev-parse --show-toplevel)"
-fi
-
-(
-cd "$SYMPHONY_WORKFLOW_DIR"
-SYMPHONY_SOURCE_REPO="$source_repo" ISSUE_KEY=PRO-496 WORKPAD_BODY_FILE=/tmp/workpad.md mise exec -- mix run --no-start -e '
-case System.get_env("SYMPHONY_WORKFLOW_FILE") do
-  value when is_binary(value) ->
-    case String.trim(value) do
-      "" -> :ok
-      workflow_file -> SymphonyElixir.Workflow.set_workflow_file_path(workflow_file)
-    end
-
-  _ ->
-    :ok
-end
-
-source_repo = System.fetch_env!("SYMPHONY_SOURCE_REPO") |> String.trim()
-
-:ok =
-  SymphonyElixir.EnvFile.load(
-    SymphonyElixir.EnvFile.config_dir(source_repo),
-    override_existing: true
-  )
-
-{:ok, _} = Application.ensure_all_started(:req)
-{:ok, issue} = SymphonyElixir.Tracker.fetch_issue_by_identifier(System.fetch_env!("ISSUE_KEY"))
-body = File.read!(System.fetch_env!("WORKPAD_BODY_FILE"))
-:ok = SymphonyElixir.Workpad.update_tracker_workpad(issue.id, body)
-'
-)
-```
-
-Erstelle im Legacy-Modus einen separaten Blocker-Kommentar nur dann, wenn sowohl der reguläre
-Kommentar-Edit-Pfad als auch dieser lokale Workpad-Update-Helfer scheitern.
-
 ## Introspection und Uploads
 
 Nutze gezielte Introspection, wenn Mutations-, Feld- oder Input-Formen unklar

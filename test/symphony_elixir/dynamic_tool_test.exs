@@ -264,7 +264,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(missing_token["output"]) == %{
              "error" => %{
-               "message" => "Symphony is missing Linear auth. Set `linear.api_key` in `WORKFLOW.md` or export `LINEAR_API_KEY`."
+               "message" => "Symphony benötigt die projektgebundene Linear-App-Konfiguration und OAuth2 Client Credentials in .symphony/.env(.local)."
              }
            }
 
@@ -317,14 +317,12 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     Enum.each(cases, fn {status, body, headers, classification, codes} ->
       capture_log(fn ->
+        SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
+          {:ok, %{status: status, body: body, headers: headers}}
+        end)
+
         assert {:error, {:linear_api_status, ^status, diagnostics}} =
-                 Client.graphql(
-                   "query Viewer { viewer { id } }",
-                   %{},
-                   request_fun: fn _payload, _headers ->
-                     {:ok, %{status: status, body: body, headers: headers}}
-                   end
-                 )
+                 Client.graphql("query Viewer { viewer { id } }", %{})
 
         assert diagnostics.status == status
         assert diagnostics.classification == classification

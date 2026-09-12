@@ -44,6 +44,13 @@ defmodule SymphonyElixir.Workflow do
 
   @spec workflow_file_path() :: Path.t()
   def workflow_file_path do
+    case SymphonyElixir.ProjectContext.current() do
+      %{workflow_path: path} -> path
+      nil -> configured_workflow_file_path()
+    end
+  end
+
+  defp configured_workflow_file_path do
     Application.get_env(:symphony_elixir, :workflow_file_path) ||
       default_workflow_file_path()
   end
@@ -93,6 +100,13 @@ defmodule SymphonyElixir.Workflow do
 
   @spec current() :: {:ok, loaded_workflow()} | {:error, term()}
   def current do
+    case SymphonyElixir.ProjectContext.current() do
+      %{workflow: workflow} -> {:ok, workflow}
+      nil -> current_unbound()
+    end
+  end
+
+  defp current_unbound do
     case Process.whereis(WorkflowStore) do
       pid when is_pid(pid) ->
         WorkflowStore.current()

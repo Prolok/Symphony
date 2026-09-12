@@ -31,7 +31,10 @@ defmodule SymphonyElixir.RuntimePaths do
 
   @spec project_root() :: Path.t()
   def project_root do
-    File.cwd!()
+    case SymphonyElixir.ProjectContext.current() do
+      %{root: root} -> root
+      nil -> File.cwd!()
+    end
   end
 
   @spec project_worktrees_root() :: Path.t()
@@ -61,6 +64,14 @@ defmodule SymphonyElixir.RuntimePaths do
       "SYMPHONY_WORKFLOW_FILE" => workflow_file()
     }
     |> Map.merge(bound_runtime_env())
+    |> Map.merge(project_context_env())
+  end
+
+  defp project_context_env do
+    case SymphonyElixir.ProjectContext.current() do
+      %{env: env} -> Map.take(env, @runtime_env_names)
+      nil -> %{}
+    end
   end
 
   defp bound_runtime_env do
@@ -99,12 +110,15 @@ defmodule SymphonyElixir.RuntimePaths do
 
   @spec cleaned_builtin_port_env(map()) :: [{charlist(), charlist() | false}]
   def cleaned_builtin_port_env(overrides \\ %{}) when is_map(overrides) do
+    secret_names = SymphonyElixir.Config.linear_secret_env_names()
+
     normalized_overrides =
       builtin_env()
       |> Map.merge(stringify_env(overrides))
+      |> Map.drop(secret_names)
 
     clears =
-      @runtime_env_names
+      (@runtime_env_names ++ secret_names)
       |> Enum.reject(&Map.has_key?(normalized_overrides, &1))
       |> Enum.map(&{String.to_charlist(&1), false})
 

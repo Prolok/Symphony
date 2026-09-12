@@ -848,10 +848,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     state_payload = json_response(conn, 200)
 
     assert state_payload == %{
+             "projects" => [],
              "generated_at" => state_payload["generated_at"],
              "counts" => %{"running" => 1, "retrying" => 1},
              "running" => [
                %{
+                 "project" => nil,
+                 "issue_reference" => "MT-HTTP",
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
                  "state" => "In Progress",
@@ -868,6 +871,8 @@ defmodule SymphonyElixir.ExtensionsTest do
              ],
              "retrying" => [
                %{
+                 "project" => nil,
+                 "issue_reference" => "MT-RETRY",
                  "issue_id" => "issue-retry",
                  "issue_identifier" => "MT-RETRY",
                  "attempt" => 2,

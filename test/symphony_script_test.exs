@@ -4,7 +4,7 @@ defmodule SymphonyScriptTest do
   @script_source Path.expand("../symphony", __DIR__)
   @mix_runtime_source Path.expand("../scripts/mix-runtime", __DIR__)
 
-  test "the launcher rejects old Python before update or build and retains the legacy minimum" do
+  test "the launcher requires Python 3.11 before update or build" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
     python = System.find_executable("python3")
     fake_python = Path.join(bin_dir, "python3")
@@ -23,22 +23,10 @@ defmodule SymphonyScriptTest do
       File.write!(Path.join(repo_dir, "WORKFLOW.md"), "---\ntracker:\n  auth_mode: app\n---\n")
 
       assert {output, 1} = run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_PYTHON", nil}])
-      assert output == "mix-runtime: Für den App-Modus ist Python 3.11 oder neuer erforderlich\n"
+      assert output == "mix-runtime: Python 3.11 oder neuer ist erforderlich\n"
       refute File.exists?(Path.join(repo_dir, ".mix-calls"))
       refute File.exists?(Path.join(repo_dir, "_build"))
-      refute File.exists?(home_dir)
-
-      File.write!(Path.join(repo_dir, "WORKFLOW.md"), "---\ntracker:\n  auth_mode: legacy\n---\n")
-      {output, status} = run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_PYTHON", nil}])
-
-      if minor == 10 do
-        assert status == 0
-        assert output =~ "symphony-stub"
-        refute output =~ "/usr/bin/env "
-      else
-        assert status == 1
-        assert output == "mix-runtime: Python 3.10 oder neuer ist erforderlich\n"
-      end
+      refute File.exists?(Path.join(home_dir, ".local/bin"))
     end
   end
 
@@ -355,7 +343,7 @@ defmodule SymphonyScriptTest do
              "deps.loadpaths\ncompile\nescript.build\n"
   end
 
-  test "parallel starts serialize autoupdate and Mix build work" do
+  test "parallel service starts reject the second invocation before autoupdate and build" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
     autoupdate_path = Path.join(repo_dir, "autoupdate")
 
@@ -385,7 +373,8 @@ defmodule SymphonyScriptTest do
 
     results = Enum.map(tasks, &Task.await(&1, 30_000))
 
-    assert Enum.all?(results, fn {_output, status} -> status == 0 end)
+    assert Enum.sort(Enum.map(results, &elem(&1, 1))) == [0, 1]
+    assert Enum.any?(results, fn {output, status} -> status == 1 and output =~ "Symphony läuft bereits" end)
     refute Enum.any?(results, fn {output, _status} -> output =~ "overlap" end)
   end
 
@@ -504,7 +493,7 @@ defmodule SymphonyScriptTest do
       assert output =~ "#{tool} not found in PATH"
       refute File.exists?(Path.join(repo_dir, ".mix-calls"))
       refute File.exists?(Path.join(repo_dir, "_build"))
-      refute File.exists?(home_dir)
+      refute File.exists?(Path.join(home_dir, ".local/bin"))
       File.ln_s!(target, path)
     end
   end
@@ -524,14 +513,14 @@ defmodule SymphonyScriptTest do
       assert output =~ message
       refute output =~ "MUTATED"
       refute File.exists?(Path.join(repo_dir, ".mix-calls"))
-      refute File.exists?(home_dir)
+      refute File.exists?(Path.join(home_dir, ".local/bin"))
     end
 
     File.rm!(Path.join(bin_dir, "runtime/escript"))
     assert {output, 1} = run_script(repo_dir, home_dir, bin_dir, [])
     assert output =~ "escript fehlt nach mise-Aktivierung"
     refute output =~ "MUTATED"
-    refute File.exists?(home_dir)
+    refute File.exists?(Path.join(home_dir, ".local/bin"))
   end
 
   test "activation makes escript available only to the launched process" do
@@ -602,11 +591,11 @@ defmodule SymphonyScriptTest do
     assert {output, 1} = run_script(fixture.repo_dir, fixture.home_dir, fixture.bin_dir, [])
     assert output =~ "escript fehlt nach mise-Aktivierung"
     refute File.exists?(Path.join(fixture.repo_dir, ".mix-calls"))
-    refute File.exists?(fixture.home_dir)
+    refute File.exists?(Path.join(fixture.home_dir, ".local/bin"))
   end
 
   @tag timeout: 120_000
-  test "the running service does not inherit or hold the start lock" do
+  test "the running service retains the service mutex after the build lock is released" do
     fixture = build_script_fixture!()
     assert {output, 0} = run_lock_probe(fixture, "service", 0, fixture.repo_dir)
     assert output =~ "lock probe passed"
@@ -622,7 +611,7 @@ defmodule SymphonyScriptTest do
   end
 
   @tag timeout: 120_000
-  test "independent linked worktrees never share their startup lock" do
+  test "linked worktrees share the per-user service mutex" do
     fixture = build_script_fixture!()
     repo = fixture.repo_dir
     other = Path.join(fixture.bin_dir, "other checkout")
@@ -662,6 +651,7 @@ defmodule SymphonyScriptTest do
 
     File.cp!(@script_source, Path.join(repo_dir, "symphony"))
     File.cp!(@mix_runtime_source, Path.join(repo_dir, "scripts/mix-runtime"))
+    File.cp!(Path.expand("../scripts/service-lock.py", __DIR__), Path.join(repo_dir, "scripts/service-lock.py"))
     # These tests exercise preflight, build locking and launch inside an
     # isolated release. The real snapshot copier has separate process tests.
     File.write!(Path.join(repo_dir, "scripts/installation-release.py"), """

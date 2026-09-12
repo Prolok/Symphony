@@ -80,7 +80,7 @@ Nur im Merge-Schritt des Workflows verwenden.
    aktuellen Live-Labelstand samt etwaiger Approval-Evidenz im Workpad halten.
    Scheitert der erlaubte Live-Lookup, bleibt der Label-Lookup-Blocker bestehen.
    Kein Dispatch-Snapshot, kein Shell-/Mix-Fallback und keine Lockerung der
-   Secret-Abschirmung. Nur Legacy nutzt den lokalen Tracker-Refresh.
+   Secret-Abschirmung. Kein lokaler Tracker-Refresh über die Modell-Shell.
 10. Wenn GitHub-Checks bestanden oder gemäß Skip-/Neutral-Policy akzeptabel sind
    und Feedback erledigt ist, mit Merge-Commit-Betreff
    `<IssueId>: <IssueTitle>` mergen.

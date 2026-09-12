@@ -268,8 +268,7 @@ defmodule SymphonyElixir.RootEnvTest do
       refute inspect(settings) =~ "synthetic-secret"
     end
 
-    assert {:ok, legacy} = Schema.parse(%{"tracker" => %{"auth_mode" => "legacy"}})
-    assert legacy.tracker.auth_mode == "legacy"
+    assert {:error, _} = Schema.parse(%{"tracker" => %{"auth_mode" => "legacy"}})
 
     issue_ids = ["00000000-0000-4000-8000-000000000002"]
     scoped_workflow = put_in(workflow.config, ["tracker", "app", "allowed_issue_ids"], issue_ids)

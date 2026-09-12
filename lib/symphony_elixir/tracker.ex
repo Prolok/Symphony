@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Tracker do
   Adapter boundary for issue tracker reads and writes.
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, ProjectContext, ProjectPoller}
 
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
@@ -19,7 +19,10 @@ defmodule SymphonyElixir.Tracker do
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
-    adapter().fetch_candidate_issues()
+    case {ProjectContext.current(), Process.whereis(ProjectPoller)} do
+      {%SymphonyElixir.ProjectContext{} = context, pid} when is_pid(pid) -> ProjectPoller.candidates(context)
+      _ -> adapter().fetch_candidate_issues()
+    end
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}

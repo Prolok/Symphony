@@ -199,7 +199,7 @@ defmodule SymCodexScriptTest do
       File.rm_rf(workspace_root)
     end)
 
-    prompt_output = manual_prompt_context_v2("Todo (Dialog-AI)", "thread-dialog", "follow-up-prompt")
+    prompt_output = manual_session_context("Todo (Dialog-AI)", "thread-dialog", "follow-up-prompt")
 
     assert {output, 0} =
              run_script(Path.join(repo_dir, "sym-codex"), bin_dir, ["PRO-351"],
@@ -230,7 +230,7 @@ defmodule SymCodexScriptTest do
       File.rm_rf(workspace_root)
     end)
 
-    prompt_output = manual_prompt_context_v2("Todo (Dialog-AI)", "thread-dialog", "follow-up-prompt")
+    prompt_output = manual_session_context("Todo (Dialog-AI)", "thread-dialog", "follow-up-prompt")
 
     assert {output, 0} =
              run_script(Path.join(worktree, "sym-codex"), bin_dir, [],
@@ -261,7 +261,7 @@ defmodule SymCodexScriptTest do
       File.rm_rf(workspace_root)
     end)
 
-    prompt_output = manual_prompt_context_v2("Todo (Dialog-AI)", "thread-dialog", "")
+    prompt_output = manual_session_context("Todo (Dialog-AI)", "thread-dialog", "")
 
     assert {output, 0} =
              run_script(Path.join(repo_dir, "sym-codex"), bin_dir, ["PRO-351"],
@@ -325,9 +325,9 @@ defmodule SymCodexScriptTest do
                ]
              )
 
-    assert output =~ "--model gpt-5.6-sol"
+    assert output =~ "--model gpt-6-astra"
     assert output =~ "--config service_tier=priority"
-    assert output =~ "--config model_reasoning_effort=high"
+    assert output =~ "--config model_reasoning_effort=xhigh"
   end
 
   test "sym-codex passes the new reasoning effort values through unchanged" do
@@ -570,8 +570,8 @@ defmodule SymCodexScriptTest do
                env: [{"SYMPHONY_PROJECT_WORKTREES_ROOT", workspace_root}]
              )
 
-    assert output =~ "--model gpt-5.6-sol"
-    assert output =~ "--config model_reasoning_effort=high"
+    assert output =~ "--model gpt-6-astra"
+    assert output =~ "--config model_reasoning_effort=xhigh"
     refute output =~ "--model gpt-5.4-mini"
     refute output =~ "--config model_reasoning_effort=low"
   end
@@ -647,7 +647,7 @@ defmodule SymCodexScriptTest do
     assert output =~ "pwd=#{worktree}"
   end
 
-  test "sym-codex observer start from a worktree avoids mix for branch-based inference" do
+  test "bound sym-codex observer avoids mix for branch-based inference" do
     %{repo_dir: repo_dir, bin_dir: bin_dir, workspace_root: workspace_root, worktree: worktree} =
       build_script_worktree_fixture!("PRO-49")
 
@@ -666,7 +666,10 @@ defmodule SymCodexScriptTest do
     File.chmod!(Path.join(bin_dir, "mix"), 0o755)
 
     assert {output, 0} =
-             run_script(Path.join(repo_dir, "sym-codex"), bin_dir, ["--observer"], cd: worktree)
+             run_script(Path.join(repo_dir, "sym-codex"), bin_dir, ["--observer"],
+               cd: worktree,
+               env: [{"SYMPHONY_LINEAR_AUTH_MODE", "app"}]
+             )
 
     assert output =~ "codex-stub"
     assert output =~ "pwd=#{worktree}"
@@ -818,6 +821,7 @@ defmodule SymCodexScriptTest do
       File.rm_rf(workspace_root)
     end)
 
+    File.rm_rf!(Path.join(repo_dir, ".venv"))
     create_venv_fixture!(worktree, "workspace")
 
     {output, 0} =
@@ -913,6 +917,7 @@ defmodule SymCodexScriptTest do
     File.cp!(@script_source, Path.join(repo_dir, "sym-codex"))
     File.cp!(@mcp_script_source, Path.join(repo_dir, "sym-codex-mcp"))
     File.cp!(@mix_runtime_source, Path.join(repo_dir, "scripts/mix-runtime"))
+    File.write!(Path.join(repo_dir, "scripts/codex-app-context.py"), "import os,sys\nos.execvp('codex',['codex',*sys.argv[1:]])\n")
 
     File.write!(codex_path, """
     #!/usr/bin/env bash
@@ -970,6 +975,17 @@ defmodule SymCodexScriptTest do
         shift
       fi
 
+      case "$mix_expr" in
+        *'Config.linear_runtime_env()'*)
+          printf '%s' '#{manual_session_context("", "", "")}'
+          exit 0
+          ;;
+        *ProjectSelection.command_selection*)
+          python3 -c 'import json,os,sys; print(json.dumps({"project_root":os.environ.get("SYMPHONY_TEST_SELECTED_PROJECT") or sys.argv[1], "identifier":sys.argv[2].split(":")[-1]}))' "$1" "$3"
+          exit 0
+          ;;
+      esac
+
       case "$#" in
         1)
           printf '%s' "${SYMPHONY_PROJECT_WORKTREES_ROOT:-}"
@@ -990,7 +1006,8 @@ defmodule SymCodexScriptTest do
         3|4)
           issue_identifier="$#"
           if [ -n "${SYMPHONY_TEST_MANUAL_PROMPT_OUTPUT_FROM_ENV:-}" ]; then
-            printf 'SYM_CODEX_CONTEXT_V1\nIn Arbeit (AI)\nSYM_CODEX_PROMPT_V1\nactive=%s source=%s workflow=%s' \
+            printf '%s' '#{manual_prompt_context("In Arbeit (AI)", "")}'
+            printf 'active=%s source=%s workflow=%s' \
               "${SYMPHONY_ACTIVE_REPO_ROOT:-}" \
               "${SYMPHONY_SOURCE_REPO:-}" \
               "${SYMPHONY_WORKFLOW_FILE:-}"
@@ -998,6 +1015,7 @@ defmodule SymCodexScriptTest do
             printf '%s' "$SYMPHONY_TEST_MANUAL_PROMPT_OUTPUT"
           else
             eval "resolved_issue_identifier=\\${$issue_identifier}"
+            printf '%s' '#{manual_prompt_context("In Arbeit (AI)", "")}'
             printf 'manual-prompt-for-%s' "$resolved_issue_identifier"
           fi
           exit 0
@@ -1071,9 +1089,22 @@ defmodule SymCodexScriptTest do
   end
 
   defp run_script(script_path, bin_dir, args \\ ["--observer"], opts \\ []) do
+    selected_project =
+      case Keyword.get(opts, :cd) do
+        nil ->
+          Path.dirname(script_path)
+
+        cwd ->
+          case System.cmd("git", ["-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"], stderr_to_stdout: true) do
+            {common, 0} -> common |> String.trim() |> Path.dirname()
+            _ -> Path.dirname(script_path)
+          end
+      end
+
     env =
       SymphonyElixir.TestSupport.cleared_symphony_runtime_env() ++
         [
+          {"SYMPHONY_TEST_SELECTED_PROJECT", selected_project},
           {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)},
           {"SYM_CODEX_MODEL", nil},
           {"SYM_CODEX_REASONING_EFFORT", nil},
@@ -1138,11 +1169,18 @@ defmodule SymCodexScriptTest do
     File.chmod!(venv_python_path, 0o755)
   end
 
-  defp manual_prompt_context(workflow_step, prompt) do
-    "SYM_CODEX_CONTEXT_V1\n#{workflow_step}\nSYM_CODEX_PROMPT_V1\n#{prompt}"
-  end
+  defp manual_prompt_context(workflow_step, prompt), do: manual_session_context(workflow_step, "", prompt)
 
-  defp manual_prompt_context_v2(workflow_step, session_id, prompt) do
-    "SYM_CODEX_CONTEXT_V2\n#{workflow_step}\n#{session_id}\nSYM_CODEX_PROMPT_V1\n#{prompt}"
+  defp manual_session_context(workflow_step, session_id, prompt) do
+    runtime = %{
+      "SYMPHONY_LINEAR_AUTH_MODE" => "app",
+      "SYMPHONY_LINEAR_CLIENT_SECRET_ENV" => "SYMPHONY_TEST_SECRET",
+      "SYMPHONY_LINEAR_BINDING_HASH" => "synthetic-binding",
+      "SYMPHONY_CODEX_STATE_ROOT" => "/synthetic/state",
+      "SYMPHONY_RUN_ID" => "synthetic-run",
+      "SYMPHONY_PHASE" => workflow_step
+    }
+
+    "SYM_CODEX_CONTEXT_V3\n#{Jason.encode!(runtime)}\n#{workflow_step}\n#{session_id}\nSYM_CODEX_PROMPT_V1\n#{prompt}"
   end
 end

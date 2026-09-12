@@ -5,7 +5,7 @@ defmodule SymphonyElixir.EnvFile do
 
   @config_dir_name ".symphony"
   # Root-only settings are read by Config; project files must not export them.
-  @root_only_keys ["SYM_MAXIMUM_REVIEW_ITERATIONS"]
+  @root_only_keys ["SYM_MAXIMUM_REVIEW_ITERATIONS", "SYM_PROJECT_ROOT"]
   @env_files [
     {".env", :defaults},
     {".env.local", :local_override}
@@ -14,7 +14,7 @@ defmodule SymphonyElixir.EnvFile do
   @type load_mode :: :defaults | :local_override
 
   @root_config_names ~w(SYM_CODEX_MODEL SYM_CODEX_REASONING_EFFORT
-    SYM_CODEX_SERVICE_TIER SYM_CODEX_HUMAN_SERVICE_TIER SYM_MAXIMUM_REVIEW_ITERATIONS)
+    SYM_CODEX_SERVICE_TIER SYM_CODEX_HUMAN_SERVICE_TIER SYM_MAXIMUM_REVIEW_ITERATIONS SYM_PROJECT_ROOT)
 
   @spec root_config_names() :: [String.t()]
   def root_config_names, do: @root_config_names
@@ -91,15 +91,16 @@ defmodule SymphonyElixir.EnvFile do
   @doc "Read only the requested project secret in a trusted auth runtime; never export it."
   @spec linear_secret(String.t()) :: {:ok, String.t()} | {:error, atom()}
   def linear_secret(name) do
+    linear_secret(name, System.get_env("SYMPHONY_LINEAR_ENV_DIR"))
+  end
+
+  @spec linear_secret(String.t(), Path.t() | nil) :: {:ok, String.t()} | {:error, atom()}
+  def linear_secret(name, config_dir) do
     if System.get_env("SYMPHONY_LINEAR_SECRET_ACCESS") == "denied" do
       {:error, :linear_secret_access_denied}
     else
-      read_linear_secret(name)
+      read_secret_file(config_dir, name)
     end
-  end
-
-  defp read_linear_secret(name) do
-    read_secret_file(System.get_env("SYMPHONY_LINEAR_ENV_DIR"), name)
   end
 
   defp read_secret_file(root, name) when is_binary(root) and root != "" do
@@ -153,6 +154,38 @@ defmodule SymphonyElixir.EnvFile do
   @spec config_dir(Path.t()) :: Path.t()
   def config_dir(project_root) when is_binary(project_root) do
     Path.join(project_root, @config_dir_name)
+  end
+
+  @doc "Read project settings without exporting variables or interpreting secret values."
+  @spec read_public(Path.t(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def read_public(config_dir, secret_reference \\ "LINEAR_APP_SECRET") do
+    paths = Enum.map(@env_files, fn {name, _} -> Path.join(config_dir, name) end)
+
+    with {:ok, names} <- public_names(paths),
+         {:ok, selected_secrets} <- selected_secret_names(paths, secret_reference) do
+      read_selected(paths, names -- ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_APP_INSTALLATION_ID" | selected_secrets])
+    end
+  end
+
+  defp selected_secret_names(paths, "$" <> selector) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, names} ->
+      case read_selected([path], [selector]) do
+        {:ok, values} -> {:cont, {:ok, names ++ Map.values(values)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp selected_secret_names(_paths, reference), do: {:ok, List.wrap(reference)}
+
+  defp public_names(paths) do
+    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, names} ->
+      case File.read(path) do
+        {:ok, contents} -> {:cont, {:ok, names ++ Enum.map(String.split(contents, ~r/\r\n|\n|\r/), &line_key/1)}}
+        {:error, :enoent} -> {:cont, {:ok, names}}
+        {:error, reason} -> {:halt, {:error, {:env_file_read_failed, path, reason}}}
+      end
+    end)
   end
 
   @doc "Reads defaults and local overrides without changing the process environment."

@@ -396,7 +396,11 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_project_link_lines do
-    scope_line = format_linear_scope_line(Config.linear_scope())
+    scope_line =
+      case SymphonyElixir.Projects.configured() do
+        [] -> format_linear_scope_line(Config.linear_scope())
+        contexts -> colorize("│ Projects: ", @ansi_bold) <> colorize(Enum.map_join(contexts, ", ", & &1.name), @ansi_cyan)
+      end
 
     case dashboard_url() do
       url when is_binary(url) ->

@@ -65,6 +65,7 @@ defmodule SymphonyElixir.Orchestrator do
       :active_instance_count_fun,
       :shutdown_fun,
       :output_fun,
+      external_poll: false,
       shutdown_requested: false,
       running: %{},
       completed: MapSet.new(),
@@ -85,6 +86,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def init(opts) do
+    :ok = SymphonyElixir.ProjectContext.bind(Keyword.get(opts, :context))
+    if Keyword.get(opts, :external_poll, false), do: Process.flag(:trap_exit, true)
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
     idle_shutdown_ms_override = Keyword.get(opts, :idle_shutdown_ms)
@@ -102,6 +105,7 @@ defmodule SymphonyElixir.Orchestrator do
       active_instance_count_fun: Keyword.get(opts, :active_instance_count_fun, &RuntimeInstances.active_count/0),
       shutdown_fun: Keyword.get(opts, :shutdown_fun, &default_shutdown/0),
       output_fun: Keyword.get(opts, :output_fun, &IO.puts/1),
+      external_poll: Keyword.get(opts, :external_poll, false),
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -119,10 +123,27 @@ defmodule SymphonyElixir.Orchestrator do
         state.poll_interval_ms
       end
 
-    state = schedule_tick(state, initial_poll_delay_ms)
+    state =
+      if state.external_poll do
+        # The shared initial fetch may finish before this project is registered.
+        # Consume its cache on startup as well as on subsequent poll notifications.
+        send(self(), :tick)
+        state
+      else
+        schedule_tick(state, initial_poll_delay_ms)
+      end
 
     {:ok, state}
   end
+
+  @impl true
+  def terminate(_reason, %State{external_poll: true, running: running}) do
+    Enum.each(running, fn {_id, entry} ->
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, entry.pid)
+    end)
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   @impl true
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
@@ -168,7 +189,7 @@ defmodule SymphonyElixir.Orchestrator do
     state = maybe_request_idle_shutdown(state)
 
     state =
-      if state.shutdown_requested do
+      if state.shutdown_requested or state.external_poll do
         state
       else
         schedule_tick(state, next_poll_delay_ms(state))
@@ -1052,7 +1073,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, run_opts) do
+    context = SymphonyElixir.ProjectContext.current()
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+           :ok = SymphonyElixir.ProjectContext.bind(context)
+
            AgentRunner.run(
              issue,
              recipient,
@@ -1963,7 +1988,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec request_refresh(GenServer.server()) :: map() | :unavailable
   def request_refresh(server) do
-    if Process.whereis(server) do
+    if GenServer.whereis(server) do
       GenServer.call(server, :request_refresh)
     else
       :unavailable
@@ -1975,7 +2000,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
-    if Process.whereis(server) do
+    if GenServer.whereis(server) do
       try do
         GenServer.call(server, :snapshot, timeout)
       catch
@@ -2035,6 +2060,8 @@ defmodule SymphonyElixir.Orchestrator do
      %{
        running: running,
        retrying: retrying,
+       last_activity_at_ms: state.last_activity_at_ms,
+       idle_shutdown_ms: state.idle_shutdown_ms,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -3824,6 +3851,7 @@ defmodule SymphonyElixir.Orchestrator do
       previous_state.completed_states != next_state.completed_states
   end
 
+  defp maybe_request_idle_shutdown(%State{external_poll: true} = state), do: state
   defp maybe_request_idle_shutdown(%State{shutdown_requested: true} = state), do: state
 
   defp maybe_request_idle_shutdown(%State{idle_shutdown_ms: timeout_ms} = state)

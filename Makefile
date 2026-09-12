@@ -30,7 +30,7 @@ test:
 	$(MIX) test
 
 python-check:
-	@python3 -c 'import sys; sys.exit("make all: Python 3.11+ ist für die vollständige App-/Legacy-Testmatrix erforderlich") if sys.version_info < (3, 11) else None'
+	@python3 -c 'import sys; sys.exit("make all: Python 3.11+ ist für die vollständige Testmatrix erforderlich") if sys.version_info < (3, 11) else None'
 
 python-tests: python-check
 	python3 -m unittest discover -s test/linear_app -v

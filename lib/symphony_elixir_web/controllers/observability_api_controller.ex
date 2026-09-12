@@ -21,6 +21,9 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
       {:error, :issue_not_found} ->
         error_response(conn, 404, "issue_not_found", "Issue not found")
+
+      {:error, :ambiguous_issue_identifier} ->
+        error_response(conn, 409, "ambiguous_issue_identifier", "Mehrdeutige Ticketkennung; Projekt:Ticketkennung angeben.")
     end
   end
 

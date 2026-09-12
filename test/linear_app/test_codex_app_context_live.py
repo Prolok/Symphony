@@ -52,6 +52,7 @@ class RealCodexContextTest(unittest.TestCase):
         (self.project / ".codex").mkdir()
         self.foreign_config = foreign + '[mcp_servers."foreign.with.dots"]\ncommand="/usr/bin/touch"\nargs=' + json.dumps([str(self.marker)]) + '\n'
         self.foreign_config += '[mcp_servers.foreign_http]\nurl="http://127.0.0.1:9"\n'
+        self.foreign_config += '[features]\nmemories=true\n[memories]\ngenerate_memories=true\nuse_memories=true\n'
         self.foreign_config += '[plugins."foreign.plugin@market"]\nenabled=true\n'
         # No inherited auth, project binding, personal Codex config or secrets.
         # mise may reuse installed tool binaries, with all mutable state private.
@@ -157,6 +158,9 @@ class RealCodexContextTest(unittest.TestCase):
                 status = request(3, "mcpServerStatus/list", {}) if "result" in started else None
                 if "result" in started:
                     config = request(4, "config/read", {"cwd": str(cwd)})["result"]["config"]
+                    self.assertFalse(config["features"]["memories"])
+                    self.assertFalse(config["memories"]["generate_memories"])
+                    self.assertFalse(config["memories"]["use_memories"])
                     servers = config["mcp_servers"]
                     self.assertEqual({name for name, server in servers.items() if server.get("enabled", True)}, {"symphony_linear"})
                     self.assertTrue(all(not plugin["enabled"] for plugin in config.get("plugins", {}).values()))
@@ -222,7 +226,7 @@ class RealCodexContextTest(unittest.TestCase):
         (worktree / ".codex").mkdir()
         (worktree / ".codex/config.toml").write_text(self.foreign_config)
         started, status = self.handshake(worktree)
-        self.assertIn("result", started, started)
+        self.assertIn("result", started, f"{started}\n{self.last_stderr}")
         self.assertIn("linear_graphql", json.dumps(status))
         self.assert_unchanged()
         self.config.write_text(self.config.read_text().replace("apps = false", "apps = true"))
@@ -232,20 +236,24 @@ class RealCodexContextTest(unittest.TestCase):
         self.assertIn("error", started, started)
         self.assertIn("symphony_linear", started["error"]["message"])
 
-    def test_real_codex_reproduces_unprepared_trust_drift(self):
-        # Seal the old config shape without changing any existing release.
+    def test_second_project_uses_its_own_home_and_keeps_the_release_unchanged(self):
         self.seal(self.project)
-        (self.release / ".symphony-release.json").unlink()
-        self.config.write_text("[features]\napps = false\n")
-        release_helper.seal(self.release)
         started, _ = self.handshake(self.project)
-        self.assertIn("error", started, started)
-        self.assertIn("symphony_linear", started["error"]["message"])
-        self.assertEqual(tomllib.loads(self.config.read_text())["projects"], {
-            str(self.project): {"trust_level": "trusted"},
-        })
-        with self.assertRaisesRegex(RuntimeError, "content changed"):
-            release_helper.verify(self.release)
+        self.assertIn("result", started, f"{started}\n{self.last_stderr}")
+        second = self.root / "second-project"
+        second.mkdir()
+        self.git(second, "init", "-q")
+        self.env.update(SYMPHONY_PROJECT_ROOT=str(second), SYMPHONY_SOURCE_REPO=str(second),
+                        SYMPHONY_CODEX_STATE_ROOT=str(self.root / "second-state"),
+                        SYMPHONY_LINEAR_ENV_DIR=str(second / ".symphony"))
+        started, status = self.handshake(second)
+        self.assertIn("result", started, f"{started}\n{self.last_stderr}")
+        self.assertIn("linear_graphql", json.dumps(status))
+        homes = list((self.release / ".symphony/codex/projects").iterdir())
+        self.assertEqual(len(homes), 2)
+        self.assertEqual({(home / "sessions").resolve() for home in homes}, {
+            self.root / "sessions-state/sessions", self.root / "second-state/sessions"})
+        self.assert_unchanged()
 
 
 if __name__ == "__main__":

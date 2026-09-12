@@ -50,6 +50,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <h1 class="hero-title">
               Operations Dashboard
             </h1>
+            <p :if={@payload[:projects] not in [nil, []]} class="hero-copy">Projects: <%= Enum.join(@payload.projects, ", ") %></p>
             <p class="hero-copy">
               Current state, retry pressure, token usage, and orchestration health for the active Symphony runtime.
             </p>
@@ -153,7 +154,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <a class="issue-link" href={"/api/v1/#{URI.encode(entry.issue_reference, &URI.char_unreserved?/1)}"}>JSON details</a>
                       </div>
                     </td>
                     <td>
@@ -232,7 +233,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                        <a class="issue-link" href={"/api/v1/#{URI.encode(entry.issue_reference, &URI.char_unreserved?/1)}"}>JSON details</a>
                       </div>
                     </td>
                     <td><%= entry.attempt %></td>

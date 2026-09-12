@@ -82,10 +82,9 @@ run_update() {
     echo "symphony: Update benötigt einen getrennten Laufzeitstand; Symphony für diesen Checkout neu starten." >&2
     return 0
   fi
-  # The full development gate covers App mode as well as Legacy. A Legacy
-  # runtime may still start on 3.10, but cannot validate an update on it.
+  # Check the gate toolchain before changing the release checkout.
   if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
-    echo "symphony: Update nicht ausgeführt: make all benötigt Python 3.11+. Der vorhandene Legacy-Stand wird gestartet." >&2
+    echo "symphony: Update nicht ausgeführt: make all benötigt Python 3.11+. Python 3.11+ muss für den Start erreichbar sein." >&2
     return 0
   fi
   git pull --ff-only "$REMOTE_NAME" "$REMOTE_BRANCH"

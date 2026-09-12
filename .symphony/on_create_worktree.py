@@ -15,18 +15,9 @@ LINEAR_TEST_PROJECT_SLUG = "LINEAR_TEST_PROJECT_SLUG"
 ENV_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 APP_PROJECT_KEYS = {
     LINEAR_PROJECT_SLUG, LINEAR_TEST_PROJECT_SLUG, "LINEAR_TEAM_KEY", "LINEAR_ASSIGNEE",
-    "LINEAR_APP_CLIENT_ID", "LINEAR_APP_WORKSPACE_ID", "LINEAR_APP_USER_ID", "LINEAR_APP_INSTALLATION_ID",
+    "LINEAR_APP_CLIENT_ID", "LINEAR_APP_WORKSPACE_ID", "LINEAR_APP_USER_ID",
 }
 MODEL_KEYS = {"SYM_CODEX_MODEL", "SYM_CODEX_REASONING_EFFORT", "SYM_CODEX_SERVICE_TIER", "SYM_CODEX_HUMAN_SERVICE_TIER"}
-
-
-def copy_env_local(source: Path, target: Path) -> None:
-    if not source.is_file():
-        return
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, target)
-    target.chmod(0o600)
 
 
 def copy_public_env_values(source: Path, target: Path, keys: set[str]) -> None:
@@ -248,14 +239,10 @@ def main(argv: list[str]) -> int:
 
     source_repo = Path(argv[1]).expanduser().resolve()
     workspace = Path(argv[2]).expanduser().resolve()
-    app_mode = os.environ.get("SYMPHONY_LINEAR_AUTH_MODE") == "app"
     project_source = source_repo / ".symphony" / ".env.local"
     project_target = workspace / ".symphony" / ".env.local"
-    preserve_project_target = app_mode and project_target.exists()
-    if app_mode:
-        copy_public_env_values(project_source, project_target, APP_PROJECT_KEYS)
-    else:
-        copy_env_local(project_source, project_target)
+    preserve_project_target = project_target.exists()
+    copy_public_env_values(project_source, project_target, APP_PROJECT_KEYS)
     test_project_slug = read_env_value_with_overrides(
         [
             source_repo / ".symphony" / ".env",
@@ -271,10 +258,7 @@ def main(argv: list[str]) -> int:
             test_project_slug,
         )
 
-    if app_mode:
-        copy_public_env_values(source_repo / ".env.local", workspace / ".env.local", MODEL_KEYS)
-    else:
-        copy_env_local(source_repo / ".env.local", workspace / ".env.local")
+    copy_public_env_values(source_repo / ".env.local", workspace / ".env.local", MODEL_KEYS)
 
     for binary_name in MANAGED_BINARIES:
         ensure_managed_symlink(workspace, binary_name)

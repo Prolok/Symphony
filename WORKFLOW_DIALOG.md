@@ -51,18 +51,27 @@ vergleichbaren Themen und die semantische Suche einbezogen werden.
 - Schreibe keine Antwortkommentare direkt in Linear. Gib deine Antwort als
   finale Antwort an Symphony zurück; Symphony veröffentlicht sie mit dem Header
   `### Antwort Symphony`.
-- Symphony prüft nach dem Dialog-Turn, ob das Repository nach normaler
-  Git-Semantik clean ist. Versionierte Änderungen und nicht ignorierte
-  unversionierte Dateien oder Verzeichnisse blockieren die Antwort; von Git
-  ignorierte Dateien und Verzeichnisse werden nicht separat geprüft. Wenn
-  Git-relevante Repository-Änderungen zurückbleiben, veröffentlicht Symphony
+- Symphony prüft vor jedem Codex-Start oder Resume, ob der Projektroot nach
+  normaler Git-Semantik sauber ist. Vorbestehende versionierte/indexierte
+  Änderungen oder nicht ignorierte Dateien verhindern den Start. Der
+  Antwortkommentar nennt den Projektroot und `git status --short` zur Prüfung;
+  vorhandene Arbeit muss gesichert bzw. abgeschlossen und die Anfrage danach
+  als neuer Linear-Kommentar gestellt werden. Symphony bereinigt keine Dateien
+  und schreibt diesen vorbestehenden Zustand nicht Codex zu.
+- Nach gestarteten Dialogläufen einschließlich Fehlerpfaden prüft Symphony den
+  Git-Status und den unveränderten HEAD. Damit werden auch während des Dialogs
+  committete Änderungen erkannt. Von Git ignorierte Dateien und Verzeichnisse
+  werden weiterhin nicht separat geprüft. Wenn Git-relevante Änderungen
+  zurückbleiben, veröffentlicht Symphony
   statt der eigentlichen Antwort einen Fehlerhinweis und wartet auf einen neuen
   Linear-Kommentar. Wenn während des fehlerhaften Turns bereits ein neuerer
   Benutzerkommentar eingetroffen ist, bleibt der Fehlerhinweis sichtbar, zählt
   aber nicht als abschließende Antwort auf diesen neueren Kommentar. Wenn
   Symphony die Kommentarfrische vor dem Fehlerhinweis nicht verifizieren kann,
   markiert der sichtbare Hinweis nur die ursprüngliche Anfrage als behandelt;
-  neuere Benutzerkommentare bleiben weiterhin bearbeitbar.
+  neuere Benutzerkommentare bleiben weiterhin bearbeitbar. Derselbe Frische-
+  und Quellbezug gilt für Vorabmeldungen bei unsauberem Projektroot; eine
+  vorhandene Session bleibt dabei erhalten, weil kein Resume versucht wurde.
 - Wenn der Codex-Turn in der nicht-interaktiven Dialog-Sitzung wegen
   erforderlicher Genehmigung, zusätzlicher Eingabe oder eines Turn-Fehlers nicht
   abgeschlossen werden kann, veröffentlicht Symphony einen Antwortkommentar mit

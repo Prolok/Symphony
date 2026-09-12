@@ -28,7 +28,10 @@ Gegenueber OpenAI Symphony legt dieser Fork den Schwerpunkt auf einen deutschspr
 Der Sonderstatus `Todo (Dialog-AI)` ist davon ausgenommen: Er nutzt
 `WORKFLOW_DIALOG.md` für dialogische Vorplanung, erstellt keinen Worktree,
 führt keine Hooks aus und startet Codex im Projektroot. Die Dialoganweisung
-untersagt Repository-Änderungen; Symphony prüft nach dem Turn den Git-Status.
+untersagt Repository-Änderungen; Symphony verlangt vor Start/Resume einen sauberen
+Git-Status und prüft nach dem Lauf zusätzlich den unveränderten HEAD. Vorbestehende
+Änderungen führen ohne Codex-Lauf zu einer konkreten Vorabmeldung; vorhandene
+Dateien werden nicht bereinigt, ignorierte Dateien bleiben außerhalb der Prüfung.
 Wenn ein zuvor vorgeschlagenes Umsetzungsticket ausdrücklich bestätigt wird,
 darf der Dialog-AI-Pfad dieses Ticket in Linear erstellen, verknüpfen und das
 Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.

@@ -629,6 +629,69 @@ defmodule SymphonyElixir.DialogTest do
     end
   end
 
+  test "agent runner posts source-scoped preflight answers when comment refresh fails" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-dialog-turn-refresh-error-#{System.unique_integer([:positive])}")
+
+    previous_linear_request_fun = Application.get_env(:symphony_elixir, :linear_client_request_fun)
+
+    try do
+      project_root = Path.join(test_root, "project")
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-turn-refresh-error.trace")
+
+      File.mkdir_p!(project_root)
+      File.write!(Path.join(project_root, "README.md"), "clean\n")
+      git_cmd!(project_root, ["init", "-b", "main"])
+      git_cmd!(project_root, ["config", "user.name", "Dialog Test"])
+      git_cmd!(project_root, ["config", "user.email", "dialog-test@example.com"])
+      git_cmd!(project_root, ["add", "README.md"])
+      git_cmd!(project_root, ["commit", "-m", "Initial commit"])
+      File.write!(Path.join(project_root, "archive.txt"), "existing archive")
+      write_turn_failed_fake_codex!(codex_binary, trace_file)
+      write_dialog_workflow!("dialog prompt {{ issue.identifier }}")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "linear",
+        tracker_api_token: "token",
+        tracker_project_slug: "project",
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      original_comment = %{
+        id: "comment-original",
+        body: "Original turn question",
+        created_at: ~U[2026-05-19 10:01:00Z]
+      }
+
+      put_linear_comment_refresh_failing_request_fun!([original_comment], self())
+      issue = dialog_issue("issue-dialog-turn-refresh-error", "MT-TREFRESH-ERR")
+
+      File.cd!(project_root, fn ->
+        assert :ok = AgentRunner.run(issue, self())
+      end)
+
+      assert_receive {:linear_comment_body, body}, 1_000
+      assert body =~ "### Antwort Symphony"
+      assert body =~ "[Antwort nicht abgeschlossen]"
+      assert body =~ "[Quelle id:comment-original]"
+      refute body =~ "[Session"
+      assert body =~ "vor dem Start"
+      refute File.exists?(trace_file)
+
+      assert {:ok, :noop} =
+               Dialog.next_request(
+                 issue,
+                 [original_comment, %{id: "comment-turn-error", body: body, created_at: ~U[2026-05-19 10:02:00Z]}],
+                 project_root
+               )
+    after
+      restore_app_env(:linear_client_request_fun, previous_linear_request_fun)
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner allows Symphony runtime log artifacts during dialog repo checks" do
     test_root = Path.join(System.tmp_dir!(), "symphony-dialog-log-artifact-#{System.unique_integer([:positive])}")
 
@@ -736,6 +799,65 @@ defmodule SymphonyElixir.DialogTest do
       restore_app_env(:memory_tracker_comments, previous_memory_comments)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       File.rm_rf(test_root)
+    end
+  end
+
+  for change <- [:staged, :committed] do
+    test "agent runner detects #{change} during a dialog even if Git status becomes clean" do
+      test_root = Path.join(System.tmp_dir!(), "symphony-dialog-dirty-#{System.unique_integer([:positive])}")
+
+      previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+      previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
+      previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+      try do
+        project_root = Path.join(test_root, "project")
+        workspace_root = Path.join(test_root, "workspaces")
+        codex_binary = Path.join(test_root, "fake-codex")
+        trace_file = Path.join(test_root, "codex-dirty.trace")
+        dirty_file = Path.join(project_root, "README.md")
+
+        File.mkdir_p!(project_root)
+        File.write!(Path.join(project_root, "README.md"), "clean\n")
+        git_cmd!(project_root, ["init", "-b", "main"])
+        git_cmd!(project_root, ["config", "user.name", "Dialog Test"])
+        git_cmd!(project_root, ["config", "user.email", "dialog-test@example.com"])
+        git_cmd!(project_root, ["add", "README.md"])
+        git_cmd!(project_root, ["commit", "-m", "Initial commit"])
+
+        write_dirty_fake_codex!(codex_binary, trace_file, dirty_file)
+        add_fake_git_change!(codex_binary, unquote(change))
+        write_dialog_workflow!("dialog prompt {{ issue.identifier }}")
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_kind: "memory",
+          workspace_root: workspace_root,
+          codex_command: "#{codex_binary} app-server"
+        )
+
+        issue = dialog_issue("issue-dialog-dirty", "MT-DDIRTY")
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+        Application.put_env(:symphony_elixir, :memory_tracker_comments, %{})
+        Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+        File.cd!(project_root, fn ->
+          assert :ok = AgentRunner.run(issue, self())
+        end)
+
+        assert_receive {:memory_tracker_comment, "issue-dialog-dirty", body}, 1_000
+        assert body =~ "### Antwort Symphony"
+        assert body =~ "Repository"
+        assert body =~ "nicht erlaubt"
+        refute body =~ "Dirty answer"
+        assert File.read!(dirty_file) == "dirty\n"
+        assert File.read!(trace_file) =~ "thread/start"
+        assert_dialog_git_change!(project_root, unquote(change))
+      after
+        restore_app_env(:memory_tracker_issues, previous_memory_issues)
+        restore_app_env(:memory_tracker_comments, previous_memory_comments)
+        restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+        File.rm_rf(test_root)
+      end
     end
   end
 
@@ -960,58 +1082,84 @@ defmodule SymphonyElixir.DialogTest do
     end
   end
 
-  test "agent runner catches dialog changes to already dirty tracked files" do
-    test_root = Path.join(System.tmp_dir!(), "symphony-dialog-tracked-dirty-#{System.unique_integer([:positive])}")
+  for dirty_kind <- [:archive, :tracked, :staged] do
+    test "agent runner rejects preexisting #{dirty_kind} before starting Codex" do
+      test_root = Path.join(System.tmp_dir!(), "symphony-dialog-tracked-dirty-#{System.unique_integer([:positive])}")
 
-    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
-    previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
-    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+      previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+      previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
+      previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
 
-    try do
-      project_root = Path.join(test_root, "project")
-      workspace_root = Path.join(test_root, "workspaces")
-      codex_binary = Path.join(test_root, "fake-codex")
-      trace_file = Path.join(test_root, "codex-tracked-dirty.trace")
-      dirty_file = Path.join(project_root, "README.md")
+      try do
+        project_root = Path.join(test_root, "project")
+        workspace_root = Path.join(test_root, "workspaces")
+        codex_binary = Path.join(test_root, "fake-codex")
+        trace_file = Path.join(test_root, "codex-tracked-dirty.trace")
+        dirty_file = Path.join(project_root, "README.md")
 
-      File.mkdir_p!(project_root)
-      File.write!(dirty_file, "clean\n")
-      git_cmd!(project_root, ["init", "-b", "main"])
-      git_cmd!(project_root, ["config", "user.name", "Dialog Test"])
-      git_cmd!(project_root, ["config", "user.email", "dialog-test@example.com"])
-      git_cmd!(project_root, ["add", "README.md"])
-      git_cmd!(project_root, ["commit", "-m", "Initial commit"])
-      File.write!(dirty_file, "already dirty\n")
+        File.mkdir_p!(project_root)
+        File.write!(dirty_file, "clean\n")
+        git_cmd!(project_root, ["init", "-b", "main"])
+        git_cmd!(project_root, ["config", "user.name", "Dialog Test"])
+        git_cmd!(project_root, ["config", "user.email", "dialog-test@example.com"])
+        git_cmd!(project_root, ["add", "README.md"])
+        git_cmd!(project_root, ["commit", "-m", "Initial commit"])
 
-      write_dirty_fake_codex!(codex_binary, trace_file, dirty_file)
-      write_dialog_workflow!("dialog prompt {{ issue.identifier }}")
+        dirty_file = prepare_dirty_dialog_root!(project_root, unquote(dirty_kind))
+        before_status = System.cmd("git", ["status", "--porcelain=v1", "-z"], cd: project_root)
+        before_index = System.cmd("git", ["write-tree"], cd: project_root)
 
-      write_workflow_file!(Workflow.workflow_file_path(),
-        tracker_kind: "memory",
-        workspace_root: workspace_root,
-        codex_command: "#{codex_binary} app-server"
-      )
+        write_fake_codex!(codex_binary, trace_file, "thread-unused", "turn-unused", "Unchanged answer")
+        write_dialog_workflow!("dialog prompt {{ issue.identifier }}")
 
-      issue = dialog_issue("issue-dialog-tracked-dirty", "MT-TDIRTY")
-      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{})
-      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_kind: "memory",
+          workspace_root: workspace_root,
+          codex_command: "#{codex_binary} app-server"
+        )
 
-      File.cd!(project_root, fn ->
-        assert :ok = AgentRunner.run(issue, self())
-      end)
+        issue = dialog_issue("issue-dialog-tracked-dirty", "MT-TDIRTY")
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+        Application.put_env(:symphony_elixir, :memory_tracker_comments, %{})
+        Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      assert_receive {:memory_tracker_comment, "issue-dialog-tracked-dirty", body}, 1_000
-      assert body =~ "### Antwort Symphony"
-      assert body =~ "Repository"
-      assert body =~ "nicht erlaubt"
-      refute body =~ "Dirty answer"
-      assert File.read!(dirty_file) == "dirty\n"
-    after
-      restore_app_env(:memory_tracker_issues, previous_memory_issues)
-      restore_app_env(:memory_tracker_comments, previous_memory_comments)
-      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
-      File.rm_rf(test_root)
+        File.cd!(project_root, fn ->
+          assert :ok = AgentRunner.run(issue, self())
+        end)
+
+        assert_receive {:memory_tracker_comment, "issue-dialog-tracked-dirty", body}, 1_000
+        assert body =~ "### Antwort Symphony"
+        assert body =~ "vor dem Start"
+        assert body =~ project_root
+        assert body =~ "git status --short"
+        refute body =~ "Codex-Lauf Änderungen"
+        refute File.exists?(trace_file)
+        assert File.read!(dirty_file) == "already dirty\n"
+        assert System.cmd("git", ["status", "--porcelain=v1", "-z"], cd: project_root) == before_status
+        assert System.cmd("git", ["write-tree"], cd: project_root) == before_index
+        assert {:ok, :noop} = Dialog.next_request(issue, [%{id: "answer", body: body}], project_root)
+
+        stored = %{id: "stored", body: Dialog.format_answer_comment("Vorherige Antwort", "stored-thread", true), created_at: ~U[2026-09-12 09:59:00Z]}
+        original = %{id: "original", body: "Noch eine Frage", created_at: ~U[2026-09-12 10:00:00Z]}
+        newer = %{id: "newer", body: "Neuere Frage", created_at: ~U[2026-09-12 10:01:00Z]}
+        {:ok, request} = Dialog.next_request(issue, [stored, original], project_root)
+        request = %{request | session_id: "stored-thread", include_session?: true}
+        Application.put_env(:symphony_elixir, :memory_tracker_comments, %{issue.id => [stored, original, newer]})
+        File.cd!(project_root, fn -> assert :ok = AgentRunner.run(issue, self(), dialog_request: request) end)
+        assert_receive {:memory_tracker_comment, "issue-dialog-tracked-dirty", stale_body}, 1_000
+        assert stale_body =~ "vor dem Start"
+        assert stale_body =~ "[Session stored-thread]"
+        refute File.exists?(trace_file)
+        answer = %{id: "stale-answer", body: stale_body, created_at: ~U[2026-09-12 10:02:00Z]}
+        assert {:ok, next} = Dialog.next_request(issue, [stored, original, newer, answer], project_root)
+        assert next.source_comment_id == "newer"
+        assert next.session_id == "stored-thread"
+      after
+        restore_app_env(:memory_tracker_issues, previous_memory_issues)
+        restore_app_env(:memory_tracker_comments, previous_memory_comments)
+        restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+        File.rm_rf(test_root)
+      end
     end
   end
 
@@ -2296,6 +2444,24 @@ defmodule SymphonyElixir.DialogTest do
       value when is_binary(value) -> value
       _value -> nil
     end
+  end
+
+  defp add_fake_git_change!(codex_binary, change) do
+    command = if change == :committed, do: "git add README.md && git commit -qm dialog-change", else: "git add README.md"
+    script = File.read!(codex_binary)
+    File.write!(codex_binary, String.replace(script, "      printf '%s\\n' '{\"method\":\"item/completed\"", "      #{command}\n      printf '%s\\n' '{\"method\":\"item/completed\""))
+  end
+
+  defp assert_dialog_git_change!(root, :committed), do: assert({"", 0} = System.cmd("git", ["status", "--porcelain=v1"], cd: root))
+  defp assert_dialog_git_change!(root, :staged), do: assert({"M  README.md\n", 0} = System.cmd("git", ["status", "--porcelain=v1"], cd: root))
+
+  defp prepare_dirty_dialog_root!(project_root, kind) do
+    file = if kind == :archive, do: "archive/notes.txt", else: "README.md"
+    path = Path.join(project_root, file)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "already dirty\n")
+    if kind == :staged, do: git_cmd!(project_root, ["add", "README.md"])
+    path
   end
 
   defp write_dialog_workflow!(prompt) when is_binary(prompt) do

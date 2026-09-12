@@ -5,6 +5,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
   alias SymphonyElixir.Codex.{CommentTool, DynamicTool, MCPServer, MergeTool}
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, Workpad}
   alias SymphonyElixir.Linear.{Adapter, CommentActionGuard, CommentMutations, CommentVersion, WriteContext}
+  alias SymphonyElixir.Linear.DurableState
 
   setup do
     System.put_env("SYMPHONY_LINEAR_ENV_DIR", Path.join(Path.dirname(Workflow.workflow_file_path()), ".symphony"))
@@ -55,6 +56,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert second["source"]["body"] == "zweite Fassung"
     assert workpad_body() =~ CommentVersion.key(first)
     body = workpad_body()
+    refute body =~ "<!-- symphony-input-result:"
     assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [result(key)])
     assert workpad_body() == body
     assert {:ok, prompt} = CommentCheckpoint.prompt(issue)
@@ -65,6 +67,84 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert workpad_body() =~ "Rückfrage"
     assert :ok = CommentCheckpoint.before_action(issue)
     assert {:ok, %{"inputs" => []}} = CommentCheckpoint.checkpoint(issue)
+  end
+
+  test "marker-free workpad write survives a local persistence failure and restart", %{issue: issue} do
+    establish(issue)
+    human("human", "Bitte prüfen")
+    {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
+    results = [result(key, "übernommen", "Erste Zeile.\nZweite Zeile mit **Fachbezug**.")]
+
+    fail_processed = fn path, state ->
+      if get_in(state, ["versions", key, "status"]) == "processed",
+        do: {:error, :disk_full},
+        else: DurableState.write(path, state)
+    end
+
+    assert {:error, :disk_full} = CommentCheckpoint.acknowledge(issue, results, writer: fail_processed)
+    body = workpad_body()
+    refute body =~ "<!-- symphony-input-result:"
+    assert body =~ "Zweite Zeile mit **Fachbezug**."
+    assert {:ok, %{"inputs" => [%{"key" => ^key}]}} = CommentCheckpoint.checkpoint(issue)
+    assert {:ok, %{"inputs" => []}} = CommentCheckpoint.acknowledge(issue, results)
+    assert workpad_body() == body
+  end
+
+  test "ack reuses complete Markdown entries and removes only matching legacy markers", %{issue: issue} do
+    establish(issue)
+    human("human", "Bitte prüfen")
+    {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
+    ack = result(key)
+    entry = "- Quelle `#{key}`: **übernommen** — #{ack["reason"]}"
+    marker = "<!-- symphony-input-result:#{CommentVersion.digest(ack)} -->"
+    foreign = "<!-- symphony-input-result:#{String.duplicate("0", 64)} -->"
+    original = workpad_body() <> "\n#{entry}\n#{marker}\n\n- Fremde Notiz\n#{foreign}\n"
+    :ok = Workpad.update_tracker_workpad(issue.id, original)
+    assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+    refute workpad_body() =~ marker
+    assert workpad_body() =~ foreign
+    assert length(String.split(workpad_body(), entry)) == 2
+
+    normalized = workpad_body() |> String.replace(entry, String.replace(entry, "- Quelle", "* Quelle") <> "  \r")
+    :ok = Workpad.update_tracker_workpad(issue.id, normalized)
+    assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+    assert workpad_body() == normalized
+  end
+
+  test "replacement and thread results retain their version references without hashes", %{issue: issue} do
+    establish(issue)
+    first = human("human", "erste Fassung")
+    {:ok, _} = CommentCheckpoint.checkpoint(issue)
+    second = human("human", "zweite Fassung")
+    thread = human("thread", "Antwort im Thread") |> Map.put("parentId", "human")
+    Process.put(:comments, Map.put(Process.get(:comments), "thread", thread))
+    {:ok, _} = CommentCheckpoint.checkpoint(issue)
+    replacement = result(CommentVersion.key(first), "ersetzt", "Durch die neue Fassung ersetzt") |> Map.put("replacement", CommentVersion.key(second))
+    results = [replacement, result(CommentVersion.key(second)), result(CommentVersion.key(thread), "nicht anwendbar", "Bereits berücksichtigt")]
+    assert {:ok, %{"inputs" => []}} = CommentCheckpoint.acknowledge(issue, results)
+    body = workpad_body()
+    assert body =~ "**ersetzt** → `#{CommentVersion.key(second)}`"
+    assert body =~ CommentVersion.key(thread)
+    refute body =~ "symphony-input-result"
+    assert {:ok, _} = CommentCheckpoint.acknowledge(issue, results)
+    assert workpad_body() == body
+  end
+
+  test "similar text, examples and a key alone do not replace a complete result", %{issue: issue} do
+    establish(issue)
+    human("human", "Bitte prüfen")
+    {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
+    ack = result(key)
+    entry = "- Quelle `#{key}`: **übernommen** — #{ack["reason"]}"
+    examples = "\n#{entry}\n\nNoch offen, anderer vollständiger Eintrag.\n\n```markdown\n#{entry}\n```\n\n### Verlauf\n\n#{entry}\n"
+    :ok = Workpad.update_tracker_workpad(issue.id, workpad_body() <> examples)
+    assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+    body = workpad_body()
+    assert body =~ examples
+    assert length(String.split(body, entry)) == 5
+    assert length(String.split(body, "### Kommentareingang")) == 2
+    assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+    assert workpad_body() == body
   end
 
   test "pending handoff errors contain identifiers while full source text stays in the checkpoint", %{issue: issue} do

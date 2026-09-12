@@ -115,15 +115,77 @@ defmodule SymphonyElixir.CommentCheckpoint do
   end
 
   defp append_result(result, body) do
-    marker = "<!-- symphony-input-result:" <> CommentVersion.digest(result) <> " -->"
+    blocks = Enum.map(inbox_blocks(body), fn {block, inbox?} -> {if(inbox?, do: remove_legacy_marker(block), else: block), inbox?} end)
+    body = Enum.map_join(blocks, &elem(&1, 0))
+    replacement = if result["replacement"], do: " → `#{result["replacement"]}`", else: ""
+    reason = String.replace(result["reason"], "\n", "\n  ")
+    entry = "- Quelle `#{result["key"]}`: **#{result["outcome"]}**#{replacement} — #{reason}"
 
-    if String.contains?(body, marker) do
+    if Enum.any?(blocks, fn {block, inbox?} -> inbox? and normalize_entry(block) == normalize_entry(entry) end) do
       body
     else
-      section = if String.contains?(body, "### Kommentareingang"), do: "", else: "\n\n### Kommentareingang\n"
-      replacement = if result["replacement"], do: " → `#{result["replacement"]}`", else: ""
-      body <> section <> "\n- Quelle `#{result["key"]}`: **#{result["outcome"]}**#{replacement} — #{result["reason"]}\n#{marker}\n"
+      insert_result(blocks, body, entry)
     end
+  end
+
+  defp insert_result(blocks, body, entry) do
+    case Enum.find_index(blocks, fn {block, inbox?} -> inbox? and String.starts_with?(block, "### Kommentareingang") end) do
+      nil ->
+        body <> "\n\n### Kommentareingang\n\n" <> entry <> "\n"
+
+      index ->
+        blocks
+        |> List.update_at(index, fn {block, inbox?} -> {block <> "\n" <> entry <> "\n\n", inbox?} end)
+        |> Enum.map_join(&elem(&1, 0))
+    end
+  end
+
+  defp inbox_blocks(body) do
+    body
+    |> String.split(~r/(?=^(?:\#{1,6} |[-*] |```|~~~))/m)
+    |> Enum.map_reduce({false, nil}, fn block, {inbox?, fence} ->
+      cond do
+        fence && String.starts_with?(block, fence) ->
+          {{block, false}, {inbox?, nil}}
+
+        fence ->
+          {{block, false}, {inbox?, fence}}
+
+        String.starts_with?(block, ["```", "~~~"]) ->
+          {{block, false}, {inbox?, String.slice(block, 0, 3)}}
+
+        String.starts_with?(block, "#") ->
+          inbox? = Regex.match?(~r/\A### Kommentareingang[ \t]*(?:\r?\n|$)/, block)
+          {{block, inbox?}, {inbox?, nil}}
+
+        true ->
+          {{block, inbox?}, {inbox?, nil}}
+      end
+    end)
+    |> elem(0)
+  end
+
+  defp remove_legacy_marker(block) do
+    pattern = ~r/\A([-*] Quelle `([^`\n]+)`: \*\*(übernommen|Rückfrage|nicht anwendbar|ersetzt)\*\*(?: → `([^`\n]+)`)? — ([\s\S]*?))\r?\n(<!-- symphony-input-result:([a-f0-9]{64}) -->)(?=\r?\n|$)/
+
+    case Regex.run(pattern, block) do
+      [_, _entry, key, outcome, replacement, reason, marker, digest] ->
+        result = %{"key" => key, "outcome" => outcome, "reason" => reason}
+        result = if replacement == "", do: result, else: Map.put(result, "replacement", replacement)
+        if CommentVersion.digest(result) == digest, do: Regex.replace(~r/\r?\n#{Regex.escape(marker)}(?=\r?\n|$)/, block, "", global: false), else: block
+
+      _ ->
+        block
+    end
+  end
+
+  defp normalize_entry(entry) do
+    entry
+    |> String.replace(~r/\A\* /, "- ")
+    |> String.split(~r/\r?\n/)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
   end
 
   defp payload(state), do: %{"last_successful_scan" => state["last_successful_scan"], "scan_error" => state["scan_error"], "inputs" => CommentInbox.pending(state)}

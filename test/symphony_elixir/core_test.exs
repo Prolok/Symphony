@@ -5396,29 +5396,31 @@ defmodule SymphonyElixir.CoreTest do
 
       orchestrator_name = Module.concat(__MODULE__, :DialogChangedSignalOrchestrator)
 
-      with_orchestrator([name: orchestrator_name, initial_poll?: false], fn pid ->
-        observed_issue = %{issue | last_comment_signal: answer_signal}
-        now_ms = System.monotonic_time(:millisecond)
+      with_clean_dialog_project(test_root, fn ->
+        with_orchestrator([name: orchestrator_name, initial_poll?: false], fn pid ->
+          observed_issue = %{issue | last_comment_signal: answer_signal}
+          now_ms = System.monotonic_time(:millisecond)
 
-        :sys.replace_state(pid, fn state ->
-          observed_issue
-          |> Orchestrator.observe_dialog_full_check_for_test(state, now_ms)
-          |> Map.put(:completed_states, %{issue_id => {"todo (dialog-ai)", DateTime.to_iso8601(completed_at)}})
-        end)
-
-        send(pid, :tick)
-
-        assert_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 1_000
-
-        running_entry =
-          Enum.find_value(1..20, fn _attempt ->
-            Process.sleep(50)
-            orchestrator_state(pid).running[issue_id]
+          :sys.replace_state(pid, fn state ->
+            observed_issue
+            |> Orchestrator.observe_dialog_full_check_for_test(state, now_ms)
+            |> Map.put(:completed_states, %{issue_id => {"todo (dialog-ai)", DateTime.to_iso8601(completed_at)}})
           end)
 
-        assert %{run_mode: :dialog, issue: %Issue{updated_at: ^completed_at}} = running_entry
-        assert running_entry.issue.last_comment_signal.id == "comment-user-new"
-        refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
+          send(pid, :tick)
+
+          assert_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 1_000
+
+          running_entry =
+            Enum.find_value(1..20, fn _attempt ->
+              Process.sleep(50)
+              orchestrator_state(pid).running[issue_id]
+            end)
+
+          assert %{run_mode: :dialog, issue: %Issue{updated_at: ^completed_at}} = running_entry
+          assert running_entry.issue.last_comment_signal.id == "comment-user-new"
+          refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
+        end)
       end)
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
@@ -5482,29 +5484,31 @@ defmodule SymphonyElixir.CoreTest do
 
       orchestrator_name = Module.concat(__MODULE__, :DialogSafetyFallbackOrchestrator)
 
-      with_orchestrator(
-        [name: orchestrator_name, initial_poll?: false, active_instance_count_fun: fn -> 1 end],
-        fn pid ->
-          now_ms = System.monotonic_time(:millisecond)
+      with_clean_dialog_project(test_root, fn ->
+        with_orchestrator(
+          [name: orchestrator_name, initial_poll?: false, active_instance_count_fun: fn -> 1 end],
+          fn pid ->
+            now_ms = System.monotonic_time(:millisecond)
 
-          :sys.replace_state(pid, fn state ->
-            Orchestrator.observe_dialog_full_check_for_test(issue, state, now_ms - 31_000)
-          end)
-
-          send(pid, :tick)
-
-          assert_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 1_000
-
-          running_entry =
-            Enum.find_value(1..20, fn _attempt ->
-              Process.sleep(50)
-              orchestrator_state(pid).running[issue_id]
+            :sys.replace_state(pid, fn state ->
+              Orchestrator.observe_dialog_full_check_for_test(issue, state, now_ms - 31_000)
             end)
 
-          assert %{run_mode: :dialog} = running_entry
-          refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
-        end
-      )
+            send(pid, :tick)
+
+            assert_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 1_000
+
+            running_entry =
+              Enum.find_value(1..20, fn _attempt ->
+                Process.sleep(50)
+                orchestrator_state(pid).running[issue_id]
+              end)
+
+            assert %{run_mode: :dialog} = running_entry
+            refute_receive {:memory_tracker_fetch_issue_comments, ^issue_id}, 100
+          end
+        )
+      end)
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
@@ -5782,6 +5786,14 @@ defmodule SymphonyElixir.CoreTest do
 
   defp orchestrator_state(pid) when is_pid(pid) do
     :sys.get_state(pid, 15_000)
+  end
+
+  defp with_clean_dialog_project(test_root, fun) do
+    # Dispatch tests must reach Codex startup independently of the developer's worktree.
+    project_root = Path.join(test_root, "project")
+    File.mkdir_p!(project_root)
+    assert {_, 0} = System.cmd("git", ["init", "-q"], cd: project_root)
+    File.cd!(project_root, fun)
   end
 
   defp with_orchestrator(opts, fun) do

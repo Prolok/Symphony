@@ -571,22 +571,25 @@ defmodule SymphonyScriptTest do
   test "a lock is released after each update and build failure" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
 
-    for env <- [
-          [{"SYMPHONY_TEST_COMPILE_STATUS", "9"}],
-          [{"SYMPHONY_TEST_DEPS_LOADPATHS_STATUS", "1"}, {"SYMPHONY_TEST_DEPS_GET_STATUS", "7"}],
-          [{"SYMPHONY_TEST_ESCRIPT_STATUS", "6"}]
+    for {env, expected_status} <- [
+          {[{"SYMPHONY_TEST_COMPILE_STATUS", "9"}], 9},
+          {[{"SYMPHONY_TEST_DEPS_LOADPATHS_STATUS", "1"}, {"SYMPHONY_TEST_DEPS_GET_STATUS", "7"}], 7},
+          {[{"SYMPHONY_TEST_ESCRIPT_STATUS", "6"}], 6}
         ] do
-      {_output, status} = run_script(repo_dir, home_dir, bin_dir, [], env: env)
-      assert status != 0
+      assert {_output, ^expected_status} = run_script(repo_dir, home_dir, bin_dir, [], env: env)
+      await_service_unlock(home_dir)
       assert {_output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
+      await_service_unlock(home_dir)
     end
 
     autoupdate = Path.join(repo_dir, "autoupdate")
     File.write!(autoupdate, "#!/bin/bash\nexit 13\n")
     File.chmod!(autoupdate, 0o755)
     assert {_output, 13} = run_script(repo_dir, home_dir, bin_dir, [])
+    await_service_unlock(home_dir)
     File.rm!(autoupdate)
     assert {_output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
+    await_service_unlock(home_dir)
   end
 
   test "a toolchain removed by autoupdate fails before build and registration" do

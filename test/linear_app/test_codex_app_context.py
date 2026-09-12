@@ -112,6 +112,30 @@ class AppContextTest(unittest.TestCase):
             "projects": {str(self.project.resolve()): {"trust_level": "trusted"}},
         })
 
+    def test_mcp_receives_the_worker_workspace_binding_without_inherited_runtime_env(self):
+        target = context.prepare(self.release, self.original, [], self.project)
+        worktrees = self.root / 'worktrees ä "quoted"'
+        workspace = worktrees / 'PRO-677'
+        workspace.mkdir(parents=True)
+        environment = {
+            "SYMPHONY_LINEAR_CLIENT_SECRET_ENV": "SYNTHETIC_SECRET",
+            "SYMPHONY_PROJECT_ROOT": str(self.project),
+            "SYMPHONY_PROJECT_WORKTREES_ROOT": str(worktrees),
+            "SYMPHONY_ISSUE_IDENTIFIER": workspace.name,
+        }
+        args = context.launch_config(self.release, target, self.project, self.personal, environment)
+        configuration = tomllib.loads(next(arg for arg in args if arg.startswith("mcp_servers.symphony_linear.env=")))
+        child_env = configuration["mcp_servers"]["symphony_linear"]["env"]
+        # Codex does not implicitly inherit arbitrary runtime variables into MCP.
+        result = subprocess.run([
+            os.sys.executable, "-c",
+            "import os; from pathlib import Path; "
+            "p=Path(os.environ['SYMPHONY_PROJECT_WORKTREES_ROOT'])/os.environ['SYMPHONY_ISSUE_IDENTIFIER']; "
+            "assert p.is_dir(); print(p)",
+        ], env=child_env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), str(workspace))
+
     def test_multiple_project_homes_keep_sessions_and_personal_memory_separate(self):
         (self.original / "memories").mkdir()
         (self.original / "memories/MEMORY.md").write_text("synthetic personal memory")

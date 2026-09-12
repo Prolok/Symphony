@@ -188,6 +188,8 @@ Ohne explizites `GH_REPO` bindet der Land-Helper sämtliche GitHub-Kindprozesse
 an die URL von `origin`. Eine bestehende GitHub-CLI-Standardauswahl von
 `upstream` wird dabei nicht als Projektbindung verwendet; die lokale
 Git-Konfiguration bleibt unverändert. Explizites `GH_REPO` bleibt erhalten.
+Der MCP-Start übernimmt den gebundenen `SYMPHONY_PROJECT_WORKTREES_ROOT`
+explizit; die isolierte Runtime ersetzt nicht den Workspace des Fachprojekts.
 Manuelle GitHub-Approvals,
 PR-/Remote-/Head-, CI- und Review-Gates bleiben bestehen. Offene Eingaben,
 fehlgeschlagene Scans oder geänderte Labels verhindern den Abschluss. Ein

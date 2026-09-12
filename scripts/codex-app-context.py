@@ -152,7 +152,7 @@ def launch_config(release, target, cwd, user_home, environment=None):
                  "--config", "mcp_servers.symphony_linear.command=" + json.dumps(str(release / "sym-codex-mcp"))])
     names = ("SYMPHONY_RELEASE_ROOT", "SYMPHONY_ROOT_DIR", "SYMPHONY_LINEAR_ENV_DIR", "SYMPHONY_LINEAR_AUTH_MODE", "SYMPHONY_LINEAR_CLIENT_SECRET_ENV", "SYMPHONY_LINEAR_BINDING_HASH",
              "SYMPHONY_RUN_ID", "SYMPHONY_PHASE", "SYMPHONY_ISSUE_ID", "SYMPHONY_ISSUE_IDENTIFIER",
-             "SYMPHONY_SOURCE_REPO", "SYMPHONY_PROJECT_ROOT", "SYMPHONY_WORKFLOW_FILE", "SYMPHONY_CODEX_STATE_ROOT", "SYMPHONY_PYTHON")
+             "SYMPHONY_SOURCE_REPO", "SYMPHONY_PROJECT_ROOT", "SYMPHONY_PROJECT_WORKTREES_ROOT", "SYMPHONY_WORKFLOW_FILE", "SYMPHONY_CODEX_STATE_ROOT", "SYMPHONY_PYTHON")
     forwarded = ",".join(json.dumps(name) + "=" + json.dumps(environment[name]) for name in names if name in environment)
     # Only the configured MCP may load the project secret on demand. A shell child
     # keeps the denied marker even when it invokes a launcher or Mix itself.

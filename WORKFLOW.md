@@ -768,6 +768,9 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
    GitHub-Aufrufe die URL von `origin`, unabhängig von einer lokalen
    GitHub-CLI-Standardauswahl von `upstream`. Die Bindung gilt nur für seine
    Kindprozesse; bestehende Git-Konfigurationen werden nicht verändert.
+   Der gebundene MCP-Transport übernimmt auch `SYMPHONY_PROJECT_WORKTREES_ROOT`
+   aus dem Worker-Kontext, damit beide Tooltransporte denselben Issue-Workspace
+   prüfen. Ein separates Runtime-Verzeichnis ist kein Projekt-Worktree-Root.
 5. Wenn Remote-Branch oder offene PR fehlen, darf Recovery nur aus einem
    sauberen, lokal in `Test (AI)` validierten Stand über `symphony-push`
    erfolgen. Nach dem Push PR-Kontext und PR-Head erneut prüfen; Duplicate-URL

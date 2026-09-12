@@ -384,7 +384,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
       workflow_path: Workflow.workflow_file_path(),
       workflow: workflow,
       settings: Config.settings!(),
-      env: %{"GH_CONFIG_DIR" => expected, "GIT_SSH_COMMAND" => "ssh -F " <> expected, "LINEAR_APP_SECRET" => "synthetic-secret"}
+      env: %{"GH_REPO" => "", "GH_CONFIG_DIR" => expected, "GIT_SSH_COMMAND" => "ssh -F " <> expected, "LINEAR_APP_SECRET" => "synthetic-secret"}
     }
 
     System.put_env("SYMPHONY_TEST_EXPECT_GIT_ENV", expected)

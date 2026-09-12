@@ -31,6 +31,9 @@ Nur im Merge-Schritt des Workflows verwenden.
    für genau diesen Branch muss existieren und die PR-Head-SHA muss dem
    lokalen `HEAD` entsprechen. Fehlenden Remote-Branch, fehlende PR oder
    PR-Head-Mismatch nicht als mergefähig behandeln.
+   Ohne explizites `GH_REPO` bindet der Land-Helper seine GitHub-Aufrufe an
+   die URL von `origin`; eine GitHub-CLI-Standardauswahl von `upstream`
+   ersetzt diese Projektbindung nicht. Explizites `GH_REPO` bleibt erhalten.
 2. Keine pauschalen lokalen Volltests in `Merge (AI)` ausführen. Vorhandene
    Test-Evidenz aus `Test (AI)` ist das maßgebliche lokale Gate. Wenn
    GitHub-Checks durch bewusste Skip-Policy `skipped` sind, ersetzt das keine

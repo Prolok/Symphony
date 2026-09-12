@@ -105,6 +105,9 @@ async def run_git(*args: str) -> str:
 
 
 async def run_gh(*args: str) -> str:
+    env = os.environ.copy()
+    if not env.get("GH_REPO"):
+        env["GH_REPO"] = (await run_git("remote", "get-url", "origin")).strip()
     # A merge retry must re-enter merge_bound and its fresh runtime gates.
     # Read-only GitHub calls may keep their bounded rate-limit backoff.
     attempts = 1 if args[:2] == ("pr", "merge") else MAX_GH_RETRIES
@@ -117,6 +120,7 @@ async def run_gh(*args: str) -> str:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         stdout, stderr = await proc.communicate()
         if proc.returncode == 0:

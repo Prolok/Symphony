@@ -764,6 +764,10 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
    `origin/symphony/<Issue>`, offene PR für diesen Branch und PR-Head-SHA gleich
    lokalem `HEAD`. Fehlender Remote-Branch, fehlende PR oder PR-Head-Mismatch
    dürfen nicht stillschweigend als mergefähig gelten.
+   Ohne explizites `GH_REPO` verwendet der Land-Helper für sämtliche
+   GitHub-Aufrufe die URL von `origin`, unabhängig von einer lokalen
+   GitHub-CLI-Standardauswahl von `upstream`. Die Bindung gilt nur für seine
+   Kindprozesse; bestehende Git-Konfigurationen werden nicht verändert.
 5. Wenn Remote-Branch oder offene PR fehlen, darf Recovery nur aus einem
    sauberen, lokal in `Test (AI)` validierten Stand über `symphony-push`
    erfolgen. Nach dem Push PR-Kontext und PR-Head erneut prüfen; Duplicate-URL

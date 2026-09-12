@@ -184,6 +184,10 @@ aufgelösten Workspace (auch bei relativen oder `~/`-Roots)
 gestartet; Checkpoint-Anfragen kommen über denselben Prozesskanal zurück.
 Beide Starts übernehmen die gebundene Projektumgebung, einschließlich Git-/GitHub-
 Konfiguration. Linear-Secrets werden vor der Übergabe entfernt.
+Ohne explizites `GH_REPO` bindet der Land-Helper sämtliche GitHub-Kindprozesse
+an die URL von `origin`. Eine bestehende GitHub-CLI-Standardauswahl von
+`upstream` wird dabei nicht als Projektbindung verwendet; die lokale
+Git-Konfiguration bleibt unverändert. Explizites `GH_REPO` bleibt erhalten.
 Manuelle GitHub-Approvals,
 PR-/Remote-/Head-, CI- und Review-Gates bleiben bestehen. Offene Eingaben,
 fehlgeschlagene Scans oder geänderte Labels verhindern den Abschluss. Ein

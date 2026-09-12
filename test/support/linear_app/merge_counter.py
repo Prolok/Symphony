@@ -13,6 +13,8 @@ if expected_env and args[:2] != ["rev-parse", "--path-format=absolute"]:
     assert "LINEAR_APP_SECRET" not in os.environ, "Linear secret forwarded"
 marker = Path(os.environ["SYMPHONY_TEST_MERGE_COUNTER"])
 head = "a" * 40
+if Path(sys.argv[0]).name == "gh":
+    assert os.environ.get("GH_REPO") == "https://example.invalid/project.git", "wrong project repository"
 if Path(sys.argv[0]).name == "git":
     if args[:2] == ["rev-parse", "HEAD"]:
         print(head)
@@ -20,6 +22,8 @@ if Path(sys.argv[0]).name == "git":
         print(head + "\trefs/heads/symphony/PRO-1")
     elif args and args[0] == "status":
         pass
+    elif args == ["remote", "get-url", "origin"]:
+        print("https://example.invalid/project.git")
     else:
         print("symphony/PRO-1")
 elif args[:2] == ["pr", "view"]:

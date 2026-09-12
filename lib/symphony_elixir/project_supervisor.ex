@@ -14,6 +14,7 @@ defmodule SymphonyElixir.ProjectSupervisor do
     children =
       [
         {Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry},
+        {SymphonyElixir.WorkerCapacity, contexts: contexts},
         {ProjectPoller, contexts: contexts}
       ] ++
         Enum.map(contexts, fn context ->

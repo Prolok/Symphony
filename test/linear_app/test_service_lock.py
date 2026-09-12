@@ -27,12 +27,12 @@ class ServiceLockTest(unittest.TestCase):
             process.communicate(timeout=5)
         self.directory.cleanup()
 
-    def start(self, name):
+    def start(self, name, child=None):
         # Two independent entry commands use the actual lock implementation.
         marker = self.root / name
-        child = "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started'); sys.stdin.buffer.read(1)"
+        child = child or "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('started'); sys.stdin.buffer.read(1)"
         bootstrap = "import importlib.util,pathlib,sys; s=importlib.util.spec_from_file_location('lock',sys.argv[1]); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); m.launch(sys.argv[3:],pathlib.Path(sys.argv[2]))"
-        process = subprocess.Popen([sys.executable, "-c", bootstrap, str(SCRIPT), str(self.lock), sys.executable, "-c", child, str(marker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        process = subprocess.Popen([sys.executable, "-c", bootstrap, str(SCRIPT), str(self.lock), sys.executable, "-c", child, str(marker)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         self.processes.append(process)
         return process, marker
 
@@ -76,6 +76,33 @@ class ServiceLockTest(unittest.TestCase):
 
     def test_second_start_and_restart_after_crash(self):
         self.assert_restart(signal.SIGKILL)
+
+    def test_group_signals_keep_mutex_until_owner_finishes_cleanup(self):
+        child = """
+import pathlib,signal,sys,time
+marker = pathlib.Path(sys.argv[1])
+def cleanup(*_):
+    marker.with_suffix('.cleanup').write_text('cleaning')
+for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    signal.signal(number, cleanup)
+marker.write_text('started')
+sys.stdin.buffer.read(1)
+"""
+        first, marker = self.start("owner", child)
+        self.wait_started(first, marker)
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=number):
+                receipt = marker.with_suffix('.cleanup')
+                receipt.unlink(missing_ok=True)
+                os.killpg(first.pid, number)
+                self.wait_started(first, receipt)
+                time.sleep(0.05)
+                second, second_marker = self.start("second-" + str(number))
+                _, error = second.communicate(input=b"x", timeout=2)
+                self.assertEqual(second.returncode, 1)
+                self.assertIn("Symphony läuft bereits", error.decode())
+                self.assertFalse(second_marker.exists())
+        first.communicate(input=b"x", timeout=2)
 
 
 if __name__ == "__main__":

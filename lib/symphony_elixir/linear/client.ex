@@ -305,10 +305,17 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, {:team, key}} -> get_in(node, ["team", "key"]) == key
       end
 
-    {:ok, filter} = build_assignee_filter(tracker.assignee)
-
     scope_matches and get_in(node, ["state", "name"]) in candidate_state_names(tracker.active_states) and
-      (Config.yolo?() or (get_in(node, ["assignee", "app"]) != true and assigned_to_worker?(node["assignee"], filter)))
+      project_assignee_matches?(node, tracker.assignee)
+  end
+
+  defp project_assignee_matches?(node, assignee) do
+    if Config.yolo?() do
+      true
+    else
+      {:ok, filter} = build_assignee_filter(assignee)
+      get_in(node, ["assignee", "app"]) != true and assigned_to_worker?(node["assignee"], filter)
+    end
   end
 
   @spec fetch_workspace_page(map(), String.t() | nil, page_cursors(), [map()]) :: {:ok, [map()]} | {:error, term()}
@@ -974,7 +981,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp validate_identifier_scope({:team, team_key}, _identifier, team_key), do: :ok
 
   defp validate_identifier_scope({:team, team_key}, identifier, _identifier_team_key) do
-    {:error, "Linear issue #{identifier} is outside configured team scope #{team_key}"}
+    {:error, {:issue_outside_team_scope, identifier, team_key}}
   end
 
   defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})

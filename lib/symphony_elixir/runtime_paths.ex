@@ -69,7 +69,7 @@ defmodule SymphonyElixir.RuntimePaths do
 
   defp project_context_env do
     case SymphonyElixir.ProjectContext.current() do
-      %{env: env} -> Map.take(env, @runtime_env_names)
+      %{env: env} -> env
       nil -> %{}
     end
   end

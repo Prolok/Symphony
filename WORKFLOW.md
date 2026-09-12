@@ -228,16 +228,31 @@ Mix-Artefakte an den aufgelösten Symphony-Checkout gebunden bleiben.
 Der eigenständige Release-Checkout übernimmt den aktuellen Arbeitsstand samt
 gestagten Löschungen, Umbenennungen und Datei-/Verzeichniswechseln;
 ignorierte Dateien werden nicht übernommen.
-Die öffentlichen Rootwerte `SYM_CODEX_*` und `SYM_MAXIMUM_REVIEW_ITERATIONS`
+Die öffentlichen Rootwerte `SYM_PROJECT_ROOT`, `SYM_CODEX_*` und `SYM_MAXIMUM_REVIEW_ITERATIONS`
 werden mit ihren lokalen Overrides im Release-Snapshot gebunden. Spätere
 Rootänderungen gelten erst für einen neuen Release; Fachprojektdateien
 überschreiben weder Modellstartwerte noch das Reviewbudget.
-Im App-Modus bereitet der autorisierte Projektstart vor dem Versiegeln des
-Releases genau eine lokale Codex-Trust-Freigabe für den Fachprojektroot vor
-(bei Git-Worktrees den Git-common-root). Dadurch verändert der erste
-`thread/start` die versiegelte Konfiguration nicht. Persönliche MCPs und
-Plugins bleiben gesperrt; die Manifestprüfung gilt weiterhin für die gesamte
-vorbereitete `config.toml`.
+Akzeptierte Workflow-Reloads erzeugen neue Projektkontexte für Polling und
+künftige Worker; bereits laufende Worker behalten ihren bisherigen Snapshot.
+Die gemeinsame Dashboard-Konfiguration folgt dem akzeptierten Reload;
+ihr Snapshot gilt nur während der Laufzeit des zugehörigen Pollers.
+Auth-/Scope- und Worktreeroot-Wechsel erfordern einen Neustart, ungültige Änderungen
+ersetzen keinen zuletzt gültigen Projektkontext. Externe Workflowdateien ändern
+den gebundenen Mix-/Release-Ausführungsroot nicht.
+Öffentliche Projektvariablen stehen projektbezogenen Hooks und Workerprozessen
+zur Verfügung; Kommando- und SSH-Konfigurations-Overrides werden im selben Kontext aufgelöst.
+Die Dienstkapazität, Statuslimits und SSH-Hostlimits gelten gemeinsam für alle Projekte;
+Workerstarts werden atomar zugelassen und nach Worker- oder Eigentümerende freigegeben.
+Aufgelöste Worktree-Roots verschiedener Projekte dürfen sich nicht überschneiden;
+der Start lehnt gleiche oder ineinander liegende Roots auch über Symlinks ab.
+Verwende dafür etwa `workspace.root: $SYMPHONY_PROJECT_WORKTREES_ROOT`.
+Der Release versiegelt das gemeinsame Codex-Startprofil und die kopierten
+Skills. Jedes Fachprojekt erhält ein eigenes Codex-Home mit genau seiner
+Trust-Freigabe (bei Git-Worktrees den Git-common-root). Die daraus erzeugte
+`config.toml` wird vor jedem Start vollständig gegen den erwarteten Inhalt
+geprüft; Abweichungen brechen den Start ab, vorhandene Sessions bleiben erhalten.
+Persönliche MCPs und Plugins bleiben gesperrt. Die gemeinsame Basiskonfiguration
+und Skills bleiben zusätzlich durch das Release-Manifest abgesichert.
 Reguläre Release-Starts erzeugen keine globalen Issue-Befehle. Für manuelle
 Ticketstarts aus dem Fachprojektroot den absoluten `sym-codex`-Pfad der
 gewünschten Installation mit Ticket-ID verwenden. Nur Hooks außerhalb eines

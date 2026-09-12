@@ -3,6 +3,29 @@ defmodule SymphonyElixir.EnvFileTest do
 
   alias SymphonyElixir.EnvFile
 
+  test "public reads exclude every occurrence of default and selected secret names" do
+    root = temp_project_root("repeated-secrets")
+    on_exit(fn -> File.rm_rf(root) end)
+
+    for name <- [".env", ".env.local"] do
+      File.write!(Path.join(root, name), """
+      LINEAR_APP_SECRET=synthetic-default
+      LINEAR_APP_SECRET=synthetic-repeat
+      LINEAR_API_KEY=synthetic-personal
+      LINEAR_API_KEY=synthetic-repeat
+      PRIVATE_TOKEN=synthetic-selected
+      PRIVATE_TOKEN=synthetic-repeat
+      SECRET_SELECTOR=PRIVATE_TOKEN
+      PUBLIC=visible
+      """)
+    end
+
+    for reference <- ["PRIVATE_TOKEN", "$SECRET_SELECTOR"] do
+      assert {:ok, values} = EnvFile.read_public(root, reference)
+      assert values == %{"PUBLIC" => "visible", "SECRET_SELECTOR" => "PRIVATE_TOKEN"}
+    end
+  end
+
   test "project loads cannot export or overwrite the Symphony root review budget" do
     root = temp_project_root("root-only-budget")
     env_dir = symphony_dir(root)

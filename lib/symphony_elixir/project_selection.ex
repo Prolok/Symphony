@@ -28,7 +28,7 @@ defmodule SymphonyElixir.ProjectSelection do
         end)
 
       matches = for {context, {:ok, issue}} <- results, do: {context, issue}
-      errors = for {context, {:error, reason}} <- results, not match?({:issue_not_found, _}, reason), do: {context.name, reason}
+      errors = for {context, {:error, reason}} <- results, not scope_miss?(reason), do: {context.name, reason}
 
       case {errors, matches} do
         {[], [{context, issue}]} -> {:ok, context, issue}
@@ -38,6 +38,10 @@ defmodule SymphonyElixir.ProjectSelection do
       end
     end
   end
+
+  defp scope_miss?({:issue_not_found, _}), do: true
+  defp scope_miss?({:issue_outside_team_scope, _, _}), do: true
+  defp scope_miss?(_), do: false
 
   defp candidates(contexts, qualifier, _cwd) when is_binary(qualifier) do
     case Enum.filter(contexts, &(&1.name == qualifier or &1.root == qualifier)) do

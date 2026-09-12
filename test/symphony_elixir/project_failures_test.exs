@@ -54,6 +54,48 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     assert {:error, {:project_root_unavailable, _, :enoent}} = Projects.prepare(root, workflow)
   end
 
+  test "preparation refuses colliding workspace roots before publishing contexts", %{root: root} do
+    System.put_env("SYM_PROJECT_ROOT", root)
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_project_slug: "$LINEAR_PROJECT_SLUG")
+
+    for name <- ["One", "Two"] do
+      File.mkdir_p!(Path.join([root, name, ".symphony"]))
+      File.write!(Path.join([root, name, ".symphony/.env"]), "LINEAR_ASSIGNEE=dev@example.com\nLINEAR_PROJECT_SLUG=#{name}\n")
+    end
+
+    previous = Projects.configured()
+    result = Projects.prepare(root, Workflow.workflow_file_path())
+    assert {:error, {:overlapping_project_worktree_roots, _, _, _, _}} = result
+    assert Projects.configured() == previous
+
+    contexts =
+      for name <- ["One", "Two"] do
+        {:ok, context} = ProjectContext.load(Path.join(root, name), Workflow.workflow_file_path(), %{})
+        context
+      end
+
+    assert :ok = Client.validate_workspace_bindings(contexts)
+    [one, two] = contexts
+    assert one.settings.workspace.root == two.settings.workspace.root
+    shared = Path.join(root, "shared")
+    File.mkdir_p!(shared)
+    alias_path = Path.join(root, "shared-link")
+    File.ln_s!(shared, alias_path)
+    one = put_in(one.settings.workspace.root, shared)
+
+    for other <- [shared, alias_path, Path.join(shared, "PRO-1"), root] do
+      two = put_in(two.settings.workspace.root, other)
+      assert {:error, {:overlapping_project_worktree_roots, _, _, _, _}} = Projects.validate_workspace_roots([one, two])
+    end
+
+    two = put_in(two.settings.workspace.root, shared <> "-other")
+    assert :ok = Projects.validate_workspace_roots([one, two])
+    cycle = Path.join(root, "cycle-root")
+    File.ln_s!(cycle, cycle)
+    two = put_in(two.settings.workspace.root, cycle)
+    assert {:error, {:path_canonicalize_failed, _, :eloop}} = Projects.validate_workspace_roots([one, two])
+  end
+
   test "discovery, public config and journals fail visibly without modifying bad state", %{root: root} do
     cycle = Path.join(root, "cycle")
     File.ln_s!(cycle, cycle)
@@ -195,6 +237,53 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     assert {:ok, []} = ProjectPoller.candidates(context)
     assert {:reply, :unavailable, _} = Projects.handle_call(:snapshot, nil, [%{context | id: "missing"}])
 
+    changed =
+      context.workflow.config
+      |> put_in(["polling", "interval_ms"], 61_000)
+      |> put_in(["polling", "idle_shutdown_ms"], 0)
+      |> put_in(["agent", "max_concurrent_agents"], 2)
+      |> put_in(["observability"], %{"dashboard_enabled" => false, "refresh_ms" => 777, "render_interval_ms" => 888})
+
+    File.write!(context.workflow_path, "---\n" <> Jason.encode!(changed) <> "\n---\nReloaded project prompt\n")
+    assert :ok = WorkflowStore.force_reload()
+    ProjectPoller.refresh()
+    assert {:ok, []} = ProjectPoller.candidates(context)
+    refreshed = :sys.get_state(Projects.server(context))
+    assert refreshed.poll_interval_ms == 61_000
+    assert refreshed.max_concurrent_agents == 2
+    assert :sys.get_state(ProjectPoller).interval == 61_000
+    [reloaded] = :sys.get_state(ProjectPoller).contexts
+    assert reloaded.workflow.prompt == "Reloaded project prompt"
+    assert Config.settings!().agent.max_concurrent_agents == 2
+    assert Config.settings!().observability.refresh_ms == 777
+    assert Config.settings!().observability.render_interval_ms == 888
+    refute Config.settings!().observability.dashboard_enabled
+    parent = self()
+
+    :sys.replace_state(Projects.server(context), fn state ->
+      send(parent, {:worker_context, ProjectContext.current()})
+      state
+    end)
+
+    assert_receive {:worker_context, ^reloaded}
+    assert reloaded.settings.tracker.app == context.settings.tracker.app
+    assert context.workflow.prompt != reloaded.workflow.prompt
+    invalid = put_in(changed, ["polling", "interval_ms"], -1)
+    File.write!(context.workflow_path, "---\n" <> Jason.encode!(invalid) <> "\n---\nInvalid settings\n")
+    assert :ok = WorkflowStore.force_reload()
+    assert ProjectContext.refresh(reloaded) == reloaded
+    File.write!(context.workflow_path, "---\n" <> Jason.encode!(changed) <> "\n---\nReloaded project prompt\n")
+    assert :ok = WorkflowStore.force_reload()
+    stale_binding = put_in(context.settings.tracker.app["client_id"], "another-client")
+    assert ProjectContext.refresh(stale_binding) == stale_binding
+    stale_root = put_in(context.settings.workspace.root, Path.join(root, "another-worktree-root"))
+    assert ProjectContext.refresh(stale_root) == stale_root
+    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    File.rm!(context.workflow_path)
+    assert ProjectContext.refresh(reloaded) == reloaded
+    File.write!(context.workflow_path, "---\n" <> Jason.encode!(changed) <> "\n---\nReloaded project prompt\n")
+    assert {:ok, _} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+
     send(Orchestrator, :check_idle)
     assert is_map(Orchestrator.snapshot())
     server = Projects.server(context)
@@ -207,6 +296,7 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     send(Orchestrator, :check_idle)
     assert_receive {:DOWN, ^monitor, :process, ^supervisor, :shutdown}, 3_000
     assert Process.whereis(SymphonyElixir.ProjectPoller) == nil
+    assert ProjectPoller.service_settings() == nil
   end
 
   defp set_idle(server, timeout, elapsed) do

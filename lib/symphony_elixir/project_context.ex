@@ -5,6 +5,7 @@ defmodule SymphonyElixir.ProjectContext do
   """
 
   alias SymphonyElixir.{Config, EnvFile, PathSafety, Workflow}
+  require Logger
 
   defstruct [:id, :name, :root, :workflow_path, :workflow, :settings, env: %{}]
   @type t :: %__MODULE__{}
@@ -62,7 +63,7 @@ defmodule SymphonyElixir.ProjectContext do
           "SYMPHONY_LINEAR_ENV_DIR" => EnvFile.config_dir(root),
           "SYMPHONY_PROJECT_WORKTREES_ROOT" => root <> "-worktrees",
           "SYMPHONY_WORKFLOW_FILE" => workflow_path,
-          "SYMPHONY_WORKFLOW_DIR" => Path.dirname(workflow_path)
+          "SYMPHONY_WORKFLOW_DIR" => SymphonyElixir.RuntimePaths.workflow_dir()
         })
 
       context = %__MODULE__{
@@ -76,6 +77,46 @@ defmodule SymphonyElixir.ProjectContext do
 
       with_context(context, &resolve_context/0)
     end
+  end
+
+  @doc "Create a new configuration snapshot from the last accepted workflow; existing workers retain their snapshot."
+  @spec refresh(t()) :: t()
+  def refresh(context) do
+    workflow =
+      with_context(nil, fn ->
+        if Workflow.workflow_file_path() == context.workflow_path,
+          do: SymphonyElixir.WorkflowStore.current(),
+          else: {:ok, context.workflow}
+      end)
+
+    case workflow do
+      {:ok, workflow} when workflow == context.workflow ->
+        context
+
+      {:ok, workflow} ->
+        candidate = %{context | workflow: workflow, settings: nil}
+
+        accept_refreshed_context(with_context(candidate, &resolve_context/0), context)
+
+      {:error, reason} ->
+        keep_context(context, reason)
+    end
+  end
+
+  defp accept_refreshed_context({:ok, updated}, context) do
+    keys = [:auth_mode, :app, :assignee, :endpoint, :kind, :project_slug, :team_key]
+
+    if Map.take(updated.settings.tracker, keys) == Map.take(context.settings.tracker, keys) and
+         updated.settings.workspace.root == context.settings.workspace.root,
+       do: updated,
+       else: keep_context(context, :project_binding_change_requires_restart)
+  end
+
+  defp accept_refreshed_context({:error, reason}, context), do: keep_context(context, reason)
+
+  defp keep_context(context, reason) do
+    Logger.error("Workflow reload rejected project_root=#{context.root} reason=#{inspect(reason)}; keeping last known good project configuration")
+    context
   end
 
   defp resolve_context do

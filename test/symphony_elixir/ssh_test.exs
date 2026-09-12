@@ -65,6 +65,15 @@ defmodule SymphonyElixir.SSHTest do
     assert trace =~ "-F /tmp/symphony-test-ssh-config"
     assert trace =~ "-T -p 2222 localhost bash -lc"
     assert trace =~ "echo ready"
+
+    context = %SymphonyElixir.ProjectContext{env: %{"SYMPHONY_SSH_CONFIG" => "/tmp/project-ssh-config"}}
+
+    SymphonyElixir.ProjectContext.with_context(context, fn ->
+      assert {:ok, {"", 0}} = SSH.run("localhost:2222", "echo project", stderr_to_stdout: true)
+    end)
+
+    assert File.read!(trace_file) =~ "-F /tmp/project-ssh-config"
+    assert System.get_env("SYMPHONY_SSH_CONFIG") == "/tmp/symphony-test-ssh-config"
   end
 
   test "run/3 keeps the user prefix when parsing user@host:port targets" do

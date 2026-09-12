@@ -47,7 +47,7 @@ defmodule SymphonyElixir.Application do
          :ok <- SymphonyElixir.LogFile.configure() do
       children = [
         {Phoenix.PubSub, name: SymphonyElixir.PubSub},
-        {Task.Supervisor, task_supervisor_options()},
+        {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
         SymphonyElixir.WorkflowStore,
         orchestrator_child(),
         SymphonyElixir.HttpServer,
@@ -77,13 +77,6 @@ defmodule SymphonyElixir.Application do
     case SymphonyElixir.Projects.configured() do
       [] -> SymphonyElixir.Orchestrator
       contexts -> {SymphonyElixir.ProjectSupervisor, contexts: contexts}
-    end
-  end
-
-  defp task_supervisor_options do
-    case SymphonyElixir.Projects.configured() do
-      [] -> [name: SymphonyElixir.TaskSupervisor]
-      _ -> [name: SymphonyElixir.TaskSupervisor, max_children: Config.settings!().agent.max_concurrent_agents]
     end
   end
 end

@@ -10,11 +10,12 @@ defmodule SymphonyElixir.Projects do
 
   @spec prepare(Path.t(), Path.t()) :: :ok | {:error, term()}
   def prepare(code_root, workflow) do
-    with {:ok, values} <- EnvFile.read_public(code_root),
+    with {:ok, values} <- EnvFile.read_root(code_root),
          root_env <- Map.merge(Map.take(values, EnvFile.root_config_names()), Map.take(System.get_env(), EnvFile.root_config_names())),
          {:ok, roots} <- ProjectContext.discover(Map.get(root_env, "SYM_PROJECT_ROOT", "~/QuantHub"), code_root),
          false <- roots == [],
          {:ok, contexts} <- load_contexts(roots, workflow, root_env),
+         :ok <- validate_workspace_roots(contexts),
          :ok <- Client.validate_workspace_bindings(contexts) do
       Application.put_env(:symphony_elixir, :project_contexts, contexts)
       Application.put_env(:symphony_elixir, :service_settings, hd(contexts).settings)
@@ -23,6 +24,34 @@ defmodule SymphonyElixir.Projects do
       true -> {:error, :no_symphony_projects_found}
       error -> error
     end
+  end
+
+  @spec validate_workspace_roots([ProjectContext.t()]) :: :ok | {:error, term()}
+  def validate_workspace_roots(contexts) do
+    Enum.reduce_while(contexts, {:ok, []}, &check_workspace_root/2)
+    |> case do
+      {:ok, _} -> :ok
+      error -> error
+    end
+  end
+
+  defp check_workspace_root(context, {:ok, seen}) do
+    case SymphonyElixir.PathSafety.canonicalize(context.settings.workspace.root) do
+      {:ok, root} -> record_workspace_root(context, root, seen)
+      error -> {:halt, error}
+    end
+  end
+
+  defp record_workspace_root(context, root, seen) do
+    case Enum.find(seen, fn {_, previous} -> roots_overlap?(root, previous) end) do
+      nil -> {:cont, {:ok, [{context.root, root} | seen]}}
+      {project, previous} -> {:halt, {:error, {:overlapping_project_worktree_roots, project, context.root, previous, root}}}
+    end
+  end
+
+  defp roots_overlap?(a, b) do
+    a == b or String.starts_with?(a, String.trim_trailing(b, "/") <> "/") or
+      String.starts_with?(b, String.trim_trailing(a, "/") <> "/")
   end
 
   @spec server(ProjectContext.t()) :: GenServer.server()

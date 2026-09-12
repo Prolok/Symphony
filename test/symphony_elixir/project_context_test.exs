@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.ProjectContextTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SymphonyElixir.{Config, ProjectContext, RuntimePaths}
   alias SymphonyElixir.Linear.{Assignees, Client}
@@ -58,6 +58,8 @@ defmodule SymphonyElixir.ProjectContextTest do
         LINEAR_APP_USER_ID=app-user
         LINEAR_ASSIGNEE=first@example.com, second@example.com
         LINEAR_APP_SECRET=fixture-secret
+        SYMPHONY_CODEX_COMMAND=project-#{name}
+        PUBLIC_HOOK_VALUE=value-#{name}
         """)
 
         assert {:ok, context} = ProjectContext.load(project, workflow, %{})
@@ -76,6 +78,8 @@ defmodule SymphonyElixir.ProjectContextTest do
           assert Config.settings!().workspace.root == context.root <> "-worktrees"
           assert Config.settings!().tracker.app["state_root"] == Path.join(context.root, ".symphony/state")
           assert RuntimePaths.builtin_env()["SYMPHONY_LINEAR_ENV_DIR"] == Path.join(context.root, ".symphony")
+          assert Config.local_codex_command() == "project-#{context.name}"
+          assert RuntimePaths.builtin_env()["PUBLIC_HOOK_VALUE"] == "value-#{context.name}"
         end)
 
         assert ProjectContext.current() == nil

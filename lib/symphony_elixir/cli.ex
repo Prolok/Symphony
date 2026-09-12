@@ -105,8 +105,8 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp load_project_env_files(_env_files_dir) do
-    workflow = default_workflow_path()
-    root = System.get_env("SYMPHONY_ROOT_DIR") || Path.dirname(workflow)
+    workflow = Workflow.workflow_file_path()
+    root = System.get_env("SYMPHONY_ROOT_DIR") || SymphonyElixir.RuntimePaths.workflow_dir()
     SymphonyElixir.Projects.prepare(root, workflow)
   end
 

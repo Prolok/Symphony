@@ -9,6 +9,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
     old_request = Application.get_env(:symphony_elixir, :linear_client_request_fun)
     old_req = Req.default_options()
     parent = self()
+    original_service_settings = Application.get_env(:symphony_elixir, :service_settings)
     Supervisor.terminate_child(SymphonyElixir.Supervisor, Orchestrator)
 
     on_exit(fn ->
@@ -40,6 +41,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
         LINEAR_APP_SECRET=synthetic-#{workspace}
         LINEAR_PROJECT_SLUG=#{name}
         LINEAR_ASSIGNEE=#{assignee}
+        PUBLIC_HOOK_VALUE=#{name}
         """)
 
         write_hooks(project)
@@ -147,6 +149,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
       assert receipt["cwd"] == Path.dirname(result)
       assert receipt["state_root"] == Path.join(context.root, ".symphony/state/codex/symphony")
       assert receipt["secret_visible"] == false
+      assert receipt["public_value"] == context.name
     end
 
     refute_receive {:page, _, _, _}, 100
@@ -169,6 +172,8 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
     end
 
     stop_supervised!(ProjectSupervisor)
+    assert ProjectPoller.service_settings() == nil
+    assert Application.get_env(:symphony_elixir, :service_settings) == original_service_settings
 
     for {context, issue} <- Enum.zip(contexts, nodes) do
       ProjectContext.with_context(context, fn -> Workspace.remove(Path.join(context.settings.workspace.root, issue["identifier"])) end)
@@ -214,7 +219,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
       if method=='thread/start': result={'thread':{'id':'thread-fixture'}}
       if method=='turn/start':
         result={'turn':{'id':'turn-fixture'}}
-        pathlib.Path('result.json').write_text(json.dumps({'project':os.environ.get('SYMPHONY_PROJECT_ROOT'),'cwd':os.getcwd(),'state_root':os.environ.get('SYMPHONY_CODEX_STATE_ROOT'),'secret_visible':bool(os.environ.get('LINEAR_APP_SECRET') or os.environ.get('LINEAR_API_KEY'))}))
+        pathlib.Path('result.json').write_text(json.dumps({'project':os.environ.get('SYMPHONY_PROJECT_ROOT'),'cwd':os.getcwd(),'state_root':os.environ.get('SYMPHONY_CODEX_STATE_ROOT'),'public_value':os.environ.get('PUBLIC_HOOK_VALUE'),'secret_visible':bool(os.environ.get('LINEAR_APP_SECRET') or os.environ.get('LINEAR_API_KEY'))}))
       if 'id' in m: print(json.dumps({'id':m['id'],'result':result}),flush=True)
       if method=='turn/start': print(json.dumps({'method':'turn/completed'}),flush=True)
     """)
@@ -223,8 +228,9 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
   defp write_hooks(project) do
     for {file, action} <- [{"on_create_worktree.py", "create"}, {"on_remove_worktree.py", "remove"}] do
       File.write!(Path.join([project, ".symphony", file]), """
-      import pathlib,sys,subprocess
+      import pathlib,sys,subprocess,os
       project,workspace=map(pathlib.Path,sys.argv[1:])
+      assert os.environ.get('PUBLIC_HOOK_VALUE')==project.name
       with (project/'hooks.log').open('a') as f: f.write('#{action}:'+project.name+'\\n')
       if '#{action}'=='create':
         for args in [['init','-b','main'],['config','user.name','Fixture'],['config','user.email','fixture@example.com'],['commit','--allow-empty','-m','fixture']]:

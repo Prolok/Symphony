@@ -997,7 +997,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       {:error, :unexpected_request}
     end)
 
-    assert {:error, "Linear issue OTHER-123 is outside configured team scope PRO"} =
+    assert {:error, {:issue_outside_team_scope, "OTHER-123", "PRO"}} =
              Client.fetch_issue_by_identifier("OTHER-123")
 
     refute_received {:manual_issue_lookup, _payload}
@@ -2814,12 +2814,23 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert Config.settings!().worker.ssh_hosts == ["worker-01:2200"]
       assert Config.settings!().workspace.root == workspace_root
-      assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
-      assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
+
+      File.mkdir_p!(Path.join(test_root, ".symphony"))
+      File.write!(Path.join(test_root, ".symphony/.env"), "LINEAR_ASSIGNEE=dev@example.com\n")
+      {:ok, context} = SymphonyElixir.ProjectContext.load(test_root, Workflow.workflow_file_path(), %{})
+      context = %{context | env: Map.put(context.env, "SYMPHONY_SSH_CONFIG", "/project/ssh-config")}
+
+      SymphonyElixir.ProjectContext.with_context(context, fn ->
+        assert {:ok, ^workspace_path} = Workspace.create_for_issue("MT-SSH-WS", "worker-01:2200")
+        assert :ok = Workspace.run_before_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+        assert :ok = Workspace.run_after_run_hook(workspace_path, "MT-SSH-WS", "worker-01:2200")
+        assert :ok = Workspace.remove_issue_workspaces("MT-SSH-WS", "worker-01:2200")
+      end)
 
       trace = File.read!(trace_file)
+      calls = trace |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "ARGV:"))
+      assert length(calls) >= 4
+      assert Enum.all?(calls, &String.contains?(&1, "-F /project/ssh-config"))
       assert trace =~ "-p 2200 worker-01 bash -lc"
       assert trace =~ "__SYMPHONY_WORKSPACE__"
       assert trace =~ "~/.symphony-remote-workspaces/MT-SSH-WS"

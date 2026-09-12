@@ -95,6 +95,8 @@ def project_home(base, state, project_dir):
             pass
     finally:
         temporary.unlink()
+    if (target / "config.toml").is_symlink() or (target / "config.toml").read_text() != config:
+        raise RuntimeError("changed project configuration")
     for name in ("skills.json", "skills", "auth.json"):
         source = base / name
         if source.exists():
@@ -102,6 +104,8 @@ def project_home(base, state, project_dir):
                 (target / name).symlink_to(source.resolve(), target_is_directory=source.is_dir())
             except FileExistsError:
                 pass
+            if not (target / name).is_symlink() or (target / name).resolve() != source.resolve():
+                raise RuntimeError("changed project resource binding")
     bind_sessions(target, state)
     return target
 
@@ -111,7 +115,7 @@ def launch_config(release, target, cwd, user_home, environment=None):
     environment = os.environ if environment is None else environment
     captured = json.loads((target / "skills.json").read_text())
     roots = [user_home / ".agents/skills", user_home / ".codex/skills", Path("/etc/codex/skills")]
-    configs = [Path("/etc/codex/config.toml")]
+    configs = [Path("/etc/codex/config.toml"), target / "config.toml"]
     for parent in [cwd, *cwd.parents]:
         roots.extend([parent / ".agents/skills", parent / ".codex/skills"])
         configs.append(parent / ".codex/config.toml")

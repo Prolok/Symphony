@@ -47,6 +47,10 @@ API-Seite verknüpft die Scope-, Status- und Assignee-Auswahl projektweise.
 Innerhalb eines Workspaces müssen alle Projekte dieselbe verifizierte App-Bindung
 und dieselben Client Credentials verwenden. Widersprüche stoppen den Start.
 Verschiedene Workspaces werden getrennt abgefragt.
+Worktree-Roots müssen je Projekt getrennt sein; gleiche oder ineinander liegende
+Pfade werden beim Start abgewiesen. `workspace.root: $SYMPHONY_PROJECT_WORKTREES_ROOT`
+liefert einen projektspezifischen Root. Gesamt-, Status- und SSH-Hostlimits gelten
+gemeinsam für den Dienst.
 
 Symphony unterstützt ausschließlich OAuth2 Client Credentials. Persönliche API-Keys,
 PKCE und Legacy-Workflows sind keine Authentifizierungswege. Die

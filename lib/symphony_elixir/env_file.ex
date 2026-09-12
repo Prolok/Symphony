@@ -69,10 +69,19 @@ defmodule SymphonyElixir.EnvFile do
       {"", _} ->
         {:ok, %{}}
 
-      {_root, release} when is_binary(release) and release != "" ->
+      {root, _} ->
+        read_root(root)
+    end
+  end
+
+  @doc "Read public launch settings from the bound release snapshot or the source root without exporting them."
+  @spec read_root(Path.t()) :: {:ok, map()} | {:error, term()}
+  def read_root(root) do
+    case System.get_env("SYMPHONY_RELEASE_ROOT") do
+      release when is_binary(release) and release != "" ->
         read_root_snapshot(Path.join(release, ".symphony/root-config.json"))
 
-      {root, _} ->
+      _ ->
         read_selected(Enum.map(@env_files, fn {name, _} -> Path.join(root, name) end), @root_config_names)
     end
   end
@@ -163,7 +172,8 @@ defmodule SymphonyElixir.EnvFile do
 
     with {:ok, names} <- public_names(paths),
          {:ok, selected_secrets} <- selected_secret_names(paths, secret_reference) do
-      read_selected(paths, names -- ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_APP_INSTALLATION_ID" | selected_secrets])
+      excluded = ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_APP_INSTALLATION_ID" | selected_secrets]
+      read_selected(paths, Enum.reject(names, &(&1 in excluded)))
     end
   end
 

@@ -86,7 +86,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def init(opts) do
-    :ok = SymphonyElixir.ProjectContext.bind(Keyword.get(opts, :context))
+    context = Keyword.get(opts, :context)
+    context = if Keyword.get(opts, :external_poll, false), do: SymphonyElixir.ProjectPoller.context(context), else: context
+    :ok = SymphonyElixir.ProjectContext.bind(context)
     if Keyword.get(opts, :external_poll, false), do: Process.flag(:trap_exit, true)
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
@@ -146,6 +148,11 @@ defmodule SymphonyElixir.Orchestrator do
   def terminate(_reason, _state), do: :ok
 
   @impl true
+  def handle_info({:project_poll, context}, state) do
+    :ok = SymphonyElixir.ProjectContext.bind(context)
+    handle_info(:tick, state)
+  end
+
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
     state = refresh_runtime_config(state)
@@ -628,6 +635,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp refresh_running_issue_state(%State{} = state, %Issue{} = issue) do
     case Map.get(state.running, issue.id) do
       %{issue: _} = running_entry ->
+        if state.external_poll, do: SymphonyElixir.WorkerCapacity.update_state(running_entry.pid, issue.state)
         %{state | running: Map.put(state.running, issue.id, %{running_entry | issue: issue})}
 
       _ ->
@@ -864,7 +872,7 @@ defmodule SymphonyElixir.Orchestrator do
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
-      state_slots_available?(issue, running) and
+      state_slots_available?(issue, state) and
       worker_slots_available?(issue, state, nil)
   end
 
@@ -885,9 +893,14 @@ defmodule SymphonyElixir.Orchestrator do
     not completed_in_current_state?(issue, completed_states)
   end
 
-  defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
+  defp state_slots_available?(%Issue{state: issue_state}, %State{running: running, external_poll: external_poll}) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
-    used = running_issue_count_for_state(running, issue_state)
+
+    used =
+      if external_poll,
+        do: SymphonyElixir.WorkerCapacity.count_state(issue_state),
+        else: running_issue_count_for_state(running, issue_state)
+
     limit > used
   end
 
@@ -1075,7 +1088,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, run_opts) do
     context = SymphonyElixir.ProjectContext.current()
 
-    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+    case start_agent_task(state, worker_host, issue.state, fn ->
            :ok = SymphonyElixir.ProjectContext.bind(context)
 
            AgentRunner.run(
@@ -1148,6 +1161,12 @@ defmodule SymphonyElixir.Orchestrator do
         })
     end
   end
+
+  defp start_agent_task(%State{external_poll: true}, worker_host, issue_state, fun) do
+    SymphonyElixir.WorkerCapacity.start_child(worker_host, issue_state, fun)
+  end
+
+  defp start_agent_task(_state, _worker_host, _issue_state, fun), do: Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun)
 
   defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
@@ -1921,12 +1940,16 @@ defmodule SymphonyElixir.Orchestrator do
     hosts
     |> Enum.with_index()
     |> Enum.min_by(fn {host, index} ->
-      {running_worker_host_count(state.running, host), index}
+      {running_worker_host_count(state, host), index}
     end)
     |> elem(0)
   end
 
-  defp running_worker_host_count(running, worker_host) when is_map(running) and is_binary(worker_host) do
+  defp running_worker_host_count(%State{external_poll: true}, worker_host) do
+    SymphonyElixir.WorkerCapacity.count(worker_host)
+  end
+
+  defp running_worker_host_count(%State{running: running}, worker_host) do
     Enum.count(running, fn
       {_issue_id, %{worker_host: ^worker_host}} -> true
       _ -> false
@@ -1940,7 +1963,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp worker_host_slots_available?(%State{} = state, worker_host) when is_binary(worker_host) do
     case Config.settings!().worker.max_concurrent_agents_per_host do
       limit when is_integer(limit) and limit > 0 ->
-        running_worker_host_count(state.running, worker_host) < limit
+        running_worker_host_count(state, worker_host) < limit
 
       _ ->
         true
@@ -3898,7 +3921,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
-    available_slots(state) > 0 and state_slots_available?(issue, state.running)
+    available_slots(state) > 0 and state_slots_available?(issue, state)
   end
 
   defp apply_codex_token_delta(

@@ -36,6 +36,20 @@ Reviewbudget. Projektdateien überschreiben diese Rootvorgaben nicht.
 Jedes Projekt bekommt einen unveränderlichen Kontext mit Scope, Assignees,
 Workflow, Worktreepfad, Hookumgebung und lokalem Zustand. Parallele Worker wechseln
 weder die prozessglobale Umgebung noch das gemeinsame Arbeitsverzeichnis.
+Öffentliche Projektvariablen werden an Hooks und Worker weitergegeben; lokale
+Codex-Kommando- und SSH-Konfigurations-Overrides verwenden ebenfalls diesen Kontext.
+Ein akzeptierter Workflow-Reload erzeugt neue Snapshots für Polling und spätere
+Worker. Laufende Worker behalten ihren Kontext; Identitäts-/Scope- und Worktreeroot-Wechsel
+erfordern einen Neustart und ungültige Konfigurationen ersetzen keinen gültigen
+Snapshot. Eine externe Workflowdatei bleibt vom Mix-/Release-Ausführungsroot getrennt.
+Die gemeinsame Dashboard-Konfiguration übernimmt akzeptierte Reloads aus einem
+an die Poller-Laufzeit gebundenen Snapshot, einschließlich des geltenden Gesamtlimits.
+Gesamt-, Status- und SSH-Hostkapazität werden über alle Projekte atomar geprüft; auch ein
+abgebrochener Projektprozess gibt die von ihm gestarteten Worker und Plätze frei.
+Die Vorbereitung lehnt überschneidende Worktree-Roots verschiedener Projekte
+einschließlich Symlink-Aliasen ab. Ein gemeinsamer literaler Root oder der allgemeine
+Fallbackroot muss dafür durch projektspezifische Roots ersetzt werden, etwa
+`workspace.root: $SYMPHONY_PROJECT_WORKTREES_ROOT`.
 
 Pro Linear-Workspace müssen Client-ID, Workspace-ID, App-User-ID und Credentials
 übereinstimmen. Konflikte werden als Konfigurationsfehler abgewiesen. Die App-/
@@ -61,10 +75,16 @@ Sessionartefakten heraus. Direkte HTTP-Redirects sind für den App-Client deakti
 
 Release-Checkouts binden Code, Workflow, Helfer, Skills und Build-Artefakte an den
 geprüften Stand. Der Root-Konfigurationssnapshot enthält nur öffentliche
-Startwerte und die Rootreferenz. Codex bekommt kopierte Skills und nur den
+Startwerte einschließlich Discovery-Roots und Reviewbudget sowie die Rootreferenz.
+Discovery und Promptbau verwenden diese eingefrorenen Werte; spätere Änderungen
+am ursprünglichen Root wirken erst in einem neuen Release.
+Codex bekommt kopierte Skills und nur den
 gebundenen `symphony_linear`-MCP; persönliche MCPs und Plugins werden ausgeschlossen.
 Die vorhandene OpenAI-Anmeldung bleibt an ihrer Credential-Referenz. Dies ersetzt
 keine Dateisystemisolation gegenüber beliebigen Programmen mit Betreiberrechten.
+Jedes Projekt hat ein eigenes Codex-Home. Dessen erzeugte Konfiguration wird vor
+jedem Start vollständig mit dem erwarteten Inhalt verglichen; veränderte
+Konfigurationen werden abgewiesen, ohne Sessions zu ändern.
 
 ## Einmalige Betreiberübergabe
 
@@ -98,6 +118,8 @@ auch aus einem anderen Checkout oder mit einem anderen Port, endet sofort mit
 „Symphony läuft bereits“. Die Datei wird nicht gelöscht. Nach sauberem Ende oder
 Crash wird der OS-Lock freigegeben. Direkte escript-Starts verwenden denselben
 Lock; manuelle Codex-/Watch-Helfer sind kein zweiter Dienst.
+Der Lockhalter läuft in einer eigenen Prozessgruppe, damit Terminalsignale den
+Mutex erst nach dem Ende des Eigentümers und seiner regulären Bereinigung freigeben.
 
 Automatisierte kontrollierte Mehrprojekt-/Mehrworkspace-Tests und ein realer
 Linear-/Codex-Smoke werden getrennt ausgewiesen. Für reale Prüfungen dient das

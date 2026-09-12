@@ -45,6 +45,40 @@ defmodule SymphonyElixir.ProjectContractsTest do
     assert {:error, {:project_lookup_failed, [_]}} = ProjectSelection.resolve("PRO-1", contexts)
   end
 
+  test "an absent issue in one project does not hide the unique match in another", %{contexts: [one, two] = contexts} do
+    SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
+      nodes = if ProjectContext.current().id == one.id, do: [], else: [issue_node(two)]
+      {:ok, %{status: 200, body: %{"data" => %{"issues" => %{"nodes" => nodes}}}}}
+    end)
+
+    assert {:ok, ^two, %{identifier: "PRO-1"}} = ProjectSelection.resolve("PRO-1", contexts)
+    assert {:error, {:issue_not_found_in_projects, "PRO-1"}} = ProjectSelection.resolve("One:PRO-1", contexts)
+  end
+
+  test "manual selection ignores foreign team scopes while preserving real lookup failures", %{contexts: contexts} do
+    [one, two] =
+      Enum.zip(contexts, ["AAA", "BBB"])
+      |> Enum.map(fn {context, team} ->
+        tracker = %{context.settings.tracker | project_slug: nil, team_key: team}
+        %{context | settings: %{context.settings | tracker: tracker}}
+      end)
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
+      assert ProjectContext.current().id == one.id
+      node = issue_node(one) |> Map.put("identifier", "AAA-1") |> Map.put("team", %{"key" => "AAA"})
+      {:ok, %{status: 200, body: %{"data" => %{"issues" => %{"nodes" => [node]}}}}}
+    end)
+
+    assert {:ok, ^one, %{identifier: "AAA-1"}} = ProjectSelection.resolve("AAA-1", [one, two])
+    assert {:error, {:issue_not_found_in_projects, "AAA-1"}} = ProjectSelection.resolve("Two:AAA-1", [one, two])
+  end
+
+  test "project prompts use their captured root review budget", %{contexts: [one, _], root: root} do
+    File.write!(Path.join(root, ".env"), "SYM_MAXIMUM_REVIEW_ITERATIONS=3\n")
+    one = %{one | env: Map.put(one.env, "SYM_MAXIMUM_REVIEW_ITERATIONS", "7")}
+    ProjectContext.with_context(one, fn -> assert Config.maximum_review_iterations!(root) == 7 end)
+  end
+
   test "full project slugs match Linear's short slugId in polling and reconciliation", %{contexts: [one, _]} do
     context = %{one | settings: %{one.settings | tracker: %{one.settings.tracker | project_slug: "one-7d8cc05658e6"}}}
     node = put_in(issue_node(context), ["project", "slugId"], "7d8cc05658e6")
@@ -84,6 +118,47 @@ defmodule SymphonyElixir.ProjectContractsTest do
     assert {:error, {:linear_assignees_not_human_or_unavailable, _, _}} = Client.verify_project_assignees(contexts)
     assert_receive {:human_page, nil}
     assert_receive {:human_page, "next"}
+  end
+
+  test "shared yolo polling accepts issues without any configured assignee", %{contexts: [one, _]} do
+    previous = Application.get_env(:symphony_elixir, :yolo)
+    on_exit(fn -> Application.put_env(:symphony_elixir, :yolo, previous) end)
+    Application.put_env(:symphony_elixir, :yolo, true)
+    context = %{one | settings: %{one.settings | tracker: %{one.settings.tracker | assignee: nil}}}
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
+      node = Map.put(issue_node(context), "assignee", nil)
+      page = %{"nodes" => [node], "pageInfo" => %{"hasNextPage" => false}}
+      {:ok, %{status: 200, body: %{"data" => %{"issues" => page}}}}
+    end)
+
+    assert {:ok, candidates} = Client.fetch_project_candidates([context])
+    assert [%{identifier: "PRO-1", assigned_to_worker: true}] = candidates[context.id]
+  end
+
+  test "external workflow keeps the runtime execution root in hook environments", %{root: root} do
+    external = Path.join(root, "external")
+    File.mkdir_p!(external)
+    path = Path.join(external, "CUSTOM.md")
+    File.cp!(Workflow.workflow_file_path(), path)
+    project = Path.join(root, "One")
+    runtime_root = SymphonyElixir.RuntimePaths.workflow_dir()
+    {:ok, context} = ProjectContext.load(project, path, %{})
+    assert ProjectContext.refresh(context) == context
+
+    ProjectContext.with_context(context, fn ->
+      env = SymphonyElixir.RuntimePaths.builtin_env()
+      assert env["SYMPHONY_WORKFLOW_FILE"] == path
+      assert env["SYMPHONY_WORKFLOW_DIR"] == runtime_root
+
+      assert :ok =
+               SymphonyElixir.HookRunner.run_local(
+                 ~s(cd "$SYMPHONY_WORKFLOW_DIR" && test -f mix.exs),
+                 project,
+                 "external-workflow-root",
+                 env: env
+               )
+    end)
   end
 
   test "overlapping scopes fail before dispatch and repeated page cursors terminate", %{contexts: [one, two]} do

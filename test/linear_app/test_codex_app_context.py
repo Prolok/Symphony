@@ -144,6 +144,28 @@ class AppContextTest(unittest.TestCase):
                 str(Path(directory).resolve()): {"trust_level": "trusted"},
             })
 
+    def test_project_home_rejects_modified_config_without_changing_sessions(self):
+        base = context.prepare(self.release, self.original, [], self.project)
+        state = self.root / "state"
+        home = context.project_home(base, state, self.project)
+        retained = state / "sessions/retained.jsonl"
+        retained.write_text("retained")
+        config = home / "config.toml"
+        config.write_text(config.read_text() + '\n[mcp_servers.foreign]\ncommand="foreign"\n[plugins.foreign]\nenabled=true\n')
+        with self.assertRaisesRegex(RuntimeError, "changed project configuration"):
+            context.project_home(base, state, self.project)
+        self.assertEqual(retained.read_text(), "retained")
+
+    def test_launch_overrides_disable_extra_mcp_and_plugins_in_effective_home(self):
+        base = context.prepare(self.release, self.original, [], self.project)
+        home = context.project_home(base, self.root / "state", self.project)
+        config = home / "config.toml"
+        config.write_text(config.read_text() + '\n[mcp_servers.foreign]\ncommand="foreign"\n[plugins.foreign]\nenabled=true\n')
+        args = context.launch_config(self.release, home, self.project, self.personal,
+                                     {"SYMPHONY_LINEAR_CLIENT_SECRET_ENV": "SYNTHETIC_SECRET"})
+        self.assertIn('mcp_servers={"foreign"={enabled=false}}', args)
+        self.assertIn('plugins={"foreign"={enabled=false}}', args)
+
     def test_project_trust_uses_git_common_root_from_subdirectories_and_worktrees(self):
         def git(*args):
             return subprocess.run(["git", "-C", str(self.project), *args], check=True, capture_output=True)

@@ -41,7 +41,9 @@ defmodule SymphonyElixir.Config do
         resolve_settings()
 
       nil ->
-        case Application.get_env(:symphony_elixir, :service_settings) do
+        settings = SymphonyElixir.ProjectPoller.service_settings()
+
+        case settings || Application.get_env(:symphony_elixir, :service_settings) do
           %Schema{} = settings -> {:ok, settings}
           nil -> resolve_settings()
         end
@@ -183,7 +185,7 @@ defmodule SymphonyElixir.Config do
 
   @spec local_codex_command() :: String.t()
   def local_codex_command do
-    case System.get_env("SYMPHONY_CODEX_COMMAND") do
+    case ProjectContext.env("SYMPHONY_CODEX_COMMAND") || System.get_env("SYMPHONY_CODEX_COMMAND") do
       command when is_binary(command) ->
         case String.trim(command) do
           "" -> configured_local_codex_command()
@@ -195,15 +197,15 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @doc "Resolves the review budget from the environment and the active Symphony checkout."
+  @doc "Resolves the review budget from the bound project launch settings or the active Symphony root."
   @spec maximum_review_iterations!(Path.t()) :: pos_integer()
   def maximum_review_iterations!(symphony_root) do
     value =
-      case System.fetch_env("SYM_MAXIMUM_REVIEW_ITERATIONS") do
-        {:ok, value} ->
+      case ProjectContext.env("SYM_MAXIMUM_REVIEW_ITERATIONS") do
+        value when is_binary(value) ->
           value
 
-        :error ->
+        nil ->
           case EnvFile.read(symphony_root) do
             {:ok, values} -> Map.get(values, "SYM_MAXIMUM_REVIEW_ITERATIONS", "3")
             {:error, reason} -> raise ArgumentError, "Invalid SYM_MAXIMUM_REVIEW_ITERATIONS config: #{inspect(reason)}"

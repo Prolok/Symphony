@@ -111,6 +111,52 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert workpad_body() == normalized
   end
 
+  test "fenced examples require a matching fence length and a valid closing line", %{issue: issue} do
+    establish(issue)
+    human("human", "Bitte prüfen")
+    {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
+    ack = result(key)
+    entry = "- Quelle `#{key}`: **übernommen** — #{ack["reason"]}"
+    original = workpad_body()
+
+    for {opening, inner, closing} <- [
+          {"````markdown", "```", "````"},
+          {"~~~~markdown", "~~~", "~~~~"},
+          {"```markdown", "```not-a-close", "```"},
+          {"~~~markdown", "~~~~not-a-close", "~~~~"},
+          {"  ````markdown", "   ```", "   `````   "}
+        ] do
+      example = "\n#{opening}\n#{inner}\n#{entry}\n#{closing}\n"
+      :ok = Workpad.update_tracker_workpad(issue.id, original <> example)
+      assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+      body = workpad_body()
+      assert body =~ example
+      assert length(String.split(body, entry)) == 3, opening
+      assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+      assert workpad_body() == body
+    end
+  end
+
+  test "legacy multiline results migrate before Markdown block splitting and remain idempotent", %{issue: issue} do
+    establish(issue)
+    original = workpad_body()
+
+    for reason <- ["Geprüft:\n- API\n- Tests", "Geprüft:\n\n### Nachweis\n```text\nErgebnis\n```\nEnde"] do
+      human("human", reason)
+      {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
+      ack = result(key, "übernommen", reason)
+      entry = "- Quelle `#{key}`: **übernommen** — #{reason}"
+      marker = "<!-- symphony-input-result:#{CommentVersion.digest(ack)} -->"
+      :ok = Workpad.update_tracker_workpad(issue.id, original <> "\n#{entry}\n#{marker}\n")
+      assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+      body = workpad_body()
+      refute body =~ marker
+      assert length(String.split(body, "- Quelle `#{key}`")) == 2
+      assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+      assert workpad_body() == body
+    end
+  end
+
   test "replacement and thread results retain their version references without hashes", %{issue: issue} do
     establish(issue)
     first = human("human", "erste Fassung")

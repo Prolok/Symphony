@@ -166,8 +166,14 @@ bleiben erhalten und bestätigen die Löschung nicht mit.
 `symphony_comments` liefert sichere Checkpoints und schreibt versionsbezogene
 fachliche Ergebnisse in `### Kommentareingang` des einen Workpads. Nach einem
 Crash wird unbestätigte Arbeit erneut zugestellt. Ein bestätigter Workpad-Write
-mit noch fehlendem lokalem Ack lässt sich anhand seines Ergebnismarkers
-idempotent wiederholen. Die Marker und den Abschnitt bei Workpad-Updates erhalten.
+mit noch fehlendem lokalem Ack lässt sich anhand des vollständigen lesbaren
+Eintrags mit Quellversion, Ergebnis, Begründung und gegebenenfalls Ersatzbezug
+idempotent wiederholen. Den Abschnitt und diese vollständigen fachlichen
+Einträge bei Workpad-Updates erhalten; zusätzliche technische Ergebnis-Marker
+sind nicht nötig. Beim nächsten Ack entfernt Symphony alte HTML-Ergebnis-Marker
+nur bei einem vollständig zugehörigen, über den bisherigen Hash geprüften
+Eintrag und erhält dessen fachlichen Inhalt. Das gilt auch für mehrzeilige
+Begründungen. Codebeispiele und fremde Marker gelten nicht als Ergebnisbelege.
 Eigene App-Ausgaben werden am letzten bestätigten vollständigen Schreibstand
 erkannt; Rückedits auf frühere Texte bleiben sichtbar. Andere Integrationen
 aktivieren keine Arbeit. Technische Review-Subagenten bleiben isoliert.

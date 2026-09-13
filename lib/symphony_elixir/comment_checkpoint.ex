@@ -115,17 +115,21 @@ defmodule SymphonyElixir.CommentCheckpoint do
   end
 
   defp append_result(result, body) do
-    blocks = Enum.map(inbox_blocks(body), fn {block, inbox?} -> {if(inbox?, do: remove_legacy_marker(block), else: block), inbox?} end)
+    blocks = inbox_blocks(body)
     body = Enum.map_join(blocks, &elem(&1, 0))
-    replacement = if result["replacement"], do: " → `#{result["replacement"]}`", else: ""
-    reason = String.replace(result["reason"], "\n", "\n  ")
-    entry = "- Quelle `#{result["key"]}`: **#{result["outcome"]}**#{replacement} — #{reason}"
+    entry = result_entry(result)
 
     if Enum.any?(blocks, fn {block, inbox?} -> inbox? and normalize_entry(block) == normalize_entry(entry) end) do
       body
     else
       insert_result(blocks, body, entry)
     end
+  end
+
+  defp result_entry(result) do
+    replacement = if result["replacement"], do: " → `#{result["replacement"]}`", else: ""
+    reason = String.replace(result["reason"], "\n", "\n  ")
+    "- Quelle `#{result["key"]}`: **#{result["outcome"]}**#{replacement} — #{reason}"
   end
 
   defp insert_result(blocks, body, entry) do
@@ -142,40 +146,78 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   defp inbox_blocks(body) do
     body
-    |> String.split(~r/(?=^(?:\#{1,6} |[-*] |```|~~~))/m)
-    |> Enum.map_reduce({false, nil}, fn block, {inbox?, fence} ->
-      cond do
-        fence && String.starts_with?(block, fence) ->
-          {{block, false}, {inbox?, nil}}
-
-        fence ->
-          {{block, false}, {inbox?, fence}}
-
-        String.starts_with?(block, ["```", "~~~"]) ->
-          {{block, false}, {inbox?, String.slice(block, 0, 3)}}
-
-        String.starts_with?(block, "#") ->
-          inbox? = Regex.match?(~r/\A### Kommentareingang[ \t]*(?:\r?\n|$)/, block)
-          {{block, inbox?}, {inbox?, nil}}
-
-        true ->
-          {{block, inbox?}, {inbox?, nil}}
-      end
-    end)
-    |> elem(0)
+    |> split_blocks()
+    |> inbox_blocks({false, nil}, [])
+    |> Enum.reverse()
   end
 
-  defp remove_legacy_marker(block) do
+  defp split_blocks(body), do: String.split(body, ~r/(?=^(?:\#{1,6} |[-*] | {0,3}(?:`{3,}|~{3,})))/m, trim: true)
+
+  defp inbox_blocks([], _state, blocks), do: blocks
+
+  defp inbox_blocks([block | rest], {inbox?, fence}, blocks) when not is_nil(fence) do
+    next_fence = if closing_fence?(block, fence), do: nil, else: fence
+    inbox_blocks(rest, {inbox?, next_fence}, [{block, false} | blocks])
+  end
+
+  defp inbox_blocks(["  " <> _ = block | rest], {inbox?, nil} = state, [{previous, inbox?} | blocks]) do
+    if String.starts_with?(previous, ["- ", "* "]) do
+      inbox_blocks(rest, state, [{previous <> block, inbox?} | blocks])
+    else
+      classify_inbox_block(block, rest, state, [{previous, inbox?} | blocks])
+    end
+  end
+
+  defp inbox_blocks([block | rest], {true, nil} = state, blocks) do
+    case legacy_result([block | rest]) do
+      {entry, remaining} -> inbox_blocks(split_blocks(remaining), state, [{entry, true} | blocks])
+      nil -> classify_inbox_block(block, rest, state, blocks)
+    end
+  end
+
+  defp inbox_blocks([block | rest], state, blocks), do: classify_inbox_block(block, rest, state, blocks)
+
+  defp classify_inbox_block(block, rest, {inbox?, nil}, blocks) do
+    cond do
+      fence = opening_fence(block) ->
+        inbox_blocks(rest, {inbox?, fence}, [{block, false} | blocks])
+
+      String.starts_with?(block, "#") ->
+        inbox? = Regex.match?(~r/\A### Kommentareingang[ \t]*(?:\r?\n|$)/, block)
+        inbox_blocks(rest, {inbox?, nil}, [{block, inbox?} | blocks])
+
+      true ->
+        inbox_blocks(rest, {inbox?, nil}, [{block, inbox?} | blocks])
+    end
+  end
+
+  defp opening_fence(block) do
+    case Regex.run(~r/\A {0,3}(`{3,})([^`\r\n]*)(?:\r?\n|$)|\A {0,3}(~{3,})[^\r\n]*(?:\r?\n|$)/, block) do
+      [_, fence, _] -> fence
+      [_, "", "", fence] -> fence
+      _ -> nil
+    end
+  end
+
+  defp closing_fence?(block, fence) do
+    Regex.match?(~r/\A {0,3}#{String.first(fence)}{#{String.length(fence)},}[ \t]*(?:\r?\n|$)/, block)
+  end
+
+  defp legacy_result([block | _] = remaining) do
+    if String.starts_with?(block, ["- Quelle `", "* Quelle `"]), do: parse_legacy_result(Enum.join(remaining))
+  end
+
+  defp parse_legacy_result(body) do
     pattern = ~r/\A([-*] Quelle `([^`\n]+)`: \*\*(übernommen|Rückfrage|nicht anwendbar|ersetzt)\*\*(?: → `([^`\n]+)`)? — ([\s\S]*?))\r?\n(<!-- symphony-input-result:([a-f0-9]{64}) -->)(?=\r?\n|$)/
 
-    case Regex.run(pattern, block) do
-      [_, _entry, key, outcome, replacement, reason, marker, digest] ->
+    case Regex.run(pattern, body) do
+      [matched, _entry, key, outcome, replacement, reason, _marker, digest] ->
         result = %{"key" => key, "outcome" => outcome, "reason" => reason}
         result = if replacement == "", do: result, else: Map.put(result, "replacement", replacement)
-        if CommentVersion.digest(result) == digest, do: Regex.replace(~r/\r?\n#{Regex.escape(marker)}(?=\r?\n|$)/, block, "", global: false), else: block
+        if CommentVersion.digest(result) == digest, do: {result_entry(result), String.replace_prefix(body, matched, "")}
 
       _ ->
-        block
+        nil
     end
   end
 

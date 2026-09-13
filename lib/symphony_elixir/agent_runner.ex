@@ -284,7 +284,8 @@ defmodule SymphonyElixir.AgentRunner do
          session_id,
          codex_update_recipient
        ) do
-    with {:ok, before_repo_status} <- dialog_repo_status_snapshot(workspace) do
+    with {:ok, before_repo_status} <- dialog_repo_status_snapshot(workspace),
+         :ok <- ensure_dialog_repo_clean(before_repo_status) do
       workspace
       |> start_dialog_app_session(session_id)
       |> handle_dialog_session_start(
@@ -294,7 +295,38 @@ defmodule SymphonyElixir.AgentRunner do
         codex_update_recipient,
         before_repo_status
       )
+    else
+      {:error, :dialog_repo_dirty_before_start} ->
+        maybe_post_dialog_preflight_answer(issue, workspace, request)
+
+      {:error, _} = error ->
+        error
     end
+  end
+
+  defp ensure_dialog_repo_clean(%{status: ""}), do: :ok
+  defp ensure_dialog_repo_clean(_snapshot), do: {:error, :dialog_repo_dirty_before_start}
+
+  defp maybe_post_dialog_preflight_answer(issue, workspace, request) do
+    session_id = request.session_id
+    Logger.warning("Skipping dialog before Codex start because the repository is already dirty: #{issue_context(issue)} session_id=#{session_id_for_log(session_id)} project_root=#{workspace}")
+
+    answer =
+      "Ich habe die Dialoganfrage nicht gestartet, weil das Repository bereits vor dem Start lokale Änderungen oder nicht ignorierte Dateien enthält. " <>
+        "Bitte prüfe im Projektroot `#{workspace}` mit `git status --short` den Arbeitsstand und sichere bzw. schließe deine vorhandene Arbeit ab, bis der Git-Status sauber ist. " <>
+        "Stelle die Anfrage anschließend erneut als neuen Linear-Kommentar. Vorhandene Dateien wurden nicht verändert."
+
+    body =
+      case dialog_request_freshness(issue, request, "repository preflight answer") do
+        :current ->
+          Dialog.format_answer_comment(answer, session_id, request.include_session?)
+
+        freshness when freshness in [:stale, :unknown] ->
+          source_key = Dialog.request_source_key(request)
+          Dialog.format_nonblocking_answer_comment(answer, session_id, request.include_session?, source_key)
+      end
+
+    Tracker.create_comment(issue.id, body)
   end
 
   defp start_dialog_app_session(workspace, session_id) when is_binary(workspace) do
@@ -613,17 +645,22 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp dialog_repo_status_snapshot(workspace) when is_binary(workspace) do
-    dialog_git_snapshot_command(workspace, [
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=normal",
-      "-z"
-    ])
+    with {:ok, status} <- dialog_git_snapshot_command(workspace, ["status", "--porcelain=v1", "--untracked-files=normal", "-z"]),
+         {:ok, head} <- dialog_head_snapshot(workspace) do
+      {:ok, %{status: status, head: head}}
+    end
+  end
+
+  defp dialog_head_snapshot(workspace) do
+    case dialog_git_snapshot_command(workspace, ["rev-parse", "--verify", "--quiet", "HEAD"]) do
+      {:error, {:dialog_git_snapshot_failed, _args, 1, ""}} -> {:ok, nil}
+      result -> result
+    end
   end
 
   defp ensure_dialog_repo_unchanged(workspace, before_repo_status) when is_binary(workspace) do
     with {:ok, after_repo_status} <- dialog_repo_status_snapshot(workspace) do
-      if after_repo_status == "" do
+      if after_repo_status.status == "" and after_repo_status.head == before_repo_status.head do
         :ok
       else
         {:error, {:dialog_repo_modified, before_repo_status, after_repo_status}}

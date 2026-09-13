@@ -476,6 +476,14 @@ werden dabei weiter in Tabellenreihenfolge aufgelöst.
 
 ## Polling-Vertrag für `Todo (Dialog-AI)`
 
+- Vor Codex-Start/Resume muss der Projektroot nach normaler Git-Semantik sauber
+  sein. Vorbestehende Änderungen oder nicht ignorierte Dateien führen ohne
+  Codex-Lauf zu einer konkreten Vorabmeldung mit Projektroot und
+  `git status --short`; Symphony bereinigt keine Anwenderdateien. Nach einem
+  gestarteten Lauf werden Git-Status und unveränderter HEAD auch auf Fehlerpfaden
+  geprüft. Ignorierte Dateien bleiben außerhalb dieser Prüfung. Vorabmeldungen
+  erhalten denselben Frische-/Quellbezug wie andere Dialogfehler; eine vorhandene
+  Session bleibt erhalten. Details stehen in `WORKFLOW_DIALOG.md`.
 - Der reguläre Candidate-Poll beobachtet `Todo (Dialog-AI)`-Issues über ein leichtes letztes-Kommentar-Signal aus Linear (`id`, `createdAt`, `updatedAt`) und merkt pro Issue den zuletzt vollständig geprüften Signal-Key.
 - Bei unverändertem Signal und nicht fälligem Safety-Fallback wird kein `running`-Eintrag erzeugt, kein Dashboard-Item angezeigt, kein Codex gestartet und kein vollständiger Kommentarabruf ausgeführt.
 - Bei neuem oder geändertem Signal lädt Symphony die vollständigen Kommentare, wertet `Dialog.next_request/3` aus und startet Codex nur bei einer echten offenen Dialoganfrage. Die Frischeprüfung vor dem Antwortposting bleibt unverändert.
@@ -907,6 +915,14 @@ bestehendem Workpad und Kommentaren. Vor Umsetzung deren noch relevante offene
 Hinweise in Plan/Workpad übernehmen und den Startbeleg über `acknowledge`
 festhalten. Historie nicht als Auftragsliste wiederholen. Bereits bekannte offene
 Versionen bleiben bei der Baseline erhalten.
+
+Der Kommentareingang zeigt vollständige Quellen-/Ergebniseinträge mit
+Quellversion, Ergebnis, Begründung und gegebenenfalls Ersatzbezug. Diese lesbaren
+Einträge dienen auch nach einem Neustart als idempotenter Workpad-Beleg; neue
+HTML-Kommentare oder redundante Ergebnis-Hashes werden nicht angehängt. Beim
+nächsten Ack werden nur eindeutig zum fachlichen Eintrag passende alte
+Ergebnis-Marker im Kommentareingang entfernt. Der dauerhafte Inbox-/Journalzustand
+und die Reihenfolge Workpad-Schreiben vor lokaler Bestätigung bleiben erhalten.
 
 Für jede zugestellte Version bestätigt `symphony_comments` mit
 `operation: "acknowledge"` und `results: [{key, outcome, reason}]` das fachliche

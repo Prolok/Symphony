@@ -98,7 +98,11 @@ Fachliche Ergebnisse über `acknowledge` mit `results: [{key, outcome, reason}]`
 speichern. Zulässige Ergebnisse: `übernommen`, `Rückfrage`, `nicht anwendbar`
 (mit Begründung), `ersetzt` (mit `replacement` auf eine neuere Quellversion).
 Das Tool ergänzt `### Kommentareingang` im bestehenden Workpad. Diesen Abschnitt
-und seine Quellen-/Ergebnismarker bei späteren Workpad-Updates erhalten.
+und seine vollständigen fachlichen Einträge mit Quellversion, Ergebnis,
+Begründung und gegebenenfalls Ersatzbezug bei späteren Workpad-Updates erhalten.
+Sie sind zugleich der idempotente Workpad-Beleg; keine zusätzlichen technischen
+Ergebnis-Marker ergänzen. Alte eindeutig zugehörige HTML-Ergebnis-Marker entfernt
+das Tool beim nächsten Ack selbst.
 Ein Edit benötigt eine eigene Bestätigung; Auflösen ist kein fachlicher Abschluss.
 Gelöschte Quellen nicht neu ausführen; begonnene Auswirkungen einordnen.
 Ein eigener Löschungs-Quellschlüssel nach vorheriger Zustellung/Bestätigung

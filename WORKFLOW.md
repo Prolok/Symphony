@@ -197,175 +197,81 @@ Zusätzliche Review-Hinweise:
 
 ### Start- und Laufzeitvertrag
 
-Der reguläre Einstieg ist `./symphony` unter Linux oder macOS; die
-Plattformmatrix und Installation stehen in `README.md`. System-Bash 3.2 und
-BSD-Werkzeuge genügen. Python 3.11+, Git 2.31+,
-Make, Codex CLI und mise 2026.3.17+ müssen erreichbar und die Toolchain aus
-`mise.toml` installiert sein.
-Der Wrapper prüft diese Voraussetzungen vor Autoupdate, Build und
-Hilfsbefehlsregistrierung und aktiviert Erlang/Elixir prozesslokal. Nach einem
-Autoupdate wird die möglicherweise geänderte Toolchain erneut geprüft.
-Der lokale gebundene App-Worker erhält den aktivierten Toolchain-PATH nach
-dem Shell-Login erneut. Die Release- und App-Helper verwenden über
-`SYMPHONY_PYTHON` den absolut gebundenen, geprüften Interpreter, auch nach
-Aktivierung einer Projekt-venv und im gebundenen Linear-MCP. Die Projekt-venv
-bleibt für Projektwerkzeuge aktiv. Custom-Codex- und SSH-Aufrufe
-behalten ihren Shell-Vertrag; lokale Toolchain-Pfade werden nicht über SSH
-exportiert. Fehlt die passende Python-Laufzeit, stoppt der Launcher vor
-Autoupdate, Build und Dienststart mit einer kurzen Anforderungsmeldung.
-`make all` verwendet dieselbe Python-Mindestversion 3.11.
-Der direkte Aufruf von `bin/symphony` benötigt dagegen bereits erreichbares
-`escript`, etwa über `mise exec -- bin/symphony`. Der lokale Standard-Worker
-wird auch ohne Release-Variable an den Helfer des ermittelten Symphony-Checkouts
-gebunden und benötigt keinen globalen `sym-codex`-Link.
+Nutze regulär `./symphony` unter Linux oder macOS. Voraussetzungen und
+Start-/Build-Details stehen bei Bedarf in [README.md](README.md#voraussetzungen)
+und [Einrichtung](README.md#einrichtung). `bin/symphony` benötigt bereits
+aktives Erlang, etwa über `mise exec -- bin/symphony`.
+Für manuelle Ticketstarts aus dem Fachprojektroot den absoluten `sym-codex`-Pfad
+der gewünschten Installation mit Ticket-ID verwenden; globale Links sind dafür
+nicht erforderlich und bleiben an ihre bisherige Installation gebunden.
 
-Autoupdate und Build laufen unter einem checkout-spezifischen OS-Lock über
-die Python-Standardbibliothek; ein externes `flock` ist nicht erforderlich.
-Signale beenden auch die Build-Kinder, bevor der Lock freigegeben wird.
-Die Lockdatei wird nicht gelöscht; der Dienst erbt keinen Lock.
-Das aufrufende Projekt-CWD bleibt erhalten, während Workflow-Dateien und
-Mix-Artefakte an den aufgelösten Symphony-Checkout gebunden bleiben.
-Der eigenständige Release-Checkout übernimmt den aktuellen Arbeitsstand samt
-gestagten Löschungen, Umbenennungen und Datei-/Verzeichniswechseln;
-ignorierte Dateien werden nicht übernommen.
-Die öffentlichen Rootwerte `SYM_PROJECT_ROOT`, `SYM_CODEX_*` und `SYM_MAXIMUM_REVIEW_ITERATIONS`
-werden mit ihren lokalen Overrides im Release-Snapshot gebunden. Spätere
-Rootänderungen gelten erst für einen neuen Release; Fachprojektdateien
-überschreiben weder Modellstartwerte noch das Reviewbudget.
-Akzeptierte Workflow-Reloads erzeugen neue Projektkontexte für Polling und
-künftige Worker; bereits laufende Worker behalten ihren bisherigen Snapshot.
-Die gemeinsame Dashboard-Konfiguration folgt dem akzeptierten Reload;
-ihr Snapshot gilt nur während der Laufzeit des zugehörigen Pollers.
-Auth-/Scope- und Worktreeroot-Wechsel erfordern einen Neustart, ungültige Änderungen
-ersetzen keinen zuletzt gültigen Projektkontext. Externe Workflowdateien ändern
-den gebundenen Mix-/Release-Ausführungsroot nicht.
-Öffentliche Projektvariablen stehen projektbezogenen Hooks und Workerprozessen
-zur Verfügung; Kommando- und SSH-Konfigurations-Overrides werden im selben Kontext aufgelöst.
-Die Dienstkapazität, Statuslimits und SSH-Hostlimits gelten gemeinsam für alle Projekte;
-Workerstarts werden atomar zugelassen und nach Worker- oder Eigentümerende freigegeben.
-Aufgelöste Worktree-Roots verschiedener Projekte dürfen sich nicht überschneiden;
-der Start lehnt gleiche oder ineinander liegende Roots auch über Symlinks ab.
-Verwende dafür etwa `workspace.root: $SYMPHONY_PROJECT_WORKTREES_ROOT`.
-Der Release versiegelt das gemeinsame Codex-Startprofil und die kopierten
-Skills. Jedes Fachprojekt erhält ein eigenes Codex-Home mit genau seiner
-Trust-Freigabe (bei Git-Worktrees den Git-common-root). Die daraus erzeugte
-`config.toml` wird vor jedem Start vollständig gegen den erwarteten Inhalt
-geprüft; Abweichungen brechen den Start ab, vorhandene Sessions bleiben erhalten.
-Persönliche MCPs und Plugins bleiben gesperrt. Die gemeinsame Basiskonfiguration
-und Skills bleiben zusätzlich durch das Release-Manifest abgesichert.
-Reguläre Release-Starts erzeugen keine globalen Issue-Befehle. Für manuelle
-Ticketstarts aus dem Fachprojektroot den absoluten `sym-codex`-Pfad der
-gewünschten Installation mit Ticket-ID verwenden. Nur Hooks außerhalb eines
-Releases registrieren weiter Issue-Befehle unter `~/.local/bin`; vorhandene
-Links bleiben gebunden, Cleanup entfernt nur passende Links.
-
-App-Kommentarschreibvorgänge und ihre Wiederaufnahme werden pro Projektjournal
-prozessübergreifend serialisiert. Jede App-Anfrage darf eine Kommentar-ID nur
-einmal verändern; mehrfache Writes derselben ID werden vor HTTP mit
-`invalid_comment_mutation` abgewiesen und müssen einzeln gesendet werden.
-Optionale GraphQL-Felder bleiben bei fehlenden Variablen ausgelassen;
-explizites `null` bleibt erhalten. Ticketkennungen werden vor der Intent-Anlage
-lesend zu Issue-IDs aufgelöst. JSON-Inhalt und die String-Ausgabe von `bodyData`
-werden strukturell verglichen. Kommentarupdates unterstützen die rücklesbaren
-Felder `body`, `bodyData`, `quotedText`, `resolvingUserId` und
-`resolvingCommentId`; andere Update-Felder werden vor HTTP abgewiesen.
-Eindeutige 401/429 ohne Daten werden auch bei leerem oder textuellem Body als
-abgewiesen protokolliert; unklare Ausgänge werden weiterhin abgeglichen.
-GraphQL-`RATELIMITED` ohne Daten und ohne Feldpfad wird ebenso als eindeutige
-Ablehnung erfasst, auch bei HTTP 400/403. Antworten mit Daten oder unklaren
-zusätzlichen Fehlern bleiben abgleichpflichtig.
-Historische Journalbelege werden auch nach einem kontrollierten App-Wechsel
-gegen ihren gespeicherten Autor geprüft. Neue Writes und Kommentarupdates
-bleiben an die aktuell geprüfte App-Identität gebunden.
-Konkurrierende Journalzugriffe warten bis zu
-10 Sekunden auf den Lock (`comment_journal_busy` bei Zeitüberschreitung,
-`comment_journal_unavailable` bei Helfer-/Backendfehlern). GraphQL-Aufrufe ohne
-Kommentarschreibvorgang benötigen keinen Journal-Lock. Echte konkurrierende
-Issue-Owner werden weiterhin sofort mit `issue_already_owned` abgewiesen.
-Der gebundene Linear-MCP überträgt UTF-8-JSON als unveränderte Bytes mit genau
-einer Protokollzeile pro Nachricht, einschließlich Unicode und Text-Whitespace.
+Der Release bindet Code, Workflow, Helfer, Skills und öffentliche Rootvorgaben.
+Spätere Rootänderungen gelten erst im neuen Release; Fachprojektdateien
+überschreiben weder Modellstartwerte noch Reviewbudget. Workflow-Reloads gelten
+für Polling und künftige Worker; laufende Worker behalten ihren Snapshot.
+Auth-/Scope- und Worktreeroot-Wechsel erfordern einen Neustart; ungültige
+Änderungen ersetzen keinen gültigen Projektkontext.
 
 ### Projekte und gemeinsamer Dienst
 
-`SYM_PROJECT_ROOT` aus `.env`/`.env.local` im Symphony-Code-Root enthält die
-kommaseparierten Basisroots (Standard `~/QuantHub`). Nur direkte
-Unterverzeichnisse mit `.symphony` werden entdeckt; kanonische Pfade werden
-dedupliziert. Jeder Projektkontext erhält eigene App-Bindung, Scope,
-Assignee-Liste, Hooks, Worktrees, Sessions und lokalen Zustand. Parallele
-Projektarbeit schaltet weder Prozessumgebung noch CWD global um.
+- Arbeite im gebundenen Projektkontext mit eigenen Hooks, Worktrees, Sessions
+  und Zustand. Reguläre Workspaces bleiben unter dem konfigurierten Root;
+  Roots verschiedener Projekte dürfen sich auch über Symlinks nicht überlappen.
+  Verwende etwa `workspace.root: $SYMPHONY_PROJECT_WORKTREES_ROOT`.
+- Projekte desselben Linear-Workspace verwenden dieselbe verifizierte App und
+  dieselben Client Credentials. `LINEAR_ASSIGNEE` ist eine getrimmte,
+  deduplizierte Liste menschlicher E-Mails/UUIDs; `me` und App-Benutzer sind
+  unzulässig. Der `--yolo`-Sonderfall steht in der Statusübersicht.
+- Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
+  (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
+  `config.toml` oder des versiegelten Startprofils/der Skills blockieren den
+  Start; vorhandene Sessions bleiben erhalten. Persönliche MCPs und Plugins
+  bleiben gesperrt. Secrets bleiben aus öffentlicher Umgebung und Prompts
+  ausgeschlossen; private Envdateien sind kein Agentenzugriffspfad.
+- Eine gemeinsame Dienstinstanz pro Benutzer; ein konkurrierender Start endet
+  mit „Symphony läuft bereits“. Manuelle Helfer sind keine zweiten Dienste.
+  `sym-codex` und `sym-watch` verlangen bei mehrdeutigen Kennungen
+  `Projekt:Ticketkennung`.
+- Die interne Zustandskennung ist `symphony`. Abweichenden Altzustand nur gemäß
+  [Betreiberübergabe](docs/linear-app.md#einmalige-betreiberübergabe) behandeln;
+  keine automatische Löschung oder beliebigen Installations-IDs.
 
-Alle Projekte desselben Linear-Workspace müssen dieselbe verifizierte App
-und dieselben Client Credentials verwenden. Der gemeinsame Kandidatenpoll
-verknüpft Scope, Status und menschliche Assignees projektweise und fragt je
-Workspace und API-Seite einmal ab. `LINEAR_ASSIGNEE` enthält eine getrimmte,
-deduplizierte Liste menschlicher E-Mails/UUIDs; `me` und App-Benutzer sind
-unzulässig. Der bestehende `--yolo`-Sonderfall bleibt erhalten.
-
-Vor Update, Build und Registrierung erwirbt `./symphony` nichtblockierend
-`~/.cache/symphony/service.lock`. Ein konkurrierender Dienststart endet mit
-„Symphony läuft bereits“. Die Sperre bleibt bis Dienstende erhalten, auch
-über den Build hinaus. Manuelle Helfer sind keine zweiten Dienste.
-
-Die interne Zustandskennung ist konstant `symphony`. Für abweichenden
-Altzustand gilt die einmalige Betreiberübergabe in `docs/linear-app.md`;
-keine automatische Löschung, keine beliebigen Installations-IDs. Die
-versionierten Modellvorgaben sind `gpt-6-astra` und `xhigh`; Service-Tiers,
-Reviewbudget und Workflow-Gates bleiben unverändert. `sym-codex` und
-`sym-watch` akzeptieren `Projekt:Ticketkennung`; mehrdeutige Treffer
-verlangen eine eindeutige Projektqualifizierung.
+Bei Änderungen an Discovery gezielt
+[Normale Einrichtung](docs/linear-app.md#normale-einrichtung) lesen;
+für Reload oder gemeinsame Kapazitäten
+[Projektbindung und Polling](docs/linear-app.md#projektbindung-und-polling)
+und für Release-/Trust-/Secret-Details
+[Schutz der Zugangsdaten](docs/linear-app.md#schutz-der-zugangsdaten).
 
 ### Linear-Zugriff
 
-CLI, MCP und manuelle Skripthelfer aktivieren den ausgewählten Workflow vor
-dem öffentlichen Laden der Projektumgebung. Damit sind auch bei abweichenden
-Workflowdateien deren direkte oder indirekte Secretreferenzen von Anfang an
-vom Export ausgeschlossen.
+Im App-Modus ausschließlich das injizierte `linear_graphql` oder das gebundene
+`symphony_linear`-MCP nutzen. Bei Transportausfall den anderen gebundenen Pfad
+verwenden. Scheitern beide, sichtbar stoppen; Kommentar/Status nur über einen
+funktionierenden erlaubten Pfad schreiben und Speicherung nur nach Bestätigung
+behaupten. Keine privaten Envdateien, persönlichen Tokenfallbacks oder Umgehung
+der Secret-Abschirmung; `scripts/linear-app` ist ein geschütztes Betreiberwerkzeug,
+kein Modell-Shell-Ersatz.
 
-Der Agent sollte mit Linear kommunizieren können, entweder über einen konfigurierten Linear-MCP-Server oder über das injizierte Tool `linear_graphql`. HTTP 401, HTTP 403 ohne Rate-Limit-Signal oder als `auth` klassifizierte `linear_graphql`-Fehler gelten dabei wie fehlender Linear-Zugriff für den normalen Tool-Pfad. `classification: "rate_limited"`, `extensionsCodes` wie `RATELIMITED` und `rateLimit.limited: true` sind dagegen Rate-Limit-Signale und kein fehlender Linear-Zugriff; bloße nicht erschöpfte `rateLimit`-Header ohne `limited: true` bleiben Diagnosehinweise.
+HTTP 401, HTTP 403 ohne Rate-Limit-Signal und `classification: "auth"` bedeuten
+fehlenden Zugriff: gemäß `Blocked-access escape hatch` handeln.
+`classification: "rate_limited"`, `extensionsCodes` mit `RATELIMITED` oder
+`rateLimit.limited: true` sind Rate-Limits, kein Auth-Blocker. Nicht erschöpfte
+Rate-Limit-Header bleiben Diagnosehinweise.
 
-Im App-Modus nutze ausschließlich das injizierte `linear_graphql` bzw. das gebundene `symphony_linear`-MCP; fällt ein Tooltransport aus, nutze den verfügbaren anderen gebundenen Transport. Fehlen oder scheitern beide, stoppe und melde den Blocker sichtbar in der Abschlussnachricht. Versuche Kommentar und Status nur über einen noch funktionierenden erlaubten Toolpfad; behaupte keine Speicherung ohne bestätigten Schreibzugriff. Greife nicht auf private Envdateien zu, umgehe nicht die Secret-Abschirmung und verwende keinen persönlichen Tokenfallback. Das geschützte Betreiberwerkzeug `scripts/linear-app` ist kein Modell-Shell-Ersatz.
+Für den ersten Issue-Lookup den schema-konformen Bootstrap aus `symphony-linear`,
+Abschnitt „Issue-Lookup“, verwenden: nur ID, Kennung, Titel und Status abfragen.
+`issue(id: $key)` nur bei in dieser Session bestätigter Key-Unterstützung nutzen,
+sonst Team-Key und Nummer. Danach interne ID für begrenzte Folgeabfragen verwenden;
+keine spekulativen `links`-/Identifier-Filter. Unbekannte Felder, Inputs oder
+Mutationen vor Verwendung gezielt per Introspection prüfen.
 
-
-
-Wenn du einen Ticket-Key wie `PRO-190` hast und zuerst nur Status, Titel und die interne Linear-`id` brauchst, verwende für die erste Anfrage einen bereits abgesicherten schema-konformen Bootstrap und führe erst danach breitere Folgeabfragen aus:
-
-- Wenn in der aktuellen Session bereits bestätigt ist, dass `issue(id: $key)` Issue-Keys akzeptiert, nutze diese Minimalabfrage:
-
-```graphql
-query BootstrapIssue($key: String!) {
-  issue(id: $key) {
-    id
-    identifier
-    title
-    state {
-      id
-      name
-      type
-    }
-  }
-}
-```
-
-- Wenn dieser Direktpfad in der aktuellen Session noch nicht bestätigt ist oder du dich am bereits implementierten Repo-Lookup orientieren willst, splitte den Key in Team-Key und Nummer und nutze stattdessen diese Abfrage:
-
-```graphql
-query BootstrapIssueByTeamAndNumber($teamKey: String!, $number: Float!) {
-  issues(filter: { team: { key: { eq: $teamKey } }, number: { eq: $number } }, first: 1) {
-    nodes {
-      id
-      identifier
-      title
-      state {
-        id
-        name
-        type
-      }
-    }
-  }
-}
-```
-
-Nutze die dabei zurückgegebene interne `id` anschließend für eng begrenzte Folgeabfragen über `issue(id: $id)`. Verwende in dieser ersten Anfrage keine spekulativen Felder oder Filter wie `links` oder `issues(filter: { identifier: ... })`; wenn du zusätzliche Felder, Input-Typen oder Mutationen brauchst und ihre aktuelle Form nicht sicher kennst, führe zuerst gezielte Introspection über den in der Session verfügbaren Linear-Zugriff aus.
+Je App-Anfrage eine Kommentar-ID höchstens einmal verändern; mehrere Änderungen
+dieser ID einzeln senden. Unklare Schreibausgänge anhand der gemeldeten
+Kommentar-ID abgleichen, keine blinde Neuanlage oder Wiederholung.
+Für unterstützte Update-Felder und Journalfehler gezielt
+[Kommentarjournal und App-Mutationen](docs/linear-app.md#kommentarjournal-und-app-mutationen)
+lesen.
 
 ### Git-Branch-Kontrakt
 
@@ -484,11 +390,10 @@ werden dabei weiter in Tabellenreihenfolge aufgelöst.
   geprüft. Ignorierte Dateien bleiben außerhalb dieser Prüfung. Vorabmeldungen
   erhalten denselben Frische-/Quellbezug wie andere Dialogfehler; eine vorhandene
   Session bleibt erhalten. Details stehen in `WORKFLOW_DIALOG.md`.
-- Der reguläre Candidate-Poll beobachtet `Todo (Dialog-AI)`-Issues über ein leichtes letztes-Kommentar-Signal aus Linear (`id`, `createdAt`, `updatedAt`) und merkt pro Issue den zuletzt vollständig geprüften Signal-Key.
-- Bei unverändertem Signal und nicht fälligem Safety-Fallback wird kein `running`-Eintrag erzeugt, kein Dashboard-Item angezeigt, kein Codex gestartet und kein vollständiger Kommentarabruf ausgeführt.
-- Bei neuem oder geändertem Signal lädt Symphony die vollständigen Kommentare, wertet `Dialog.next_request/3` aus und startet Codex nur bei einer echten offenen Dialoganfrage. Die Frischeprüfung vor dem Antwortposting bleibt unverändert.
-- Wenn das leichte Signal fehlt oder unverändert bleibt, führt Symphony einen skalierten Safety-Full-Check aus. Das Intervall beträgt pro Instanz `30 Sekunden * Anzahl sichtbarer offener Dialogtickets * active_instance_count`.
-- Candidate-Polls, unveränderte Signale und No-op-Safety-Checks zählen nicht als Aktivität für den Idle-Shutdown. Erst echte Dialogbearbeitung, Antwortposting, Statusänderungen, Retry-/Running-Änderungen oder reguläre Agentenarbeit setzen die Inaktivitätszeit zurück.
+- Codex startet nur bei einer echten offenen Dialoganfrage; No-op-Polls
+  aktivieren keine Arbeit und verlängern nicht die Dienstlaufzeit.
+  Signal-, Safety- und Idle-Details bei Änderungen am Polling gezielt in
+  [Dialog-Polling](docs/linear-app.md#dialog-polling) lesen.
 
 ## Ablauf für `Todo (AI)`
 
@@ -767,25 +672,22 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
 1. Öffne den globalen Skill `symphony-land` und befolge den dort definierten Ablauf.
 2. Lokale Volltests werden in `Merge (AI)` nicht pauschal ausgeführt; das vollständige lokale Gate bleibt Aufgabe von `Test (AI)`.
 3. GitHub-Checks mit `skipped` ersetzen keine bestandene CI. Wenn GitHub-CI für diesen Push bewusst übersprungen wurde, ist `skipped` nur gemäß Policy akzeptabel; die lokale Test-Evidenz aus `Test (AI)` bleibt dann das maßgebliche Gate. `neutral` muss ausdrücklich neutral/akzeptiert oder blockierend klassifiziert sein; echte Fehler bleiben blockierend.
-   Leere Checks sind nur bei vollständig belegtem No-CI zulässig: Für das
-   gebundene Repository und den aktuellen PR-Zielbranch sind keine Checks
-   erforderlich und keine CI-Konfiguration oder CI-Signale vorhanden. Der
-   Land-Helper prüft dies vor `symphony_merge` erneut; unbekannte Policy,
-   unvollständige Abfragen und fehlende erwartete CI blockieren. No-CI als
-   „nicht konfiguriert und nicht erforderlich“ melden; lokale Test-/Review-Gates
-   bleiben bestehen. API-Details stehen in `docs/linear-app.md`.
+   Leere Checks nur bei vollständig belegtem No-CI akzeptieren: Im gebundenen
+   Repository sind für den PR-Zielbranch keine Checks erforderlich und weder
+   CI-Konfiguration noch CI-Signale vorhanden. Unbekannte Policy, unvollständige
+   Abfragen oder fehlende erwartete CI blockieren. `symphony_merge` prüft frisch;
+   No-CI als „nicht konfiguriert und nicht erforderlich“ melden. Lokale
+   Test-/Review-Gates bleiben bestehen; Nachweise unter
+   [GitHub-CI und No-CI](docs/linear-app.md#github-ci-und-no-ci).
 4. Vor dem Merge müssen PR-/Remote-Evidenz und lokaler Stand konsistent sein:
    aktueller Branch `symphony/<Issue>`, vorhandener Remote-Branch
    `origin/symphony/<Issue>`, offene PR für diesen Branch und PR-Head-SHA gleich
    lokalem `HEAD`. Fehlender Remote-Branch, fehlende PR oder PR-Head-Mismatch
    dürfen nicht stillschweigend als mergefähig gelten.
-   Ohne explizites `GH_REPO` verwendet der Land-Helper für sämtliche
-   GitHub-Aufrufe die URL von `origin`, unabhängig von einer lokalen
-   GitHub-CLI-Standardauswahl von `upstream`. Die Bindung gilt nur für seine
-   Kindprozesse; bestehende Git-Konfigurationen werden nicht verändert.
-   Der gebundene MCP-Transport übernimmt auch `SYMPHONY_PROJECT_WORKTREES_ROOT`
-   aus dem Worker-Kontext, damit beide Tooltransporte denselben Issue-Workspace
-   prüfen. Ein separates Runtime-Verzeichnis ist kein Projekt-Worktree-Root.
+   Ohne explizites `GH_REPO` ist `origin` für GitHub maßgeblich; eine lokale
+   `upstream`-Standardauswahl ersetzt diese Bindung nicht. Beide Tooltransporte
+   müssen den gebundenen Issue-Workspace prüfen; Transportdetails stehen unter
+   [Dauerhafter Kommentareingang](docs/linear-app.md#dauerhafter-kommentareingang).
 5. Wenn Remote-Branch oder offene PR fehlen, darf Recovery nur aus einem
    sauberen, lokal in `Test (AI)` validierten Stand über `symphony-push`
    erfolgen. Nach dem Push PR-Kontext und PR-Head erneut prüfen; Duplicate-URL
@@ -916,13 +818,11 @@ Hinweise in Plan/Workpad übernehmen und den Startbeleg über `acknowledge`
 festhalten. Historie nicht als Auftragsliste wiederholen. Bereits bekannte offene
 Versionen bleiben bei der Baseline erhalten.
 
-Der Kommentareingang zeigt vollständige Quellen-/Ergebniseinträge mit
-Quellversion, Ergebnis, Begründung und gegebenenfalls Ersatzbezug. Diese lesbaren
-Einträge dienen auch nach einem Neustart als idempotenter Workpad-Beleg; neue
-HTML-Kommentare oder redundante Ergebnis-Hashes werden nicht angehängt. Beim
-nächsten Ack werden nur eindeutig zum fachlichen Eintrag passende alte
-Ergebnis-Marker im Kommentareingang entfernt. Der dauerhafte Inbox-/Journalzustand
-und die Reihenfolge Workpad-Schreiben vor lokaler Bestätigung bleiben erhalten.
+Vollständige lesbare Ack-Einträge mit Quellversion, Ergebnis, Begründung und
+gegebenenfalls Ersatzbezug bei Workpad-Updates erhalten; sie sind der idempotente
+Beleg. Keine neuen HTML-Ergebnis-Marker oder redundanten Hashes ergänzen.
+Details zu Wiederaufnahme und automatischer Bereinigung alter Marker stehen unter
+[Dauerhafter Kommentareingang](docs/linear-app.md#dauerhafter-kommentareingang).
 
 Für jede zugestellte Version bestätigt `symphony_comments` mit
 `operation: "acknowledge"` und `results: [{key, outcome, reason}]` das fachliche
@@ -949,20 +849,17 @@ Kommentartexte über `symphony_comments` am nächsten Checkpoint abrufen.
 Rückgaben nach Planung/BLOCKER und Abbruch bleiben
 möglich. Der bestehende Land-Pfad führt den Merge ausschließlich über das gebundene
 `symphony_merge` mit `head_sha` aus; es prüft GitHub-Gates, aktuelle Linear-Labels
-und den Kommentareingang vor der tatsächlichen Merge-Anforderung. Bei SSH-Workern
-läuft der Land-Prozess im gebundenen entfernten Workspace; der frische Linear-Check
-bleibt im zuständigen Symphony-Prozess. Bei neuer
+und den Kommentareingang vor der tatsächlichen Merge-Anforderung. Bei neuer
 Eingabe deren Ergebnis bearbeiten und danach erneut frisch prüfen. Eine durch
 GitHub-Rate-Limit gescheiterte Merge-Anforderung wird nicht intern wiederholt;
 ein erneuter gebundener Merge durchläuft sämtliche Gates und Checkpoints frisch.
 
-Garantiert werden API-seitig beobachtete Fassungen. Zwischen Polls vollständig
-überschriebene Zwischenstände sind nicht rekonstruierbar. Paginierung wird auf
-sichtbare Änderungen geprüft; auch die in Vor-/Nachscan-Signalen gelesenen
-Fassungen bleiben bei einem unvollständigen Scan erhalten. Die Abfrage liefert
-keinen atomaren Snapshot. Zwischen
-letzter API-Antwort und Status-/GitHub-Aktion verbleibt ein unvermeidbares
-Zeitfenster; keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
+Nur API-seitig beobachtete Fassungen sind nachweisbar; zwischen Polls
+überschriebene Zwischenstände sind nicht rekonstruierbar. Unvollständige Scans
+bewahren bereits beobachtete Quellen, erlauben aber keinen Abschluss.
+Das Fenster zwischen letzter API-Antwort und Aktion bleibt; keine atomare
+Linear-/GitHub- oder Exactly-once-Garantie. Scan-/Transportdetails stehen im oben
+verlinkten Abschnitt „Dauerhafter Kommentareingang“.
 
 ## Workpad-Handhabung
 

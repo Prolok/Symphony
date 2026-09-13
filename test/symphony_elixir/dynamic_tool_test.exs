@@ -299,6 +299,16 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            }
   end
 
+  test "linear_graphql exposes the persisted app cooldown to the worker" do
+    deadline = %{retry_at_ms: 1_800_003_600_000, retry_after_ms: 3_600_000}
+    client = fn _, _, _ -> {:error, {:linear_api_request, {:linear_app_rate_limited, deadline}}} end
+    result = DynamicTool.execute("linear_graphql", %{"query" => "query Viewer { viewer { id } }"}, linear_client: client)
+    refute result["success"]
+    error = Jason.decode!(result["output"])["error"]
+    assert error["classification"] == "rate_limited"
+    assert error["rateLimit"] == %{"limited" => true, "retryAtMs" => deadline.retry_at_ms, "retryAfterMs" => deadline.retry_after_ms}
+  end
+
   test "linear client enriches HTTP 400, 401, 403, and rate-limit responses" do
     cases = [
       {400, %{"errors" => [%{"message" => "Unknown field", "extensions" => %{"code" => "GRAPHQL_VALIDATION_FAILED"}}]}, [], "graphql", ["GRAPHQL_VALIDATION_FAILED"]},
@@ -318,6 +328,14 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     ]
 
     Enum.each(cases, fn {status, body, headers, classification, codes} ->
+      # Each row is an independent provider response, not a request during
+      # the cooldown established by the previous synthetic scenario.
+      binding = Config.settings!().tracker.app
+      key = :crypto.hash(:sha256, Jason.encode!([binding["workspace_id"], binding["client_id"]])) |> Base.encode16(case: :lower)
+      path = Path.join(Config.linear_rate_limit_root(), key <> ".json")
+      File.rm(path)
+      on_exit(fn -> File.rm(path) end)
+
       capture_log(fn ->
         SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
           {:ok, %{status: status, body: body, headers: headers}}

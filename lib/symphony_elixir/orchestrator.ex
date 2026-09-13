@@ -23,7 +23,7 @@ defmodule SymphonyElixir.Orchestrator do
     Workspace
   }
 
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Linear.{Issue, RateLimit}
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -332,7 +332,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
-      case pop_retry_attempt_state(state, issue_id, retry_token) do
+      case retry_attempt_state(state, issue_id, retry_token) do
         {:ok, attempt, metadata, state} ->
           case handle_retry_issue(state, issue_id, attempt, metadata) do
             {:noreply, next_state} -> {:noreply, touch_activity(next_state)}
@@ -1072,16 +1072,16 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
-        state
+        release_issue_claim(state, issue.id)
 
       {:skip, %Issue{} = refreshed_issue} ->
         Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
 
-        state
+        release_issue_claim(state, issue.id)
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
-        state
+        schedule_issue_retry(state, issue.id, attempt, %{identifier: issue.identifier, error: "dispatch refresh failed: #{inspect(reason)}", worker_host: preferred_worker_host})
     end
   end
 
@@ -1091,7 +1091,7 @@ defmodule SymphonyElixir.Orchestrator do
     case select_worker_host_for_issue(issue, state, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
-        state
+        schedule_issue_retry(state, issue.id, attempt, %{identifier: issue.identifier, error: "no worker capacity", worker_host: preferred_worker_host})
 
       worker_host ->
         spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, run_opts)
@@ -1366,7 +1366,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
-    delay_ms = retry_delay(next_attempt, metadata)
+    delay_ms = max(retry_delay(next_attempt, metadata), RateLimit.remaining_ms())
     old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
@@ -1407,7 +1407,7 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp pop_retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
+  defp retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
@@ -1420,7 +1420,7 @@ defmodule SymphonyElixir.Orchestrator do
           review_subagent_ids: Map.get(retry_entry, :review_subagent_ids)
         }
 
-        {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
+        {:ok, attempt, metadata, state}
 
       _ ->
         :missing
@@ -1584,7 +1584,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
-    %{state | claimed: MapSet.delete(state.claimed, issue_id)}
+    %{state | claimed: MapSet.delete(state.claimed, issue_id), retry_attempts: Map.delete(state.retry_attempts, issue_id)}
   end
 
   defp maybe_integrate_retry_codex_update(%State{} = state, issue_id, update)
@@ -2137,7 +2137,7 @@ defmodule SymphonyElixir.Orchestrator do
     previous_review_subagent_call_ids = tracked_review_subagent_call_ids(running_entry)
     previous_review_subagent_ids = tracked_review_subagent_ids(running_entry)
     review_completion = extract_review_subagent_completion_text(running_entry, update)
-    recovered_turn_context = review_completion || Map.get(running_entry, :recovered_turn_context)
+    recovered_turn_context = merge_review_context(Map.get(running_entry, :recovered_turn_context), review_completion)
 
     recovered_review_subagent_call_ids = recovered_review_subagent_call_ids_for_update(running_entry, review_completion)
 
@@ -2311,42 +2311,15 @@ defmodule SymphonyElixir.Orchestrator do
     Map.get(running_entry, :recovered_turn_context)
   end
 
-  defp review_subagent_call_ids_for_retry(running_entry) when is_map(running_entry) do
-    if is_binary(Map.get(running_entry, :recovered_turn_context)) do
-      MapSet.new()
-    else
-      tracked_review_subagent_call_ids(running_entry)
-    end
+  defp review_subagent_call_ids_for_retry(running_entry), do: tracked_review_subagent_call_ids(running_entry)
+  defp review_subagent_ids_for_retry(running_entry), do: tracked_review_subagent_ids(running_entry)
+
+  defp recovered_review_subagent_call_ids_for_update(running_entry, _review_completion) do
+    running_entry |> Map.get(:recovered_review_subagent_call_ids) |> normalize_review_subagent_call_ids()
   end
 
-  defp review_subagent_ids_for_retry(running_entry) when is_map(running_entry) do
-    if is_binary(Map.get(running_entry, :recovered_turn_context)) do
-      MapSet.new()
-    else
-      tracked_review_subagent_ids(running_entry)
-    end
-  end
-
-  defp recovered_review_subagent_call_ids_for_update(running_entry, review_completion)
-       when is_map(running_entry) do
-    if is_binary(review_completion) do
-      MapSet.new()
-    else
-      running_entry
-      |> Map.get(:recovered_review_subagent_call_ids, MapSet.new())
-      |> normalize_review_subagent_call_ids()
-    end
-  end
-
-  defp recovered_review_subagent_ids_for_update(running_entry, review_completion)
-       when is_map(running_entry) do
-    if is_binary(review_completion) do
-      MapSet.new()
-    else
-      running_entry
-      |> Map.get(:recovered_review_subagent_ids, MapSet.new())
-      |> normalize_review_subagent_ids()
-    end
+  defp recovered_review_subagent_ids_for_update(running_entry, _review_completion) do
+    running_entry |> Map.get(:recovered_review_subagent_ids) |> normalize_review_subagent_ids()
   end
 
   defp tracked_review_subagent_call_ids(running_entry) when is_map(running_entry) do
@@ -2409,6 +2382,16 @@ defmodule SymphonyElixir.Orchestrator do
       extract_subagent_completion_text(running_entry, update)
     end
   end
+
+  defp merge_review_context(nil, current), do: current
+  defp merge_review_context(previous, nil), do: previous
+
+  defp merge_review_context(previous, current) do
+    if previous == current or String.ends_with?(previous, "\n\n" <> current), do: previous, else: previous <> "\n\n" <> current
+  end
+
+  defp extract_subagent_completion_text(_running_entry, %{event: :review_subagent_completed, review_result: %{"text" => text}})
+       when is_binary(text), do: text
 
   defp extract_subagent_completion_text(running_entry, update)
        when is_map(running_entry) and is_map(update) do
@@ -3229,7 +3212,8 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_map(status) and is_struct(review_subagent_ids, MapSet) and
               is_struct(review_subagent_call_ids, MapSet) do
-    Enum.find_value(status, fn
+    status
+    |> Enum.map(fn
       {agent_id, entry} ->
         extract_subagent_completion_from_wait_agent_status_entry(
           agent_id,
@@ -3239,12 +3223,19 @@ defmodule SymphonyElixir.Orchestrator do
 
       _ ->
         nil
-    end) ||
-      unverified_review_subagent_completion_from_wait_agent_status(
-        status,
-        review_subagent_ids,
-        review_subagent_call_ids
-      )
+    end)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] ->
+        unverified_review_subagent_completion_from_wait_agent_status(
+          status,
+          review_subagent_ids,
+          review_subagent_call_ids
+        )
+
+      results ->
+        Enum.join(results, "\n\n")
+    end
   end
 
   defp extract_subagent_completion_from_wait_agent_status(
@@ -3783,6 +3774,8 @@ defmodule SymphonyElixir.Orchestrator do
        do: false
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do
+    delay_ms = max(delay_ms, RateLimit.remaining_ms())
+
     if is_reference(state.tick_timer_ref) do
       Process.cancel_timer(state.tick_timer_ref)
     end

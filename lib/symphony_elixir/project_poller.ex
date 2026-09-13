@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ProjectPoller do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.{Client, RateLimit}
   alias SymphonyElixir.{ProjectContext, Projects}
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -40,7 +40,7 @@ defmodule SymphonyElixir.ProjectPoller do
     state = %{
       contexts: contexts,
       interval: interval,
-      result: {:error, :initial_poll_pending},
+      result: Map.new(contexts, &{&1.id, {:error, :initial_poll_pending}}),
       timer: nil,
       timer_token: nil
     }
@@ -66,13 +66,7 @@ defmodule SymphonyElixir.ProjectPoller do
   end
 
   def handle_call({:candidates, id}, _from, state) do
-    result =
-      case state.result do
-        {:ok, candidates} -> {:ok, Map.fetch!(candidates, id)}
-        error -> error
-      end
-
-    {:reply, result, state}
+    {:reply, Map.fetch!(state.result, id), state}
   end
 
   def handle_call({:context, id}, _from, state) do
@@ -95,16 +89,40 @@ defmodule SymphonyElixir.ProjectPoller do
     state = %{state | contexts: contexts, interval: interval}
     :ok = SymphonyElixir.WorkerCapacity.configure(contexts)
     publish_settings(contexts)
-    result = Client.fetch_project_candidates(state.contexts)
-    if match?({:error, _}, result), do: Logger.error("Gemeinsames Linear-Polling fehlgeschlagen: #{inspect(result)}")
+    groups = Enum.group_by(contexts, & &1.settings.tracker.app["workspace_id"])
+    results = Enum.map(groups, &poll_workspace/1)
+    result = results |> Enum.map(&elem(&1, 0)) |> Enum.reduce(%{}, &Map.merge/2)
     token = make_ref()
-    timer = Process.send_after(self(), {:poll, token}, state.interval)
+    delay = results |> Enum.map(&elem(&1, 1)) |> Enum.min()
+    timer = Process.send_after(self(), {:poll, token}, delay)
 
     for context <- state.contexts do
       if pid = GenServer.whereis(Projects.server(context)), do: send(pid, {:project_poll, context})
     end
 
     %{state | result: result, timer: timer, timer_token: token}
+  end
+
+  defp poll_workspace({workspace, contexts}) do
+    result = Client.fetch_project_candidates(contexts)
+
+    if match?({:error, _}, result),
+      do: Logger.error("Gemeinsames Linear-Polling fehlgeschlagen workspace_id=#{workspace}: #{inspect(result)}")
+
+    candidates =
+      Map.new(contexts, fn context ->
+        scoped =
+          case result do
+            {:ok, found} -> {:ok, Map.fetch!(found, context.id)}
+            error -> error
+          end
+
+        {context.id, scoped}
+      end)
+
+    interval = contexts |> Enum.map(& &1.settings.polling.interval_ms) |> Enum.min()
+    cooldown = contexts |> Enum.map(&ProjectContext.with_context(&1, fn -> RateLimit.remaining_ms() end)) |> Enum.max()
+    {candidates, max(interval, cooldown)}
   end
 
   defp publish_settings(contexts) do

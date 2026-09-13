@@ -168,7 +168,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-dialog-source"}}}'
             ;;
           4)
-            printf '%s\\n' '{"method":"turn/completed","params":{}}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-dialog-source","turn":{"id":"turn-dialog-source"}}}'
             exit 0
             ;;
           *)
@@ -285,7 +285,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-env"}}}'
-            printf '%s\\n' '{"method":"turn/completed","params":{}}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-env","turn":{"id":"turn-env"}}}'
             exit 0
             ;;
           *)
@@ -377,7 +377,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"method":"item/tool/call","id":99,"params":{"tool":"linear_graphql","callId":"call-linear","item":{"type":"dynamic_tool"},"arguments":{"query":"query Test { viewer { id } }"}}}'
             ;;
           5)
-            printf '%s\\n' '{"method":"turn/completed","params":{}}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-tool","turn":{"id":"turn-tool"}}}'
             exit 0
             ;;
           *)
@@ -598,7 +598,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1001"}}}'
             ;;
           4)
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-1001","turn":{"id":"turn-1001"}}}'
             exit 0
             ;;
           *)
@@ -695,7 +695,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-resumed"}}}'
             ;;
           4)
-            printf '%s\\n' '{"method":"turn/completed","params":{}}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-existing","turn":{"id":"turn-resumed"}}}'
             exit 0
             ;;
           *)
@@ -938,7 +938,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":99,\"method\":\"item/commandExecution/requestApproval\",\"params\":{\"command\":\"gh pr view\",\"cwd\":\"/tmp\",\"reason\":\"need approval\"}}'
             ;;
           5)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-89\",\"turn\":{\"id\":\"turn-89\"}}}'
             exit 0
             ;;
           *)
@@ -1077,7 +1077,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":110,\"method\":\"item/tool/requestUserInput\",\"params\":{\"itemId\":\"call-717\",\"questions\":[{\"header\":\"Approve app tool call?\",\"id\":\"mcp_tool_call_approval_call-717\",\"isOther\":false,\"isSecret\":false,\"options\":[{\"description\":\"Run the tool and continue.\",\"label\":\"Approve Once\"},{\"description\":\"Run the tool and remember this choice for this session.\",\"label\":\"Approve this Session\"},{\"description\":\"Decline this tool call and continue.\",\"label\":\"Deny\"},{\"description\":\"Cancel this tool call\",\"label\":\"Cancel\"}],\"question\":\"The linear MCP server wants to run the tool \\\"Save issue\\\", which may modify or delete data. Allow this action?\"}],\"threadId\":\"thread-717\",\"turnId\":\"turn-717\"}}'
             ;;
           5)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-717\",\"turn\":{\"id\":\"turn-717\"}}}'
             exit 0
             ;;
           *)
@@ -1162,7 +1162,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":111,"method":"item/tool/requestUserInput","params":{"itemId":"call-718","questions":[{"header":"Provide context","id":"freeform-718","isOther":false,"isSecret":false,"options":null,"question":"What comment should I post back to the issue?"}],"threadId":"thread-718","turnId":"turn-718"}}'
             ;;
           5)
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-718","turn":{"id":"turn-718"}}}'
             exit 0
             ;;
           *)
@@ -1251,7 +1251,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":112,\"method\":\"item/tool/requestUserInput\",\"params\":{\"itemId\":\"call-719\",\"questions\":[{\"header\":\"Choose an action\",\"id\":\"options-719\",\"isOther\":false,\"isSecret\":false,\"options\":[{\"description\":\"Use the default behavior.\",\"label\":\"Use default\"},{\"description\":\"Skip this step.\",\"label\":\"Skip\"}],\"question\":\"How should I proceed?\"}],\"threadId\":\"thread-719\",\"turnId\":\"turn-719\"}}'
             ;;
           5)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-719\",\"turn\":{\"id\":\"turn-719\"}}}'
             exit 0
             ;;
           *)
@@ -1350,7 +1350,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":101,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"some_tool\",\"callId\":\"call-90\",\"threadId\":\"thread-90\",\"turnId\":\"turn-90\",\"arguments\":{}}}'
             ;;
           5)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-90\",\"turn\":{\"id\":\"turn-90\"}}}'
             exit 0
             ;;
           *)
@@ -1451,7 +1451,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":102,\"method\":\"item/tool/call\",\"params\":{\"name\":\"symphony_linear.linear_graphql\",\"callId\":\"call-90a\",\"threadId\":\"thread-90a\",\"turnId\":\"turn-90a\",\"arguments\":{\"query\":\"query Viewer { viewer { id } }\",\"variables\":{\"includeTeams\":false}}}}'
             ;;
           5)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-90a\",\"turn\":{\"id\":\"turn-90a\"}}}'
             exit 0
             ;;
           *)
@@ -1587,7 +1587,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{\"id\":103,\"method\":\"item/tool/call\",\"params\":{\"tool\":\"linear_graphql\",\"callId\":\"call-90b\",\"threadId\":\"thread-90b\",\"turnId\":\"turn-90b\",\"arguments\":{\"query\":\"query Viewer { viewer { id } }\"}}}'
             ;;
           5)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-90b\",\"turn\":{\"id\":\"turn-90b\"}}}'
             exit 0
             ;;
           *)
@@ -1677,7 +1677,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-91"}}}'
             ;;
           4)
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-91","turn":{"id":"turn-91"}}}'
             exit 0
             ;;
           *)
@@ -1741,7 +1741,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' 'warning: this is stderr noise' >&2
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-92","turn":{"id":"turn-92"}}}'
             exit 0
             ;;
           *)
@@ -1815,7 +1815,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"method":"turn/completed"'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-93","turn":{"id":"turn-93"}}}'
             exit 0
             ;;
           *)
@@ -1884,7 +1884,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-94"}}}'
             ;;
           4)
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-94","turn":{"id":"turn-94"}}}'
             printf '%s\\n' '{"method":"codex/event/user_message","params":{"msg":{"payload":{"content":[{"type":"input_text","text":"<subagent_notification>\\n{\\"agent_path\\":\\"agent-1\\",\\"status\\":{\\"completed\\":\\"Findings:\\\\n- High: Example finding.\\"}}\\n</subagent_notification>"}]}}}}'
             exit 0
             ;;
@@ -1997,7 +1997,7 @@ defmodule SymphonyElixir.AppServerTest do
             printf '%s\\n' '{"id":44,"method":"item/tool/call","params":{"tool":"symphony_merge","arguments":{}}}'
             ;;
           5)
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-remote","turn":{"id":"turn-remote"}}}'
             exit 0
             ;;
           *)
@@ -2144,7 +2144,7 @@ defmodule SymphonyElixir.AppServerTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-auth"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-auth","turn":{"id":"turn-review-auth"}}}'
             exit 0
             ;;
           *)

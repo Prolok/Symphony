@@ -13,7 +13,7 @@ defmodule SymphonyElixir.LinearAppAuthTest do
     owner = self()
 
     token_request = fn form ->
-      assert form == %{"grant_type" => "client_credentials", "scope" => "read,write", "client_id" => "client", "client_secret" => "synthetic-client-secret"}
+      assert form == %{"grant_type" => "client_credentials", "scope" => "read,write", "client_id" => name, "client_secret" => "synthetic-client-secret"}
       number = Agent.get_and_update(counter, &{&1 + 1, &1 + 1})
       send(owner, {:token_issued, number})
       token_response("synthetic-token-#{number}")
@@ -23,7 +23,7 @@ defmodule SymphonyElixir.LinearAppAuthTest do
       auth_mode: "app",
       endpoint: "https://api.linear.app/graphql",
       assignee: "00000000-0000-4000-8000-000000000001",
-      app: %{"client_secret_env" => name, "client_id" => "client", "workspace_id" => "workspace", "user_id" => "app", "state_root" => "/synthetic", "installation_id" => "synthetic"}
+      app: %{"client_secret_env" => name, "client_id" => name, "workspace_id" => "workspace", "user_id" => "app", "state_root" => "/synthetic", "installation_id" => "synthetic"}
     }
 
     {:ok, tracker: tracker, cache: cache, token_request: token_request, counter: counter}
@@ -312,6 +312,49 @@ defmodule SymphonyElixir.LinearAppAuthTest do
     assert {:error, :linear_app_runtime_failed} = call(ctx, request: fn _, _ -> throw("synthetic-token") end)
     assert_received {:token_issued, 1}
     refute_received {:token_issued, 2}
+  end
+
+  test "confirmed retry-after survives another app cache and blocks identity and token requests", ctx do
+    root = Path.join([File.cwd!(), "_build", "rate-limit-#{System.unique_integer([:positive])}"])
+    on_exit(fn -> File.rm_rf!(root) end)
+    ctx = put_in(ctx, [:tracker, :app, "state_root"], root)
+    now = 1_800_000_000_000
+    request = fn _, _ -> {:ok, %{status: 403, headers: %{"retry-after" => ["3600"]}, body: %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}}} end
+
+    assert {:error, {:linear_app_rate_limited, %{retry_at_ms: deadline}}} =
+             call(ctx, request: request, rate_limit_now: fn -> now end)
+
+    assert deadline == now + 3_600_000
+    {:ok, cache} = AppAuth.start_link()
+    ctx = %{ctx | cache: cache}
+    ctx = put_in(ctx, [:tracker, :app, "state_root"], Path.join(root, "other-project/.symphony/state"))
+    forbidden = fn _ -> flunk("token requested before retry-after") end
+
+    denied_request = fn _, _ -> flunk("HTTP before retry-after") end
+    retry_opts = [token_request: forbidden, request: denied_request, rate_limit_now: fn -> now + 5_000 end]
+    assert {:error, {:linear_app_rate_limited, %{retry_at_ms: ^deadline}}} = call(ctx, retry_opts)
+
+    assert {:ok, _} = call(ctx, rate_limit_now: fn -> deadline end)
+  end
+
+  test "token cooldown and errors observed inside the guarded request preserve their classification", ctx do
+    deadline = %{retry_at_ms: 1_800_003_600_000, retry_after_ms: 3_600_000}
+    limited = {:error, {:linear_app_rate_limited, deadline}}
+    assert ^limited = call(ctx, request: fn _, _ -> limited end)
+
+    assert {:error, :linear_rate_limit_state_unavailable} =
+             call(ctx, request: fn _, _ -> {:error, :linear_rate_limit_state_unavailable} end)
+
+    {:ok, cache} = AppAuth.start_link()
+    assert ^limited = call(%{ctx | cache: cache}, token_request: fn _ -> limited end)
+
+    root = Path.join([File.cwd!(), "_build", "token-cooldown-#{System.unique_integer([:positive])}"])
+    on_exit(fn -> File.rm_rf!(root) end)
+    ctx = put_in(ctx, [:tracker, :app, "state_root"], root)
+    now = 1_800_000_000_000
+    token_request = fn _ -> {:ok, %{status: 429, headers: %{"retry-after" => "3600"}}} end
+    assert ^limited = call(ctx, token_request: token_request, rate_limit_now: fn -> now end)
+    assert ^limited = call(ctx, token_request: fn _ -> flunk("token request before cooldown") end, rate_limit_now: fn -> now end)
   end
 
   defp call(ctx, opts \\ []) do

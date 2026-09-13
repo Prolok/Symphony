@@ -55,7 +55,10 @@ Pro Linear-Workspace müssen Client-ID, Workspace-ID, App-User-ID und Credential
 übereinstimmen. Konflikte werden als Konfigurationsfehler abgewiesen. Die App-/
 Workspaceidentität wird bei API-Zugriffen verifiziert. Eine Kandidatenabfrage pro
 Workspace und API-Seite enthält projektweise verknüpfte Scope-, Status- und
-Assignee-Filter. Verschiedene Workspaces werden getrennt abgefragt.
+Assignee-Filter. Verschiedene Workspaces werden getrennt abgefragt. Fehler und
+bestätigte Sperrfristen gelten je Workspacegruppe; unbetroffene Gruppen behalten
+ihre Kandidaten und ihren Polltakt. Sind alle Gruppen gesperrt, richtet sich der
+nächste Poll nach der frühesten fälligen Gruppe.
 
 Worktree-Erzeugung und Cleanup verwenden `on_create_worktree.py` bzw.
 `on_remove_worktree.py` aus dem jeweiligen Projektroot. Dialog, Retry und
@@ -266,11 +269,45 @@ GitHub-Rate-Limit bei der Merge-Anforderung beendet den Versuch; die Wiederholun
 wiederholen Rate-Limits intern mit Backoff.
 
 Logs `Comment scan completed/failed` nennen Projektroot, Issue-/Session-Kontext,
-letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Rate-Limits folgen
-der bestehenden Fehlerklassifikation und werden beim nächsten Poll/Checkpoint
-wieder geprüft. Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
+letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Bestätigte Linear-
+Sperrfristen aus `Retry-After` oder Rate-Limit-Reset gelten gemeinsam für Token-,
+Identity- und Geschäftsanfragen derselben App. Der nicht geheime Dauerzustand
+unter `~/.cache/symphony/rate-limits` ist nach Workspace-/Client-ID gebunden und
+unabhängig von Projekt-State-Root und Release. Er erhält die Fristen auch über
+Prozessneustarts und beide Tooltransporte; Polling und Worker-Retries der
+betroffenen App warten mindestens bis zum Ablauf. Projektzustände und private
+Credentialquellen bleiben im jeweiligen Projekt.
+Nicht erschöpfte Diagnoseheader erzeugen keine Sperre. Ein fehlgeschlagener
+Dispatch-Refresh erhält den sichtbaren Retry samt Ergebnis und IDs.
+Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
 zwischen Polls und keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
 Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehen.
+
+### Review-Wiederaufnahme
+
+Ein Codex-Terminalereignis beendet nur den zugehörigen Hauptturn (`threadId`
+und `turn.id`). Native `subAgentActivity`-Meldungen und leere Collab-Waitzustände
+enthalten keinen Ergebnistext. Vollständige Finals werden über den bestehenden
+App-Server mit `thread/read` und vollständig paginiertem `thread/turns/list`
+gelesen; Child-ID, Parent-ID und Workspace müssen zur gespeicherten Bindung passen.
+Während solcher RPCs eintreffende Ereignisse bleiben gepuffert.
+
+Der atomare Zustand unter `state/reviews` bindet Projekt, Issue, Workspace und
+Workerhost an den aktuellen Review-Parentthread. Er erhält Aufruf-/Child-IDs,
+vollständige Resultate und deren Zustellung vor nachfolgenden Linear-Aktionen.
+Native `subAgentActivity(kind=started)` zählen anhand ihrer Call-ID und des
+Parentturns auch ohne separaten Collab-Spawn. Live-Ereignisse und vollständige
+Parenthistorie ergänzen dieselben Aufrufe idempotent; Completed-IDs zählen nicht
+als weitere Starts. Die Historie ergänzt auch bisher fehlende Start-IDs, ohne
+vorhandene Resultate oder Zustellungen zurückzusetzen.
+Eine Wiederaufnahme verwendet `thread/resume` und die vorhandene Historie;
+bereits zugestellte Resultate werden nicht erneut als Zusatzkontext eingespielt.
+Die fachliche Verarbeitung bleibt im bestehenden Workpad nachgewiesen. Mehrere
+Resultate bleiben nebeneinander erhalten, auch wenn später „Keine Findings“
+folgt; Budget und Pflichtgates bleiben unverändert. Beschädigter Zustand oder
+unvollständige/falsch gebundene Historie erlauben keinen Ersatzreviewstart.
+Der Zustand aktiviert keine abgeschlossenen Tickets und wird beim regulären
+Verlassen der Reviewphase verworfen.
 
 ### GitHub-CI und No-CI
 

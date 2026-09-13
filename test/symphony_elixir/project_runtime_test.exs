@@ -122,7 +122,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
     end)
 
     start_supervised!({ProjectSupervisor, contexts: contexts})
-    assert {:ok, _} = :sys.get_state(ProjectPoller).result
+    assert {:ok, [_]} = ProjectPoller.candidates(one)
     assert_receive {:page, "workspace-a", nil, filter}, 3_000
     assert length(filter["or"]) == 2
     branches = Enum.map(filter["or"], fn branch -> Enum.reduce(branch["and"], %{}, &Map.merge/2) end)

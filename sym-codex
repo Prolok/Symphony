@@ -868,7 +868,11 @@ sym_codex_run() {
   fi
 
   if [[ -n "$SYM_CODEX_MODEL" ]]; then
-    codex_args+=(--model "$SYM_CODEX_MODEL")
+    if (( observer_mode )); then
+      codex_args+=(--config "model=$SYM_CODEX_MODEL")
+    else
+      codex_args+=(--model "$SYM_CODEX_MODEL")
+    fi
   fi
 
   if (( observer_mode )); then

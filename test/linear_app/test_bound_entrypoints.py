@@ -99,9 +99,12 @@ else:
             subprocess.run(['git', 'init', '-q', '-b', 'main', str(foreign)], check=True)
             (project / '.venv/bin').mkdir(parents=True)
             (project / '.venv/bin/activate').write_text('export SYNTHETIC_BOUND_PROJECT=preserved\n')
-            (runtime / 'scripts/codex-app-context.py').write_text("import os\nprint('project='+os.environ.get('SYNTHETIC_BOUND_PROJECT','lost'))\n")
+            (runtime / 'scripts/codex-app-context.py').write_text("import os,sys,json\nprint('project='+os.environ.get('SYNTHETIC_BOUND_PROJECT','lost'))\nprint('args='+json.dumps(sys.argv[1:]))\n")
             env.update(SYMPHONY_LINEAR_AUTH_MODE='app', SYMPHONY_LINEAR_ENV_DIR=str(project / '.symphony'),
-                       SYMPHONY_LINEAR_BINDING_HASH='observer-binding')
+                       SYMPHONY_LINEAR_BINDING_HASH='observer-binding', SYM_CODEX_MODEL='gpt-5.6-sol')
             result = subprocess.run([runtime / 'sym-codex', '--observer'], cwd=foreign, env=env,
                                     text=True, capture_output=True, check=True)
             self.assertIn('project=preserved', result.stdout)
+            arguments = json.loads(next(line[5:] for line in result.stdout.splitlines() if line.startswith('args=')))
+            self.assertIn('model=gpt-5.6-sol', arguments)
+            self.assertNotIn('--model', arguments)

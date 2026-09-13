@@ -2729,7 +2729,7 @@ defmodule SymphonyElixir.CoreTest do
              recovered_review_subagent_ids: recovered_review_subagent_ids
            } = :sys.get_state(pid).running[issue_id]
 
-    assert MapSet.equal?(recovered_review_subagent_ids, MapSet.new())
+    assert MapSet.equal?(recovered_review_subagent_ids, MapSet.new(["agent-review-recovered"]))
   end
 
   test "review subagent tracking trusts only the mandatory review spawn request" do
@@ -5877,7 +5877,7 @@ defmodule SymphonyElixir.CoreTest do
           ;;
         4)
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-success"}}}'
-          printf '%s\\n' '{"method":"turn/completed"}'
+          printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-success","turn":{"id":"turn-success"}}}'
           exit 0
           ;;
       esac
@@ -7454,7 +7454,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-1\"}}}'
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-1\",\"turn\":{\"id\":\"turn-1\"}}}'
             exit 0
             ;;
           *)
@@ -7539,7 +7539,7 @@ defmodule SymphonyElixir.CoreTest do
               printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-live\"}}}'
               ;;
             4)
-              printf '%s\\n' '{\"method\":\"turn/completed\"}'
+              printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-live\",\"turn\":{\"id\":\"turn-live\"}}}'
               ;;
             *)
               ;;
@@ -7704,7 +7704,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-manual-skip"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-manual-skip","turn":{"id":"turn-manual-skip"}}}'
             ;;
         esac
       done
@@ -8230,11 +8230,11 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-1"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-cont","turn":{"id":"turn-cont-1"}}}'
             ;;
           5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cont-2"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-cont","turn":{"id":"turn-cont-2"}}}'
             ;;
         esac
       done
@@ -8374,11 +8374,11 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-status-change-1"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-status-change","turn":{"id":"turn-status-change-1"}}}'
             ;;
           5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-status-change-2"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-status-change","turn":{"id":"turn-status-change-2"}}}'
             ;;
         esac
       done
@@ -8499,11 +8499,11 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cancel-1"}}}'
-            printf '%s\\n' '{"method":"turn/cancelled","params":{"reason":"interrupted"}}'
+            printf '%s\\n' '{"method":"turn/cancelled","params":{"reason":"interrupted","threadId":"thread-cancel-cont","turn":{"id":"turn-cancel-1"}}}'
             ;;
           5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-cancel-2"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-cancel-cont","turn":{"id":"turn-cancel-2"}}}'
             ;;
         esac
       done
@@ -8642,7 +8642,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-branch-sync"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-branch-sync","turn":{"id":"turn-branch-sync"}}}'
             ;;
         esac
       done
@@ -9112,7 +9112,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-prereview"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-prereview","turn":{"id":"turn-prereview"}}}'
             ;;
         esac
       done
@@ -9225,7 +9225,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-prereview-skip"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-prereview-skip","turn":{"id":"turn-prereview-skip"}}}'
             ;;
         esac
       done
@@ -9341,7 +9341,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-open-handoff"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-open-handoff","turn":{"id":"turn-open-handoff"}}}'
             ;;
         esac
       done
@@ -9542,7 +9542,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-manual-stale-review"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-manual-stale-review","turn":{"id":"turn-manual-stale-review"}}}'
             exit 0
             ;;
           *)
@@ -9669,7 +9669,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review","turn":{"id":"turn-review"}}}'
             ;;
         esac
       done
@@ -9784,7 +9784,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-comment-findings"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-comment-findings","turn":{"id":"turn-review-comment-findings"}}}'
             ;;
         esac
       done
@@ -9906,7 +9906,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-open"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-open","turn":{"id":"turn-review-open"}}}'
             ;;
         esac
       done
@@ -10028,11 +10028,11 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-incomplete-1"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-incomplete","turn":{"id":"turn-review-incomplete-1"}}}'
             ;;
           5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-incomplete-2"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-incomplete","turn":{"id":"turn-review-incomplete-2"}}}'
             ;;
         esac
       done
@@ -10188,7 +10188,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-missing-workpad"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-missing-workpad","turn":{"id":"turn-review-missing-workpad"}}}'
             ;;
         esac
       done
@@ -10291,7 +10291,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-no-section"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-no-section","turn":{"id":"turn-review-no-section"}}}'
             ;;
         esac
       done
@@ -10405,7 +10405,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-no-checklist"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-no-checklist","turn":{"id":"turn-review-no-checklist"}}}'
             ;;
         esac
       done
@@ -10515,7 +10515,7 @@ defmodule SymphonyElixir.CoreTest do
           4)
             printf 'review change\\n' >> README.md
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-dirty"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-dirty","turn":{"id":"turn-review-dirty"}}}'
             ;;
         esac
       done
@@ -10626,7 +10626,7 @@ defmodule SymphonyElixir.CoreTest do
           4)
             rm -rf .git
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-status-error"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-status-error","turn":{"id":"turn-review-status-error"}}}'
             ;;
         esac
       done
@@ -10752,7 +10752,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-preflight"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-preflight","turn":{"id":"turn-review-preflight"}}}'
             ;;
         esac
       done
@@ -10885,7 +10885,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-retry"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-retry","turn":{"id":"turn-review-retry"}}}'
             ;;
         esac
       done
@@ -11027,7 +11027,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-hook"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-hook","turn":{"id":"turn-review-hook"}}}'
             ;;
         esac
       done
@@ -11204,7 +11204,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-startup-failure"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-startup-failure","turn":{"id":"turn-review-startup-failure"}}}'
             ;;
         esac
       done
@@ -11311,7 +11311,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-turn-failure"}}}'
-            printf '%s\\n' '{"method":"turn/failed","params":{"reason":"boom"}}'
+            printf '%s\\n' '{"method":"turn/failed","params":{"reason":"boom","threadId":"thread-review-turn-failure","turn":{"id":"turn-review-turn-failure"}}}'
             ;;
         esac
       done
@@ -11408,7 +11408,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-marker"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-marker","turn":{"id":"turn-review-marker"}}}'
             ;;
         esac
       done
@@ -11584,7 +11584,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-cancelled"}}}'
-            printf '%s\\n' '{"method":"turn/cancelled","params":{"reason":"interrupted"}}'
+            printf '%s\\n' '{"method":"turn/cancelled","params":{"reason":"interrupted","threadId":"thread-review-cancelled","turn":{"id":"turn-review-cancelled"}}}'
             ;;
         esac
       done
@@ -11761,7 +11761,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-skip"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-skip","turn":{"id":"turn-review-skip"}}}'
             ;;
         esac
       done
@@ -11888,7 +11888,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-review-blocked-skip"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-review-blocked-skip","turn":{"id":"turn-review-blocked-skip"}}}'
             ;;
         esac
       done
@@ -12007,7 +12007,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-clean"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-merge-clean","turn":{"id":"turn-merge-clean"}}}'
             ;;
         esac
       done
@@ -12110,7 +12110,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-evidence"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-merge-evidence","turn":{"id":"turn-merge-evidence"}}}'
             ;;
         esac
       done
@@ -12219,7 +12219,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-test-clean"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-test-clean","turn":{"id":"turn-test-clean"}}}'
             ;;
         esac
       done
@@ -12333,7 +12333,7 @@ defmodule SymphonyElixir.CoreTest do
           4)
             printf '# fixed during test\\n' > README.md
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-test-fix"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-test-fix","turn":{"id":"turn-test-fix"}}}'
             ;;
         esac
       done
@@ -12455,7 +12455,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-test-dirty"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-test-dirty","turn":{"id":"turn-test-dirty"}}}'
             ;;
         esac
       done
@@ -12573,7 +12573,7 @@ defmodule SymphonyElixir.CoreTest do
           4)
             printf '# changed by merge pull/rebase\\n' > README.md
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-rerun"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-merge-rerun","turn":{"id":"turn-merge-rerun"}}}'
             ;;
         esac
       done
@@ -12680,7 +12680,7 @@ defmodule SymphonyElixir.CoreTest do
           4)
             printf '# changed before wrong review handoff\\n' > README.md
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-dirty-review"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-merge-dirty-review","turn":{"id":"turn-merge-dirty-review"}}}'
             ;;
         esac
       done
@@ -12785,7 +12785,7 @@ defmodule SymphonyElixir.CoreTest do
           4)
             printf '# changed before cancelled review handoff\\n' > README.md
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-cancel-dirty"}}}'
-            printf '%s\\n' '{"method":"turn/cancelled","params":{"reason":"interrupted"}}'
+            printf '%s\\n' '{"method":"turn/cancelled","params":{"reason":"interrupted","threadId":"thread-merge-cancel-dirty","turn":{"id":"turn-merge-cancel-dirty"}}}'
             ;;
         esac
       done
@@ -12890,7 +12890,7 @@ defmodule SymphonyElixir.CoreTest do
           4)
             printf '# changed before cancelled active handoff\\n' > README.md
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-cancel-active"}}}'
-            printf '%s\\n' '{"method":"turn/cancelled","params":{"reason":"interrupted"}}'
+            printf '%s\\n' '{"method":"turn/cancelled","params":{"reason":"interrupted","threadId":"thread-merge-cancel-active","turn":{"id":"turn-merge-cancel-active"}}}'
             ;;
         esac
       done
@@ -12998,7 +12998,7 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-dirty"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-merge-dirty","turn":{"id":"turn-merge-dirty"}}}'
             ;;
         esac
       done
@@ -13112,11 +13112,11 @@ defmodule SymphonyElixir.CoreTest do
             ;;
           4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-1"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-max","turn":{"id":"turn-max-1"}}}'
             ;;
           5)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-max-2"}}}'
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-max","turn":{"id":"turn-max-2"}}}'
             ;;
         esac
       done
@@ -13215,7 +13215,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-77\"}}}'
             ;;
           4)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-77\",\"turn\":{\"id\":\"turn-77\"}}}'
             exit 0
             ;;
           *)
@@ -13359,7 +13359,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{\"id\":3,\"result\":{\"turn\":{\"id\":\"turn-88\"}}}'
             ;;
           4)
-            printf '%s\\n' '{\"method\":\"turn/completed\"}'
+            printf '%s\\n' '{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"thread-88\",\"turn\":{\"id\":\"turn-88\"}}}'
             exit 0
             ;;
           *)
@@ -13445,7 +13445,7 @@ defmodule SymphonyElixir.CoreTest do
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-99"}}}'
             ;;
           4)
-            printf '%s\\n' '{"method":"turn/completed"}'
+            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-99","turn":{"id":"turn-99"}}}'
             exit 0
             ;;
           *)

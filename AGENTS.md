@@ -50,3 +50,11 @@ mix specs.check
 Wenn sich Verhalten oder Konfiguration ändern, aktualisiere die Dokumentation im selben PR:
 
 - `WORKFLOW.md` für Änderungen am Workflow- oder Konfigurationsvertrag
+
+`WORKFLOW.md` ist Startkontext und zentraler Agentenvertrag. Ergänze nur
+notwendige, präzise, kompakte und widerspruchsfreie Regeln mit minimalem Delta.
+Keine Ticketchronik, Debug-Erzählungen, Implementierungsdetails oder Dopplungen;
+benötigte Details gehören in vorhandene passende Docs oder zuständige Skills,
+mit gezieltem Verweis, soweit für die Aufgabe nötig. Prüfe bei jeder Änderung
+das notwendige Delta und die Gesamtwirkung auf den Startkontext; Pflichtgates
+und Verhaltensgrenzen müssen vollständig erhalten bleiben.

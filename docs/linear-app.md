@@ -66,6 +66,9 @@ Kennung darf niemals das erste von mehreren Ergebnissen auswählen.
 
 ## Schutz der Zugangsdaten
 
+CLI, MCP und manuelle Skripthelfer aktivieren den ausgewählten Workflow vor
+dem öffentlichen Laden der Projektumgebung. Auch bei abweichenden Workflowdateien
+bleiben deren direkte und indirekte Secretreferenzen dadurch vom Export ausgeschlossen.
 Envdateien werden als Daten geparst, nie als Shellcode ausgeführt. Öffentliche
 Ladepfade exportieren keine Secrets. Nur der gebundene Auth-/MCP-Prozess liest die
 benannte Secretquelle; `.env.local` gewinnt vor `.env`. Ein bewusst leerer Wert
@@ -74,17 +77,23 @@ Fallback. Token und Secret bleiben aus Logs, Prompts, Codex-Umgebung und
 Sessionartefakten heraus. Direkte HTTP-Redirects sind für den App-Client deaktiviert.
 
 Release-Checkouts binden Code, Workflow, Helfer, Skills und Build-Artefakte an den
-geprüften Stand. Der Root-Konfigurationssnapshot enthält nur öffentliche
-Startwerte einschließlich Discovery-Roots und Reviewbudget sowie die Rootreferenz.
+geprüften Stand. Sie übernehmen den aktuellen Arbeitsstand einschließlich gestagter
+Löschungen, Umbenennungen und Datei-/Verzeichniswechsel; ignorierte Dateien bleiben
+ausgeschlossen. Der Root-Konfigurationssnapshot enthält nur öffentliche
+Startwerte (`SYM_PROJECT_ROOT`, `SYM_CODEX_*`, `SYM_MAXIMUM_REVIEW_ITERATIONS`)
+mit ihren lokalen Overrides sowie die Rootreferenz.
 Discovery und Promptbau verwenden diese eingefrorenen Werte; spätere Änderungen
 am ursprünglichen Root wirken erst in einem neuen Release.
 Codex bekommt kopierte Skills und nur den
 gebundenen `symphony_linear`-MCP; persönliche MCPs und Plugins werden ausgeschlossen.
 Die vorhandene OpenAI-Anmeldung bleibt an ihrer Credential-Referenz. Dies ersetzt
 keine Dateisystemisolation gegenüber beliebigen Programmen mit Betreiberrechten.
-Jedes Projekt hat ein eigenes Codex-Home. Dessen erzeugte Konfiguration wird vor
-jedem Start vollständig mit dem erwarteten Inhalt verglichen; veränderte
-Konfigurationen werden abgewiesen, ohne Sessions zu ändern.
+Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
+(bei Git-Worktrees für den Git-common-root). Dessen erzeugte `config.toml` wird
+vor jedem Start vollständig mit dem erwarteten Inhalt verglichen; veränderte
+Konfigurationen werden abgewiesen, ohne Sessions zu ändern. Gemeinsames
+Codex-Startprofil und kopierte Skills sind zusätzlich durch das Release-Manifest
+versiegelt.
 
 ## Einmalige Betreiberübergabe
 
@@ -139,6 +148,56 @@ in den gemeinsamen Lauf importiert. Gesprächs-/Session-History, Wiederaufnahme
 und Tracker-/Journalzustand bleiben erhalten. Bereits geladener Alt-Kontext
 wird dadurch nicht rückwirkend entfernt.
 
+## Kommentarjournal und App-Mutationen
+
+App-Kommentarschreibvorgänge und ihre Wiederaufnahme werden pro Projektjournal
+prozessübergreifend serialisiert. Jede App-Anfrage darf eine Kommentar-ID nur
+einmal verändern; mehrfache Writes derselben ID werden vor HTTP mit
+`invalid_comment_mutation` abgewiesen und müssen einzeln gesendet werden.
+Optionale GraphQL-Felder bleiben bei fehlenden Variablen ausgelassen;
+explizites `null` bleibt erhalten. Ticketkennungen werden vor der Intent-Anlage
+lesend zu Issue-IDs aufgelöst. JSON-Inhalt und die String-Ausgabe von `bodyData`
+werden strukturell verglichen. Kommentarupdates unterstützen die rücklesbaren
+Felder `body`, `bodyData`, `quotedText`, `resolvingUserId` und
+`resolvingCommentId`; andere Update-Felder werden vor HTTP abgewiesen.
+
+Eindeutige 401/429 ohne Daten werden auch bei leerem oder textuellem Body als
+abgewiesen protokolliert; unklare Ausgänge werden weiterhin abgeglichen.
+GraphQL-`RATELIMITED` ohne Daten und ohne Feldpfad wird ebenso als eindeutige
+Ablehnung erfasst, auch bei HTTP 400/403. Antworten mit Daten oder unklaren
+zusätzlichen Fehlern bleiben abgleichpflichtig.
+Historische Journalbelege werden auch nach einem kontrollierten App-Wechsel
+gegen ihren gespeicherten Autor geprüft. Neue Writes und Kommentarupdates
+bleiben an die aktuell geprüfte App-Identität gebunden.
+
+Konkurrierende Journalzugriffe warten bis zu 10 Sekunden auf den Lock
+(`comment_journal_busy` bei Zeitüberschreitung, `comment_journal_unavailable`
+bei Helfer-/Backendfehlern). GraphQL-Aufrufe ohne Kommentarschreibvorgang
+benötigen keinen Journal-Lock. Echte konkurrierende Issue-Owner werden sofort
+mit `issue_already_owned` abgewiesen.
+Der gebundene Linear-MCP überträgt UTF-8-JSON als unveränderte Bytes mit genau
+einer Protokollzeile pro Nachricht, einschließlich Unicode und Text-Whitespace.
+
+## Dialog-Polling
+
+Der Candidate-Poll beobachtet `Todo (Dialog-AI)` über ein leichtes
+letztes-Kommentar-Signal (`id`, `createdAt`, `updatedAt`) und merkt pro Issue
+den zuletzt vollständig geprüften Signal-Key. Bei unverändertem Signal und
+nicht fälligem Safety-Fallback entstehen weder `running`-Eintrag noch
+Dashboard-Item, Codex-Start oder vollständiger Kommentarabruf.
+Bei neuem/geändertem Signal lädt Symphony alle Kommentare und wertet
+`Dialog.next_request/3` aus; nur eine echte offene Anfrage startet Codex.
+Die Frischeprüfung vor dem Antwortposting gilt weiterhin.
+
+Bei fehlendem oder unverändertem Signal folgt ein Safety-Full-Check im
+Intervall `30 Sekunden * Anzahl sichtbarer offener Dialogtickets * active_instance_count`
+pro Instanz. Candidate-Polls, unveränderte Signale und No-op-Safety-Checks
+zählen nicht als Aktivität für den Idle-Shutdown. Erst echte Dialogbearbeitung,
+Antwortposting, Statusänderungen, Retry-/Running-Änderungen oder reguläre
+Agentenarbeit setzen die Inaktivitätszeit zurück.
+Die Grenzen für Projektroot, Vorabmeldungen und gestartete Läufe stehen in
+`WORKFLOW_DIALOG.md`, Abschnitt „Verbindliche Regeln“.
+
 ## Dauerhafter Kommentareingang
 
 Reguläre übernommene aktive Issues werden im vorhandenen Polltakt (standardmäßig
@@ -152,6 +211,7 @@ pro Issue die Bindung, beobachtete Quellversionen (auch aus Vor-/Nachscan-Signal
 Abruf, Scanfehler und Zustände `recognized`, `delivered`, `processed` fest.
 Die bestehende OS-Journal-Sperre serialisiert Scan/Ack; Beobachtungen werden mit
 App-Schreibvorgängen serialisiert und unbestätigte Schreibbelege abgeglichen.
+Die Paginierung prüft sichtbare Änderungen, liefert aber keinen atomaren Snapshot.
 Ein fehlgeschlagener Scan ersetzt keinen vollständigen Stand. Schon gelesene
 Seiten bleiben als offene Beobachtungen erhalten. Das gilt auch für gültige
 Quellen innerhalb einer Seite mit GraphQL-Teilfehlern, ungültigen anderen Zeilen
@@ -164,7 +224,9 @@ der Worker ordnet mögliche begonnene Auswirkungen ein. Frühere Ergebnisse
 bleiben erhalten und bestätigen die Löschung nicht mit.
 
 `symphony_comments` liefert sichere Checkpoints und schreibt versionsbezogene
-fachliche Ergebnisse in `### Kommentareingang` des einen Workpads. Nach einem
+fachliche Ergebnisse in `### Kommentareingang` des einen Workpads. Das Workpad
+wird vor der lokalen Bestätigung geschrieben; der dauerhafte Inbox-/Journalzustand
+bleibt erhalten. Nach einem
 Crash wird unbestätigte Arbeit erneut zugestellt. Ein bestätigter Workpad-Write
 mit noch fehlendem lokalem Ack lässt sich anhand des vollständigen lesbaren
 Eintrags mit Quellversion, Ergebnis, Begründung und gegebenenfalls Ersatzbezug
@@ -202,6 +264,15 @@ fehlgeschlagene Scans oder geänderte Labels verhindern den Abschluss. Ein
 GitHub-Rate-Limit bei der Merge-Anforderung beendet den Versuch; die Wiederholung
 über `symphony_merge` prüft sämtliche Gates frisch. Nur lesende GitHub-Aufrufe
 wiederholen Rate-Limits intern mit Backoff.
+
+Logs `Comment scan completed/failed` nennen Projektroot, Issue-/Session-Kontext,
+letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Rate-Limits folgen
+der bestehenden Fehlerklassifikation und werden beim nächsten Poll/Checkpoint
+wieder geprüft. Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
+zwischen Polls und keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
+Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehen.
+
+### GitHub-CI und No-CI
 
 Der Land-Helper unterscheidet bestandene/akzeptierte Checks von No-CI.
 Für No-CI liest er im selben gebundenen GitHub-Repository die aktiven Regeln
@@ -244,10 +315,3 @@ unbekannte Ergebnisse oder Teilantworten bleiben gesperrt.
 PR-/Base-/Head-, Remote- und Workspace-Konsistenz vor dem letzten Linear-Checkpoint.
 Es gibt keine gespeicherte No-CI-Freigabe, zusätzliche Skip-Option oder Änderung
 der Repositoryschutzregeln. Das verbleibende API-/Aktionsfenster bleibt bestehen.
-
-Logs `Comment scan completed/failed` nennen Projektroot, Issue-/Session-Kontext,
-letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Rate-Limits folgen
-der bestehenden Fehlerklassifikation und werden beim nächsten Poll/Checkpoint
-wieder geprüft. Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
-zwischen Polls und keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
-Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehen.

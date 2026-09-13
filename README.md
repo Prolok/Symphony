@@ -172,6 +172,16 @@ für den laufenden Prozess und seine Kinder. Ein aktiviertes Shellprofil oder ei
 schon global erreichbares `escript` ist nicht nötig. Fehlende Voraussetzungen
 brechen vor Autoupdate, Build und Registrierung der Hilfsbefehle ab.
 
+Der lokale gebundene App-Worker erhält den aktivierten Toolchain-PATH nach
+dem Shell-Login erneut. Release- und App-Helfer verwenden über `SYMPHONY_PYTHON`
+den absolut gebundenen, geprüften Python-Interpreter, auch im gebundenen
+Linear-MCP und nach Aktivierung einer Projekt-venv. Die venv bleibt für
+Projektwerkzeuge aktiv. Custom-Codex- und SSH-Aufrufe behalten ihren
+Shell-Vertrag; lokale Toolchain-Pfade werden nicht über SSH exportiert.
+Eine fehlende Python-Laufzeit ab 3.11 stoppt den Launcher vor Autoupdate, Build
+und Dienststart mit einer kurzen Anforderungsmeldung; `make all` verlangt
+dieselbe Mindestversion.
+
 Danach serialisiert der Wrapper Autoupdate und Build über einen OS-Lock aus der
 Python-Standardbibliothek. Die Lockdatei liegt im jeweiligen Git-Verzeichnis,
 bei Worktrees in deren eigenem Git-Verzeichnis; außerhalb von Git liegt sie in

@@ -157,6 +157,22 @@ defmodule SymphonyElixir.ReviewStateTest do
     assert_raise RuntimeError, "review_thread_binding_mismatch", fn -> ReviewState.bind_thread(ctx.context, "other") end
   end
 
+  test "stored results must remain present in the bound child's complete history", ctx do
+    assert ["child"] = ReviewState.observe(ctx.context, event(activity()))
+    assert [%{"text" => "Finding"}] = ReviewState.capture(ctx.context, "child", child(ctx.root, [turn("Finding")]))
+
+    record = ReviewState.read(ctx.context)
+    [{_key, result}] = Map.to_list(record["results"])
+    forged = %{result | "turn_id" => "unknown-turn", "item_id" => "unknown-item"}
+    forged_key = "parent/child/unknown-turn/unknown-item"
+    assert :ok = DurableState.write(ctx.context.path, put_in(record, ["results"], %{forged_key => forged}))
+    assert {:ok, reopened} = ReviewState.open(ctx.issue, ctx.root, nil, review_state_root: ctx.root)
+
+    assert_raise RuntimeError, "review_result_history_mismatch", fn ->
+      ReviewState.capture(reopened, "child", child(ctx.root, [turn("Finding")]))
+    end
+  end
+
   test "completed legacy messages without phase preserve their final text", ctx do
     ReviewState.observe(ctx.context, event(activity()))
     legacy = put_in(turn("Legacy finding"), ["items", Access.at(0), "phase"], nil)
@@ -172,6 +188,19 @@ defmodule SymphonyElixir.ReviewStateTest do
       assert :ok = DurableState.write(ctx.context.path, Map.put(record, key, []))
       assert {:error, :review_state_invalid} = ReviewState.open(ctx.issue, ctx.root, nil, review_state_root: ctx.root)
     end
+
+    orphan = %{
+      "parent_thread_id" => "parent",
+      "child_thread_id" => "unknown-child",
+      "turn_id" => "child-turn",
+      "item_id" => "final",
+      "text" => "Finding",
+      "delivered_in_turn" => nil
+    }
+
+    key = "parent/unknown-child/child-turn/final"
+    assert :ok = DurableState.write(ctx.context.path, put_in(record, ["results"], %{key => orphan}))
+    assert {:error, :review_state_invalid} = ReviewState.open(ctx.issue, ctx.root, nil, review_state_root: ctx.root)
 
     assert :ok = DurableState.write(ctx.context.path, Map.put(record, "version", 2))
     assert {:error, :review_state_invalid} = ReviewState.open(ctx.issue, ctx.root, nil, review_state_root: ctx.root)
@@ -208,6 +237,83 @@ defmodule SymphonyElixir.ReviewStateTest do
     SymphonyElixir.ProjectContext.with_context(project, fn -> assert :ok = ReviewState.clear(ctx.issue) end)
     settings = put_in(settings.tracker.app["state_root"], nil)
     SymphonyElixir.ProjectContext.with_context(%{project | settings: settings}, fn -> assert :ok = ReviewState.clear(ctx.issue) end)
+  end
+
+  test "a persisted departure blocks reuse until cleanup completes", ctx do
+    settings = put_in(Config.settings!().tracker.app["state_root"], ctx.root)
+    project = %SymphonyElixir.ProjectContext{root: File.cwd!(), settings: settings}
+
+    SymphonyElixir.ProjectContext.with_context(project, fn ->
+      assert {:ok, :absent} = ReviewState.persisted_binding(%{})
+      assert :ok = ReviewState.mark_departed(%{})
+      assert {:ok, :absent} = ReviewState.persisted_binding(%{id: "missing-review"})
+      assert :ok = ReviewState.mark_departed(%{id: "missing-review"})
+
+      assert {:ok, %{workspace: workspace, worker_host: nil, departed: false}} =
+               ReviewState.persisted_binding(ctx.issue)
+
+      assert workspace == ctx.root
+      assert :ok = ReviewState.mark_departed(ctx.issue)
+
+      assert {:ok, %{workspace: ^workspace, worker_host: nil, departed: true}} =
+               ReviewState.persisted_binding(ctx.issue)
+
+      assert {:error, :review_state_departed} =
+               ReviewState.open(ctx.issue, ctx.root, nil, review_state_root: ctx.root)
+
+      assert {:error, :review_state_departed} = ReviewState.worker_host(ctx.issue)
+      assert :ok = ReviewState.clear(ctx.issue)
+      assert {:ok, :absent} = ReviewState.persisted_binding(ctx.issue)
+    end)
+
+    no_root = put_in(settings.tracker.app["state_root"], nil)
+
+    SymphonyElixir.ProjectContext.with_context(%{project | settings: no_root}, fn ->
+      assert {:ok, :absent} = ReviewState.persisted_binding(ctx.issue)
+      assert :ok = ReviewState.mark_departed(ctx.issue)
+    end)
+  end
+
+  test "persisted departure inspection rejects invalid or corrupt state", ctx do
+    settings = put_in(Config.settings!().tracker.app["state_root"], ctx.root)
+    project = %SymphonyElixir.ProjectContext{root: File.cwd!(), settings: settings}
+
+    SymphonyElixir.ProjectContext.with_context(project, fn ->
+      assert :ok = DurableState.write(ctx.context.path, %{})
+      assert {:error, :review_state_invalid} = ReviewState.persisted_binding(ctx.issue)
+      assert {:error, :review_state_invalid} = ReviewState.mark_departed(ctx.issue)
+
+      File.write!(ctx.context.path, "broken")
+      assert {:error, :runtime_state_corrupt} = ReviewState.persisted_binding(ctx.issue)
+      assert {:error, :runtime_state_corrupt} = ReviewState.mark_departed(ctx.issue)
+    end)
+  end
+
+  test "worker host lookup is bound, validates state, and ignores non-review stages", ctx do
+    settings = put_in(Config.settings!().tracker.app["state_root"], ctx.root)
+    project = %SymphonyElixir.ProjectContext{root: File.cwd!(), settings: settings}
+
+    SymphonyElixir.ProjectContext.with_context(project, fn ->
+      assert {:ok, {:bound, nil}} = ReviewState.worker_host(ctx.issue)
+      assert {:ok, :unbound} = ReviewState.worker_host(%{ctx.issue | state: "Test (AI)"})
+      assert {:ok, :unbound} = ReviewState.worker_host(%{})
+
+      record = ReviewState.read(ctx.context)
+      assert :ok = DurableState.write(ctx.context.path, Map.put(record, "calls", []))
+      assert {:error, :review_state_invalid} = ReviewState.worker_host(ctx.issue)
+
+      assert :ok = DurableState.write(ctx.context.path, %{})
+      assert {:error, :review_state_invalid} = ReviewState.worker_host(ctx.issue)
+
+      File.write!(ctx.context.path, "broken")
+      assert {:error, :runtime_state_corrupt} = ReviewState.worker_host(ctx.issue)
+    end)
+
+    no_root = put_in(settings.tracker.app["state_root"], nil)
+
+    SymphonyElixir.ProjectContext.with_context(%{project | settings: no_root}, fn ->
+      assert {:ok, :unbound} = ReviewState.worker_host(ctx.issue)
+    end)
   end
 
   defp event(item), do: %{"method" => "item/completed", "params" => %{"threadId" => "parent", "turnId" => "turn", "item" => item}}

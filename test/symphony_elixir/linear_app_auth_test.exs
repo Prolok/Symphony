@@ -319,7 +319,10 @@ defmodule SymphonyElixir.LinearAppAuthTest do
     on_exit(fn -> File.rm_rf!(root) end)
     ctx = put_in(ctx, [:tracker, :app, "state_root"], root)
     now = 1_800_000_000_000
-    request = fn _, _ -> {:ok, %{status: 403, headers: %{"retry-after" => ["3600"]}, body: %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}}} end
+
+    request = fn _, _ ->
+      {:ok, %{status: 403, headers: %{"retry-after" => ["3600"]}, body: %{}}}
+    end
 
     assert {:error, {:linear_app_rate_limited, %{retry_at_ms: deadline}}} =
              call(ctx, request: request, rate_limit_now: fn -> now end)

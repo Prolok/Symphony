@@ -2,7 +2,8 @@ defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.AutocommitMessage
-  alias SymphonyElixir.Codex.ScriptSupport
+  alias SymphonyElixir.Codex.{ReviewState, ScriptSupport}
+  alias SymphonyElixir.Linear.DurableState
 
   setup_all do
     # The application also schedules polls when its initial poll is disabled.
@@ -1532,6 +1533,310 @@ defmodule SymphonyElixir.CoreTest do
 
   test "linear issue state reconciliation fetch with no running issues is a no-op" do
     assert {:ok, []} = Client.fetch_issue_states_by_ids([])
+  end
+
+  test "external departure from Review (AI) clears its durable continuation state" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-departure-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-review-departure-#{System.unique_integer([:positive])}"
+    issue_identifier = "MT-REVIEW-DEPARTURE"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Review (AI)", "Test (AI)"],
+        tracker_terminal_states: ["Closed"]
+      )
+
+      File.mkdir_p!(workspace)
+
+      started_issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Review (AI)",
+        title: "Review departure"
+      }
+
+      state_root = Config.settings!().tracker.app["state_root"]
+
+      {:ok, review_context} =
+        ReviewState.open(started_issue, workspace, nil, review_state_root: state_root)
+
+      assert :ok =
+               ReviewState.bind_thread(
+                 review_context,
+                 "thread-review-departure"
+               )
+
+      assert File.exists?(review_context.path)
+
+      agent_pid =
+        spawn(fn ->
+          receive do
+            :stop -> :ok
+          end
+        end)
+
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: agent_pid,
+            ref: nil,
+            identifier: issue_identifier,
+            issue: started_issue,
+            workspace_path: workspace,
+            worker_host: nil,
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{
+          input_tokens: 0,
+          output_tokens: 0,
+          total_tokens: 0,
+          seconds_running: 0
+        },
+        retry_attempts: %{}
+      }
+
+      testing_issue = %{started_issue | state: "Test (AI)"}
+      testing_state = Orchestrator.reconcile_issue_states_for_test([testing_issue], state)
+
+      assert Map.has_key?(testing_state.running, issue_id)
+      assert Process.alive?(agent_pid)
+      assert File.exists?(review_context.path)
+
+      current_issue = %{started_issue | state: "Freigabe Review"}
+
+      updated_state =
+        Orchestrator.reconcile_issue_states_for_test([current_issue], testing_state)
+
+      refute Map.has_key?(updated_state.running, issue_id)
+      refute Process.alive?(agent_pid)
+      refute File.exists?(review_context.path)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "external review departure clears state written while the worker terminates" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-departure-race-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-review-departure-race-#{System.unique_integer([:positive])}"
+    issue_identifier = "MT-REVIEW-DEPARTURE-RACE"
+    workspace = Path.join(test_root, issue_identifier)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: test_root,
+        tracker_active_states: ["Review (AI)"],
+        tracker_terminal_states: ["Closed"]
+      )
+
+      File.mkdir_p!(workspace)
+
+      started_issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Review (AI)",
+        title: "Review departure race"
+      }
+
+      state_root = Config.settings!().tracker.app["state_root"]
+
+      {:ok, review_context} =
+        ReviewState.open(started_issue, workspace, nil, review_state_root: state_root)
+
+      assert :ok = ReviewState.bind_thread(review_context, "thread-review-departure-race")
+      stale_record = ReviewState.read(review_context)
+      owner = self()
+
+      agent_pid =
+        spawn(fn ->
+          Process.flag(:trap_exit, true)
+          send(owner, :review_departure_agent_ready)
+
+          receive do
+            {:EXIT, _from, :shutdown} ->
+              :ok = DurableState.write(review_context.path, stale_record)
+              send(owner, :late_review_state_write)
+          end
+        end)
+
+      assert_receive :review_departure_agent_ready
+
+      state = %Orchestrator.State{
+        running: %{
+          issue_id => %{
+            pid: agent_pid,
+            ref: nil,
+            identifier: issue_identifier,
+            issue: started_issue,
+            workspace_path: workspace,
+            worker_host: nil,
+            started_at: DateTime.utc_now()
+          }
+        },
+        claimed: MapSet.new([issue_id]),
+        codex_totals: %{
+          input_tokens: 0,
+          output_tokens: 0,
+          total_tokens: 0,
+          seconds_running: 0
+        },
+        retry_attempts: %{}
+      }
+
+      current_issue = %{started_issue | state: "Freigabe Review"}
+      updated_state = Orchestrator.reconcile_issue_states_for_test([current_issue], state)
+
+      assert_receive :late_review_state_write
+      refute Map.has_key?(updated_state.running, issue_id)
+      refute Process.alive?(agent_pid)
+      refute File.exists?(review_context.path)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "retry cleanup clears durable review state after the issue leaves Review (AI)" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-retry-departure-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-review-retry-departure-#{System.unique_integer([:positive])}"
+    issue_identifier = "MT-REVIEW-RETRY-DEPARTURE"
+    workspace = Path.join(test_root, issue_identifier)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        tracker_active_states: ["Review (AI)"],
+        tracker_terminal_states: ["Closed"]
+      )
+
+      File.mkdir_p!(workspace)
+
+      started_issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Review (AI)",
+        title: "Review retry departure"
+      }
+
+      state_root = Config.settings!().tracker.app["state_root"]
+
+      {:ok, review_context} =
+        ReviewState.open(started_issue, workspace, nil, review_state_root: state_root)
+
+      assert :ok = ReviewState.bind_thread(review_context, "thread-review-retry-departure")
+      assert File.exists?(review_context.path)
+
+      current_issue = %{started_issue | state: "Freigabe Review"}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [current_issue])
+      retry_token = make_ref()
+
+      state = %Orchestrator.State{
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{
+          issue_id => %{
+            attempt: 1,
+            retry_token: retry_token,
+            timer_ref: nil,
+            identifier: issue_identifier,
+            workspace_path: workspace,
+            worker_host: nil,
+            review_stay: true
+          }
+        }
+      }
+
+      assert {:noreply, updated_state} =
+               Orchestrator.handle_info({:retry_issue, issue_id, retry_token}, state)
+
+      refute MapSet.member?(updated_state.claimed, issue_id)
+      refute Map.has_key?(updated_state.retry_attempts, issue_id)
+      refute File.exists?(review_context.path)
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "startup poll clears a persisted review stay observed at the manual handoff" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-review-restart-departure-#{System.unique_integer([:positive])}"
+      )
+
+    issue_id = "issue-review-restart-departure-#{System.unique_integer([:positive])}"
+    issue_identifier = "MT-REVIEW-RESTART-DEPARTURE"
+    workspace = Path.join(test_root, issue_identifier)
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+
+    try do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        tracker_active_states: ["Review (AI)"],
+        tracker_terminal_states: ["Closed"]
+      )
+
+      File.mkdir_p!(workspace)
+
+      started_issue = %Issue{
+        id: issue_id,
+        identifier: issue_identifier,
+        state: "Review (AI)",
+        title: "Review restart departure"
+      }
+
+      state_root = Config.settings!().tracker.app["state_root"]
+
+      {:ok, review_context} =
+        ReviewState.open(started_issue, workspace, nil, review_state_root: state_root)
+
+      assert :ok = ReviewState.bind_thread(review_context, "thread-review-restart-departure")
+      assert File.exists?(review_context.path)
+
+      manual_issue = %{started_issue | state: "Freigabe Review"}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [manual_issue])
+
+      with_orchestrator([name: nil, initial_poll?: false], fn pid ->
+        send(pid, :run_poll_cycle)
+        refute_file_exists_eventually!(review_context.path)
+        refute Map.has_key?(orchestrator_state(pid).running, issue_id)
+      end)
+
+      reentered_issue = %{started_issue | state: "Review (AI)"}
+
+      assert {:ok, reentered_context} =
+               ReviewState.open(
+                 reentered_issue,
+                 workspace,
+                 nil,
+                 review_state_root: state_root
+               )
+
+      assert ReviewState.read(reentered_context)["thread_id"] == nil
+    after
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      File.rm_rf(test_root)
+    end
   end
 
   test "non-active issue state stops running agent without cleaning workspace" do
@@ -4048,7 +4353,8 @@ defmodule SymphonyElixir.CoreTest do
     Process.sleep(350)
     state = :sys.get_state(pid)
 
-    assert %{identifier: "MT-560M", recovered_turn_context: nil} = state.retry_attempts[issue_id]
+    assert %{identifier: "MT-560M", recovered_turn_context: nil, review_stay: true} =
+             state.retry_attempts[issue_id]
   end
 
   test "normal worker completion ignores top-level wait_agent completed fields outside agent status entries" do
@@ -5135,6 +5441,51 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
+  test "review worker selection waits for the host bound in durable review state" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    issue = %Issue{
+      id: "issue-review-bound-host-#{System.unique_integer([:positive])}",
+      identifier: "MT-REVIEW-BOUND-HOST",
+      title: "Review host binding",
+      state: "Review (AI)"
+    }
+
+    root = Config.settings!().tracker.app["state_root"]
+
+    {:ok, review_context} =
+      ReviewState.open(issue, "/tmp/review-bound-host", "worker-a", review_state_root: root)
+
+    assert :ok = ReviewState.bind_thread(review_context, "thread-bound-host")
+
+    on_exit(fn -> ReviewState.clear(issue) end)
+
+    busy_state = %Orchestrator.State{
+      running: %{"other" => %{worker_host: "worker-a"}}
+    }
+
+    assert Orchestrator.select_worker_host_for_issue_for_test(issue, busy_state, "worker-b") ==
+             :no_worker_capacity
+
+    assert Orchestrator.select_worker_host_for_issue_for_test(
+             issue,
+             %{busy_state | running: %{}},
+             "worker-b"
+           ) == "worker-a"
+  end
+
+  test "mixed recovered review results keep findings dominant" do
+    assert Orchestrator.review_recovered_context_kind_for_test("Keine Findings.\n\nFindings:\n- Ein späterer Befund") == :findings
+
+    assert Orchestrator.review_recovered_context_kind_for_test("Findings:\n- Ein Befund\n\nKeine Findings.") == :findings
+
+    assert Orchestrator.review_recovered_context_kind_for_test("Keine Findings.") ==
+             :no_findings
+  end
+
   test "dialog issues bypass ssh worker capacity" do
     write_workflow_file!(Workflow.workflow_file_path(),
       worker_ssh_hosts: ["worker-a", "worker-b"],
@@ -5843,6 +6194,19 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   defp assert_file_exists_eventually!(path, 0), do: flunk("expected file to exist: #{path}")
+
+  defp refute_file_exists_eventually!(path, attempts \\ 100)
+
+  defp refute_file_exists_eventually!(path, attempts) when attempts > 0 do
+    if File.exists?(path) do
+      Process.sleep(50)
+      refute_file_exists_eventually!(path, attempts - 1)
+    else
+      :ok
+    end
+  end
+
+  defp refute_file_exists_eventually!(path, 0), do: flunk("expected file to be removed: #{path}")
 
   defp no_findings_review_workpad do
     """

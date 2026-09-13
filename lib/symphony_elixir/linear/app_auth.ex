@@ -119,14 +119,12 @@ defmodule SymphonyElixir.Linear.AppAuth do
     end
   end
 
-  defp preserve_rate_limit({:error, :linear_app_rate_limited} = error, binding, opts) do
+  defp preserve_rate_limit(result, binding, opts) do
     case RateLimit.check(binding, opts) do
-      :ok -> error
-      cooldown -> cooldown
+      :ok -> result
+      {:error, _reason} = error -> error
     end
   end
-
-  defp preserve_rate_limit(result, _binding, _opts), do: result
 
   defp check_identity(:ok, token, _cache, _binding, _request, _opts, _retry?), do: {:ok, token}
 

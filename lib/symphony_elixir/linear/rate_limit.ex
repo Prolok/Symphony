@@ -106,8 +106,8 @@ defmodule SymphonyElixir.Linear.RateLimit do
     exhausted = Enum.any?(headers, fn {key, value} -> String.ends_with?(key, "remaining") and value == "0" end)
     status = Map.get(response, :status)
 
-    status == 429 or graphql_limited?(Map.get(response, :body)) or
-      (status == 403 and (exhausted or Map.has_key?(headers, "retry-after")))
+    exhausted or status == 429 or graphql_limited?(Map.get(response, :body)) or
+      (status == 403 and Map.has_key?(headers, "retry-after"))
   end
 
   defp graphql_limited?(body) when is_map(body) do

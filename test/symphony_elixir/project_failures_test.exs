@@ -168,6 +168,25 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     {:ok, context} = ProjectContext.load(project, Workflow.workflow_file_path(), %{})
     SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:error, :offline} end)
     assert {:stop, {:linear_api_request, :linear_app_request_unavailable}} = ProjectPoller.init(contexts: [context])
+
+    app = context.settings.tracker.app
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
+      query = payload[:query] || payload["query"]
+
+      data =
+        if String.contains?(query, "SymphonyAppIdentity") do
+          %{"viewer" => %{"id" => app["user_id"], "app" => true, "organization" => %{"id" => app["workspace_id"]}}}
+        else
+          %{"users" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}}
+        end
+
+      {:ok, %{status: 200, body: %{"data" => data}}}
+    end)
+
+    assert {:stop, {:linear_assignees_not_human_or_unavailable, workspace, ["dev@example.com"]}} = ProjectPoller.init(contexts: [context])
+
+    assert workspace == app["workspace_id"]
   end
 
   test "full service refreshes one cache, exposes failures and stops only when all projects are idle", %{root: root} do

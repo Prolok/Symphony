@@ -248,6 +248,214 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert CommentJournal.classify(binding, remote) == :pending
   end
 
+  test "unchanged update preimage safely replays a write lost before execution", %{
+    binding: binding
+  } do
+    original = %{
+      "id" => "old",
+      "body" => "## Symphony Workpad\n\nVorher\n",
+      "bodyData" => nil,
+      "quotedText" => nil,
+      "resolvingUser" => nil,
+      "resolvingComment" => nil,
+      "updatedAt" => "version-1",
+      "user" => %{"id" => "app"},
+      "issue" => %{"id" => "issue"}
+    }
+
+    intended_body = original["body"] <> "Runde 1 gestartet\n"
+    later_body = intended_body <> "Finding behandelt\n"
+
+    Process.put(:remote_comments, %{"old" => original})
+
+    first_update =
+      %{
+        "query" => "mutation($body: String!) { commentUpdate(id: \"old\", input: {body: $body}) { success } }",
+        "variables" => %{"body" => intended_body}
+      }
+
+    lost_before_execution = fn payload ->
+      case parsed_fields(payload) do
+        [%{name: "comment"}] -> lookup_only(payload)
+        [%{name: "commentUpdate"}] -> {:ok, %{status: 503, body: %{}}}
+      end
+    end
+
+    assert {:ok, %{status: 503}} =
+             CommentJournal.execute(binding, first_update, lost_before_execution)
+
+    assert Process.get(:remote_comments)["old"] == original
+
+    replaying_request = fn payload ->
+      case parsed_fields(payload) do
+        [%{name: "comment"}] ->
+          lookup_only(payload)
+
+        [%{name: "commentUpdate", field: field, arguments: %{"id" => "old", "input" => input}}] ->
+          refute Process.get(:current_write_allowed, false)
+          replayed = original |> Map.put("body", input["body"]) |> Map.put("updatedAt", "version-2")
+          put_remote(replayed)
+          response(%{field => %{"success" => true, "symphonyReceipt" => replayed}})
+      end
+    end
+
+    later_update =
+      %{
+        "query" => "mutation($body: String!) { commentUpdate(id: \"old\", input: {body: $body}) { success } }",
+        "variables" => %{"body" => later_body}
+      }
+
+    assert {:error, {:comment_write_recovered, ["old"]}} =
+             CommentJournal.execute(binding, later_update, replaying_request)
+
+    assert Process.get(:remote_comments)["old"]["body"] == intended_body
+    refute Process.get(:remote_comments)["old"]["body"] == later_body
+
+    Process.put(:current_write_allowed, true)
+    assert {:ok, _response} = CommentJournal.execute(binding, later_update, &graphql_request/1)
+    assert Process.get(:remote_comments)["old"]["body"] == later_body
+  end
+
+  test "update replay stays blocked after a newer version or foreign identity", %{
+    binding: binding
+  } do
+    for {name, mutate_remote} <- [
+          {:newer_version, &Map.put(&1, "updatedAt", "version-2")},
+          {:foreign_comment, &Map.put(&1, "id", "other")},
+          {:foreign_author, &put_in(&1, ["user", "id"], "human")},
+          {:foreign_issue, &put_in(&1, ["issue", "id"], "other")}
+        ] do
+      scoped_binding = Map.put(binding, "state_root", Path.join(binding["state_root"], Atom.to_string(name)))
+
+      original = %{
+        "id" => "old",
+        "body" => "before",
+        "updatedAt" => "version-1",
+        "user" => %{"id" => "app"},
+        "issue" => %{"id" => "issue"}
+      }
+
+      Process.put(:remote_comments, %{"old" => original})
+
+      update = %{
+        "query" => "mutation($body: String!) { commentUpdate(id: \"old\", input: {body: $body}) { success } }",
+        "variables" => %{"body" => "intended"}
+      }
+
+      lost = fn payload ->
+        case parsed_fields(payload) do
+          [%{name: "comment"}] -> lookup_only(payload)
+          [%{name: "commentUpdate"}] -> {:ok, %{status: 503, body: %{}}}
+        end
+      end
+
+      assert {:ok, %{status: 503}} = CommentJournal.execute(scoped_binding, update, lost)
+      changed = mutate_remote.(original)
+      Process.put(:remote_comments, %{"old" => changed})
+
+      assert {:error, {:comment_write_unresolved, [%{"state" => "conflict"}]}} =
+               CommentJournal.execute(scoped_binding, create_payload(), fn payload ->
+                 assert [%{name: "comment"}] = parsed_fields(payload)
+                 lookup_only(payload)
+               end)
+
+      assert Process.get(:remote_comments)["old"] == changed
+    end
+  end
+
+  test "update replay stays blocked after the bound app identity changes", %{
+    binding: binding
+  } do
+    original = %{
+      "id" => "old",
+      "body" => "before",
+      "updatedAt" => "version-1",
+      "user" => %{"id" => "app"},
+      "issue" => %{"id" => "issue"}
+    }
+
+    Process.put(:remote_comments, %{"old" => original})
+
+    update = %{
+      "query" => "mutation($body: String!) { commentUpdate(id: \"old\", input: {body: $body}) { success } }",
+      "variables" => %{"body" => "intended"}
+    }
+
+    lost = fn payload ->
+      case parsed_fields(payload) do
+        [%{name: "comment"}] -> lookup_only(payload)
+        [%{name: "commentUpdate"}] -> {:ok, %{status: 503, body: %{}}}
+      end
+    end
+
+    assert {:ok, %{status: 503}} = CommentJournal.execute(binding, update, lost)
+    next_binding = %{binding | "user_id" => "next-app"}
+
+    assert {:error, {:comment_write_unresolved, [%{"state" => "conflict"}]}} =
+             CommentJournal.execute(next_binding, create_payload(), fn payload ->
+               assert [%{name: "comment"}] = parsed_fields(payload)
+               lookup_only(payload)
+             end)
+
+    assert Process.get(:remote_comments)["old"] == original
+  end
+
+  test "an inconclusive replay response remains pending", %{binding: binding} do
+    original = %{
+      "id" => "old",
+      "body" => "before",
+      "updatedAt" => "version-1",
+      "user" => %{"id" => "app"},
+      "issue" => %{"id" => "issue"}
+    }
+
+    Process.put(:remote_comments, %{"old" => original})
+    Process.put(:update_attempts, 0)
+    update = %{"query" => "mutation { commentUpdate(id: \"old\", input: {body: \"after\"}) { success } }"}
+
+    request = fn payload ->
+      case parsed_fields(payload) do
+        [%{name: "comment"}] ->
+          lookup_only(payload)
+
+        [%{name: "commentUpdate"}] ->
+          Process.put(:update_attempts, Process.get(:update_attempts, 0) + 1)
+          {:ok, %{status: 503, body: %{}}}
+      end
+    end
+
+    assert {:ok, %{status: 503}} = CommentJournal.execute(binding, update, request)
+    assert Process.get(:update_attempts) == 1
+
+    assert {:error, {:comment_write_unresolved, [%{"state" => "pending"}]}} =
+             CommentJournal.execute(binding, create_payload(), request)
+
+    assert Process.get(:update_attempts) == 2
+
+    assert {:error, {:comment_write_unresolved, [%{"state" => "conflict"}]}} =
+             CommentJournal.execute(binding, create_payload(), request)
+
+    assert Process.get(:update_attempts) == 2
+    assert Process.get(:remote_comments)["old"] == original
+  end
+
+  test "recovery refuses partial lookup data", %{binding: binding} do
+    assert {:error, :lost} =
+             CommentJournal.execute(binding, create_payload(), fn _ -> {:error, :lost} end)
+
+    [record] = journal_records(binding)
+
+    partial = %{
+      "data" => %{"comment" => comment(record)},
+      "errors" => [%{"message" => "partial"}]
+    }
+
+    assert {:ok, [%{"state" => "conflict"}]} =
+             CommentJournal.reconcile(binding, fn _ ->
+               {:ok, %{status: 200, body: partial}}
+             end)
+  end
+
   test "resolving relations are checked and unverifiable update controls are rejected", %{binding: binding} do
     for {input, output} <- [{"resolvingUserId", "resolvingUser"}, {"resolvingCommentId", "resolvingComment"}] do
       nested = Map.put(binding, "state_root", Path.join(binding["state_root"], input))

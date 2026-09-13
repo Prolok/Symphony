@@ -22,10 +22,126 @@ defmodule SymphonyElixir.Codex.ReviewState do
     context = %{path: state_path(root, issue.id), binding: binding}
 
     case DurableState.read(context.path) do
-      {:error, :enoent} -> {:ok, context}
-      {:ok, record} -> if valid?(record, binding), do: {:ok, context}, else: {:error, :review_state_invalid}
+      {:error, :enoent} ->
+        {:ok, context}
+
+      {:ok, record} ->
+        cond do
+          not valid?(record, binding) -> {:error, :review_state_invalid}
+          record["departed"] == true -> {:error, :review_state_departed}
+          true -> {:ok, context}
+        end
+
+      error ->
+        error
+    end
+  end
+
+  @spec persisted_binding(map()) ::
+          {:ok,
+           :absent
+           | %{
+               workspace: Path.t(),
+               worker_host: String.t() | nil,
+               departed: boolean()
+             }}
+          | {:error, term()}
+  def persisted_binding(%{id: issue_id}) when is_binary(issue_id) do
+    case Config.settings!().tracker.app["state_root"] do
+      root when is_binary(root) -> read_persisted_binding(root, issue_id)
+      _root -> {:ok, :absent}
+    end
+  end
+
+  def persisted_binding(_issue), do: {:ok, :absent}
+
+  @spec mark_departed(map()) :: :ok | {:error, term()}
+  def mark_departed(%{id: issue_id}) when is_binary(issue_id) do
+    case Config.settings!().tracker.app["state_root"] do
+      root when is_binary(root) -> mark_persisted_departed(root, issue_id)
+      _root -> :ok
+    end
+  end
+
+  def mark_departed(_issue), do: :ok
+
+  @spec worker_host(map()) :: {:ok, :unbound | {:bound, String.t() | nil}} | {:error, term()}
+  def worker_host(%{id: issue_id, state: "Review (AI)"}) when is_binary(issue_id) do
+    case Config.settings!().tracker.app["state_root"] do
+      root when is_binary(root) -> read_worker_host(root, issue_id)
+      _root -> {:ok, :unbound}
+    end
+  end
+
+  def worker_host(_issue), do: {:ok, :unbound}
+
+  defp read_worker_host(root, issue_id) do
+    case DurableState.read(state_path(root, issue_id)) do
+      {:error, :enoent} -> {:ok, :unbound}
+      {:ok, %{"binding" => binding} = record} when is_map(binding) -> worker_host_from_record(record, binding, issue_id)
+      {:ok, _record} -> {:error, :review_state_invalid}
       error -> error
     end
+  end
+
+  defp read_persisted_binding(root, issue_id) do
+    case read_persisted_record(root, issue_id) do
+      {:ok, :absent} ->
+        {:ok, :absent}
+
+      {:ok, {_path, record, binding}} ->
+        {:ok,
+         %{
+           workspace: binding["workspace"],
+           worker_host: binding["worker_host"],
+           departed: record["departed"] == true
+         }}
+
+      error ->
+        error
+    end
+  end
+
+  defp mark_persisted_departed(root, issue_id) do
+    case read_persisted_record(root, issue_id) do
+      {:ok, :absent} -> :ok
+      {:ok, {path, record, _binding}} -> DurableState.write(path, Map.put(record, "departed", true))
+      error -> error
+    end
+  end
+
+  defp read_persisted_record(root, issue_id) do
+    path = state_path(root, issue_id)
+
+    case DurableState.read(path) do
+      {:error, :enoent} ->
+        {:ok, :absent}
+
+      {:ok, %{"binding" => binding} = record} when is_map(binding) ->
+        if valid_worker_binding?(record, binding, issue_id),
+          do: {:ok, {path, record, binding}},
+          else: {:error, :review_state_invalid}
+
+      {:ok, _record} ->
+        {:error, :review_state_invalid}
+
+      error ->
+        error
+    end
+  end
+
+  defp worker_host_from_record(record, binding, issue_id) do
+    cond do
+      not valid_worker_binding?(record, binding, issue_id) -> {:error, :review_state_invalid}
+      record["departed"] == true -> {:error, :review_state_departed}
+      true -> {:ok, {:bound, binding["worker_host"]}}
+    end
+  end
+
+  defp valid_worker_binding?(record, binding, issue_id) do
+    valid?(record, binding) and binding["project"] == RuntimePaths.project_root() and
+      binding["issue_id"] == issue_id and nonempty?(binding["workspace"]) and
+      (is_nil(binding["worker_host"]) or nonempty?(binding["worker_host"]))
   end
 
   @spec read(map() | nil) :: map()
@@ -102,6 +218,7 @@ defmodule SymphonyElixir.Codex.ReviewState do
         %{"parent_thread_id" => record["thread_id"], "child_thread_id" => child_id, "turn_id" => turn["id"], "item_id" => item["id"], "text" => item["text"], "delivered_in_turn" => nil}
       end
 
+    validate_stored_results!(record, child_id, results)
     {updated, fresh} = Enum.reduce(results, {record, []}, &put_result/2)
 
     if updated != record, do: write!(context, updated)
@@ -124,6 +241,15 @@ defmodule SymphonyElixir.Codex.ReviewState do
   end
 
   defp unknown_phase_final(_item), do: []
+
+  defp validate_stored_results!(record, child_id, observed) do
+    observed_keys = MapSet.new(observed, &result_key/1)
+
+    Enum.each(record["results"], fn {key, result} ->
+      if result["child_thread_id"] == child_id and not MapSet.member?(observed_keys, key),
+        do: raise("review_result_history_mismatch")
+    end)
+  end
 
   defp put_result(result, {acc, fresh}) do
     key = result_key(result)
@@ -215,22 +341,25 @@ defmodule SymphonyElixir.Codex.ReviewState do
 
   defp valid?(record, binding) do
     record["version"] == 1 and record["binding"] == binding and
+      record["departed"] in [nil, false, true] and
       (is_nil(record["thread_id"]) or is_binary(record["thread_id"])) and
-      Enum.all?(~w(calls agents), &valid_ids?(record[&1])) and valid_results?(record["results"], record["thread_id"])
+      Enum.all?(~w(calls agents), &valid_ids?(record[&1])) and
+      valid_results?(record["results"], record["thread_id"], record["agents"])
   end
 
   defp valid_ids?(ids) when is_map(ids), do: Enum.all?(ids, fn {id, turn} -> nonempty?(id) and nonempty?(turn) end)
   defp valid_ids?(_ids), do: false
 
-  defp valid_results?(results, parent) when is_map(results) do
+  defp valid_results?(results, parent, agents) when is_map(results) and is_map(agents) do
     Enum.all?(results, fn {key, result} ->
       is_map(result) and Enum.all?(~w(parent_thread_id child_thread_id turn_id item_id text), &nonempty?(result[&1])) and
-        result["parent_thread_id"] == parent and key == result_key(result) and
+        result["parent_thread_id"] == parent and Map.has_key?(agents, result["child_thread_id"]) and
+        key == result_key(result) and
         (is_nil(result["delivered_in_turn"]) or nonempty?(result["delivered_in_turn"]))
     end)
   end
 
-  defp valid_results?(_results, _parent), do: false
+  defp valid_results?(_results, _parent, _agents), do: false
   defp nonempty?(value), do: is_binary(value) and String.trim(value) != ""
 
   defp write!(context, record) do

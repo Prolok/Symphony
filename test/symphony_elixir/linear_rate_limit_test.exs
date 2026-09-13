@@ -12,6 +12,7 @@ defmodule SymphonyElixir.LinearRateLimitTest do
     for {status, headers, body, delay} <- [
           {429, [{"Retry-After", "3600"}], %{}, 3_600_000},
           {403, %{"x-ratelimit-requests-remaining" => ["0"], "x-ratelimit-requests-reset" => [to_string(now + 60_000)]}, %{}, 60_000},
+          {200, %{"x-ratelimit-requests-remaining" => ["0"], "x-ratelimit-requests-reset" => [to_string(now + 60_000)]}, %{}, 60_000},
           {200, %{"retry-after" => ["10"], "x-ratelimit-requests-reset" => [to_string(div(now, 1_000) + 20)]}, %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}, 20_000},
           {429, %{"retry-after" => ["Fri, 15 Jan 2027 09:00:00 GMT"]}, %{}, 3_600_000}
         ] do

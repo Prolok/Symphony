@@ -131,6 +131,135 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
     end
   end
 
+  test "startup defers a pre-limited workspace and still polls an independent workspace", %{
+    contexts: [a, b, c]
+  } do
+    limit(a, "3600")
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    start_supervised!({WorkerCapacity, contexts: [a, b, c]})
+    start_supervised!({ProjectPoller, contexts: [a, b, c]})
+
+    assert {:error, {:linear_api_request, {:linear_app_rate_limited, _}}} =
+             ProjectPoller.candidates(a)
+
+    assert {:error, {:linear_api_request, {:linear_app_rate_limited, _}}} =
+             ProjectPoller.candidates(b)
+
+    assert {:ok, []} = ProjectPoller.candidates(c)
+    assert_received {:candidates, "independent"}
+    refute_received {:http, "shared", _}
+    refute_received {:candidates, "shared"}
+    assert ProjectPoller.polling().next_poll_in_ms <= 60_000
+
+    expire(a)
+    ProjectPoller.refresh()
+    assert {:ok, []} = ProjectPoller.candidates(a)
+    assert {:ok, []} = ProjectPoller.candidates(b)
+    assert_received {:candidates, "shared"}
+  end
+
+  test "startup also defers a provider rate limit without a server deadline", %{
+    contexts: [a | _rest]
+  } do
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn _payload, _headers ->
+      {:ok,
+       %{
+         status: 200,
+         body: %{
+           "errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]
+         }
+       }}
+    end)
+
+    assert {:ok, %{verified_workspaces: verified}, {:continue, :poll}} =
+             ProjectPoller.init(contexts: [a])
+
+    assert verified == MapSet.new()
+    :ets.delete(ProjectPoller)
+  end
+
+  test "startup isolates a temporary verification failure from an independent workspace", %{
+    contexts: [a, _b, c]
+  } do
+    parent = self()
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+      query = payload[:query] || payload["query"]
+      workspace = Config.settings!().tracker.app["workspace_id"]
+
+      cond do
+        String.contains?(query, "SymphonyAppIdentity") ->
+          app = Config.settings!().tracker.app
+          data = %{"viewer" => %{"id" => app["user_id"], "app" => true, "organization" => %{"id" => workspace}}}
+          {:ok, %{status: 200, body: %{"data" => data}}}
+
+        String.contains?(query, "SymphonyHumanAssignees") and workspace == "shared" ->
+          {:ok, %{status: 503, body: "temporarily unavailable"}}
+
+        String.contains?(query, "SymphonyHumanAssignees") ->
+          users = %{"nodes" => [%{"id" => "human", "email" => "dev@example.com", "app" => false}], "pageInfo" => %{"hasNextPage" => false}}
+          {:ok, %{status: 200, body: %{"data" => %{"users" => users}}}}
+
+        true ->
+          send(parent, {:isolated_candidate_poll, workspace})
+          issues = %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}
+          {:ok, %{status: 200, body: %{"data" => %{"issues" => issues}}}}
+      end
+    end)
+
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    start_supervised!({WorkerCapacity, contexts: [a, c]})
+    start_supervised!({ProjectPoller, contexts: [a, c]})
+
+    assert {:error, {:linear_api_status, 503, %{classification: "http"}}} =
+             ProjectPoller.candidates(a)
+
+    assert {:ok, []} = ProjectPoller.candidates(c)
+    assert_received {:isolated_candidate_poll, "independent"}
+    refute_received {:isolated_candidate_poll, "shared"}
+  end
+
+  test "startup also isolates temporary identity unavailability by workspace", %{
+    contexts: [a, _b, c]
+  } do
+    parent = self()
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _headers ->
+      query = payload[:query] || payload["query"]
+      app = Config.settings!().tracker.app
+      workspace = app["workspace_id"]
+
+      cond do
+        String.contains?(query, "SymphonyAppIdentity") and workspace == "shared" ->
+          {:ok, %{status: 503, body: "temporarily unavailable"}}
+
+        String.contains?(query, "SymphonyAppIdentity") ->
+          viewer = %{"id" => app["user_id"], "app" => true, "organization" => %{"id" => workspace}}
+          {:ok, %{status: 200, body: %{"data" => %{"viewer" => viewer}}}}
+
+        String.contains?(query, "SymphonyHumanAssignees") ->
+          users = %{"nodes" => [%{"id" => "human", "email" => "dev@example.com", "app" => false}], "pageInfo" => %{"hasNextPage" => false}}
+          {:ok, %{status: 200, body: %{"data" => %{"users" => users}}}}
+
+        true ->
+          send(parent, {:identity_isolated_candidate_poll, workspace})
+          issues = %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}
+          {:ok, %{status: 200, body: %{"data" => %{"issues" => issues}}}}
+      end
+    end)
+
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    start_supervised!({WorkerCapacity, contexts: [a, c]})
+    start_supervised!({ProjectPoller, contexts: [a, c]})
+
+    assert {:error, {:linear_api_request, :linear_app_identity_unavailable}} =
+             ProjectPoller.candidates(a)
+
+    assert {:ok, []} = ProjectPoller.candidates(c)
+    assert_received {:identity_isolated_candidate_poll, "independent"}
+    refute_received {:identity_isolated_candidate_poll, "shared"}
+  end
+
   test "a fresh BEAM transport runtime observes another project's persisted cooldown", %{contexts: [a, b, _c]} do
     limit(a, "3600")
 

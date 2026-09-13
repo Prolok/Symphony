@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
+  alias SymphonyElixir.Codex.ReviewState
   alias SymphonyElixir.CommentCheckpoint
   alias SymphonyElixir.Linear.WriteContext
 
@@ -75,6 +76,7 @@ defmodule SymphonyElixir.Orchestrator do
       completed_states: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
+      review_cleanup_blocked: MapSet.new(),
       dialog_observations: %{},
       comment_scans: %{},
       codex_totals: nil,
@@ -237,6 +239,7 @@ defmodule SymphonyElixir.Orchestrator do
 
             _ ->
               {running_entry, state} = pop_running_entry(state, issue_id)
+              clear_deferred_review_stay_state(running_entry)
               state = record_session_completion_totals(state, running_entry)
               session_id = running_entry_session_id(running_entry)
 
@@ -252,7 +255,9 @@ defmodule SymphonyElixir.Orchestrator do
                   workspace_path: Map.get(running_entry, :workspace_path),
                   recovered_turn_context: recoverable_turn_context(running_entry, reason),
                   review_subagent_call_ids: review_subagent_call_ids_for_retry(running_entry),
-                  review_subagent_ids: review_subagent_ids_for_retry(running_entry)
+                  review_subagent_ids: review_subagent_ids_for_retry(running_entry),
+                  codex_token_checkpoint: codex_token_checkpoint(running_entry),
+                  review_stay: running_review_stay?(running_entry)
                 })
 
               Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -355,6 +360,7 @@ defmodule SymphonyElixir.Orchestrator do
         {running_entry, state} = pop_running_entry(state, issue_id)
         exit_reason = Map.get(running_entry, :exit_reason, :normal)
         running_entry = clear_running_entry_finalize_state(running_entry)
+        clear_deferred_review_stay_state(running_entry)
         session_id = running_entry_session_id(running_entry)
         state = record_session_completion_totals(state, running_entry)
 
@@ -375,7 +381,9 @@ defmodule SymphonyElixir.Orchestrator do
                 workspace_path: Map.get(running_entry, :workspace_path),
                 recovered_turn_context: recoverable_turn_context(running_entry, exit_reason),
                 review_subagent_call_ids: review_subagent_call_ids_for_retry(running_entry),
-                review_subagent_ids: review_subagent_ids_for_retry(running_entry)
+                review_subagent_ids: review_subagent_ids_for_retry(running_entry),
+                codex_token_checkpoint: codex_token_checkpoint(running_entry),
+                review_stay: running_review_stay?(running_entry)
               })
           end
 
@@ -399,6 +407,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
+      state = reconcile_idle_review_stays(state, issues)
       state = retain_visible_completed_states(state, issues)
       state = retain_visible_dialog_observations(state, issues)
 
@@ -524,6 +533,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec review_recovered_context_kind_for_test(term()) :: :findings | :no_findings | :none
+  def review_recovered_context_kind_for_test(value), do: review_recovered_context_kind(value)
+
+  @doc false
   @spec observe_dialog_full_check_for_test(Issue.t(), term(), integer()) :: term()
   def observe_dialog_full_check_for_test(%Issue{} = issue, %State{} = state, now_ms) when is_integer(now_ms) do
     observe_dialog_full_check(state, issue, now_ms)
@@ -567,33 +580,191 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
-    cond do
-      cancel_issue_state?(issue.state) ->
-        Logger.info("Issue moved to cancel state: #{issue_context(issue)} state=#{issue.state}; aborting workflow and cleaning workspace")
+    review_departure = review_departure_running_entry(issue, state)
 
-        cancel_issue_workflow(state, issue)
+    next_state =
+      cond do
+        cancel_issue_state?(issue.state) ->
+          Logger.info("Issue moved to cancel state: #{issue_context(issue)} state=#{issue.state}; aborting workflow and cleaning workspace")
 
-      terminal_issue_state?(issue.state, terminal_states) ->
-        Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
+          cancel_issue_workflow(state, issue)
 
-        terminate_running_issue(state, issue.id, true)
+        terminal_issue_state?(issue.state, terminal_states) ->
+          Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-      !issue_routable_to_worker?(issue) ->
-        Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
+          terminate_running_issue(state, issue.id, true)
 
-        terminate_running_issue(state, issue.id, false)
+        !issue_routable_to_worker?(issue) ->
+          Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-      active_issue_state?(issue.state, active_states) ->
-        reconcile_active_running_issue_state(state, issue)
+          terminate_running_issue(state, issue.id, false)
 
-      true ->
-        Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
+        active_issue_state?(issue.state, active_states) ->
+          reconcile_active_running_issue_state(state, issue)
 
-        terminate_running_issue(state, issue.id, false)
-    end
+        true ->
+          Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
+
+          terminate_running_issue(state, issue.id, false)
+      end
+
+    finish_review_departure_reconciliation(next_state, issue, review_departure)
   end
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp review_departure_running_entry(%Issue{} = issue, %State{} = state) do
+    case Map.get(state.running, issue.id) do
+      running_entry when is_map(running_entry) ->
+        previous_issue = Map.get(running_entry, :issue) || Map.get(running_entry, :dispatch_issue)
+
+        if match?(%Issue{}, previous_issue) and review_issue_state?(previous_issue.state) and
+             not review_issue_state?(issue.state) do
+          running_entry
+        else
+          nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp finish_review_departure_reconciliation(
+         %State{} = state,
+         %Issue{} = issue,
+         running_entry
+       )
+       when is_map(running_entry) do
+    if Map.has_key?(state.running, issue.id) do
+      updated_entry =
+        state.running
+        |> Map.fetch!(issue.id)
+        |> Map.put(:clear_review_stay_on_exit, true)
+
+      %{state | running: Map.put(state.running, issue.id, updated_entry)}
+    else
+      depart_and_clear_review_stay_state(issue, running_entry)
+      state
+    end
+  end
+
+  defp finish_review_departure_reconciliation(%State{} = state, _issue, _running_entry),
+    do: state
+
+  defp depart_and_clear_review_stay_state(%Issue{} = issue, running_entry)
+       when is_map(running_entry) do
+    case ReviewState.mark_departed(issue) do
+      :ok ->
+        clear_review_stay_state(issue, running_entry)
+
+      {:error, reason} = error ->
+        Logger.warning("Failed to mark durable review state as departed: #{issue_context(issue)} reason=#{inspect(reason)}")
+        error
+    end
+  end
+
+  defp clear_review_stay_state(%Issue{} = issue, running_entry) when is_map(running_entry) do
+    workspace = Map.get(running_entry, :workspace_path)
+    worker_host = Map.get(running_entry, :worker_host)
+
+    marker_result =
+      if is_binary(workspace) do
+        Workspace.clear_review_autocommit_marker(workspace, worker_host)
+      else
+        Workspace.clear_review_autocommit_marker_for_existing_issue_workspace(issue, worker_host)
+      end
+
+    case marker_result do
+      :ok ->
+        case ReviewState.clear(issue) do
+          :ok ->
+            :ok
+
+          {:error, reason} = error ->
+            Logger.warning("Failed to clear durable review state after external review departure: #{issue_context(issue)} reason=#{inspect(reason)}")
+            error
+        end
+
+      {:error, reason} = error ->
+        Logger.warning("Failed to clear review autocommit marker after external review departure: #{issue_context(issue)} reason=#{inspect(reason)}")
+        error
+    end
+  end
+
+  defp reconcile_idle_review_stays(%State{} = state, issues) when is_list(issues) do
+    Enum.reduce(issues, state, fn
+      %Issue{id: issue_id} = issue, state_acc when is_binary(issue_id) ->
+        if Map.has_key?(state_acc.running, issue_id) or
+             Map.has_key?(state_acc.retry_attempts, issue_id) do
+          state_acc
+        else
+          reconcile_idle_review_stay(state_acc, issue)
+        end
+
+      _issue, state_acc ->
+        state_acc
+    end)
+  end
+
+  defp reconcile_idle_review_stay(%State{} = state, %Issue{} = issue) do
+    case ReviewState.persisted_binding(issue) do
+      {:ok, :absent} ->
+        unblock_review_cleanup(state, issue.id)
+
+      {:ok, binding} when is_map(binding) ->
+        reconcile_persisted_idle_review_stay(state, issue, binding)
+
+      {:error, reason} ->
+        Logger.warning("Unable to reconcile persisted review state: #{issue_context(issue)} reason=#{inspect(reason)}")
+        block_review_cleanup(state, issue.id)
+    end
+  end
+
+  defp reconcile_persisted_idle_review_stay(%State{} = state, %Issue{} = issue, binding)
+       when is_map(binding) do
+    if binding.departed == false and review_issue_state?(issue.state) do
+      unblock_review_cleanup(state, issue.id)
+    else
+      running_entry = %{
+        workspace_path: binding.workspace,
+        worker_host: binding.worker_host
+      }
+
+      result = cleanup_persisted_review_stay(issue, running_entry, binding.departed)
+      update_review_cleanup_block(state, issue, result)
+    end
+  end
+
+  defp cleanup_persisted_review_stay(issue, running_entry, true),
+    do: clear_review_stay_state(issue, running_entry)
+
+  defp cleanup_persisted_review_stay(issue, running_entry, false),
+    do: depart_and_clear_review_stay_state(issue, running_entry)
+
+  defp update_review_cleanup_block(%State{} = state, %Issue{} = issue, :ok) do
+    Logger.info("Cleared persisted review state after observing the issue outside its previous review stay: #{issue_context(issue)} state=#{issue.state}")
+    unblock_review_cleanup(state, issue.id)
+  end
+
+  defp update_review_cleanup_block(%State{} = state, %Issue{} = issue, {:error, reason}) do
+    Logger.warning("Persisted review cleanup remains blocked: #{issue_context(issue)} reason=#{inspect(reason)}")
+    block_review_cleanup(state, issue.id)
+  end
+
+  defp block_review_cleanup(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{state | review_cleanup_blocked: MapSet.put(state.review_cleanup_blocked, issue_id)}
+  end
+
+  defp unblock_review_cleanup(%State{} = state, issue_id) when is_binary(issue_id) do
+    %{state | review_cleanup_blocked: MapSet.delete(state.review_cleanup_blocked, issue_id)}
+  end
+
+  defp review_issue_state?(state_name) when is_binary(state_name) do
+    normalize_issue_state(state_name) == "review (ai)"
+  end
+
+  defp review_issue_state?(_state_name), do: false
 
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do
@@ -677,6 +848,8 @@ defmodule SymphonyElixir.Orchestrator do
           Process.demonitor(ref, [:flush])
         end
 
+        clear_deferred_review_stay_state(running_entry)
+
         %{
           state
           | running: Map.delete(state.running, issue_id),
@@ -742,7 +915,9 @@ defmodule SymphonyElixir.Orchestrator do
         workspace_path: Map.get(running_entry, :workspace_path),
         recovered_turn_context: recoverable_turn_context(running_entry, :stalled),
         review_subagent_call_ids: review_subagent_call_ids_for_retry(running_entry),
-        review_subagent_ids: review_subagent_ids_for_retry(running_entry)
+        review_subagent_ids: review_subagent_ids_for_retry(running_entry),
+        codex_token_checkpoint: codex_token_checkpoint(running_entry),
+        review_stay: running_review_stay?(running_entry)
       })
     else
       state
@@ -758,6 +933,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp running_entry_run_mode(%{issue: %Issue{} = issue}), do: issue_run_mode(issue)
 
   defp running_entry_run_mode(_running_entry), do: @regular_run_mode
+
+  defp running_review_stay?(running_entry) do
+    previous_issue = Map.get(running_entry, :issue) || Map.get(running_entry, :dispatch_issue)
+    match?(%Issue{}, previous_issue) and review_issue_state?(previous_issue.state)
+  end
 
   defp issue_run_mode(%Issue{state: state_name}) when is_binary(state_name) do
     cond do
@@ -808,15 +988,48 @@ defmodule SymphonyElixir.Orchestrator do
             :ok
 
           {:error, :not_found} ->
-            Process.exit(pid, :shutdown)
+            terminate_unmanaged_task(pid)
         end
 
       _ ->
-        Process.exit(pid, :shutdown)
+        terminate_unmanaged_task(pid)
     end
   end
 
   defp terminate_task(_pid), do: :ok
+
+  defp clear_deferred_review_stay_state(running_entry) when is_map(running_entry) do
+    if Map.get(running_entry, :clear_review_stay_on_exit) == true do
+      case Map.get(running_entry, :issue) || Map.get(running_entry, :dispatch_issue) do
+        %Issue{} = issue -> depart_and_clear_review_stay_state(issue, running_entry)
+        _issue -> :ok
+      end
+    end
+  end
+
+  defp clear_deferred_review_stay_state(_running_entry), do: :ok
+
+  defp terminate_unmanaged_task(pid) when is_pid(pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :shutdown)
+
+    receive do
+      {:DOWN, ^ref, :process, ^pid, _reason} ->
+        :ok
+    after
+      5_000 ->
+        Process.exit(pid, :kill)
+
+        receive do
+          {:DOWN, ^ref, :process, ^pid, _reason} -> :ok
+        after
+          1_000 -> :ok
+        end
+    end
+
+    Process.demonitor(ref, [:flush])
+    :ok
+  end
 
   defp choose_issues(state, issues) do
     active_states = active_state_set()
@@ -873,7 +1086,8 @@ defmodule SymphonyElixir.Orchestrator do
            running: running,
            claimed: claimed,
            completed_states: completed_states,
-           retry_attempts: retry_attempts
+           retry_attempts: retry_attempts,
+           review_cleanup_blocked: review_cleanup_blocked
          } = state,
          active_states,
          terminal_states
@@ -881,7 +1095,7 @@ defmodule SymphonyElixir.Orchestrator do
     candidate_issue?(issue, active_states, terminal_states) and
       !blocked_issue_in_dispatch_state?(issue, terminal_states) and
       dispatchable_after_completion?(issue, completed_states) and
-      !pending_retry?(retry_attempts, issue.id) and
+      dispatch_recovery_ready?(retry_attempts, review_cleanup_blocked, issue.id) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
@@ -896,6 +1110,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp pending_retry?(_retry_attempts, _issue_id), do: false
+
+  defp dispatch_recovery_ready?(retry_attempts, review_cleanup_blocked, issue_id) do
+    !pending_retry?(retry_attempts, issue_id) and
+      !MapSet.member?(review_cleanup_blocked, issue_id)
+  end
 
   defp dispatchable_after_completion?(%Issue{state: issue_state} = issue, completed_states)
        when is_binary(issue_state) do
@@ -1081,7 +1300,13 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
-        schedule_issue_retry(state, issue.id, attempt, %{identifier: issue.identifier, error: "dispatch refresh failed: #{inspect(reason)}", worker_host: preferred_worker_host})
+
+        schedule_issue_retry(state, issue.id, attempt, %{
+          identifier: issue.identifier,
+          error: "dispatch refresh failed: #{inspect(reason)}",
+          worker_host: preferred_worker_host,
+          review_stay: review_issue_state?(issue.state)
+        })
     end
   end
 
@@ -1091,7 +1316,13 @@ defmodule SymphonyElixir.Orchestrator do
     case select_worker_host_for_issue(issue, state, preferred_worker_host) do
       :no_worker_capacity ->
         Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
-        schedule_issue_retry(state, issue.id, attempt, %{identifier: issue.identifier, error: "no worker capacity", worker_host: preferred_worker_host})
+
+        schedule_issue_retry(state, issue.id, attempt, %{
+          identifier: issue.identifier,
+          error: "no worker capacity",
+          worker_host: preferred_worker_host,
+          review_stay: review_issue_state?(issue.state)
+        })
 
       worker_host ->
         spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, run_opts)
@@ -1100,6 +1331,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, run_opts) do
     context = SymphonyElixir.ProjectContext.current()
+    token_checkpoint = normalize_codex_token_checkpoint(Keyword.get(run_opts, :codex_token_checkpoint))
 
     case start_agent_task(state, worker_host, issue.state, fn ->
            :ok = SymphonyElixir.ProjectContext.bind(context)
@@ -1136,9 +1368,10 @@ defmodule SymphonyElixir.Orchestrator do
             codex_input_tokens: 0,
             codex_output_tokens: 0,
             codex_total_tokens: 0,
-            codex_last_reported_input_tokens: 0,
-            codex_last_reported_output_tokens: 0,
-            codex_last_reported_total_tokens: 0,
+            codex_token_thread_id: token_checkpoint.thread_id,
+            codex_last_reported_input_tokens: token_checkpoint.input_tokens,
+            codex_last_reported_output_tokens: token_checkpoint.output_tokens,
+            codex_last_reported_total_tokens: token_checkpoint.total_tokens,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             recovered_turn_context: nil,
@@ -1170,7 +1403,8 @@ defmodule SymphonyElixir.Orchestrator do
         schedule_issue_retry(state, issue.id, next_attempt, %{
           identifier: issue.identifier,
           error: "failed to spawn agent: #{inspect(reason)}",
-          worker_host: worker_host
+          worker_host: worker_host,
+          review_stay: review_issue_state?(issue.state)
         })
     end
   end
@@ -1377,6 +1611,8 @@ defmodule SymphonyElixir.Orchestrator do
     recovered_turn_context = pick_retry_recovered_turn_context(previous_retry, metadata)
     review_subagent_call_ids = pick_retry_review_subagent_call_ids(previous_retry, metadata)
     review_subagent_ids = pick_retry_review_subagent_ids(previous_retry, metadata)
+    codex_token_checkpoint = pick_retry_codex_token_checkpoint(previous_retry, metadata)
+    review_stay = pick_retry_review_stay(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1402,7 +1638,9 @@ defmodule SymphonyElixir.Orchestrator do
             workspace_path: workspace_path,
             recovered_turn_context: recovered_turn_context,
             review_subagent_call_ids: review_subagent_call_ids,
-            review_subagent_ids: review_subagent_ids
+            review_subagent_ids: review_subagent_ids,
+            codex_token_checkpoint: codex_token_checkpoint,
+            review_stay: review_stay
           })
     }
   end
@@ -1417,7 +1655,9 @@ defmodule SymphonyElixir.Orchestrator do
           workspace_path: Map.get(retry_entry, :workspace_path),
           recovered_turn_context: Map.get(retry_entry, :recovered_turn_context),
           review_subagent_call_ids: Map.get(retry_entry, :review_subagent_call_ids),
-          review_subagent_ids: Map.get(retry_entry, :review_subagent_ids)
+          review_subagent_ids: Map.get(retry_entry, :review_subagent_ids),
+          codex_token_checkpoint: Map.get(retry_entry, :codex_token_checkpoint),
+          review_stay: Map.get(retry_entry, :review_stay, false)
         }
 
         {:ok, attempt, metadata, state}
@@ -1449,6 +1689,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
     terminal_states = terminal_state_set()
+    metadata = reconcile_retry_review_stay(issue, metadata)
 
     cond do
       cancel_issue_state?(issue.state) ->
@@ -1479,9 +1720,31 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp handle_retry_issue_lookup(nil, state, issue_id, _attempt, _metadata) do
+  defp handle_retry_issue_lookup(nil, state, issue_id, _attempt, metadata) do
     Logger.debug("Issue no longer visible, removing claim issue_id=#{issue_id}")
+    clear_missing_retry_review_stay(issue_id, metadata)
     {:noreply, release_issue_claim(state, issue_id)}
+  end
+
+  defp reconcile_retry_review_stay(%Issue{} = issue, metadata) when is_map(metadata) do
+    if metadata[:review_stay] == true and not review_issue_state?(issue.state) do
+      depart_and_clear_review_stay_state(issue, metadata)
+    end
+
+    Map.put(metadata, :review_stay, review_issue_state?(issue.state))
+  end
+
+  defp clear_missing_retry_review_stay(issue_id, metadata)
+       when is_binary(issue_id) and is_map(metadata) do
+    if metadata[:review_stay] == true do
+      issue = %Issue{
+        id: issue_id,
+        identifier: metadata[:identifier] || issue_id,
+        state: ""
+      }
+
+      depart_and_clear_review_stay_state(issue, metadata)
+    end
   end
 
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
@@ -1594,7 +1857,17 @@ defmodule SymphonyElixir.Orchestrator do
         :unchanged
 
       retry_entry ->
+        token_checkpoint = normalize_codex_token_checkpoint(Map.get(retry_entry, :codex_token_checkpoint))
+
         tracking_entry = %{
+          session_id: nil,
+          codex_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_token_thread_id: token_checkpoint.thread_id,
+          codex_last_reported_input_tokens: token_checkpoint.input_tokens,
+          codex_last_reported_output_tokens: token_checkpoint.output_tokens,
+          codex_last_reported_total_tokens: token_checkpoint.total_tokens,
           recovered_turn_context: Map.get(retry_entry, :recovered_turn_context),
           recovered_review_subagent_call_ids: MapSet.new(),
           recovered_review_subagent_ids: MapSet.new(),
@@ -1608,7 +1881,7 @@ defmodule SymphonyElixir.Orchestrator do
             |> normalize_review_subagent_ids()
         }
 
-        {updated_tracking_entry, _token_delta} = integrate_codex_update(tracking_entry, update)
+        {updated_tracking_entry, token_delta} = integrate_codex_update(tracking_entry, update)
 
         updated_retry_entry =
           retry_entry
@@ -1621,12 +1894,14 @@ defmodule SymphonyElixir.Orchestrator do
             :review_subagent_ids,
             review_subagent_ids_for_retry(updated_tracking_entry)
           )
+          |> Map.put(:codex_token_checkpoint, codex_token_checkpoint(updated_tracking_entry))
 
-        if updated_retry_entry == retry_entry do
-          :unchanged
-        else
-          {:updated, %{state | retry_attempts: Map.put(state.retry_attempts, issue_id, updated_retry_entry)}}
-        end
+        next_state =
+          state
+          |> apply_codex_token_delta(token_delta)
+          |> apply_codex_rate_limits(update)
+
+        {:updated, %{next_state | retry_attempts: Map.put(next_state.retry_attempts, issue_id, updated_retry_entry)}}
     end
   end
 
@@ -1669,7 +1944,9 @@ defmodule SymphonyElixir.Orchestrator do
         workspace_path: Map.get(running_entry, :workspace_path),
         recovered_turn_context: Map.get(running_entry, :recovered_turn_context),
         review_subagent_call_ids: review_subagent_call_ids_for_retry(running_entry),
-        review_subagent_ids: review_subagent_ids_for_retry(running_entry)
+        review_subagent_ids: review_subagent_ids_for_retry(running_entry),
+        codex_token_checkpoint: codex_token_checkpoint(running_entry),
+        review_stay: running_review_stay?(running_entry)
       })
     end
   end
@@ -1694,7 +1971,9 @@ defmodule SymphonyElixir.Orchestrator do
       workspace_path: Map.get(running_entry, :workspace_path),
       recovered_turn_context: Map.get(running_entry, :recovered_turn_context),
       review_subagent_call_ids: review_subagent_call_ids_for_retry(running_entry),
-      review_subagent_ids: review_subagent_ids_for_retry(running_entry)
+      review_subagent_ids: review_subagent_ids_for_retry(running_entry),
+      codex_token_checkpoint: codex_token_checkpoint(running_entry),
+      review_stay: running_review_stay?(running_entry)
     })
   end
 
@@ -1886,6 +2165,15 @@ defmodule SymphonyElixir.Orchestrator do
     |> normalize_review_subagent_ids()
   end
 
+  defp pick_retry_codex_token_checkpoint(previous_retry, metadata) do
+    (metadata[:codex_token_checkpoint] || Map.get(previous_retry, :codex_token_checkpoint))
+    |> normalize_codex_token_checkpoint()
+  end
+
+  defp pick_retry_review_stay(previous_retry, metadata) do
+    Map.get(metadata, :review_stay, Map.get(previous_retry, :review_stay, false)) == true
+  end
+
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 
   defp maybe_put_runtime_value(running_entry, key, value) when is_map(running_entry) do
@@ -1900,6 +2188,7 @@ defmodule SymphonyElixir.Orchestrator do
       metadata[:review_subagent_call_ids]
     )
     |> maybe_put_retry_run_opt(:recovered_review_subagent_ids, metadata[:review_subagent_ids])
+    |> maybe_put_retry_run_opt(:codex_token_checkpoint, metadata[:codex_token_checkpoint])
   end
 
   defp maybe_put_retry_run_opt(run_opts, _key, nil) when is_list(run_opts), do: run_opts
@@ -1929,17 +2218,50 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp select_worker_host_for_issue(%Issue{state: state_name}, %State{} = state, preferred_worker_host)
+  defp select_worker_host_for_issue(%Issue{state: state_name} = issue, %State{} = state, preferred_worker_host)
        when is_binary(state_name) do
-    if Dialog.state?(state_name) do
-      nil
-    else
-      select_worker_host(state, preferred_worker_host)
+    cond do
+      Dialog.state?(state_name) ->
+        nil
+
+      review_issue_state?(state_name) ->
+        select_review_worker_host(issue, state, preferred_worker_host)
+
+      true ->
+        select_worker_host(state, preferred_worker_host)
     end
   end
 
   defp select_worker_host_for_issue(_issue, %State{} = state, preferred_worker_host) do
     select_worker_host(state, preferred_worker_host)
+  end
+
+  defp select_review_worker_host(%Issue{} = issue, %State{} = state, preferred_worker_host) do
+    case ReviewState.worker_host(issue) do
+      {:ok, :unbound} ->
+        select_worker_host(state, preferred_worker_host)
+
+      {:ok, {:bound, worker_host}} ->
+        select_bound_review_worker_host(state, worker_host)
+
+      {:error, reason} ->
+        Logger.warning("Unable to read durable review worker binding; waiting instead of changing hosts: #{issue_context(issue)} reason=#{inspect(reason)}")
+
+        :no_worker_capacity
+    end
+  end
+
+  defp select_bound_review_worker_host(%State{}, nil) do
+    if Config.settings!().worker.ssh_hosts == [], do: nil, else: :no_worker_capacity
+  end
+
+  defp select_bound_review_worker_host(%State{} = state, worker_host) when is_binary(worker_host) do
+    if worker_host in Config.settings!().worker.ssh_hosts and
+         worker_host_slots_available?(state, worker_host) do
+      worker_host
+    else
+      :no_worker_capacity
+    end
   end
 
   defp preferred_worker_host_available?(preferred_worker_host, hosts)
@@ -2124,6 +2446,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
+    running_entry = align_codex_token_checkpoint(running_entry, update)
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
@@ -2188,6 +2511,11 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_event: event,
         last_tool_call: last_tool_call_for_update(Map.get(running_entry, :last_tool_call), update),
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
+        codex_token_thread_id:
+          codex_token_thread_id_for_update(
+            Map.get(running_entry, :codex_token_thread_id),
+            update
+          ),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
@@ -2217,6 +2545,46 @@ defmodule SymphonyElixir.Orchestrator do
     do: to_string(pid)
 
   defp codex_app_server_pid_for_update(existing, _update), do: existing
+
+  defp align_codex_token_checkpoint(running_entry, %{event: :session_started} = update)
+       when is_map(running_entry) do
+    case token_thread_id_for_update(update) do
+      nil ->
+        running_entry
+
+      thread_id ->
+        checkpoint_thread_id = Map.get(running_entry, :codex_token_thread_id)
+
+        if checkpoint_thread_id in [nil, thread_id] do
+          Map.put(running_entry, :codex_token_thread_id, thread_id)
+        else
+          Map.merge(running_entry, %{
+            codex_token_thread_id: thread_id,
+            codex_last_reported_input_tokens: 0,
+            codex_last_reported_output_tokens: 0,
+            codex_last_reported_total_tokens: 0
+          })
+        end
+    end
+  end
+
+  defp align_codex_token_checkpoint(running_entry, _update), do: running_entry
+
+  defp codex_token_thread_id_for_update(existing, %{event: :session_started} = update) do
+    token_thread_id_for_update(update) || existing
+  end
+
+  defp codex_token_thread_id_for_update(existing, _update), do: existing
+
+  defp token_thread_id_for_update(%{thread_id: thread_id}) when is_binary(thread_id) do
+    if String.trim(thread_id) == "", do: nil, else: thread_id
+  end
+
+  defp token_thread_id_for_update(%{session_id: session_id}) when is_binary(session_id) do
+    if String.trim(session_id) == "", do: nil, else: session_id
+  end
+
+  defp token_thread_id_for_update(_update), do: nil
 
   defp session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
     do: session_id
@@ -2313,6 +2681,43 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp review_subagent_call_ids_for_retry(running_entry), do: tracked_review_subagent_call_ids(running_entry)
   defp review_subagent_ids_for_retry(running_entry), do: tracked_review_subagent_ids(running_entry)
+
+  defp codex_token_checkpoint(running_entry) when is_map(running_entry) do
+    %{
+      thread_id:
+        Map.get(running_entry, :codex_token_thread_id) ||
+          Map.get(running_entry, :session_id),
+      input_tokens: Map.get(running_entry, :codex_last_reported_input_tokens, 0),
+      output_tokens: Map.get(running_entry, :codex_last_reported_output_tokens, 0),
+      total_tokens: Map.get(running_entry, :codex_last_reported_total_tokens, 0)
+    }
+    |> normalize_codex_token_checkpoint()
+  end
+
+  defp normalize_codex_token_checkpoint(checkpoint) when is_map(checkpoint) do
+    %{
+      thread_id: normalize_codex_token_thread_id(Map.get(checkpoint, :thread_id)),
+      input_tokens: normalize_codex_token_total(Map.get(checkpoint, :input_tokens)),
+      output_tokens: normalize_codex_token_total(Map.get(checkpoint, :output_tokens)),
+      total_tokens: normalize_codex_token_total(Map.get(checkpoint, :total_tokens))
+    }
+  end
+
+  defp normalize_codex_token_checkpoint(_checkpoint) do
+    %{thread_id: nil, input_tokens: 0, output_tokens: 0, total_tokens: 0}
+  end
+
+  defp normalize_codex_token_thread_id(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      thread_id -> thread_id
+    end
+  end
+
+  defp normalize_codex_token_thread_id(_value), do: nil
+
+  defp normalize_codex_token_total(value) when is_integer(value) and value >= 0, do: value
+  defp normalize_codex_token_total(_value), do: 0
 
   defp recovered_review_subagent_call_ids_for_update(running_entry, _review_completion) do
     running_entry |> Map.get(:recovered_review_subagent_call_ids) |> normalize_review_subagent_call_ids()
@@ -3567,9 +3972,22 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp review_recovered_context_kind(value) when is_binary(value) do
     case PromptBuilder.normalize_recovered_review_context(value) do
-      "Keine Findings." <> _ -> :no_findings
-      "Findings:" <> _ -> :findings
-      _ -> :none
+      normalized when is_binary(normalized) ->
+        cond do
+          normalized
+          |> String.split(~r/\R/u)
+          |> Enum.any?(&(String.trim(&1) |> String.starts_with?("Findings:"))) ->
+            :findings
+
+          String.starts_with?(normalized, "Keine Findings.") ->
+            :no_findings
+
+          true ->
+            :none
+        end
+
+      _ ->
+        :none
     end
   end
 

@@ -2513,7 +2513,7 @@ defmodule SymphonyElixir.DialogTest do
           ;;
         4)
           printf '%s\\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","phase":"final_answer","text":#{escaped_answer}}}}'
-          printf '%s\\n' '{"method":"turn/completed","params":{}}'
+          printf '%s\\n' '{"method":"turn/completed","params":{"threadId":#{escaped_thread_id},"turn":{"id":#{escaped_turn_id}}}}'
           exit 0
           ;;
         *)
@@ -2557,7 +2557,7 @@ defmodule SymphonyElixir.DialogTest do
             sleep 0.05
           done
           printf '%s\\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","phase":"final_answer","text":#{escaped_answer}}}}'
-          printf '%s\\n' '{"method":"turn/completed","params":{}}'
+          printf '%s\\n' '{"method":"turn/completed","params":{"threadId":#{escaped_thread_id},"turn":{"id":#{escaped_turn_id}}}}'
           exit 0
           ;;
         *)
@@ -2603,7 +2603,7 @@ defmodule SymphonyElixir.DialogTest do
           done
           printf 'dirty\\n' > "$dirty_file"
           printf '%s\\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","phase":"final_answer","text":#{escaped_answer}}}}'
-          printf '%s\\n' '{"method":"turn/completed","params":{}}'
+          printf '%s\\n' '{"method":"turn/completed","params":{"threadId":#{escaped_thread_id},"turn":{"id":#{escaped_turn_id}}}}'
           exit 0
           ;;
         *)
@@ -2653,7 +2653,7 @@ defmodule SymphonyElixir.DialogTest do
         4)
           printf 'dirty\\n' > "$dirty_file"
           printf '%s\\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","phase":"final_answer","text":"Dirty answer"}}}'
-          printf '%s\\n' '{"method":"turn/completed","params":{}}'
+          printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-dirty","turn":{"id":"turn-dirty"}}}'
           exit 0
           ;;
         *)
@@ -2691,7 +2691,7 @@ defmodule SymphonyElixir.DialogTest do
           mkdir -p "$(dirname "$runtime_log_file")"
           printf 'runtime\\n' > "$runtime_log_file"
           printf '%s\\n' '{"method":"item/completed","params":{"item":{"type":"agentMessage","phase":"final_answer","text":"Log-safe answer"}}}'
-          printf '%s\\n' '{"method":"turn/completed","params":{}}'
+          printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-log-safe","turn":{"id":"turn-log-safe"}}}'
           exit 0
           ;;
         *)
@@ -2757,6 +2757,8 @@ defmodule SymphonyElixir.DialogTest do
   end
 
   defp write_terminal_turn_event_fake_codex!(codex_binary, trace_file, thread_id, turn_id, event_json) do
+    event_json = event_json |> Jason.decode!() |> Map.update!("params", &Map.merge(&1, %{"threadId" => thread_id, "turn" => %{"id" => turn_id}})) |> Jason.encode!()
+
     File.write!(codex_binary, """
     #!/bin/sh
     trace_file=#{inspect(trace_file)}
@@ -2814,7 +2816,7 @@ defmodule SymphonyElixir.DialogTest do
            ;;
          4)
            printf 'dirty\\n' > "$dirty_file"
-           printf '%s\\n' '{"method":"turn/failed","params":{"reason":"forced failure"}}'
+           printf '%s\\n' '{"method":"turn/failed","params":{"reason":"forced failure","threadId":"thread-dirty-error","turn":{"id":"turn-dirty-error"}}}'
            exit 0
            ;;
          *)

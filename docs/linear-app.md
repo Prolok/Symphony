@@ -55,7 +55,13 @@ Pro Linear-Workspace müssen Client-ID, Workspace-ID, App-User-ID und Credential
 übereinstimmen. Konflikte werden als Konfigurationsfehler abgewiesen. Die App-/
 Workspaceidentität wird bei API-Zugriffen verifiziert. Eine Kandidatenabfrage pro
 Workspace und API-Seite enthält projektweise verknüpfte Scope-, Status- und
-Assignee-Filter. Verschiedene Workspaces werden getrennt abgefragt.
+Assignee-Filter. Verschiedene Workspaces werden getrennt abgefragt. Fehler und
+bestätigte Sperrfristen gelten schon bei der Startprüfung je Workspacegruppe;
+unbetroffene Gruppen behalten ihre Kandidaten und ihren Polltakt. Temporäre
+HTTP-5xx- und Transportfehler einer Gruppe verhindern den Start anderer bereits
+verifizierter Gruppen nicht; Authentifizierungs-, Bindungs- und
+Konfigurationsfehler bleiben dienstweit fail-closed. Sind alle Gruppen gesperrt,
+richtet sich der nächste Poll nach der frühesten fälligen Gruppe.
 
 Worktree-Erzeugung und Cleanup verwenden `on_create_worktree.py` bzw.
 `on_remove_worktree.py` aus dem jeweiligen Projektroot. Dialog, Retry und
@@ -166,9 +172,20 @@ abgewiesen protokolliert; unklare Ausgänge werden weiterhin abgeglichen.
 GraphQL-`RATELIMITED` ohne Daten und ohne Feldpfad wird ebenso als eindeutige
 Ablehnung erfasst, auch bei HTTP 400/403. Antworten mit Daten oder unklaren
 zusätzlichen Fehlern bleiben abgleichpflichtig.
+Ein nach unbekanntem Ausgang unverändert rückgelesenes Kommentarupdate wird nur
+bei exakt gleicher Kommentar-, Issue- und Autorbindung sowie unverändertem
+gespeichertem `updatedAt`-Preimage einmal aus seinem Intent wiederholt. Der
+Replayversuch wird vor der Mutation dauerhaft im Intent reserviert. Der aktuelle
+Schreibversuch stoppt nach bestätigtem Replay mit `comment_write_recovered`,
+damit er den Stand frisch einliest. Bleibt auch der Replayausgang mehrdeutig,
+wird keine weitere Mutation gesendet; der Abgleich bleibt ungelöst. Neuere
+Versionen oder fremde Bindungen bleiben `comment_write_unresolved`;
+Kommentarerstellungen werden nie blind wiederholt.
 Historische Journalbelege werden auch nach einem kontrollierten App-Wechsel
 gegen ihren gespeicherten Autor geprüft. Neue Writes und Kommentarupdates
-bleiben an die aktuell geprüfte App-Identität gebunden.
+bleiben an die aktuell geprüfte App-Identität gebunden; ein vor dem App-Wechsel
+angelegtes Update-Intent darf daher unter der neuen Identität nicht abgespielt
+werden.
 
 Konkurrierende Journalzugriffe warten bis zu 10 Sekunden auf den Lock
 (`comment_journal_busy` bei Zeitüberschreitung, `comment_journal_unavailable`
@@ -266,11 +283,62 @@ GitHub-Rate-Limit bei der Merge-Anforderung beendet den Versuch; die Wiederholun
 wiederholen Rate-Limits intern mit Backoff.
 
 Logs `Comment scan completed/failed` nennen Projektroot, Issue-/Session-Kontext,
-letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Rate-Limits folgen
-der bestehenden Fehlerklassifikation und werden beim nächsten Poll/Checkpoint
-wieder geprüft. Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
+letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Bestätigte Linear-
+Sperrfristen aus `Retry-After` oder Rate-Limit-Reset gelten gemeinsam für Token-,
+Identity- und Geschäftsanfragen derselben App. Der nicht geheime Dauerzustand
+unter `~/.cache/symphony/rate-limits` ist nach Workspace-/Client-ID gebunden und
+unabhängig von Projekt-State-Root und Release. Er erhält die Fristen auch über
+Prozessneustarts und beide Tooltransporte; Polling und Worker-Retries der
+betroffenen App warten mindestens bis zum Ablauf. Projektzustände und private
+Credentialquellen bleiben im jeweiligen Projekt.
+Nicht erschöpfte Diagnoseheader erzeugen keine Sperre. Ein fehlgeschlagener
+Dispatch-Refresh erhält den sichtbaren Retry samt Ergebnis und IDs. Auch eine
+erfolgreiche Antwort mit bestätigtem `remaining: 0` und verwertbarem zukünftigem
+Reset setzt die gemeinsame Sperrfrist.
+Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
 zwischen Polls und keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
 Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehen.
+
+### Review-Wiederaufnahme
+
+Ein Codex-Terminalereignis beendet nur den zugehörigen Hauptturn (`threadId`
+und `turn.id`). Native `subAgentActivity`-Meldungen und leere Collab-Waitzustände
+enthalten keinen Ergebnistext. Vollständige Finals werden über den bestehenden
+App-Server mit `thread/read` und vollständig paginiertem `thread/turns/list`
+gelesen; Child-ID, Parent-ID und Workspace müssen zur gespeicherten Bindung passen.
+Während solcher RPCs eintreffende Ereignisse bleiben gepuffert.
+
+Der atomare Zustand unter `state/reviews` bindet Projekt, Issue, Workspace und
+Workerhost an den aktuellen Review-Parentthread. Er erhält Aufruf-/Child-IDs,
+vollständige Resultate und deren Zustellung vor nachfolgenden Linear-Aktionen.
+Jedes gespeicherte Resultat muss dabei auf ein im selben Zustand gebundenes
+Child verweisen; dessen vollständige Historie wird beim Erfassen beziehungsweise
+Wiederherstellen erneut gegen Parent und Workspace geprüft.
+Ist der gebundene Workerhost belegt, wartet die Wiederaufnahme auf dessen
+Kapazität, statt denselben Reviewthread auf einen anderen Host umzubinden.
+Native `subAgentActivity(kind=started)` zählen anhand ihrer Call-ID und des
+Parentturns auch ohne separaten Collab-Spawn. Live-Ereignisse und vollständige
+Parenthistorie ergänzen dieselben Aufrufe idempotent; Completed-IDs zählen nicht
+als weitere Starts. Die Historie ergänzt auch bisher fehlende Start-IDs, ohne
+vorhandene Resultate oder Zustellungen zurückzusetzen.
+Eine Wiederaufnahme verwendet `thread/resume` und die vorhandene Historie;
+bereits zugestellte Resultate werden nicht erneut als Zusatzkontext eingespielt.
+Die fachliche Verarbeitung bleibt im bestehenden Workpad nachgewiesen. Mehrere
+Resultate bleiben nebeneinander erhalten, auch wenn später „Keine Findings“
+folgt; Budget und Pflichtgates bleiben unverändert. Beschädigter Zustand oder
+unvollständige/falsch gebundene Historie erlauben keinen Ersatzreviewstart.
+Der Zustand aktiviert keine abgeschlossenen Tickets und wird beim Verlassen der
+Reviewphase auch durch die externe Reconciliation verworfen. Bei einem manuellen
+oder terminalen Abgang beendet sie den laufenden Reviewworker vor der
+Zustandslöschung; bei einem aktiven Phasenübergang wird die Löschung bis zum Ende
+desselben Workers vorgemerkt. Ein bereits wartender Review-Retry wird bereinigt,
+sobald das Ticket die Phase verlassen hat oder nicht mehr sichtbar ist.
+Ist nach einem Dienstneustart weder ein Worker noch ein Retry vorhanden, räumt
+bereits ein sichtbar gepollter manueller Handoff den gebundenen Reviewzustand
+auf. Die Abkehr wird dabei zuerst dauerhaft markiert; bis zur bestätigten
+Löschung von Autocommit-Marker und Reviewzustand ist kein erneuter Reviewstart
+zulässig. Ein vollständiges Verlassen und Wiedereintreten ausschließlich
+zwischen zwei beobachteten Polls ist dagegen nicht rekonstruierbar.
 
 ### GitHub-CI und No-CI
 

@@ -318,6 +318,9 @@ If Symphony documents token reporting externally, the contract should be:
 - Accept nested `info.total_token_usage` from `codex/event/token_count`
 - Fallback to explicit `turn/completed` `usage` only when no cumulative total was present
 - Ignore `last` for totals
-- Preserve accepted high-water counters in the running entry
+- Preserve accepted high-water counters in the running entry and across retries
+  that resume the same Codex thread
+- Key the retry high-water mark by the stable Codex `thread_id`, not by the
+  combined thread/turn `session_id`
 - Do not classify generic `usage` by field name alone
 - Do not double-count turn-completed usage after live updates

@@ -6,7 +6,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   require Logger
   alias SymphonyElixir.Linear.WriteContext
 
-  alias SymphonyElixir.Codex.{DynamicTool, LinearGraphqlTool}
+  alias SymphonyElixir.Codex.{DynamicTool, LinearGraphqlTool, ReviewState}
   alias SymphonyElixir.{Config, PathSafety, RuntimePaths, SSH, Workflow}
 
   @initialize_id 1
@@ -51,17 +51,21 @@ defmodule SymphonyElixir.Codex.AppServer do
     resume_thread_id = Keyword.get(opts, :thread_id)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host, opts),
+         {:ok, review_state} <- ReviewState.open(Keyword.get(opts, :issue), expanded_workspace, worker_host, opts),
          {:ok, launch_cwd} <- resolve_launch_cwd(expanded_workspace, worker_host, opts),
          {:ok, port} <- start_port(launch_cwd, expanded_workspace, worker_host, app_server_issue_env(Keyword.get(opts, :issue))) do
       metadata = port_metadata(port, worker_host)
+      resume_thread_id = ReviewState.read(review_state)["thread_id"] || resume_thread_id
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host, opts),
            {:ok, thread_id} <-
              do_start_session(port, expanded_workspace, session_policies, resume_thread_id) do
+        :ok = ReviewState.bind_thread(review_state, thread_id)
+
         {:ok,
          %{
            port: port,
-           metadata: metadata,
+           metadata: metadata |> Map.put(:review_state, review_state) |> Map.put(:review_resumed, is_binary(resume_thread_id)),
            approval_policy: session_policies.approval_policy,
            auto_approve_requests: session_policies.approval_policy == "never",
            thread_sandbox: session_policies.thread_sandbox,
@@ -101,8 +105,12 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    recover_review(port, metadata[:review_state], metadata[:review_resumed])
+    {recovered, result_ids} = ReviewState.pending_context(metadata[:review_state])
+
+    case start_turn(port, thread_id, prompt <> recovered, issue, workspace, approval_policy, turn_sandbox_policy) do
       {:ok, turn_id} ->
+        :ok = ReviewState.delivered(metadata[:review_state], result_ids, turn_id)
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -512,7 +520,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp receive_loop(
+  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, metadata) do
+    case take_buffered_message(port) do
+      nil -> receive_data(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, metadata)
+      line -> handle_incoming(port, on_message, line, timeout_ms, tool_executor, auto_approve_requests, metadata)
+    end
+  end
+
+  defp receive_data(
          port,
          on_message,
          timeout_ms,
@@ -564,45 +579,17 @@ defmodule SymphonyElixir.Codex.AppServer do
          metadata
        ) do
     payload_string = to_string(data)
+    capture_review_event(port, metadata[:review_state], payload_string, on_message, metadata)
 
     case Jason.decode(payload_string) do
-      {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload, metadata)
-
-        drain_post_completion_messages(
-          port,
-          on_message,
-          "",
-          tool_executor,
-          auto_approve_requests,
-          metadata
-        )
-
-      {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_failed,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params"),
-          metadata
-        )
-
-        {:error, {:turn_failed, Map.get(payload, "params")}}
-
-      {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_cancelled,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params"),
-          metadata
-        )
-
-        {:error, {:turn_cancelled, Map.get(payload, "params")}}
+      {:ok, %{"method" => method} = payload}
+      when method in ["turn/completed", "turn/failed", "turn/cancelled"] ->
+        if active_turn_event?(payload, metadata) do
+          finish_turn(port, on_message, payload, payload_string, tool_executor, auto_approve_requests, metadata)
+        else
+          emit_turn_event(on_message, :notification, payload, payload_string, port, payload, metadata)
+          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, metadata)
+        end
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
@@ -652,7 +639,14 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp drain_post_completion_messages(
+  defp drain_post_completion_messages(port, on_message, pending_line, tool_executor, auto_approve_requests, metadata) do
+    case take_buffered_message(port) do
+      nil -> receive_post_completion(port, on_message, pending_line, tool_executor, auto_approve_requests, metadata)
+      line -> handle_post_completion_incoming(port, on_message, line, tool_executor, auto_approve_requests, metadata)
+    end
+  end
+
+  defp receive_post_completion(
          port,
          on_message,
          pending_line,
@@ -704,45 +698,15 @@ defmodule SymphonyElixir.Codex.AppServer do
          metadata
        ) do
     payload_string = to_string(data)
+    capture_review_event(port, metadata[:review_state], payload_string, on_message, metadata)
 
     case Jason.decode(payload_string) do
-      {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload, metadata)
-
-        drain_post_completion_messages(
-          port,
-          on_message,
-          "",
-          tool_executor,
-          auto_approve_requests,
-          metadata
-        )
-
-      {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_failed,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params"),
-          metadata
-        )
-
-        {:error, {:turn_failed, Map.get(payload, "params")}}
-
-      {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
-        emit_turn_event(
-          on_message,
-          :turn_cancelled,
-          payload,
-          payload_string,
-          port,
-          Map.get(payload, "params"),
-          metadata
-        )
-
-        {:error, {:turn_cancelled, Map.get(payload, "params")}}
+      {:ok, %{"method" => method} = payload}
+      when method in ["turn/completed", "turn/failed", "turn/cancelled"] ->
+        # The matching terminal event has already been emitted. Late child and
+        # duplicate terminal notifications cannot change the parent's outcome.
+        emit_turn_event(on_message, :notification, payload, payload_string, port, payload, metadata)
+        drain_post_completion_messages(port, on_message, "", tool_executor, auto_approve_requests, metadata)
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
@@ -786,6 +750,34 @@ defmodule SymphonyElixir.Codex.AppServer do
         end
 
         drain_post_completion_messages(port, on_message, "", tool_executor, auto_approve_requests, metadata)
+    end
+  end
+
+  defp active_turn_event?(%{"params" => %{"threadId" => thread_id, "turn" => %{"id" => turn_id}}}, metadata) do
+    is_binary(thread_id) and is_binary(turn_id) and
+      thread_id == metadata[:thread_id] and turn_id == metadata[:turn_id]
+  end
+
+  defp active_turn_event?(_payload, _metadata), do: false
+
+  defp finish_turn(port, on_message, payload, raw, tool_executor, auto_approve_requests, metadata) do
+    status = get_in(payload, ["params", "turn", "status"])
+
+    outcome =
+      case {payload["method"], status} do
+        {"turn/failed", _} -> :turn_failed
+        {"turn/cancelled", _} -> :turn_cancelled
+        {_, "failed"} -> :turn_failed
+        {_, "interrupted"} -> :turn_cancelled
+        _ -> :turn_completed
+      end
+
+    emit_turn_event(on_message, outcome, payload, raw, port, payload["params"], metadata)
+
+    if outcome == :turn_completed do
+      drain_post_completion_messages(port, on_message, "", tool_executor, auto_approve_requests, metadata)
+    else
+      {:error, {outcome, payload["params"]}}
     end
   end
 
@@ -1384,7 +1376,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:response_error, response_payload}}
 
       {:ok, %{} = other} ->
-        Logger.debug("Ignoring message while waiting for response: #{inspect(other)}")
+        buffer_message(port, Jason.encode!(other))
         with_timeout_response(port, request_id, timeout_ms, "")
 
       {:error, _} ->
@@ -1421,6 +1413,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp stop_port(port) when is_port(port) do
+    Process.delete({__MODULE__, port, :buffer})
+
     case :erlang.port_info(port) do
       :undefined ->
         :ok
@@ -1436,8 +1430,94 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  defp buffer_message(port, line) do
+    key = {__MODULE__, port, :buffer}
+    Process.put(key, :queue.in(line, Process.get(key, :queue.new())))
+  end
+
+  defp take_buffered_message(port) do
+    key = {__MODULE__, port, :buffer}
+
+    case :queue.out(Process.get(key, :queue.new())) do
+      {{:value, line}, rest} ->
+        Process.put(key, rest)
+        line
+
+      {:empty, _} ->
+        nil
+    end
+  end
+
+  defp recover_review(_port, nil, _resumed), do: :ok
+
+  defp recover_review(port, context, resumed) do
+    record = ReviewState.read(context)
+    # Read the parent's persisted history also when the last process died
+    # between native child completion and Symphony's receipt.
+    if resumed or map_size(record["agents"]) > 0 do
+      thread = read_review_thread(port, record["thread_id"])
+
+      for child <- ReviewState.restore_parent(context, thread) do
+        ReviewState.capture(context, child, read_review_thread(port, child))
+      end
+    end
+
+    :ok
+  end
+
+  defp capture_review_event(_port, nil, _raw, _on_message, _metadata), do: :ok
+
+  defp capture_review_event(port, context, raw, on_message, metadata) do
+    case Jason.decode(raw) do
+      {:ok, payload} ->
+        for child <- ReviewState.observe(context, payload),
+            result <- ReviewState.capture(context, child, read_review_thread(port, child)) do
+          emit_message(on_message, :review_subagent_completed, %{review_result: result}, metadata)
+        end
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp read_review_thread(port, id) do
+    %{"thread" => thread} = review_rpc!(port, "thread/read", %{"threadId" => id, "includeTurns" => false})
+    turns = review_pages(port, "thread/turns/list", %{"threadId" => id, "itemsView" => "full", "sortDirection" => "asc", "limit" => 100}, [], %{})
+    Map.put(thread, "turns", turns)
+  end
+
+  @spec review_pages(port(), String.t(), map(), [[map()]], map()) :: [map()]
+  defp review_pages(port, method, params, acc, seen) do
+    case review_rpc!(port, method, params) do
+      %{"data" => data, "nextCursor" => cursor} when is_list(data) ->
+        cond do
+          is_nil(cursor) ->
+            Enum.reverse([data | acc]) |> List.flatten()
+
+          is_binary(cursor) and not Map.has_key?(seen, cursor) ->
+            review_pages(port, method, Map.put(params, "cursor", cursor), [data | acc], Map.put(seen, cursor, true))
+
+          true ->
+            raise "review_history_cursor_invalid"
+        end
+
+      _ ->
+        raise "review_history_incomplete"
+    end
+  end
+
+  defp review_rpc!(port, method, params) do
+    id = "symphony-review-#{System.unique_integer([:positive, :monotonic])}"
+    send_message(port, %{"id" => id, "method" => method, "params" => params})
+
+    case await_response(port, id) do
+      {:ok, result} -> result
+      {:error, _} -> raise "review_history_read_failed"
+    end
+  end
+
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
-    message = metadata |> Map.merge(details) |> Map.put(:event, event) |> Map.put(:timestamp, DateTime.utc_now())
+    message = metadata |> Map.delete(:review_state) |> Map.merge(details) |> Map.put(:event, event) |> Map.put(:timestamp, DateTime.utc_now())
     on_message.(message)
   end
 

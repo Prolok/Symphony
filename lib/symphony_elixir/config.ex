@@ -69,6 +69,12 @@ defmodule SymphonyElixir.Config do
     EnvFile.linear_secret(binding["client_secret_env"], binding["env_dir"] || ProjectContext.env("SYMPHONY_LINEAR_ENV_DIR"))
   end
 
+  @doc "Host-user cooldown storage, independent of project bindings and release roots."
+  @spec linear_rate_limit_root() :: Path.t()
+  def linear_rate_limit_root do
+    Application.get_env(:symphony_elixir, :linear_rate_limit_root, Path.join(System.user_home!(), ".cache/symphony/rate-limits"))
+  end
+
   @doc "Non-secret environment names excluded from non-authentication children."
   @spec linear_secret_env_names() :: [String.t()]
   def linear_secret_env_names do

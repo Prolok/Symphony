@@ -10,6 +10,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   @lookup "query SymphonyReceipt($id: String!) { comment(id: $id) { id body bodyData quotedText resolvingUser { id } resolvingComment { id } updatedAt user { id } issue { id identifier } } }"
   @issue_lookup "query SymphonyReceiptIssue($id: String!) { issue(id: $id) { id } }"
+  @recovery_update "mutation SymphonyRecoverCommentUpdate($id: String!, $input: CommentUpdateInput!) { recovered: commentUpdate(id: $id, input: $input) { success symphonyReceipt: comment { id body bodyData quotedText resolvingUser { id } resolvingComment { id } updatedAt user { id } issue { id identifier } } } }"
 
   @spec execute(map(), map(), (map() -> term()), map(), keyword()) :: term()
   def execute(binding, payload, request, context \\ %{}, opts \\ []) do
@@ -145,7 +146,11 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp recover_before_write(binding, receipts, request) do
     with {:ok, records} <- intents(binding),
-         {:ok, recovered} <- collect(Enum.reject(records, &(confirmed?(binding, &1) or rejected?(binding, &1))), &confirm_remote(binding, &1, request)) do
+         {:ok, recovered} <-
+           collect(
+             Enum.reject(records, &(confirmed?(binding, &1) or rejected?(binding, &1))),
+             &recover_remote_before_write(binding, &1, request)
+           ) do
       # Another issue or a restarted runtime may have completed reconciliation.
       # The original run/tool context is evidence, not a retry identity.
       prior = Enum.filter(records, &recovered?(binding, &1))
@@ -155,19 +160,33 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp check_recovery(records, recovered, receipts, prior) do
     unresolved = Enum.filter(recovered, &(&1["state"] != "confirmed"))
-    repeated = Enum.filter(records, &repeated_creation?(&1, recovered ++ prior, receipts))
+    recovered_updates = Enum.filter(recovered, &(&1["recovered_update"] == true))
+    repeated = Enum.filter(records, &repeated_write?(&1, recovered ++ prior, receipts))
 
     cond do
-      unresolved != [] -> {:error, {:comment_write_unresolved, unresolved}}
-      repeated != [] -> {:error, {:comment_write_recovered, Enum.map(repeated, & &1["comment_id"])}}
-      true -> :ok
+      unresolved != [] ->
+        {:error, {:comment_write_unresolved, unresolved}}
+
+      recovered_updates != [] ->
+        {:error, {:comment_write_recovered, Enum.map(recovered_updates, & &1["comment_id"])}}
+
+      repeated != [] ->
+        {:error, {:comment_write_recovered, Enum.map(repeated, & &1["comment_id"])}}
+
+      true ->
+        :ok
     end
   end
 
-  defp repeated_creation?(record, recovered, receipts) do
-    record["operation"] == "commentCreate" and
+  defp repeated_write?(record, recovered, receipts) do
+    record["operation"] in ["commentCreate", "commentUpdate"] and
       Enum.any?(recovered, &(&1["comment_id"] == record["comment_id"])) and
-      Enum.any?(receipts, &(&1["operation"] == "commentCreate" and comparable_input(&1) == comparable_input(record)))
+      Enum.any?(receipts, fn receipt ->
+        receipt["operation"] == record["operation"] and
+          (record["operation"] == "commentCreate" or
+             receipt["comment_id"] == record["comment_id"]) and
+          comparable_input(receipt) == comparable_input(record)
+      end)
   end
 
   defp comparable_input(record), do: Map.delete(record["input"], "id")
@@ -247,23 +266,117 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     if rejected?(binding, record), do: {:ok, result(record, "rejected")}, else: lookup_remote(binding, record, request)
   end
 
-  defp lookup_remote(binding, record, request) do
+  defp recover_remote_before_write(binding, record, request) do
+    if rejected?(binding, record),
+      do: {:ok, result(record, "rejected")},
+      else: lookup_remote(binding, record, request, true)
+  end
+
+  defp lookup_remote(binding, record, request, recover_update? \\ false) do
     case request.(%{"query" => @lookup, "variables" => %{"id" => record["comment_id"]}}) do
       {:ok, %{status: 200, body: %{"data" => %{"comment" => comment}} = body}} when is_map(comment) ->
-        reconcile_comment(binding, record, comment, Map.get(body, "errors", []))
+        reconcile_comment(
+          binding,
+          record,
+          comment,
+          Map.get(body, "errors", []),
+          request,
+          recover_update?
+        )
 
       _ ->
         {:ok, result(record, "pending")}
     end
   end
 
-  defp reconcile_comment(binding, record, comment, errors) do
-    if errors in [nil, []] and matches?(record, comment, binding) do
-      with :ok <- persist(binding, path(binding, record, "confirmed"), %{"comment" => comment, "recovered" => true}) do
-        {:ok, result(record, "confirmed")}
+  defp reconcile_comment(binding, record, comment, errors, request, recover_update?) do
+    cond do
+      errors not in [nil, []] ->
+        {:ok, result(record, "conflict")}
+
+      matches?(record, comment, binding) ->
+        confirm_recovered_comment(binding, record, comment, recover_update?)
+
+      recover_update? and safely_unapplied_update?(binding, record, comment) ->
+        replay_update(binding, record, request)
+
+      true ->
+        {:ok, result(record, "conflict")}
+    end
+  end
+
+  defp confirm_recovered_comment(binding, record, comment, recover_update?) do
+    with :ok <-
+           persist(binding, path(binding, record, "confirmed"), %{
+             "comment" => comment,
+             "recovered" => true
+           }) do
+      {:ok, recovered_result(record, recover_update?)}
+    end
+  end
+
+  defp recovered_result(%{"operation" => "commentUpdate"} = record, true) do
+    Map.put(result(record, "confirmed"), "recovered_update", true)
+  end
+
+  defp recovered_result(record, _recover_update?), do: result(record, "confirmed")
+
+  defp safely_unapplied_update?(binding, record, comment) do
+    record["operation"] == "commentUpdate" and
+      record["replay_attempted"] != true and
+      nonempty?(record["previous_version"]) and
+      nonempty?(record["author_id"]) and
+      record["author_id"] == binding["user_id"] and
+      comment["updatedAt"] == record["previous_version"] and
+      same_comment_identity?(binding, record, comment)
+  end
+
+  defp same_comment_identity?(binding, record, comment) do
+    author_id = Map.get(record, "author_id", binding["user_id"])
+
+    comment["id"] == record["comment_id"] and
+      get_in(comment, ["user", "id"]) == author_id and
+      (is_nil(record["issue_id"]) or
+         record["issue_id"] in [
+           get_in(comment, ["issue", "id"]),
+           get_in(comment, ["issue", "identifier"])
+         ])
+  end
+
+  defp replay_update(binding, record, request) do
+    payload = %{
+      "query" => @recovery_update,
+      "variables" => %{"id" => record["comment_id"], "input" => record["input"]}
+    }
+
+    with :ok <-
+           persist(
+             binding,
+             path(binding, record, "intent"),
+             Map.put(record, "replay_attempted", true)
+           ) do
+      case request.(payload) do
+        {:ok, response} ->
+          confirm_replayed_update(binding, record, response)
+
+        _ ->
+          {:ok, result(record, "pending")}
       end
+    end
+  end
+
+  defp confirm_replayed_update(binding, record, response) do
+    case response_comment(response, "recovered") do
+      comment when is_map(comment) -> confirm_replayed_comment(binding, record, comment)
+      _comment -> {:ok, result(record, "pending")}
+    end
+  end
+
+  defp confirm_replayed_comment(binding, record, comment) do
+    if matches?(record, comment, binding) do
+      confirm_recovered_comment(binding, record, comment, true)
     else
-      {:ok, result(record, "conflict")}
+      {:ok, result(record, "pending")}
     end
   end
 
@@ -290,6 +403,8 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp normalize_json(value), do: value
+
+  defp nonempty?(value), do: is_binary(value) and String.trim(value) != ""
 
   defp intents(binding) do
     case File.ls(directory(binding)) do

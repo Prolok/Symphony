@@ -42,6 +42,10 @@ logging is configured.
 - `Orchestrator`: log dispatch, retry, terminal/non-active transitions, and worker exits with issue context. Include `session_id` whenever running-entry data has it.
 - `Orchestrator`: for Review-(AI)-Handoffs zusätzlich festhalten, ob `spawn_agent`-/`wait_agent`-Signale erfasst wurden, inklusive `recovered_kind`, der getrackten Review-Sub-Agent-Call-/Agent-ID-Anzahlen und der Rohquelle (`source_method`, `source_item_type`, `source_tool`) des erkannten Handoff-Events.
 - `Codex.AppServer`: log session start/completion/error with issue context and `session_id`.
+- Native Reviewresultate werden erst nach bestätigter Parent-/Child-/Workspace-
+  Zuordnung und dauerhafter Speicherung als `review_subagent_completed` gemeldet.
+  Aktivitätsmeldungen allein belegen kein Ergebnis; fremde Terminalereignisse
+  bleiben Notifications und ändern den Hauptturn-Abschluss nicht.
 - `Codex.AppServer`: log protocol notifications at debug level with `method`,
   `item_type`, `tool`, `call_id` and `jsonrpc_id` when those fields are
   available. Keep the raw protocol payload in the event stream, not in normal

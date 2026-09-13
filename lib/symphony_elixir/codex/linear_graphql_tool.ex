@@ -214,6 +214,16 @@ defmodule SymphonyElixir.Codex.LinearGraphqlTool do
     %{"error" => error}
   end
 
+  defp tool_error_payload({:linear_api_request, {:linear_app_rate_limited, deadline}}) do
+    %{
+      "error" => %{
+        "message" => "Linear app request is rate limited.",
+        "classification" => "rate_limited",
+        "rateLimit" => %{"limited" => true, "retryAfterMs" => deadline.retry_after_ms, "retryAtMs" => deadline.retry_at_ms}
+      }
+    }
+  end
+
   defp tool_error_payload({:linear_api_request, :linear_app_rate_limited}) do
     %{"error" => %{"message" => "Linear app request is rate limited.", "classification" => "rate_limited"}}
   end

@@ -481,7 +481,7 @@ defmodule SymCodexScriptTest do
     assert {output, 0} =
              run_script(Path.join(worktree, "sym-codex"), bin_dir, ["--observer"], cd: worktree)
 
-    assert output =~ "--model gpt-5.5"
+    assert output =~ "--config model=gpt-5.5"
     assert output =~ "--config service_tier=flex"
     assert output =~ "--config model_reasoning_effort=xhigh"
     refute output =~ "--config model_reasoning_effort=high"

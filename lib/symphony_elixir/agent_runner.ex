@@ -12,6 +12,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.{
     AutocommitMessage,
     Codex.AppServer,
+    Codex.ReviewState,
     Config,
     Dialog,
     Linear.Issue,
@@ -692,7 +693,7 @@ defmodule SymphonyElixir.AgentRunner do
           app_session: session,
           workspace: workspace,
           codex_update_recipient: turn_context.codex_update_recipient,
-          opts: turn_context.opts,
+          opts: review_run_opts(session, turn_context.opts),
           issue_state_fetcher: turn_context.issue_state_fetcher,
           worker_host: worker_host,
           max_turns: turn_context.max_turns
@@ -708,6 +709,12 @@ defmodule SymphonyElixir.AgentRunner do
         handle_run_error(reason, issue, turn_context)
     end
   end
+
+  defp review_run_opts(%{metadata: %{review_state: context}}, opts) when is_map(context) do
+    Keyword.drop(opts, [:recovered_turn_context, :recovered_review_subagent_ids, :recovered_review_subagent_call_ids])
+  end
+
+  defp review_run_opts(_session, opts), do: opts
 
   defp do_run_codex_turns(turn_context, issue, turn_number, previous_turn_outcome)
        when is_map(turn_context) do
@@ -1534,7 +1541,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp maybe_clear_review_autocommit_marker(%Issue{} = issue, workspace, worker_host) do
     case Workspace.clear_review_autocommit_marker(workspace, worker_host) do
       :ok ->
-        :ok
+        ReviewState.clear(issue)
 
       {:error, reason} ->
         Logger.warning(

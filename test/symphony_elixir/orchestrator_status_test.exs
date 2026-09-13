@@ -355,6 +355,117 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert is_integer(completed_state.codex_totals.seconds_running)
   end
 
+  test "retry updates preserve token high-water for the same thread and reset for a new thread" do
+    issue_id = "issue-retry-token-high-water"
+
+    state = %Orchestrator.State{
+      codex_totals: %{
+        input_tokens: 80,
+        output_tokens: 20,
+        total_tokens: 100,
+        seconds_running: 0
+      },
+      retry_attempts: %{
+        issue_id => %{
+          attempt: 1,
+          codex_token_checkpoint: %{
+            thread_id: "thread-resumed",
+            input_tokens: 80,
+            output_tokens: 20,
+            total_tokens: 100
+          }
+        }
+      }
+    }
+
+    same_thread_usage =
+      token_usage_update(96, 24, 120)
+
+    assert {:noreply, same_thread_state} =
+             Orchestrator.handle_info(
+               {:codex_worker_update, issue_id, same_thread_usage},
+               state
+             )
+
+    assert same_thread_state.codex_totals == %{
+             input_tokens: 96,
+             output_tokens: 24,
+             total_tokens: 120,
+             seconds_running: 0
+           }
+
+    assert same_thread_state.retry_attempts[issue_id].codex_token_checkpoint == %{
+             thread_id: "thread-resumed",
+             input_tokens: 96,
+             output_tokens: 24,
+             total_tokens: 120
+           }
+
+    assert {:noreply, resumed_turn_state} =
+             Orchestrator.handle_info(
+               {:codex_worker_update, issue_id,
+                %{
+                  event: :session_started,
+                  session_id: "thread-resumed-turn-2",
+                  thread_id: "thread-resumed",
+                  timestamp: DateTime.utc_now()
+                }},
+               same_thread_state
+             )
+
+    assert {:noreply, same_thread_final_state} =
+             Orchestrator.handle_info(
+               {:codex_worker_update, issue_id, token_usage_update(100, 25, 125)},
+               resumed_turn_state
+             )
+
+    assert same_thread_final_state.codex_totals == %{
+             input_tokens: 100,
+             output_tokens: 25,
+             total_tokens: 125,
+             seconds_running: 0
+           }
+
+    assert same_thread_final_state.retry_attempts[issue_id].codex_token_checkpoint == %{
+             thread_id: "thread-resumed",
+             input_tokens: 100,
+             output_tokens: 25,
+             total_tokens: 125
+           }
+
+    assert {:noreply, new_thread_state} =
+             Orchestrator.handle_info(
+               {:codex_worker_update, issue_id,
+                %{
+                  event: :session_started,
+                  session_id: "thread-new-turn-1",
+                  thread_id: "thread-new",
+                  timestamp: DateTime.utc_now()
+                }},
+               same_thread_final_state
+             )
+
+    assert {:noreply, final_state} =
+             Orchestrator.handle_info(
+               {:codex_worker_update, issue_id, token_usage_update(4, 1, 5)},
+               new_thread_state
+             )
+
+    assert final_state.codex_totals == %{
+             input_tokens: 104,
+             output_tokens: 26,
+             total_tokens: 130,
+             seconds_running: 0
+           }
+
+    assert final_state.retry_attempts[issue_id].codex_token_checkpoint == %{
+             thread_id: "thread-new",
+             input_tokens: 4,
+             output_tokens: 1,
+             total_tokens: 5
+           }
+  end
+
   test "orchestrator snapshot tracks turn completed usage when present" do
     issue_id = "issue-turn-completed-usage"
 
@@ -2008,6 +2119,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_snapshot(pid, predicate, deadline_ms)
+  end
+
+  defp token_usage_update(input_tokens, output_tokens, total_tokens) do
+    %{
+      event: :notification,
+      payload: %{
+        "method" => "thread/tokenUsage/updated",
+        "params" => %{
+          "tokenUsage" => %{
+            "total" => %{
+              "inputTokens" => input_tokens,
+              "outputTokens" => output_tokens,
+              "totalTokens" => total_tokens
+            }
+          }
+        }
+      },
+      timestamp: DateTime.utc_now()
+    }
   end
 
   defp do_wait_for_snapshot(pid, predicate, deadline_ms) do

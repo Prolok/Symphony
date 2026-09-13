@@ -8,8 +8,13 @@ defmodule SymphonyElixir.Linear.AppAuth do
   use GenServer
 
   alias SymphonyElixir.Config
-  alias SymphonyElixir.Linear.{Assignees, CommentJournal}
+  alias SymphonyElixir.Linear.{Assignees, CommentJournal, RateLimit}
 
+  @rate_limit_state_errors [
+    :linear_rate_limit_binding_mismatch,
+    :linear_rate_limit_state_unavailable,
+    :runtime_state_persist_failed
+  ]
   @identity_query "query SymphonyAppIdentity { viewer { id app email organization { id } } }"
   @expiry_margin 120
   @required ~w(client_secret_env workspace_id user_id client_id state_root installation_id)
@@ -69,10 +74,13 @@ defmodule SymphonyElixir.Linear.AppAuth do
   def request(tracker, payload, request_fun, opts \\ []) do
     opts = Keyword.put(opts, :assignee, tracker.assignee)
 
+    guarded_request = fn body, headers -> RateLimit.request(tracker.app, fn -> request_fun.(body, headers) end, opts) end
+
     with :ok <- validate(tracker),
+         :ok <- RateLimit.check(tracker.app, opts),
          {:ok, cache} <- cache(Keyword.get(opts, :cache)),
-         {:ok, token} <- verified_token(cache, tracker.app, request_fun, opts, true) do
-      execute(cache, tracker.app, token, payload, request_fun, opts)
+         {:ok, token} <- verified_token(cache, tracker.app, guarded_request, opts, true) do
+      execute(cache, tracker.app, token, payload, guarded_request, opts)
     end
   rescue
     _ -> {:error, :linear_app_runtime_failed}
@@ -106,7 +114,15 @@ defmodule SymphonyElixir.Linear.AppAuth do
   defp verified_token(cache, binding, request, opts, retry?) do
     with {:ok, token} <- GenServer.call(cache, {:token, binding, opts}, 30_000) do
       identity = verify_identity(token, binding, request, opts[:assignee])
+      identity = preserve_rate_limit(identity, binding, opts)
       check_identity(identity, token, cache, binding, request, opts, retry?)
+    end
+  end
+
+  defp preserve_rate_limit(result, binding, opts) do
+    case RateLimit.check(binding, opts) do
+      :ok -> result
+      {:error, _reason} = error -> error
     end
   end
 
@@ -131,25 +147,31 @@ defmodule SymphonyElixir.Linear.AppAuth do
   end
 
   defp cached_token(_entry, binding, secret, now, opts) do
-    case acquire(binding, secret, now, Keyword.get(opts, :token_request, &token_request/1)) do
+    case acquire(binding, secret, now, Keyword.get(opts, :token_request, &token_request/1), opts) do
       {:ok, token} -> {{:ok, token}, token}
       {:error, reason} = error -> {error, %{error: reason, retry_at: now + 30}}
     end
   end
 
-  defp acquire(binding, secret, now, request) do
+  defp acquire(binding, secret, now, request, opts) do
     form = %{"grant_type" => "client_credentials", "scope" => "read,write", "client_id" => binding["client_id"], "client_secret" => secret}
 
-    case request.(form) do
+    result = RateLimit.request(binding, fn -> request.(form) end, opts)
+    with :ok <- RateLimit.check(binding, opts), do: token_result(result, secret, now)
+  rescue
+    _ -> {:error, :linear_app_token_unavailable}
+  catch
+    _, _ -> {:error, :linear_app_token_unavailable}
+  end
+
+  defp token_result(result, secret, now) do
+    case result do
+      {:error, {:linear_app_rate_limited, _}} = error -> error
       {:ok, %{status: 200, body: body}} -> parse_token(body, secret, now)
       {:ok, %{status: status}} when status in [400, 401, 403] -> {:error, :linear_app_credentials_denied}
       {:ok, %{status: 429}} -> {:error, :linear_app_rate_limited}
       _ -> {:error, :linear_app_token_unavailable}
     end
-  rescue
-    _ -> {:error, :linear_app_token_unavailable}
-  catch
-    _, _ -> {:error, :linear_app_token_unavailable}
   end
 
   defp parse_token(%{"access_token" => access, "token_type" => "Bearer", "expires_in" => ttl, "scope" => scope}, secret, now)
@@ -185,6 +207,19 @@ defmodule SymphonyElixir.Linear.AppAuth do
 
   defp verify_identity(token, binding, request_fun, assignee) do
     case safe_request(request_fun, %{query: @identity_query, variables: %{}}, headers(token)) do
+      {:error, {:linear_app_rate_limited, _}} = error ->
+        error
+
+      {:error, reason} = error when reason in @rate_limit_state_errors ->
+        error
+
+      result ->
+        verify_identity_response(result, binding, assignee)
+    end
+  end
+
+  defp verify_identity_response(result, binding, assignee) do
+    case result do
       {:ok, %{status: 200, body: body}} ->
         verify_viewer(body, binding, assignee)
 
@@ -237,6 +272,8 @@ defmodule SymphonyElixir.Linear.AppAuth do
 
   defp safe_request(request_fun, payload, headers) do
     case request_fun.(payload, headers) do
+      {:error, {:linear_app_rate_limited, _}} = error -> error
+      {:error, reason} = error when reason in @rate_limit_state_errors -> error
       {:ok, response} -> {:ok, response}
       _ -> {:error, :linear_app_request_unavailable}
     end

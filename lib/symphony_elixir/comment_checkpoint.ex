@@ -133,11 +133,14 @@ defmodule SymphonyElixir.CommentCheckpoint do
   end
 
   defp insert_result(blocks, body, entry) do
-    case Enum.find_index(blocks, fn {block, inbox?} -> inbox? and String.starts_with?(block, "### Kommentareingang") end) do
+    # Append after existing entries and closed examples so indented fences stay outside the new list.
+    case Enum.find_index(Enum.reverse(blocks), fn {_block, inbox?} -> inbox? end) do
       nil ->
         body <> "\n\n### Kommentareingang\n\n" <> entry <> "\n"
 
-      index ->
+      reversed_index ->
+        index = length(blocks) - reversed_index - 1
+
         blocks
         |> List.update_at(index, fn {block, inbox?} -> {block <> "\n" <> entry <> "\n\n", inbox?} end)
         |> Enum.map_join(&elem(&1, 0))
@@ -157,7 +160,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   defp inbox_blocks([block | rest], {inbox?, fence}, blocks) when not is_nil(fence) do
     next_fence = if closing_fence?(block, fence), do: nil, else: fence
-    inbox_blocks(rest, {inbox?, next_fence}, [{block, false} | blocks])
+    inbox_blocks(rest, {inbox?, next_fence}, [{block, inbox? and is_nil(next_fence)} | blocks])
   end
 
   defp inbox_blocks(["  " <> _ = block | rest], {inbox?, nil} = state, [{previous, inbox?} | blocks]) do

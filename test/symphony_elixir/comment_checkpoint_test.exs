@@ -137,6 +137,24 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     end
   end
 
+  test "indented fenced examples after a paragraph never serve as result evidence", %{issue: issue} do
+    original = workpad_body()
+    establish(issue)
+    human("human", "Bitte prüfen")
+    {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
+    ack = result(key)
+    entry = "- Quelle `#{key}`: **übernommen** — #{ack["reason"]}"
+    example = "\n  ```markdown\n#{entry}\n  ```\n"
+    :ok = Workpad.update_tracker_workpad(issue.id, original <> "\n### Kommentareingang\n\nDokumentiertes Beispiel:\n" <> example)
+
+    assert {:ok, %{"inputs" => []}} = CommentCheckpoint.acknowledge(issue, [ack])
+    body = workpad_body()
+    assert body =~ example
+    assert length(String.split(body, entry)) == 3
+    assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
+    assert workpad_body() == body
+  end
+
   test "legacy multiline results migrate before Markdown block splitting and remain idempotent", %{issue: issue} do
     establish(issue)
     original = workpad_body()
@@ -182,11 +200,11 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
     ack = result(key)
     entry = "- Quelle `#{key}`: **übernommen** — #{ack["reason"]}"
-    examples = "\n#{entry}\n\nNoch offen, anderer vollständiger Eintrag.\n\n```markdown\n#{entry}\n```\n\n### Verlauf\n\n#{entry}\n"
-    :ok = Workpad.update_tracker_workpad(issue.id, workpad_body() <> examples)
+    examples = ["\n#{entry}\n\nNoch offen, anderer vollständiger Eintrag.\n", "```markdown\n#{entry}\n```\n", "### Verlauf\n\n#{entry}\n"]
+    :ok = Workpad.update_tracker_workpad(issue.id, workpad_body() <> Enum.join(examples, "\n"))
     assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])
     body = workpad_body()
-    assert body =~ examples
+    for example <- examples, do: assert(body =~ example)
     assert length(String.split(body, entry)) == 5
     assert length(String.split(body, "### Kommentareingang")) == 2
     assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [ack])

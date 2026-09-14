@@ -224,7 +224,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
       if method=='thread/start': result={'thread':{'id':'thread-fixture'}}
       if method=='turn/start':
         result={'turn':{'id':'turn-fixture'}}
-        pathlib.Path('result.json').write_text(json.dumps({'project':os.environ.get('SYMPHONY_PROJECT_ROOT'),'cwd':os.getcwd(),'state_root':os.environ.get('SYMPHONY_CODEX_STATE_ROOT'),'public_value':os.environ.get('PUBLIC_HOOK_VALUE'),'secret_visible':bool(os.environ.get('LINEAR_APP_SECRET') or os.environ.get('LINEAR_API_KEY'))}))
+        pathlib.Path('result.json').write_text(json.dumps({'project':os.environ.get('SYMPHONY_PROJECT_ROOT'),'cwd':os.getcwd(),'state_root':os.environ.get('SYMPHONY_CODEX_STATE_ROOT'),'public_value':os.environ.get('PUBLIC_HOOK_VALUE'),'secret_visible':bool(os.environ.get('LINEAR_APP_SECRET'))}))
       if 'id' in m: print(json.dumps({'id':m['id'],'result':result}),flush=True)
       if method=='turn/start': print(json.dumps({'method':'turn/completed'}),flush=True)
     """)

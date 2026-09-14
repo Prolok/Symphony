@@ -26,13 +26,13 @@ for line in sys.stdin:
  result={'protocolVersion':'2025-06-18','capabilities':{'tools':{}},'serverInfo':{'name':'synthetic','version':'1'}} if r['method']=='initialize' else {'tools':[]}
  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':result}),flush=True)
 ''');mcp.chmod(0o755)
- env={'PATH':os.environ['PATH'],'HOME':str(root),'CODEX_HOME':str(target),'SYMPHONY_LINEAR_CLIENT_SECRET_ENV':secret_name,secret_name:sentinel,'SYMPHONY_RELEASE_ROOT':str(release),'PROBE_FILE':str(root/'mcp-result.json'),'SHELL':'/bin/sh','TMPDIR':str(root)}
+ env={'PATH':os.environ['PATH'],'HOME':str(root),'CODEX_HOME':str(target),'SYMPHONY_LINEAR_CLIENT_SECRET_ENV':secret_name,secret_name:sentinel,'SYMPHONY_ROOT_DIR':str(release),'PROBE_FILE':str(root/'mcp-result.json'),'SHELL':'/bin/sh','TMPDIR':str(root)}
  if project_mode:
   app_root=root/'symphony-root';app_root.mkdir()
   (project/'.symphony').mkdir()
   private=project/'.symphony/.env.local'
   values={'LINEAR_APP_CLIENT_ID':'client','LINEAR_APP_WORKSPACE_ID':'workspace','LINEAR_APP_USER_ID':'app','LINEAR_APP_INSTALLATION_ID':'synthetic'}
-  (release/'.symphony/root-config.json').write_text(json.dumps({'root':str(app_root),'values':{'SYM_CODEX_MODEL':'synthetic'}}))
+  (app_root/'.env').write_text('SYM_CODEX_MODEL=synthetic\n')
   (release/'WORKFLOW.md').write_text((repo/'WORKFLOW.md').read_text())
   private.write_text(''.join(name+'='+value+'\n' for name,value in values.items())+'LINEAR_ASSIGNEE=human@example.invalid\nLINEAR_PROJECT_SLUG=synthetic-project\nLINEAR_APP_SECRET='+sentinel+'\n');private.chmod(0o600)
   env.pop(secret_name);secret_name='LINEAR_APP_SECRET'

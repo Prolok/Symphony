@@ -19,23 +19,19 @@ defmodule SymphonyElixir.EnvFile do
   @spec root_config_names() :: [String.t()]
   def root_config_names, do: @root_config_names
 
-  @doc "Capture only public root settings; the private source file stays outside the release."
-  @spec snapshot_root(Path.t(), Path.t()) :: :ok | {:error, term()}
-  def snapshot_root(root, release) do
-    path = Path.join(release, ".symphony/root-config.json")
-
-    with {:ok, values} <- read_selected([Path.join(release, ".env"), Path.join(root, ".env.local")], @root_config_names),
-         :ok <- File.mkdir_p(Path.dirname(path)) do
-      values = Map.merge(values, Map.take(System.get_env(), @root_config_names))
-      File.write(path, Jason.encode!(%{"root" => Path.expand(root), "values" => values}), [:exclusive])
+  @doc "Load current public settings, or restore the context accepted for a running worker."
+  @spec load_runtime(Path.t()) :: :ok | {:error, term()}
+  def load_runtime(config_dir) do
+    with :ok <- bind_project_dir(config_dir) do
+      case System.get_env("SYMPHONY_PROJECT_CONTEXT") do
+        nil -> load_current_runtime(config_dir)
+        captured -> SymphonyElixir.ProjectContext.restore(captured, config_dir)
+      end
     end
   end
 
-  @doc "Load root launch settings and project bindings; keep the project secret out of the environment."
-  @spec load_runtime(Path.t()) :: :ok | {:error, term()}
-  def load_runtime(config_dir) do
-    with :ok <- load_root(),
-         :ok <- bind_project_dir(config_dir) do
+  defp load_current_runtime(config_dir) do
+    with :ok <- load_root() do
       excluded = @root_config_names ++ SymphonyElixir.Config.linear_secret_env_names()
       load(config_dir, override_existing: true, exclude: excluded)
     end
@@ -62,39 +58,16 @@ defmodule SymphonyElixir.EnvFile do
   end
 
   defp root_config do
-    case {System.get_env("SYMPHONY_ROOT_DIR"), System.get_env("SYMPHONY_RELEASE_ROOT")} do
-      {nil, _} ->
-        {:ok, %{}}
-
-      {"", _} ->
-        {:ok, %{}}
-
-      {root, _} ->
-        read_root(root)
+    case System.get_env("SYMPHONY_ROOT_DIR") do
+      root when root in [nil, ""] -> {:ok, %{}}
+      root -> read_root(root)
     end
   end
 
-  @doc "Read public launch settings from the bound release snapshot or the source root without exporting them."
+  @doc "Read current public launch settings from the original checkout without exporting them."
   @spec read_root(Path.t()) :: {:ok, map()} | {:error, term()}
   def read_root(root) do
-    case System.get_env("SYMPHONY_RELEASE_ROOT") do
-      release when is_binary(release) and release != "" ->
-        read_root_snapshot(Path.join(release, ".symphony/root-config.json"))
-
-      _ ->
-        read_selected(Enum.map(@env_files, fn {name, _} -> Path.join(root, name) end), @root_config_names)
-    end
-  end
-
-  defp read_root_snapshot(path) do
-    with {:ok, body} <- File.read(path),
-         {:ok, %{"root" => root, "values" => values}} <- Jason.decode(body),
-         true <- root == System.get_env("SYMPHONY_ROOT_DIR") and is_map(values),
-         true <- Enum.all?(values, fn {key, value} -> key in @root_config_names and is_binary(value) end) do
-      {:ok, values}
-    else
-      _ -> {:error, :invalid_root_config_snapshot}
-    end
+    read_selected(Enum.map(@env_files, fn {name, _} -> Path.join(root, name) end), @root_config_names)
   end
 
   @doc "Read only the requested project secret in a trusted auth runtime; never export it."
@@ -277,7 +250,7 @@ defmodule SymphonyElixir.EnvFile do
     names =
       if System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app",
         do: names ++ ~w(SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_CLIENT_SECRET_ENV SYMPHONY_LINEAR_BINDING_HASH
-        SYMPHONY_RELEASE_ROOT SYMPHONY_WORKFLOW_FILE SYMPHONY_WORKFLOW_DIR SYMPHONY_CODEX_STATE_ROOT),
+        SYMPHONY_PROJECT_CONTEXT SYMPHONY_WORKFLOW_FILE SYMPHONY_WORKFLOW_DIR SYMPHONY_CODEX_STATE_ROOT),
         else: names
 
     System.get_env() |> Map.take(names)

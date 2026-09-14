@@ -8,19 +8,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "$SCRIPT_PATH")" && pwd)"
 if [[ "${BASH_SOURCE[0]}" == "$0" && "${SYMPHONY_SERVICE_OWNER_PID:-}" != "$$" ]]; then
   exec "${SYMPHONY_PYTHON:-python3}" "$SCRIPT_DIR/scripts/service-lock.py" run /bin/bash "${BASH_SOURCE[0]}" "$@"
 fi
-SKILLS_DIR="$SCRIPT_DIR/.codex/skills"
-USER_SKILLS_DIR="$HOME/.codex/skills"
-USER_BIN_DIR="$HOME/.local/bin"
 PROJECT_DIR="$SCRIPT_DIR"
-WORKFLOW_FILE="$PROJECT_DIR/WORKFLOW.md"
-WORKFLOW_INTERACTIVE_FILE="$PROJECT_DIR/WORKFLOW_INTERACTIVE.md"
-WORKFLOW_DIALOG_FILE="$PROJECT_DIR/WORKFLOW_DIALOG.md"
-AUTOUPDATE_PATH="$PROJECT_DIR/autoupdate"
 MIX_RUNTIME_PATH="$PROJECT_DIR/scripts/mix-runtime"
-CODEX_LINK_PATH="$USER_BIN_DIR/sym-codex"
-CODEX_TARGET_PATH="$PROJECT_DIR/sym-codex"
-WATCH_LINK_PATH="$USER_BIN_DIR/sym-watch"
-WATCH_TARGET_PATH="$PROJECT_DIR/sym-watch"
 
 if [ ! -x "$MIX_RUNTIME_PATH" ]; then
   echo "symphony: Mix-Preflight fehlt oder ist nicht ausführbar: $MIX_RUNTIME_PATH" >&2
@@ -28,92 +17,21 @@ if [ ! -x "$MIX_RUNTIME_PATH" ]; then
 fi
 source "$MIX_RUNTIME_PATH"
 
-symphony_shell_escape() {
-  printf '%q' "$1"
-}
-
-symphony_link() {
-  # -n replaces a link to a directory itself on both BSD and GNU ln.
-  # Never replace a real file or directory owned by the user.
-  if [ -e "$2" ] && [ ! -L "$2" ]; then
-    echo "symphony: $2 exists and is not a symlink" >&2
-    exit 1
-  fi
-  ln -sfn "$1" "$2"
-}
-
 symphony_launch() {
-  SCRIPT_INVOCATION_NAME="$1"
   shift
-  ISSUE_SUFFIX=""
-  case "$SCRIPT_INVOCATION_NAME" in
-    symphony-*) ISSUE_SUFFIX="${SCRIPT_INVOCATION_NAME#symphony-}" ;;
-  esac
   mix_runtime_activate "$PROJECT_DIR"
-
-  if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$PROJECT_DIR" ]]; then
-    export SYMPHONY_WORKFLOW_FILE="$WORKFLOW_FILE"
-    export SYMPHONY_WORKFLOW_INTERACTIVE_FILE="$WORKFLOW_INTERACTIVE_FILE"
-    export SYMPHONY_WORKFLOW_DIALOG_FILE="$WORKFLOW_DIALOG_FILE"
-    export SYMPHONY_WORKFLOW_DIR="$PROJECT_DIR"
-    "$MIX_RUNTIME_PATH" mix "$PROJECT_DIR" run --no-compile --no-start -e '
-      :ok = SymphonyElixir.EnvFile.snapshot_root(System.fetch_env!("SYMPHONY_ROOT_DIR"), System.fetch_env!("SYMPHONY_RELEASE_ROOT"))
-    '
-    "$SYMPHONY_PYTHON" "$PROJECT_DIR/scripts/installation-release.py" seal "$PROJECT_DIR"
-    if [[ "${SYMPHONY_LAUNCH_CODEX:-}" == "1" ]]; then
-      unset SYMPHONY_LAUNCH_CODEX
-      exec "$CODEX_TARGET_PATH" "$@"
-    fi
-    exec "$PROJECT_DIR/bin/symphony" "$@"
-  fi
-
-  mkdir -p "$USER_SKILLS_DIR"
-  mkdir -p "$USER_BIN_DIR"
-
-  symphony_link "$CODEX_TARGET_PATH" "$CODEX_LINK_PATH"
-
-  if [ -n "$ISSUE_SUFFIX" ]; then
-    CODEX_ISSUE_LINK_PATH="$USER_BIN_DIR/sym-codex-$ISSUE_SUFFIX"
-
-    symphony_link "$CODEX_TARGET_PATH" "$CODEX_ISSUE_LINK_PATH"
-    export SYMPHONY_CODEX_COMMAND="$(symphony_shell_escape "$CODEX_ISSUE_LINK_PATH") --observer"
-  fi
-
-  symphony_link "$WATCH_TARGET_PATH" "$WATCH_LINK_PATH"
-
-  shopt -s nullglob
-  for skill_dir in "$SKILLS_DIR"/symphony-*; do
-    if [ ! -d "$skill_dir" ]; then
-      continue
-    fi
-
-    skill_name="$(basename -- "$skill_dir")"
-    target_path="$USER_SKILLS_DIR/$skill_name"
-
-    symphony_link "$skill_dir" "$target_path"
-  done
-
-  for user_skill in "$USER_SKILLS_DIR"/symphony-*; do
-    if [ ! -L "$user_skill" ]; then
-      continue
-    fi
-
-    skill_name="$(basename -- "$user_skill")"
-    if [ ! -d "$SKILLS_DIR/$skill_name" ]; then
-      unlink "$user_skill"
-    fi
-  done
-  shopt -u nullglob
-
-  export SYMPHONY_WORKFLOW_FILE="$WORKFLOW_FILE"
-  export SYMPHONY_WORKFLOW_INTERACTIVE_FILE="$WORKFLOW_INTERACTIVE_FILE"
-  export SYMPHONY_WORKFLOW_DIALOG_FILE="$WORKFLOW_DIALOG_FILE"
+  export SYMPHONY_ROOT_DIR="$PROJECT_DIR"
+  export SYMPHONY_WORKFLOW_FILE="$PROJECT_DIR/WORKFLOW.md"
+  export SYMPHONY_WORKFLOW_INTERACTIVE_FILE="$PROJECT_DIR/WORKFLOW_INTERACTIVE.md"
+  export SYMPHONY_WORKFLOW_DIALOG_FILE="$PROJECT_DIR/WORKFLOW_DIALOG.md"
   export SYMPHONY_WORKFLOW_DIR="$PROJECT_DIR"
-
+  unset SYMPHONY_RELEASE_ROOT
   exec "$PROJECT_DIR/bin/symphony" "$@"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   mix_runtime_activate "$PROJECT_DIR"
-  exec "$SYMPHONY_PYTHON" "$PROJECT_DIR/scripts/installation-release.py" start "$PROJECT_DIR" "$SCRIPT_INVOCATION_NAME" "$@"
+  export SYMPHONY_ROOT_DIR="$PROJECT_DIR"
+  unset SYMPHONY_RELEASE_ROOT SYMPHONY_PROJECT_CONTEXT SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_BINDING_HASH
+  exec "$MIX_RUNTIME_PATH" start "$PROJECT_DIR" "$SCRIPT_INVOCATION_NAME" "$@"
 fi

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Prepare a private Symphony checkout before updating or building a launcher.
+"""Copy the updated, incrementally built installation into a private runtime.
 
-The source checkout, global skills and CLI links are never changed. Every start
-gets a distinct release directory, including its Git metadata and build output.
+Every start gets distinct Git metadata and build files. Running releases,
+global skills and CLI links are never changed by subsequent updates or builds.
 """
 
 import hashlib
@@ -10,7 +10,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import sys
@@ -78,6 +77,31 @@ def capture_skills(release):
     module.prepare(release, original, [Path(release) / ".codex/skills"], Path.cwd())
 
 
+def prepare(source):
+    source = Path(source).resolve()
+    release = snapshot(source, source / ".symphony/installations" / str(uuid.uuid4()))
+    environment = os.environ.get("MIX_ENV", "dev")
+    target_name = os.environ.get("MIX_TARGET", "host")
+    build_name = environment if target_name == "host" else target_name + "_" + environment
+    # Keep Mix incremental in the installation. Runtime copies must never
+    # share writable build files or links back to that mutable checkout.
+    for name in ("deps", "_build/" + build_name, "bin", "priv/static/assets"):
+        origin, target = source / name, release / name
+        if not origin.is_dir():
+            continue
+        shutil.copytree(origin, target, symlinks=True, dirs_exist_ok=True)
+        for link in target.rglob("*"):
+            if link.is_symlink():
+                original = source / link.relative_to(release)
+                try:
+                    relative = original.resolve().relative_to(source)
+                except ValueError as error:
+                    raise RuntimeError("build symlink points outside installation") from error
+                link.unlink()
+                link.symlink_to(os.path.relpath(release / relative, link.parent))
+    return release
+
+
 def seal(release):
     release = Path(release).resolve()
     if (release / ".symphony-release.json").exists():
@@ -119,17 +143,19 @@ def main():
         capture_skills(source)
         seal(source)
         return
+    if action == "prepare":
+        print(prepare(source))
+        return
     if action not in ("start", "codex"):
         raise RuntimeError("unknown release action")
-    root = Path(source) / ".symphony" / "installations"
-    release = snapshot(source, root / str(uuid.uuid4()))
-    env = dict(os.environ, SYMPHONY_RELEASE_ROOT=str(release), SYMPHONY_ROOT_DIR=str(Path(source).resolve()))
+    source = Path(source).resolve()
+    env = dict(os.environ, SYMPHONY_ROOT_DIR=str(source))
+    env.pop("SYMPHONY_RELEASE_ROOT", None)
     if action == "codex":
         env["SYMPHONY_LAUNCH_CODEX"] = "1"
     env.pop("SYMPHONY_LINEAR_AUTH_MODE", None)
     env.pop("SYMPHONY_LINEAR_BINDING_HASH", None)
-    print("symphony: Eigener Laufzeitstand " + str(release), file=sys.stderr)
-    os.execve(str(release / "scripts/mix-runtime"), [str(release / "scripts/mix-runtime"), "start", str(release), *args], env)
+    os.execve(str(source / "scripts/mix-runtime"), [str(source / "scripts/mix-runtime"), "start", str(source), *args], env)
 
 
 if __name__ == "__main__":

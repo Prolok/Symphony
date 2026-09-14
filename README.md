@@ -131,8 +131,8 @@ Dependabot-CI; der verpflichtende Produkt-Smoke erfolgt im Symphony-Ablauf.
 
    Das von `sym-codex` verwendete Codex-Startprofil wird dagegen aus `.env`
    und optional `.env.local` im ursprünglichen Symphony-Root geladen, nicht aus
-   `.symphony/.env(.local)`. Ein isolierter Release hält die nicht geheimen
-   Werte in seinem versiegelten Root-Konfigurationssnapshot fest. Unterstützt werden:
+   `.symphony/.env(.local)`. Änderungen gelten nach dem nächsten Poll für neue
+   Worker; laufende Worker behalten ihren Kontext. Unterstützt werden:
    - `SYM_CODEX_MODEL`, Standard `gpt-6-astra`
    - `SYM_CODEX_REASONING_EFFORT`, Standard `xhigh`; zusätzliche unterstützte
      Werte umfassen `max` und `ultra`
@@ -164,16 +164,16 @@ Dependabot-CI; der verpflichtende Produkt-Smoke erfolgt im Symphony-Ablauf.
 Der reguläre Einstieg ist `./symphony`. Ein nichtblockierender OS-Lock unter
 `~/.cache/symphony/service.lock` verhindert weitere Dienststarts desselben Benutzers
 aus anderen Checkouts oder mit anderen Ports. Der Zweitstart endet sofort mit
-„Symphony läuft bereits“, vor Build, Linkregistrierung oder Dispatch. Der Lock wird
+„Symphony läuft bereits“, vor Build oder Dispatch. Der Lock wird
 über das Dienstende hinaus nicht gehalten; die Lockdatei bleibt bestehen. Manuelle
 Helfer starten keinen zweiten Dienst. Danach prüft der Wrapper die benötigten
 Werkzeuge und die installierte Toolchain und aktiviert `mise.toml` ausschließlich
 für den laufenden Prozess und seine Kinder. Ein aktiviertes Shellprofil oder ein
 schon global erreichbares `escript` ist nicht nötig. Fehlende Voraussetzungen
-brechen vor Autoupdate, Build und Registrierung der Hilfsbefehle ab.
+brechen vor Autoupdate, Build und Dienststart ab.
 
 Der lokale gebundene App-Worker erhält den aktivierten Toolchain-PATH nach
-dem Shell-Login erneut. Release- und App-Helfer verwenden über `SYMPHONY_PYTHON`
+dem Shell-Login erneut. Die App-Helfer verwenden über `SYMPHONY_PYTHON`
 den absolut gebundenen, geprüften Python-Interpreter, auch im gebundenen
 Linear-MCP und nach Aktivierung einer Projekt-venv. Die venv bleibt für
 Projektwerkzeuge aktiv. Custom-Codex- und SSH-Aufrufe behalten ihren
@@ -189,23 +189,29 @@ bei Worktrees in deren eigenem Git-Verzeichnis; außerhalb von Git liegt sie in
 SIGINT/SIGTERM werden an die Build-Prozessgruppe weitergegeben; nach spätestens
 fünf Sekunden werden verbleibende Build-Kinder beendet. Der Kernel gibt den
 Lock beim Schließen frei; die Lockdatei bleibt bestehen und muss nicht gelöscht
-werden. Der gestartete Dienst erbt keinen Lock.
+werden. Der gestartete Dienst erbt diesen Build-Lock nicht; sein Dienst-Lock bleibt bis zum Ende aktiv.
 
 Innerhalb dieses Locks prüft Symphony zunächst, ob der aktuelle Git-Upstream
 einen neueren Commit enthält. Wenn eine neue Version verfügbar ist, fragt
 Symphony `Neue Symphony Version verfügbar. Update ausführen j/n?`; bei Zustimmung
-führt das Autoupdate `git pull --ff-only` und anschließend
+führt das Autoupdate im ursprünglichen Symphony-Checkout `git pull --ff-only` und anschließend
 `make all` aus und zeigt währenddessen `Symphony Update läuft…`.
 Eine durch das Update geänderte Toolchain wird vor dem Gate und Build erneut
-geprüft und aktiviert.
+geprüft und aktiviert. Ein fehlgeschlagenes oder unterbrochenes Update-Gate
+blockiert den Dienststart und wird beim nächsten Start erneut ausgeführt.
 
 Unabhängig davon, ob ein Update verfügbar oder angenommen wurde, folgt im selben
 Lock ein selbstheilender Preflight. `mix deps.loadpaths --no-compile` prüft den
 lokalen Dependency-Zustand; bei einer Abweichung folgt `mix deps.get`. Danach
-kompiliert Symphony den Checkout und baut `bin/symphony` mit `mix escript.build`.
-Erst nach erfolgreichem Build wird der Lock freigegeben. Der Wrapper bindet
-Workflow, Skills, Helfer, Build und nicht geheime Root-Konfiguration an den
-eigenen Release und startet dessen Binary. Globale Links werden nicht ersetzt. Ein nicht reparierbarer
+prüft Mix den Build inkrementell und aktualisiert bei Bedarf `bin/symphony` mit
+`mix escript.build`. Vorhandene Artefakte bleiben im ursprünglichen Checkout
+erhalten; unveränderte Versionen werden auch nach „Nein“ nicht neu kompiliert.
+Nach erfolgreichem Build gibt der Wrapper den Start-Lock frei und startet
+`bin/symphony` direkt aus diesem Checkout. Es werden keine Laufzeitkopien angelegt.
+Workflow und öffentliche Envdateien werden an ihrem Originalpfad neu geladen;
+Änderungen gelten beim nächsten Poll für künftige Worker. Änderungen an der
+Projektliste in `SYM_PROJECT_ROOT`, am Programmcode sowie an Identität, Scope oder
+Worktreepfaden erfordern einen Neustart. Globale Links werden nicht ersetzt. Ein nicht reparierbarer
 Dependency-, Compile- oder Escript-Build-Fehler beendet den Start vorher; in
 diesem Fall beginnt kein Ticket-Polling. Das Dashboard ist standardmäßig unter
 `http://127.0.0.1:4000/` erreichbar; mit `--port <port>` kann der Startport
@@ -222,17 +228,17 @@ absoluten Helferpfad des ermittelten Symphony-Checkouts gestartet; ein globaler
 Symlinks und Pfade mit Leerzeichen werden unterstützt. Ein Aufruf aus einem
 anderen Projektverzeichnis behält dieses als Projekt-CWD; Workflow-Dateien,
 Abhängigkeiten und Build-Artefakte gehören zum aufgelösten Symphony-Checkout.
-Reguläre Release-Starts registrieren keine neuen globalen Ticketbefehle.
+Reguläre Dienststarts registrieren keine neuen globalen Ticketbefehle.
 Für einen manuellen Ticketstart verwende aus dem Fachprojektroot den absoluten
 `sym-codex`-Pfad des gewünschten Symphony-Checkouts mit der Ticket-ID, etwa
 `/pfad/zu/Symphony/sym-codex PRO-678`. Dieser Einstieg wählt den Worktree und
-bereitet im App-Modus einen eigenen gebundenen Release vor.
-Nur Hooks außerhalb eines Releases registrieren weiterhin
+verwendet den Build des gewählten Checkouts.
+Nur direkt aufgerufene Hooks ohne gebundenen Symphony-Root registrieren
 `symphony-<Ticket-ID>` und `sym-codex-<Ticket-ID>` unter `~/.local/bin`;
 bestehende Befehle bleiben an ihre bisherige Installation gebunden. Cleanup
 entfernt nur passende Links. Die ausführbaren Skripte funktionieren in Bash
 und zsh; zusätzliches Sourcing von `sym-codex` wird nur in Bash unterstützt.
-Auch beim App-Release-Start bleibt diese Shell danach im gewählten Worktree
+Auch beim App-Start bleibt diese Shell danach im gewählten Worktree
 mit aktivierter Projekt-Venv; der Rückgabecode von Codex bleibt erhalten.
 
 Mix-Artefakte werden nicht zwischen Git-Checkouts geteilt. Jeder Haupt-Checkout
@@ -355,8 +361,8 @@ Frische Symphony-/Codex-Prozesse erzwingen `features.memories=false`,
 `memories.generate_memories=false` und `memories.use_memories=false`.
 Persönliche Memory-Dateien werden weder importiert noch gelöscht. Die
 gemeinsame Wissensbasis bilden versionierte AGENTS-, Workflow-, Skill- und
-Projektdateien sowie Ticket und Workpad. Der Release übernimmt seine
-versionierten Skills; persönliche lokale Skill-Erweiterungen werden nicht
+Projektdateien sowie Ticket und Workpad. Codex übernimmt die
+versionierten Repository-Skills; persönliche lokale Skill-Erweiterungen werden nicht
 in den gemeinsamen Lauf importiert. Gesprächs-/Session-History, Wiederaufnahme
 und Tracker-/Journalzustand bleiben erhalten. Bereits geladener Alt-Kontext
 wird dadurch nicht rückwirkend entfernt.

@@ -255,18 +255,19 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
   end
 
   test "linear_graphql formats transport and auth failures" do
-    missing_token =
+    missing_secret =
       DynamicTool.execute(
         "linear_graphql",
         %{"query" => "query Viewer { viewer { id } }"},
-        linear_client: fn _query, _variables, _opts -> {:error, :missing_linear_api_token} end
+        linear_client: fn _, _, _ -> {:error, {:linear_api_request, :missing_linear_client_secret}} end
       )
 
-    assert missing_token["success"] == false
+    assert missing_secret["success"] == false
 
-    assert Jason.decode!(missing_token["output"]) == %{
+    assert Jason.decode!(missing_secret["output"]) == %{
              "error" => %{
-               "message" => "Symphony benötigt die projektgebundene Linear-App-Konfiguration und OAuth2 Client Credentials in .symphony/.env(.local)."
+               "message" => "Linear GraphQL request failed before receiving a successful response.",
+               "reason" => ":missing_linear_client_secret"
              }
            }
 

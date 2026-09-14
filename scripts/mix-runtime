@@ -33,7 +33,7 @@ mix_runtime_bind_python() {
   local status=0
 
   # Bind the interpreter before mise or a project venv can change PATH. Keep
-  # that binding through the private release's update/build/relaunch sequence.
+  # that binding through the checkout's update/build/relaunch sequence.
   SYMPHONY_PYTHON="$("$python" -c '
 import os, sys
 if sys.version_info < (3, 11):
@@ -157,6 +157,7 @@ for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
     signal.signal(sig, signal.SIG_DFL)
 if received:
     sys.exit(128 + received)
+os.environ["SYMPHONY_ROOT_DIR"] = repo
 os.execv("/bin/bash", ["/bin/bash", "-c",
     "source \"$1\"; shift; symphony_launch \"$@\"", "symphony",
     os.path.join(repo, "symphony"), invocation, *args])
@@ -189,6 +190,46 @@ mix_runtime_prepare() {
   fi
 
   mix_runtime_run_mix "$repo_root" compile
+}
+
+mix_runtime_build_escript() {
+  # escript.build always repackages the executable. Compare its inputs after
+  # incremental compilation, including removed modules and the Mix environment.
+  "${SYMPHONY_PYTHON:-python3}" - "$1" <<'PY'
+import hashlib, json, os
+from pathlib import Path
+import subprocess, sys
+
+repo = Path(sys.argv[1])
+environment = os.environ.get("MIX_ENV", "dev")
+target = os.environ.get("MIX_TARGET", "host")
+build = repo / "_build" / (environment if target == "host" else target + "_" + environment)
+binary = repo / "bin/symphony"
+stamp = build / ".symphony-escript.json"
+paths = [repo / name for name in ("mix.exs", "mix.lock", "mise.toml", "scripts/mix-runtime")]
+paths.extend((repo / "config").rglob("*.exs"))
+paths.extend(path for path in (build / "lib").rglob("*") if path.suffix in (".beam", ".app"))
+
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+inputs = {"environment": environment, "target": target,
+          "files": {str(path.relative_to(repo)): digest(path) for path in paths if path.is_file()}}
+try:
+    previous = json.loads(stamp.read_text())
+    if previous == {"inputs": inputs, "binary": digest(binary)} and os.access(binary, os.X_OK):
+        sys.exit(0)
+except (OSError, ValueError):
+    pass
+
+result = subprocess.run([str(repo / "scripts/mix-runtime"), "mix", str(repo), "escript.build"])
+if result.returncode:
+    sys.exit(result.returncode if result.returncode > 0 else 128 - result.returncode)
+build.mkdir(parents=True, exist_ok=True)
+temporary = stamp.with_suffix(".tmp")
+temporary.write_text(json.dumps({"inputs": inputs, "binary": digest(binary)}, sort_keys=True))
+temporary.replace(stamp)
+PY
 }
 
 mix_runtime_lock_path() {
@@ -224,6 +265,9 @@ mix_runtime_main() {
       mix_runtime_start "$repo_root" "$@"
       ;;
     update-build)
+      if [[ -f "$repo_root/.symphony-release.json" ]]; then
+        mix_runtime_die "Gebundener Laufzeitstand bleibt unverändert; ursprünglichen Checkout starten"
+      fi
       mix_runtime_activate "$repo_root"
       if [[ -x "$repo_root/autoupdate" ]]; then
         "$repo_root/autoupdate" "$repo_root"
@@ -231,7 +275,7 @@ mix_runtime_main() {
       # Autoupdate may have changed mise.toml.
       mix_runtime_activate "$repo_root"
       mix_runtime_prepare "$repo_root"
-      mix_runtime_run_mix "$repo_root" escript.build
+      mix_runtime_build_escript "$repo_root"
       ;;
     mix)
       shift 2
@@ -242,7 +286,7 @@ mix_runtime_main() {
       ;;
     build)
       mix_runtime_prepare "$repo_root"
-      mix_runtime_run_mix "$repo_root" escript.build
+      mix_runtime_build_escript "$repo_root"
       ;;
     lock-path)
       mix_runtime_lock_path "$repo_root"

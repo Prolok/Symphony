@@ -38,10 +38,11 @@ Workflow, Worktreepfad, Hookumgebung und lokalem Zustand. Parallele Worker wechs
 weder die prozessglobale Umgebung noch das gemeinsame Arbeitsverzeichnis.
 Öffentliche Projektvariablen werden an Hooks und Worker weitergegeben; lokale
 Codex-Kommando- und SSH-Konfigurations-Overrides verwenden ebenfalls diesen Kontext.
-Ein akzeptierter Workflow-Reload erzeugt neue Snapshots für Polling und spätere
+Beim Poll werden der originale Workflow und die öffentlichen Root- und
+Projekt-Envdateien neu geladen. Akzeptierte Änderungen gelten für Polling und spätere
 Worker. Laufende Worker behalten ihren Kontext; Identitäts-/Scope- und Worktreeroot-Wechsel
 erfordern einen Neustart und ungültige Konfigurationen ersetzen keinen gültigen
-Snapshot. Eine externe Workflowdatei bleibt vom Mix-/Release-Ausführungsroot getrennt.
+Snapshot. Eine externe Workflowdatei bleibt vom Symphony-Code-Root getrennt.
 Die gemeinsame Dashboard-Konfiguration übernimmt akzeptierte Reloads aus einem
 an die Poller-Laufzeit gebundenen Snapshot, einschließlich des geltenden Gesamtlimits.
 Gesamt-, Status- und SSH-Hostkapazität werden über alle Projekte atomar geprüft; auch ein
@@ -79,27 +80,30 @@ Envdateien werden als Daten geparst, nie als Shellcode ausgeführt. Öffentliche
 Ladepfade exportieren keine Secrets. Nur der gebundene Auth-/MCP-Prozess liest die
 benannte Secretquelle; `.env.local` gewinnt vor `.env`. Ein bewusst leerer Wert
 stoppt den Zugriff. Ein Secret aus einer fremden Projekt- oder Rootdatei ist kein
-Fallback. Token und Secret bleiben aus Logs, Prompts, Codex-Umgebung und
-Sessionartefakten heraus. Direkte HTTP-Redirects sind für den App-Client deaktiviert.
+Fallback. Ein geerbter `LINEAR_API_KEY` wird aus Worker-/Codex-Umgebungen entfernt;
+er wird nicht zur Authentifizierung ausgewertet. Token und Secret bleiben aus
+Logs, Prompts, Codex-Umgebung und Sessionartefakten heraus. Direkte HTTP-Redirects sind für den App-Client deaktiviert.
 
-Release-Checkouts binden Code, Workflow, Helfer, Skills und Build-Artefakte an den
-geprüften Stand. Sie übernehmen den aktuellen Arbeitsstand einschließlich gestagter
-Löschungen, Umbenennungen und Datei-/Verzeichniswechsel; ignorierte Dateien bleiben
-ausgeschlossen. Der Root-Konfigurationssnapshot enthält nur öffentliche
-Startwerte (`SYM_PROJECT_ROOT`, `SYM_CODEX_*`, `SYM_MAXIMUM_REVIEW_ITERATIONS`)
-mit ihren lokalen Overrides sowie die Rootreferenz.
-Discovery und Promptbau verwenden diese eingefrorenen Werte; spätere Änderungen
-am ursprünglichen Root wirken erst in einem neuen Release.
-Codex bekommt kopierte Skills und nur den
-gebundenen `symphony_linear`-MCP; persönliche MCPs und Plugins werden ausgeschlossen.
+Symphony und seine Hilfsprogramme laufen direkt aus dem ursprünglichen Checkout.
+Bestätigte Updates führen dort `git pull --ff-only` und `make all` aus; normale
+Starts verwenden den inkrementellen Build und das vorhandene Escript weiter.
+Es entstehen keine Laufzeitkopien oder Root-Konfigurationsdateien unter
+`.symphony/installations`. Die Projektliste aus `SYM_PROJECT_ROOT` wird beim Start
+ermittelt; mehrere Basispfade werden mit Komma getrennt. Änderungen dieser Liste
+und des Programmcodes erfordern einen Neustart.
+
+Worker übergeben ihren angenommenen öffentlichen Projektkontext an die gebundenen
+Helfer. So ändern spätere Dateiänderungen keine bereits laufende Verarbeitung.
+Codex bekommt ausschließlich die Repository-Skills und den gebundenen
+`symphony_linear`-MCP; persönliche MCPs und Plugins werden ausgeschlossen.
 Die vorhandene OpenAI-Anmeldung bleibt an ihrer Credential-Referenz. Dies ersetzt
 keine Dateisystemisolation gegenüber beliebigen Programmen mit Betreiberrechten.
-Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
-(bei Git-Worktrees für den Git-common-root). Dessen erzeugte `config.toml` wird
-vor jedem Start vollständig mit dem erwarteten Inhalt verglichen; veränderte
-Konfigurationen werden abgewiesen, ohne Sessions zu ändern. Gemeinsames
-Codex-Startprofil und kopierte Skills sind zusätzlich durch das Release-Manifest
-versiegelt.
+Jedes Projekt verwendet ein kleines Codex-Profil unter
+`.symphony/state/codex/symphony/profiles`, mit genau seiner Trust-Freigabe
+(bei Git-Worktrees für den Git-common-root). Profile werden bei unveränderten Skills
+wiederverwendet; sie enthalten weder Checkout noch Build oder Projektkonfiguration.
+Die erzeugte Codex-Konfiguration und die kopierten Skills werden vor dem Start
+geprüft. Sessions bleiben unabhängig vom Profil im bestehenden Zustandsverzeichnis.
 
 ## Einmalige Betreiberübergabe
 
@@ -140,7 +144,7 @@ Automatisierte kontrollierte Mehrprojekt-/Mehrworkspace-Tests und ein realer
 Linear-/Codex-Smoke werden getrennt ausgewiesen. Für reale Prüfungen dient das
 bereits freigegebene Dummy-Projekt Symphony Test. Reguläre PreReview-, Review-,
 Test- und Merge-Schritte bleiben erhalten; Installationsupdates werden am
-geprüften gemeinsamen Release gebündelt vorgenommen.
+geprüften gemeinsamen Checkout vorgenommen.
 
 ## Gemeinsame Wissensbasis ohne lokales Codex-Memory
 
@@ -148,8 +152,8 @@ Frische Symphony-/Codex-Prozesse erzwingen `features.memories=false`,
 `memories.generate_memories=false` und `memories.use_memories=false`.
 Persönliche Memory-Dateien werden weder importiert noch gelöscht. Die
 gemeinsame Wissensbasis bilden versionierte AGENTS-, Workflow-, Skill- und
-Projektdateien sowie Ticket und Workpad. Der Release übernimmt seine
-versionierten Skills; persönliche lokale Skill-Erweiterungen werden nicht
+Projektdateien sowie Ticket und Workpad. Codex übernimmt die
+versionierten Repository-Skills; persönliche lokale Skill-Erweiterungen werden nicht
 in den gemeinsamen Lauf importiert. Gesprächs-/Session-History, Wiederaufnahme
 und Tracker-/Journalzustand bleiben erhalten. Bereits geladener Alt-Kontext
 wird dadurch nicht rückwirkend entfernt.
@@ -287,7 +291,7 @@ letzten erfolgreichen Scan und Fehler bzw. offene Eingaben. Bestätigte Linear-
 Sperrfristen aus `Retry-After` oder Rate-Limit-Reset gelten gemeinsam für Token-,
 Identity- und Geschäftsanfragen derselben App. Der nicht geheime Dauerzustand
 unter `~/.cache/symphony/rate-limits` ist nach Workspace-/Client-ID gebunden und
-unabhängig von Projekt-State-Root und Release. Er erhält die Fristen auch über
+unabhängig von Projekt-State-Root und Symphony-Checkout. Er erhält die Fristen auch über
 Prozessneustarts und beide Tooltransporte; Polling und Worker-Retries der
 betroffenen App warten mindestens bis zum Ablauf. Projektzustände und private
 Credentialquellen bleiben im jeweiligen Projekt.

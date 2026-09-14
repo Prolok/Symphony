@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix='journal-process-') as directory:
     (helpers / 'state_lock.py').write_text(source)
     binding = dict(state_root=str(root / 'project/.symphony/state'), workspace_id='workspace', user_id='app', installation_id='install')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('LINEAR_', 'SYMPHONY_'))}
-    env.update(SYMPHONY_RELEASE_ROOT=str(release), ERL_FLAGS='+S 2:2')
+    env.update(SYMPHONY_ROOT_DIR=str(release), ERL_FLAGS='+S 2:2')
     runtime = sys.argv[1:] + [str(Path(__file__).with_suffix('.exs'))]
 
     class Worker:

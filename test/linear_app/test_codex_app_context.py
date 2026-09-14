@@ -36,6 +36,33 @@ class AppContextTest(unittest.TestCase):
         (self.skill / "SKILL.md").write_text("original skill")
         (self.skill / "helper.py").write_text("original helper")
 
+    def test_profiles_reuse_skills_and_sessions_without_copying_checkout_or_config(self):
+        skill = self.release / ".codex/skills/symphony-test"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("first skill")
+        (self.release / "WORKFLOW.md").write_text("workflow")
+        (self.release / ".env.local").write_text("SYM_CODEX_MODEL=first")
+        state = self.root / "state"
+        first = context.profile_home(self.release, state, self.original, self.project)
+        self.assertEqual(context.profile_home(self.release, state, self.original, self.project), first)
+        retained = state / "sessions/retained.jsonl"
+        retained.write_text("retained")
+        (self.release / ".env.local").write_text("SYM_CODEX_MODEL=second")
+        self.assertEqual(context.profile_home(self.release, state, self.original, self.project), first)
+        (skill / "SKILL.md").write_text("second skill")
+        second = context.profile_home(self.release, state, self.original, self.project)
+        self.assertNotEqual(first, second)
+        self.assertEqual((first / "repository-skills/symphony-test/SKILL.md").read_text(), "first skill")
+        self.assertEqual((second / "repository-skills/symphony-test/SKILL.md").read_text(), "second skill")
+        for home in (first, second):
+            self.assertEqual((home / "sessions/retained.jsonl").read_text(), "retained")
+            self.assertFalse((home / "WORKFLOW.md").exists())
+            self.assertFalse((home / ".env.local").exists())
+        self.assertFalse((self.release / ".symphony/installations").exists())
+        (second / "repository-skills/symphony-test/SKILL.md").write_text("tampered")
+        with self.assertRaisesRegex(RuntimeError, "changed project skills"):
+            context.profile_home(self.release, state, self.original, self.project)
+
     def test_concurrent_first_workers_share_the_same_session_links(self):
         target = context.prepare(self.release, self.original, [], self.project)
         state = self.root / "state"
@@ -62,7 +89,7 @@ class AppContextTest(unittest.TestCase):
         captured = json.loads((target / "skills.json").read_text())
         self.assertEqual(len(captured), 1)
         pinned = Path(captured[0]["path"])
-        self.assertEqual(pinned, target / 'skills/symphony-test')
+        self.assertEqual(pinned, target / 'repository-skills/symphony-test')
         (self.skill / "SKILL.md").write_text("changed global")
         (self.skill / "helper.py").write_text("changed helper")
         before = (target / "config.toml").read_bytes()
@@ -144,7 +171,7 @@ class AppContextTest(unittest.TestCase):
         projects[1].mkdir()
         states = [self.root / "first-state", self.root / "second-state"]
         with ThreadPoolExecutor(max_workers=2) as workers:
-            homes = list(workers.map(lambda pair: context.project_home(base, *pair), zip(states, projects)))
+            homes = list(workers.map(lambda pair: context.profile_home(self.release, pair[0], self.original, pair[1]), zip(states, projects)))
         self.assertNotEqual(*homes)
         for home, state, project in zip(homes, states, projects):
             self.assertEqual((home / "sessions").resolve(), (state / "sessions").resolve())
@@ -153,7 +180,7 @@ class AppContextTest(unittest.TestCase):
             self.assertFalse(config["features"]["memories"])
             self.assertEqual(config["memories"], {"generate_memories": False, "use_memories": False})
             (state / "sessions/retained.jsonl").write_text("retained session")
-            self.assertEqual(context.project_home(base, state, project), home)
+            self.assertEqual(context.profile_home(self.release, state, self.original, project), home)
             self.assertEqual((home / "sessions/retained.jsonl").read_text(), "retained session")
         self.assertEqual((self.original / "memories/MEMORY.md").read_text(), "synthetic personal memory")
 
@@ -171,18 +198,18 @@ class AppContextTest(unittest.TestCase):
     def test_project_home_rejects_modified_config_without_changing_sessions(self):
         base = context.prepare(self.release, self.original, [], self.project)
         state = self.root / "state"
-        home = context.project_home(base, state, self.project)
+        home = context.profile_home(self.release, state, self.original, self.project)
         retained = state / "sessions/retained.jsonl"
         retained.write_text("retained")
         config = home / "config.toml"
         config.write_text(config.read_text() + '\n[mcp_servers.foreign]\ncommand="foreign"\n[plugins.foreign]\nenabled=true\n')
         with self.assertRaisesRegex(RuntimeError, "changed project configuration"):
-            context.project_home(base, state, self.project)
+            context.profile_home(self.release, state, self.original, self.project)
         self.assertEqual(retained.read_text(), "retained")
 
     def test_launch_overrides_disable_extra_mcp_and_plugins_in_effective_home(self):
         base = context.prepare(self.release, self.original, [], self.project)
-        home = context.project_home(base, self.root / "state", self.project)
+        home = context.profile_home(self.release, self.root / "state", self.original, self.project)
         config = home / "config.toml"
         config.write_text(config.read_text() + '\n[mcp_servers.foreign]\ncommand="foreign"\n[plugins.foreign]\nenabled=true\n')
         args = context.launch_config(self.release, home, self.project, self.personal,

@@ -10,7 +10,7 @@ binding = tracker.app
 instance = System.fetch_env!("PROBE_INSTANCE")
 System.put_env(Config.linear_runtime_env())
 
-File.cd!(System.fetch_env!("SYMPHONY_RELEASE_ROOT"), fn ->
+File.cd!(System.fetch_env!("SYMPHONY_ROOT_DIR"), fn ->
   :ok = SymphonyElixir.Application.startup_preflight()
   true = Config.settings!().tracker == tracker
   nil = System.get_env("LINEAR_APP_SECRET")

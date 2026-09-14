@@ -16,6 +16,7 @@ defmodule SymphonyElixir.RuntimePaths do
     "SYMPHONY_PROJECT_ROOT",
     "SYMPHONY_PROJECT_WORKTREES_ROOT",
     "SYMPHONY_RELEASE_ROOT",
+    "SYMPHONY_PROJECT_CONTEXT",
     "SYMPHONY_ROOT_DIR",
     "SYMPHONY_LINEAR_ENV_DIR",
     "SYMPHONY_LINEAR_AUTH_MODE",
@@ -44,7 +45,7 @@ defmodule SymphonyElixir.RuntimePaths do
 
   @spec workflow_dir() :: Path.t()
   def workflow_dir do
-    case Map.get(bound_runtime_env(), "SYMPHONY_RELEASE_ROOT") do
+    case Map.get(bound_runtime_env(), "SYMPHONY_ROOT_DIR") do
       root when is_binary(root) and root != "" -> root
       _ -> Workflow.default_workflow_file_path() |> Path.dirname()
     end
@@ -75,19 +76,18 @@ defmodule SymphonyElixir.RuntimePaths do
   end
 
   defp bound_runtime_env do
-    root = System.get_env("SYMPHONY_RELEASE_ROOT")
+    names = ~w(SYMPHONY_ROOT_DIR SYMPHONY_LINEAR_ENV_DIR)
 
-    if is_binary(root) and File.regular?(Path.join(root, ".symphony-release.json")) do
-      names =
-        if System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app",
-          do: ~w(SYMPHONY_RELEASE_ROOT SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_BINDING_HASH),
-          else: ~w(SYMPHONY_RELEASE_ROOT)
+    names =
+      if System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app",
+        do: names ++ ~w(SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_BINDING_HASH),
+        else: names
 
-      Map.new(names, &{&1, System.get_env(&1) || ""})
-      |> Map.merge(System.get_env() |> Map.take(["SYMPHONY_ROOT_DIR", "SYMPHONY_LINEAR_ENV_DIR"]))
-    else
-      %{}
-    end
+    root = System.get_env("SYMPHONY_ROOT_DIR")
+
+    if is_binary(root) and Path.type(root) == :absolute and File.dir?(root),
+      do: System.get_env() |> Map.take(names),
+      else: %{}
   end
 
   @spec cleaned_system_env(map()) :: [{String.t(), String.t() | nil}]

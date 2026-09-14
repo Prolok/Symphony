@@ -1109,7 +1109,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator poll cycle resets next refresh countdown after a check" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
       poll_interval_ms: 50
     )
 
@@ -1170,7 +1169,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator poll cycle scales next refresh countdown by active instance count" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
       poll_interval_ms: 50
     )
 
@@ -1231,7 +1229,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
       codex_stall_timeout_ms: 1_000
     )
 
@@ -1296,7 +1293,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator does not restart manual In Arbeit bootstrap-only workers as stalled" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
       codex_stall_timeout_ms: 1_000
     )
 

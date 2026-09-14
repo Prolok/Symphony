@@ -302,6 +302,33 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
     assert Jason.decode!(content["text"])["error"]["classification"] == "rate_limited"
   end
 
+  test "a warm candidate poll classifies an errors-only HTTP 200 rate limit as a provider pause", %{contexts: [a | _]} do
+    assert {:ok, _} = Client.fetch_project_candidates([a])
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _ ->
+      refute (payload[:query] || payload["query"]) =~ "SymphonyAppIdentity"
+      {:ok, %{status: 200, body: %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}}}
+    end)
+
+    assert {:error, {:linear_api_status, 200, %{classification: "rate_limited"}}} =
+             Client.fetch_project_candidates([a])
+
+    assert {:error, {:linear_app_rate_limited, _}} = RateLimit.check(a.settings.tracker.app)
+  end
+
+  test "startup defers a rate-limited human verification after an identity cache hit", %{contexts: [a | _]} do
+    assert {:ok, _} = Client.fetch_project_candidates([a])
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _ ->
+      assert (payload[:query] || payload["query"]) =~ "SymphonyHumanAssignees"
+      {:ok, %{status: 200, body: %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}}}
+    end)
+
+    assert {:ok, %{verified_workspaces: verified}, {:continue, :poll}} = ProjectPoller.init(contexts: [a])
+    assert verified == MapSet.new()
+    :ets.delete(ProjectPoller)
+  end
+
   defp limit(context, seconds) do
     assert {:ok, _} = RateLimit.request(context.settings.tracker.app, fn -> {:ok, %{status: 429, headers: %{"retry-after" => seconds}}} end)
   end

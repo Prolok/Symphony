@@ -167,9 +167,11 @@ defmodule SymphonyElixir.LinearAppAuthTest do
 
     assert_received {:token_issued, 2}
     refute_received {:token_issued, 3}
+    assert {:ok, %{status: 401}} = call(ctx, request: fn _, _ -> {:ok, %{status: 401}} end)
     assert {:error, :linear_app_identity_denied} = call(ctx, request: fn _, _ -> {:ok, %{status: 401}} end)
     assert_received {:token_issued, 3}
-    refute_received {:token_issued, 4}
+    assert_received {:token_issued, 4}
+    refute_received {:token_issued, 5}
   end
 
   test "business 401 is returned once without mutation replay; next request obtains a new token", ctx do
@@ -190,13 +192,13 @@ defmodule SymphonyElixir.LinearAppAuthTest do
   end
 
   test "429, 5xx and lost business responses never replay or acquire extra tokens", ctx do
-    for result <- [{:ok, %{status: 429}}, {:ok, %{status: 503}}, {:error, "synthetic-token-1"}] do
+    for {result, index} <- Enum.with_index([{:ok, %{status: 429}}, {:ok, %{status: 503}}, {:error, "synthetic-token-1"}]) do
       request = fn payload, _ ->
         if payload.query =~ "SymphonyAppIdentity", do: identity(), else: result
       end
 
       expected = if elem(result, 0) == :error, do: {:error, :linear_app_request_unavailable}, else: result
-      assert call(ctx, request: request) == expected
+      assert call(ctx, request: request, now: fn -> 200 + index * 31 end) == expected
     end
 
     assert_received {:token_issued, 1}
@@ -213,7 +215,11 @@ defmodule SymphonyElixir.LinearAppAuthTest do
             {{:ok, %{status: 503}}, :linear_app_token_unavailable},
             {{:error, "synthetic-client-secret"}, :linear_app_token_unavailable}
           ]) do
-      assert {:error, ^expected} = call(ctx, token_request: fn _ -> response end, now: fn -> 200 + index * 31 end)
+      result = call(ctx, token_request: fn _ -> response end, now: fn -> 200 + index * 31 end)
+
+      if expected == :linear_app_rate_limited,
+        do: assert(match?({:error, {:linear_app_rate_limited, _}}, result)),
+        else: assert(result == {:error, expected})
     end
 
     {:ok, response} = token_response("token")
@@ -247,7 +253,7 @@ defmodule SymphonyElixir.LinearAppAuthTest do
       {:ok, %{status: 429}}
     end
 
-    for _ <- 1..5, do: assert({:error, :linear_app_rate_limited} = call(ctx, token_request: failing))
+    for _ <- 1..5, do: assert({:error, {:linear_app_rate_limited, _}} = call(ctx, token_request: failing))
     assert_received :token_attempt
     refute_received :token_attempt
     assert {:ok, _} = call(ctx, now: fn -> 230 end)
@@ -287,14 +293,17 @@ defmodule SymphonyElixir.LinearAppAuthTest do
   end
 
   test "identity rate limits and errors stay distinct with no token churn", ctx do
-    for status <- [200, 400, 403, 429] do
-      assert {:error, :linear_app_rate_limited} =
+    for {status, index} <- Enum.with_index([200, 400, 403, 429]) do
+      assert {:error, {:linear_app_rate_limited, _}} =
                call(ctx,
+                 rate_limit_now: fn -> 1_000_000 + index * 600_000 end,
                  request: fn _, _ ->
                    {:ok, %{status: status, body: %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}}}
                  end
                )
     end
+
+    Process.put(:auth_rate_now, 4_000_000)
 
     for result <- [{:ok, %{status: 403}}, {:ok, %{status: 403, body: %{}}}] do
       assert {:error, :linear_app_identity_denied} = call(ctx, request: fn _, _ -> result end)
@@ -360,15 +369,156 @@ defmodule SymphonyElixir.LinearAppAuthTest do
     assert ^limited = call(ctx, token_request: fn _ -> flunk("token request before cooldown") end, rate_limit_now: fn -> now end)
   end
 
+  test "verified identity is shared by eight callers and renewed exactly at the expiry margin", ctx do
+    owner = self()
+
+    request = fn payload, _ ->
+      if payload.query =~ "SymphonyAppIdentity", do: send(owner, :identity_checked)
+      identity()
+    end
+
+    tasks = for _ <- 1..8, do: Task.async(fn -> call(ctx, request: request) end)
+    for task <- tasks, do: assert({:ok, _} = Task.await(task))
+    assert_received :identity_checked
+    refute_received :identity_checked
+    assert {:ok, _} = call(ctx, request: request, now: fn -> 2_592_078 end)
+    refute_received :identity_checked
+    assert {:ok, _} = call(ctx, request: request, now: fn -> 2_592_079 end)
+    assert_received :identity_checked
+    assert_received {:token_issued, 2}
+  end
+
+  test "cached app email is checked against every current assignee and missing credentials discard proof", ctx do
+    owner = self()
+
+    request = fn payload, _ ->
+      if payload.query =~ "SymphonyAppIdentity", do: send(owner, :identity_checked), else: send(owner, :business)
+      {:ok, response} = identity()
+      {:ok, put_in(response, [:body, "data", "viewer", "email"], "app@example.invalid")}
+    end
+
+    assert {:ok, _} = call(ctx, request: request)
+    assert_received :identity_checked
+    assert_received :business
+    selected = %{ctx | tracker: %{ctx.tracker | assignee: "APP@example.invalid"}}
+    assert {:error, :linear_app_requires_human_assignee} = call(selected, request: request)
+    refute_received :business
+    System.delete_env(ctx.tracker.app["client_secret_env"])
+    assert {:error, :missing_linear_client_secret} = call(ctx, request: request)
+    System.put_env(ctx.tracker.app["client_secret_env"], "synthetic-client-secret")
+    assert {:ok, _} = call(ctx, request: request)
+    assert_received {:token_issued, 2}
+    assert_received :identity_checked
+  end
+
+  test "scope changes require their own verified token and wrong workspace or actor never reaches business", ctx do
+    owner = self()
+
+    request = fn payload, _ ->
+      if payload.query =~ "SymphonyAppIdentity", do: send(owner, :identity_checked), else: send(owner, :business)
+      identity()
+    end
+
+    assert {:ok, _} = call(ctx, request: request)
+    assert_received :identity_checked
+    assert_received :business
+
+    for {key, value} <- [{"allowed_issue_ids", [Ecto.UUID.generate()]}, {"state_root", "/another-synthetic"}] do
+      assert {:ok, _} = call(put_in(ctx, [:tracker, :app, key], value), request: request)
+      assert_received :identity_checked
+      assert_received :business
+    end
+
+    for {key, value} <- [{"workspace_id", "wrong"}, {"user_id", "wrong"}] do
+      assert {:error, :linear_app_identity_mismatch} = call(put_in(ctx, [:tracker, :app, key], value), request: request)
+      refute_received :business
+    end
+  end
+
+  test "a credential rotation while identity is in flight cannot authorize the old generation", ctx do
+    owner = self()
+
+    task =
+      Task.async(fn ->
+        call(ctx,
+          token_request: fn _ -> token_response("same-token-text") end,
+          request: fn payload, _ ->
+            assert payload.query =~ "SymphonyAppIdentity"
+            send(owner, {:verifying, self()})
+
+            receive do
+              :continue -> identity()
+            end
+          end
+        )
+      end)
+
+    assert_receive {:verifying, worker}
+    System.put_env(ctx.tracker.app["client_secret_env"], "rotated-synthetic-secret")
+    send(worker, :continue)
+    assert {:error, :linear_app_identity_unavailable} = Task.await(task)
+    assert {:ok, _} = call(ctx, token_request: fn _ -> token_response("same-token-text") end)
+  end
+
+  test "business errors discard verification without replay and 403 invalidates the token", ctx do
+    owner = self()
+
+    for {response, index} <- Enum.with_index([{:ok, %{status: 503}}, {:error, :offline}, {:ok, %{status: 403}}]) do
+      request = fn payload, _ ->
+        if payload.query =~ "SymphonyAppIdentity" do
+          send(owner, :identity_checked)
+          identity()
+        else
+          send(owner, :business)
+          response
+        end
+      end
+
+      call(ctx, request: request, now: fn -> 200 + index end)
+      assert_received :identity_checked
+      assert_received :business
+      refute_received :business
+    end
+
+    assert {:ok, _} = call(ctx)
+    assert_received {:token_issued, 2}
+  end
+
+  test "temporary token provider failures are cached without being treated as authentication errors", ctx do
+    parent = self()
+
+    request = fn _ ->
+      send(parent, :token_attempt)
+      {:ok, %{status: 503}}
+    end
+
+    for now <- [200, 201, 229] do
+      assert {:error, :linear_app_token_unavailable} = call(ctx, now: fn -> now end, token_request: request)
+    end
+
+    assert_received :token_attempt
+    refute_received :token_attempt
+    assert {:ok, _} = call(ctx, now: fn -> 230 end)
+    assert_received {:token_issued, 1}
+  end
+
   defp call(ctx, opts \\ []) do
     request = Keyword.get(opts, :request, fn _, _ -> identity() end)
+    rate_now = Process.get(:auth_rate_now, Keyword.get(opts, :now, fn -> 200 end).() * 1_000)
 
     AppAuth.request(
       ctx.tracker,
       %{query: "mutation { write }", variables: %{}},
       request,
       Keyword.merge(
-        [cache: ctx.cache, token_request: ctx.token_request, now: fn -> 200 end, journal: fn _, payload, request, _ -> request.(payload) end],
+        [
+          rate_limit_now: fn -> rate_now end,
+          rate_limit_jitter: fn _ -> 0 end,
+          cache: ctx.cache,
+          token_request: ctx.token_request,
+          now: fn -> 200 end,
+          journal: fn _, payload, request, _ -> request.(payload) end
+        ],
         opts
       )
     )

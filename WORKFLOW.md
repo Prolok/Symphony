@@ -808,9 +808,9 @@ Nutze dies nur, wenn der Abschluss durch fehlende erforderliche Tools oder fehle
 ## Kommentar-Checkpoints für reguläre Arbeit
 
 Für tatsächlich übernommene aktive Issues ist der Kommentareingang Standard.
-Der bestehende Projekt-Polltakt (Ausgangswert 30 Sekunden) beobachtet Kommentare,
-ohne laufende Turns zu unterbrechen. Phasenstart und Fortsetzung liefern offene
-Quellversionen an den Hauptworker. Nach Meilensteinen und vor Handoffs ruft dieser
+Der Hintergrundabgleich beobachtet Kommentare frühestens alle
+`max(30 Sekunden, polling.interval_ms)`, ohne laufende Turns zu unterbrechen.
+Phasenstart und Fortsetzung liefern offene Quellversionen an den Hauptworker. Nach Meilensteinen und vor Handoffs ruft dieser
 `symphony_comments` mit `operation: "checkpoint"` auf; `issue_id` ist die interne
 ID des aktuellen Issues. Manuelle Gates werden dadurch nicht aktiviert.
 

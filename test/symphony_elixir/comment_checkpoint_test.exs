@@ -20,6 +20,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
   end
 
   test "actual raw, dynamic, MCP and adapter state paths reject pending input and failed fresh scans", %{issue: issue} do
+    assert {:ok, _} = CommentCheckpoint.scan(issue)
     mutation = "mutation { handoff: issueUpdate(id: \"issue\", input: {stateId: \"next\"}) { success } }"
     refute DynamicTool.execute("linear_graphql", %{"query" => mutation})["success"]
     refute_received :status_mutation
@@ -29,6 +30,8 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert :ok = Adapter.update_issue_state(issue.id, "PreReview (AI)")
     assert_received :status_mutation
 
+    assert {:ok, _} = CommentCheckpoint.background_scan(issue)
+    assert {:ok, _} = CommentCheckpoint.background_scan(issue)
     human("human", "Neue Korrektur")
     assert {:error, _} = Adapter.update_issue_state(issue.id, "PreReview (AI)")
     refute_received :status_mutation
@@ -37,6 +40,8 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     refute_received :status_mutation
     assert {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
     assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [result(key)])
+    assert {:ok, _} = CommentCheckpoint.background_scan(issue)
+    assert {:ok, _} = CommentCheckpoint.background_scan(issue)
     Process.put(:scan_failure, true)
     refute DynamicTool.execute("linear_graphql", %{"query" => mutation})["success"]
     refute_received :status_mutation
@@ -296,6 +301,8 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     refute MergeTool.handle_checkpoint({:ok, %{"operation" => "merge"}}, issue, opts)["ok"]
     establish(issue)
     assert MergeTool.handle_checkpoint({:ok, %{"operation" => "merge"}}, issue, opts)["ok"]
+    assert {:ok, _} = CommentCheckpoint.background_scan(issue)
+    assert {:ok, _} = CommentCheckpoint.background_scan(issue)
     Process.put(:scan_failure, true)
     refute MergeTool.handle_checkpoint({:ok, %{"operation" => "merge"}}, issue, opts)["ok"]
     Process.delete(:scan_failure)

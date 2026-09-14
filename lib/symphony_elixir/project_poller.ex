@@ -174,7 +174,7 @@ defmodule SymphonyElixir.ProjectPoller do
     end
   end
 
-  defp rate_limited?(:linear_app_rate_limited), do: true
+  defp rate_limited?({:linear_api_status, _status, %{classification: "rate_limited"}}), do: true
   defp rate_limited?({:linear_app_rate_limited, _details}), do: true
   defp rate_limited?({:linear_api_request, reason}), do: rate_limited?(reason)
   defp rate_limited?(_reason), do: false

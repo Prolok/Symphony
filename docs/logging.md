@@ -68,3 +68,10 @@ Workpad, nicht in normale Betriebslogs. `comment_inputs_pending` enthält deshal
 nur Quellschlüssel und den letzten erfolgreichen Scan; die Quellen bleiben über
 den gebundenen Kommentar-Checkpoint abrufbar. Der letzte vollständige Stand bleibt bei
 Fehlern bestehen; Empfang ist kein fachlicher Verarbeitungsnachweis.
+
+`Linear budget headers` protokolliert auf Debug-Level erlaubte Request-/Endpoint-/
+Complexity-Limit-, Remaining- und Resetwerte, `X-Complexity` und gültiges
+`Retry-After`, auch bei erfolgreichen Antworten. `Linear rate limit paused` nennt
+die gewählte lokale Deadline und Restpause. Vorhandene `issue_id`,
+`issue_identifier` und `session_id` bleiben erhalten; Payloads, unbekannte Header
+und Zugangsdaten werden nicht als Budgetdiagnose ausgegeben.

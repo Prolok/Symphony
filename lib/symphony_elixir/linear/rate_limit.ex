@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Linear.RateLimit do
   @moduledoc "Shared, durable server cooldown for the bound Linear app; contains no credentials."
 
+  require Logger
   alias SymphonyElixir.Config
   alias SymphonyElixir.Linear.{DurableState, IssueLease}
 
@@ -27,16 +28,18 @@ defmodule SymphonyElixir.Linear.RateLimit do
     with :ok <- check(binding, opts) do
       result = callback.()
 
+      diagnostics = response_hints(result)
+      if diagnostics != %{}, do: Logger.debug("Linear budget headers=#{inspect(diagnostics)}#{context_log(opts)}")
       finish_request(binding, deadline(result, now(opts)), result, opts)
     end
   end
 
   defp finish_request(_binding, nil, result, _opts), do: result
 
-  defp finish_request(binding, deadline, result, _opts) do
+  defp finish_request(binding, deadline, result, opts) do
     # Preserve the first provider response for diagnostics and journal outcome
     # handling. Subsequent requests observe the shared deadline in check/2.
-    with :ok <- persist(binding, deadline), do: result
+    with :ok <- persist(binding, deadline, opts), do: result
   end
 
   @spec remaining_ms() :: non_neg_integer()
@@ -53,20 +56,19 @@ defmodule SymphonyElixir.Linear.RateLimit do
     end
   end
 
-  defp persist(binding, deadline) do
+  defp persist(binding, deadline, opts) do
     target = path(binding)
-
-    IssueLease.with_journal_lock(Path.dirname(target), fn -> persist_locked(binding, target, deadline) end)
+    IssueLease.with_journal_lock(Path.dirname(target), fn -> persist_locked(binding, target, deadline, opts) end)
   end
 
-  defp persist_locked(binding, target, deadline) do
+  defp persist_locked(binding, target, deadline, opts) do
     case DurableState.read(target) do
       {:error, :enoent} ->
-        write(binding, target, deadline)
+        write(binding, target, deadline, %{}, opts)
 
-      {:ok, %{"retry_at_ms" => previous, "app" => app}} when is_integer(previous) ->
+      {:ok, %{"retry_at_ms" => previous, "app" => app} = record} when is_integer(previous) ->
         if app == identity(binding) do
-          write(binding, target, max(previous, deadline))
+          write(binding, target, deadline, record, opts)
         else
           {:error, :linear_rate_limit_binding_mismatch}
         end
@@ -76,7 +78,35 @@ defmodule SymphonyElixir.Linear.RateLimit do
     end
   end
 
-  defp write(binding, target, deadline), do: DurableState.write(target, %{"app" => identity(binding), "retry_at_ms" => deadline})
+  defp write(binding, target, deadline, record, opts) do
+    {deadline, attempt} = choose_deadline(deadline, record, opts)
+
+    with :ok <- DurableState.write(target, %{"app" => identity(binding), "retry_at_ms" => deadline, "attempt" => attempt}) do
+      if record["retry_at_ms"] != deadline,
+        do: Logger.warning("Linear rate limit paused retry_at_ms=#{deadline} retry_after_ms=#{max(deadline - now(opts), 0)}#{context_log(opts)}")
+
+      :ok
+    end
+  end
+
+  defp choose_deadline(:backoff, %{"retry_at_ms" => previous} = record, opts) do
+    if previous > now(opts), do: {previous, attempt(record)}, else: backoff(record, opts)
+  end
+
+  defp choose_deadline(:backoff, record, opts), do: backoff(record, opts)
+  defp choose_deadline(deadline, record, _opts), do: {max(record["retry_at_ms"] || 0, deadline), 0}
+
+  defp backoff(record, opts) do
+    previous = record["retry_at_ms"] || 0
+    attempt = if now(opts) > previous + 300_000, do: 0, else: attempt(record)
+    base = min(30_000 * Integer.pow(2, min(attempt, 4)), 300_000)
+    maximum = div(base, 4)
+    jitter = Keyword.get(opts, :rate_limit_jitter, fn max -> :rand.uniform(max + 1) - 1 end).(maximum)
+    {now(opts) + base + min(max(jitter, 0), maximum), min(attempt + 1, 5)}
+  end
+
+  defp attempt(%{"attempt" => attempt}) when is_integer(attempt) and attempt in 0..5, do: attempt
+  defp attempt(_record), do: 0
 
   defp limited(deadline, opts) do
     {:error, {:linear_app_rate_limited, %{retry_at_ms: deadline, retry_after_ms: max(deadline - now(opts), 0)}}}
@@ -92,35 +122,69 @@ defmodule SymphonyElixir.Linear.RateLimit do
   end
 
   defp deadline({:ok, response}, now) when is_map(response) do
-    headers = normalize_headers(Map.get(response, :headers, %{}))
+    headers = budget_headers(Map.get(response, :headers, %{}))
 
-    if limited_response?(response, headers) do
-      deadlines = [retry_after(headers["retry-after"], now) | reset_deadlines(headers, now)]
-      deadlines |> Enum.filter(&(is_integer(&1) and &1 > now)) |> Enum.max(fn -> nil end)
+    if limited?(response) do
+      [retry_after(headers["retry-after"], now) | reset_deadlines(headers, now)]
+      |> Enum.filter(&(is_integer(&1) and &1 > now))
+      |> Enum.max(fn -> :backoff end)
     end
   end
 
   defp deadline(_result, _now), do: nil
 
-  defp limited_response?(response, headers) do
-    exhausted = Enum.any?(headers, fn {key, value} -> String.ends_with?(key, "remaining") and value == "0" end)
-    status = Map.get(response, :status)
+  @spec limited?(map()) :: boolean()
+  def limited?(response), do: response_hints({:ok, response})["limited"] == true
 
-    exhausted or status == 429 or graphql_limited?(Map.get(response, :body)) or
-      (status == 403 and Map.has_key?(headers, "retry-after"))
+  @spec hints(integer() | nil, map() | list() | nil, [String.t()]) :: map()
+  def hints(status, headers, codes) do
+    headers = budget_headers(headers)
+
+    limited =
+      status == 429 or "RATELIMITED" in codes or
+        (status != 401 and Enum.any?(headers, fn {key, value} -> String.ends_with?(key, "remaining") and exhausted?(value) end)) or
+        (status == 403 and Map.has_key?(headers, "retry-after"))
+
+    if limited, do: Map.put(headers, "limited", true), else: headers
   end
 
-  defp graphql_limited?(body) when is_map(body) do
-    Enum.any?(Map.get(body, "errors") || [], &(get_in(&1, ["extensions", "code"]) == "RATELIMITED"))
+  defp response_hints({:ok, response}) when is_map(response) do
+    hints(Map.get(response, :status), Map.get(response, :headers), error_codes(Map.get(response, :body)))
   end
 
-  defp graphql_limited?(_body), do: false
+  defp response_hints(_result), do: %{}
+  defp error_codes(%{"errors" => errors}) when is_list(errors), do: Enum.map(errors, &get_in(&1, ["extensions", "code"]))
+  defp error_codes(_body), do: []
 
-  defp normalize_headers(headers) when is_map(headers) or is_list(headers) do
-    Map.new(headers, fn {key, value} -> {String.downcase(to_string(key)), value |> List.wrap() |> List.first() |> to_string()} end)
+  defp budget_headers(headers) when is_map(headers) or is_list(headers) do
+    Enum.reduce(headers, %{}, fn
+      {key, value}, acc ->
+        key = String.downcase(to_string(key))
+        value = value |> List.wrap() |> List.first() |> to_string() |> String.trim()
+        if allowed_header?(key, value), do: Map.put(acc, key, value), else: acc
+
+      _, acc ->
+        acc
+    end)
   end
 
-  defp normalize_headers(_headers), do: %{}
+  defp budget_headers(_headers), do: %{}
+  defp allowed_header?("retry-after", value), do: is_integer(retry_after(value, 0))
+
+  defp allowed_header?(key, value) do
+    (key == "x-complexity" or Regex.match?(~r/\Ax-rate-?limit-(?:(?:requests|endpoint-requests|complexity)-)?(limit|remaining|reset)\z/, key)) and
+      Regex.match?(~r/\A[0-9]{1,16}(?:\.[0-9]{1,6})?\z/, value)
+  end
+
+  defp exhausted?(value), do: Regex.match?(~r/\A0(?:\.0+)?\z/, value)
+
+  defp context_log(opts) do
+    context = Keyword.get(opts, :context, %{})
+
+    Enum.map_join(~w(issue_id issue_identifier session_id), fn key ->
+      if value = context[key], do: " #{key}=#{value}", else: ""
+    end)
+  end
 
   defp retry_after(value, now) when is_binary(value) do
     case Integer.parse(value) do
@@ -140,8 +204,8 @@ defmodule SymphonyElixir.Linear.RateLimit do
 
   defp reset_deadlines(headers, now) do
     for {key, value} <- headers,
-        String.contains?(key, ["ratelimit", "rate-limit"]),
         String.ends_with?(key, "reset"),
+        exhausted?(Map.get(headers, String.replace_suffix(key, "reset", "remaining"), "unknown")),
         {epoch, ""} <- [Integer.parse(value)],
         deadline = if(epoch < 10_000_000_000, do: epoch * 1_000, else: epoch),
         deadline > now,

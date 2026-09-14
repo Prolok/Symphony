@@ -4314,10 +4314,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp refresh_runtime_config(%State{} = state) do
     config = Config.settings!()
+    due = if(state.poll_interval_ms == config.polling.interval_ms, do: state.comment_scan_due, else: %{})
 
     %{
       state
       | poll_interval_ms: config.polling.interval_ms,
+        comment_scan_due: due,
         idle_shutdown_ms: state.idle_shutdown_ms_override || config.polling.idle_shutdown_ms,
         max_concurrent_agents: config.agent.max_concurrent_agents
     }

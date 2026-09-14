@@ -230,6 +230,7 @@ Die Grenzen für Projektroot, Vorabmeldungen und gestartete Läufe stehen in
 Reguläre übernommene aktive Issues haben eine eigene Hintergrundfälligkeit von
 `max(30 Sekunden, polling.interval_ms)`. Gleichzeitige Prüfungen derselben Bindung
 teilen das Ergebnis; die Fälligkeit wird nach der Journal-Sperre erneut geprüft.
+Akzeptierte Intervall-Reloads setzen die bisherige Hintergrundfälligkeit zurück.
 Ein unverändertes neuestes Kommentarsignal erspart die vollständige Historie.
 Fehlende Baseline, veränderte/fehlende Signale oder Scanfehler erfordern einen
 Vollscan; spätestens bei nächster Fälligkeit nach `max(5 Minuten, Hintergrundintervall)`

@@ -2,14 +2,14 @@ defmodule SymphonyElixir.CommentPollingTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.CommentCheckpoint
 
-  test "real orchestrator tasks keep one running scan, respect due time and stop scans on cleanup" do
+  test "real orchestrator tasks respect due time, interval reloads and scan cleanup" do
     orchestrator = Process.whereis(Orchestrator)
     :sys.suspend(orchestrator)
     on_exit(fn -> :sys.resume(orchestrator) end)
-    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 5_000)
+    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 600_000)
     context = %SymphonyElixir.ProjectContext{settings: Config.settings!()}
     start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
-    assert CommentCheckpoint.background_interval_ms() == 30_000
+    assert CommentCheckpoint.background_interval_ms() == 600_000
     parent = self()
     {:ok, counter} = Agent.start_link(fn -> 0 end)
     source = %{"id" => "latest", "body" => "unchanged", "issue" => %{"id" => "issue"}, "user" => %{"id" => "human", "app" => false}}
@@ -90,7 +90,15 @@ defmodule SymphonyElixir.CommentPollingTest do
     assert {:noreply, repeated} = Orchestrator.handle_info(:run_poll_cycle, repeated)
     refute_received {:signal, _}
     assert repeated.comment_scan_due[issue.id] > System.monotonic_time(:millisecond)
-    assert {:noreply, cleaned} = Orchestrator.handle_info(:run_poll_cycle, %{repeated | running: %{}})
+
+    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 5_000)
+    assert {:noreply, reloaded} = Orchestrator.handle_info(:run_poll_cycle, repeated)
+    assert reloaded.poll_interval_ms == 5_000
+    assert CommentCheckpoint.background_interval_ms() == 30_000
+    assert reloaded.comment_scan_due[issue.id] <= System.monotonic_time(:millisecond) + 30_000
+    assert reloaded.comment_scans[issue.id] != scan
+
+    assert {:noreply, cleaned} = Orchestrator.handle_info(:run_poll_cycle, %{reloaded | running: %{}})
     assert cleaned.comment_scans == %{}
     assert cleaned.comment_scan_due == %{}
     assert Process.alive?(worker)

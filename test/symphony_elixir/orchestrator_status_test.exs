@@ -1108,6 +1108,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator poll cycle resets next refresh countdown after a check" do
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:error, :controlled_tracker_unavailable} end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       poll_interval_ms: 50
     )
@@ -1168,6 +1171,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator poll cycle scales next refresh countdown by active instance count" do
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:error, :controlled_tracker_unavailable} end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       poll_interval_ms: 50
     )
@@ -1228,6 +1234,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator restarts stalled workers with retry backoff" do
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:error, :controlled_tracker_unavailable} end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_stall_timeout_ms: 1_000
     )
@@ -1292,6 +1301,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator does not restart manual In Arbeit bootstrap-only workers as stalled" do
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:error, :controlled_tracker_unavailable} end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_stall_timeout_ms: 1_000
     )

@@ -300,6 +300,12 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            }
   end
 
+  test "legacy rate limit errors retain the provider classification" do
+    client = fn _, _, _ -> {:error, {:linear_api_request, :linear_app_rate_limited}} end
+    result = DynamicTool.execute("linear_graphql", %{"query" => "query { viewer { id } }"}, linear_client: client)
+    assert Jason.decode!(result["output"])["error"]["classification"] == "rate_limited"
+  end
+
   test "linear_graphql exposes the persisted app cooldown to the worker" do
     deadline = %{retry_at_ms: 1_800_003_600_000, retry_after_ms: 3_600_000}
     client = fn _, _, _ -> {:error, {:linear_api_request, {:linear_app_rate_limited, deadline}}} end

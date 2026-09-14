@@ -30,6 +30,41 @@ defmodule SymphonyElixir.CommentCheckpoint do
     result
   end
 
+  @spec background_interval_ms() :: pos_integer()
+  def background_interval_ms, do: max(30_000, Config.settings!().polling.interval_ms)
+
+  @spec background_scan(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def background_scan(issue, opts \\ []) do
+    # Persisted observations survive restarts; scheduling evidence does not.
+    runtime = background_runtime()
+    key = :crypto.hash(:sha256, :erlang.term_to_binary({runtime, Config.settings!().tracker, opts[:adoption]})) |> Base.encode16()
+
+    opts =
+      opts
+      |> Keyword.put(:background_key, key)
+      |> Keyword.put(:background_interval, background_interval_ms())
+      |> Keyword.put_new(:signal, fn -> Client.comment_scan_signal(issue.id) end)
+      |> Keyword.put_new(:fetch_after_signal, &Client.scan_issue_comments(issue.id, &1))
+
+    scan(issue, opts)
+  end
+
+  defp background_runtime do
+    key = {__MODULE__, :background_runtime}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        :global.trans({key, self()}, fn ->
+          runtime = :persistent_term.get(key, nil) || Ecto.UUID.generate()
+          :persistent_term.put(key, runtime)
+          runtime
+        end)
+
+      runtime ->
+        runtime
+    end
+  end
+
   @spec checkpoint(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def checkpoint(issue, opts \\ []) do
     with {:ok, _state} <- scan(issue, opts),

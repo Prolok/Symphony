@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.Linear.WriteContext
 
   alias SymphonyElixir.{Config, Dialog, Linear.Issue, ProjectContext}
-  alias SymphonyElixir.Linear.{Assignees, CommentVersion}
+  alias SymphonyElixir.Linear.{Assignees, CommentVersion, RateLimit}
 
   @issue_page_size 50
   @typep page_cursors :: %{optional(String.t()) => true}
@@ -442,9 +442,13 @@ defmodule SymphonyElixir.Linear.Client do
   @spec scan_issue_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
   def scan_issue_comments(issue_id) do
     with {:ok, before} <- comment_scan_signal(issue_id) do
-      scan_comment_pages(fetch_issue_comments(issue_id), issue_id, before)
+      scan_issue_comments(issue_id, before)
     end
   end
+
+  @doc "Continue a background scan using its freshly observed initial signal."
+  @spec scan_issue_comments(String.t(), [map()]) :: {:ok, [map()]} | {:error, term()}
+  def scan_issue_comments(issue_id, before), do: scan_comment_pages(fetch_issue_comments(issue_id), issue_id, before)
 
   defp scan_comment_pages({:ok, comments}, issue_id, before) do
     finish_comment_scan(comment_scan_signal(issue_id), before, before ++ comments)
@@ -460,7 +464,8 @@ defmodule SymphonyElixir.Linear.Client do
   defp finish_comment_scan({:error, {:comment_scan_incomplete, reason, observed}}, _before, comments), do: incomplete_comments(reason, comments ++ observed)
   defp finish_comment_scan({:error, reason}, _before, comments), do: incomplete_comments(reason, comments)
 
-  defp comment_scan_signal(issue_id) do
+  @spec comment_scan_signal(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def comment_scan_signal(issue_id) do
     query = "query SymphonyCommentScanSignal($id: String!) { issue(id: $id) { comments(first: 1, orderBy: updatedAt, includeArchived: true) { nodes { #{@comment_selection} } } } }"
 
     with {:ok, body} <- graphql(query, %{id: issue_id}) do
@@ -499,24 +504,29 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp graphql_response(result, payload) do
     case result do
-      {:ok, %{status: 200, body: body}} ->
-        {:ok, body}
+      {:ok, %{status: 200, body: body} = response} ->
+        if errors_only_rate_limit?(body), do: failed_response(response, payload), else: {:ok, body}
 
       {:ok, response} ->
-        diagnostics = http_error_diagnostics(response)
-        status = Map.get(diagnostics, :status)
-
-        Logger.error(
-          "Linear GraphQL request failed status=#{status}" <>
-            linear_error_context(payload, diagnostics)
-        )
-
-        {:error, {:linear_api_status, status, diagnostics}}
+        failed_response(response, payload)
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
         {:error, {:linear_api_request, reason}}
     end
+  end
+
+  defp errors_only_rate_limit?(body) when is_map(body) do
+    is_nil(body["data"]) and "RATELIMITED" in graphql_extension_codes(graphql_errors(body))
+  end
+
+  defp errors_only_rate_limit?(_body), do: false
+
+  defp failed_response(response, payload) do
+    diagnostics = http_error_diagnostics(response)
+    status = Map.get(diagnostics, :status)
+    Logger.error("Linear GraphQL request failed status=#{status}" <> linear_error_context(payload, diagnostics))
+    {:error, {:linear_api_status, status, diagnostics}}
   end
 
   defp authenticated_request(payload, request_fun) do
@@ -940,23 +950,7 @@ defmodule SymphonyElixir.Linear.Client do
     |> Enum.uniq()
   end
 
-  defp rate_limit_hints(status, headers, extensions_codes)
-       when is_map(headers) and is_list(extensions_codes) do
-    header_hints =
-      headers
-      |> Enum.filter(fn {key, value} -> rate_limit_header?(key) and value != "" end)
-      |> Map.new()
-
-    limited? =
-      status == 429 or Enum.member?(extensions_codes, "RATELIMITED") or
-        (status == 403 and rate_limit_headers_limited?(header_hints))
-
-    cond do
-      limited? -> Map.put(header_hints, "limited", true)
-      header_hints != %{} -> header_hints
-      true -> %{}
-    end
-  end
+  defp rate_limit_hints(status, headers, extensions_codes), do: RateLimit.hints(status, headers, extensions_codes)
 
   defp classify_http_error(status, errors, extensions_codes, rate_limit) do
     cond do
@@ -969,25 +963,6 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp auth_error_code?(extensions_codes) when is_list(extensions_codes) do
     Enum.any?(extensions_codes, &(&1 in ["AUTHENTICATION_ERROR", "FORBIDDEN", "UNAUTHENTICATED"]))
-  end
-
-  defp rate_limit_header?(header_name) when is_binary(header_name) do
-    header_name == "retry-after" or String.contains?(header_name, ["ratelimit", "rate-limit"])
-  end
-
-  defp rate_limit_headers_limited?(header_hints) when is_map(header_hints) do
-    retry_after? = Map.has_key?(header_hints, "retry-after")
-
-    remaining_exhausted? =
-      Enum.any?(header_hints, fn {header_name, value} ->
-        String.ends_with?(header_name, "-remaining") and
-          value
-          |> to_string()
-          |> String.trim()
-          |> then(&Regex.match?(~r/\A0(?:\.0+)?\z/, &1))
-      end)
-
-    retry_after? or remaining_exhausted?
   end
 
   defp diagnostic_log_part(_label, value) when value in [nil, "", [], %{}], do: ""

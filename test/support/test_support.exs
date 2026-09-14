@@ -130,6 +130,8 @@ defmodule SymphonyElixir.TestSupport do
           )
 
         File.mkdir_p!(workflow_root)
+        previous_rate_limit_root = Application.fetch_env!(:symphony_elixir, :linear_rate_limit_root)
+        Application.put_env(:symphony_elixir, :linear_rate_limit_root, Path.join(workflow_root, "rate-limits"))
         # Runtime-owned comment state must never be read from the developer's
         # checkout when a fixture validates its synthetic app configuration.
         System.put_env("SYMPHONY_LINEAR_ENV_DIR", Path.join(workflow_root, ".symphony"))
@@ -149,6 +151,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
           Application.delete_env(:symphony_elixir, :memory_tracker_comments)
           SymphonyElixir.TestSupport.restore_env_snapshot(runtime_env_snapshot)
+          Application.put_env(:symphony_elixir, :linear_rate_limit_root, previous_rate_limit_root)
           File.rm_rf(workflow_root)
         end)
 

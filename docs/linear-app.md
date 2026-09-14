@@ -54,7 +54,13 @@ Fallbackroot muss dafür durch projektspezifische Roots ersetzt werden, etwa
 
 Pro Linear-Workspace müssen Client-ID, Workspace-ID, App-User-ID und Credentials
 übereinstimmen. Konflikte werden als Konfigurationsfehler abgewiesen. Die App-/
-Workspaceidentität wird bei API-Zugriffen verifiziert. Eine Kandidatenabfrage pro
+Workspaceidentität wird je vollständiger App-Bindung, Credential- und Token-Generation
+verifiziert und innerhalb der BEAM-Laufzeit wiederverwendet. Parallele Erstaufrufe
+teilen die Verifikation. Ablauf mit 120 Sekunden Sicherheitsmarge, Credentialwechsel,
+fehlende Credentialquelle und Fehler verwerfen den betroffenen Beleg. Konfiguration,
+Credentialquelle und menschlicher Assignee einschließlich der App-E-Mail werden
+weiterhin je Aufruf geprüft. Tokens bleiben ausschließlich im Speicher; unabhängige
+CLI-/MCP-Laufzeiten besitzen eigene Caches. Eine Kandidatenabfrage pro
 Workspace und API-Seite enthält projektweise verknüpfte Scope-, Status- und
 Assignee-Filter. Verschiedene Workspaces werden getrennt abgefragt. Fehler und
 bestätigte Sperrfristen gelten schon bei der Startprüfung je Workspacegruppe;
@@ -221,8 +227,19 @@ Die Grenzen für Projektroot, Vorabmeldungen und gestartete Läufe stehen in
 
 ## Dauerhafter Kommentareingang
 
-Reguläre übernommene aktive Issues werden im vorhandenen Polltakt (standardmäßig
-30 Sekunden) gescannt. Die erste vollständige Beobachtung ist historische
+Reguläre übernommene aktive Issues haben eine eigene Hintergrundfälligkeit von
+`max(30 Sekunden, polling.interval_ms)`. Gleichzeitige Prüfungen derselben Bindung
+teilen das Ergebnis; die Fälligkeit wird nach der Journal-Sperre erneut geprüft.
+Akzeptierte Intervall-Reloads setzen die bisherige Hintergrundfälligkeit zurück.
+Ein unverändertes neuestes Kommentarsignal erspart die vollständige Historie.
+Fehlende Baseline, veränderte/fehlende Signale oder Scanfehler erfordern einen
+Vollscan; spätestens bei nächster Fälligkeit nach `max(5 Minuten, Hintergrundintervall)`
+erfolgt ein Sicherheitsvollscan, soweit Linear erreichbar ist. Erst dieser aktualisiert
+`last_successful_scan`; ein Signalcheck beweist weder Vollständigkeit noch Löschung.
+Die Cache-Bindung umfasst Projekt-/App-/Issue-Kontext und die aktuelle Laufzeit/Übernahme.
+Neustart, Cleanup und Bindungswechsel erlauben keine Wiederverwendung alter Fälligkeit.
+Explizite Checkpoints, Acks und Status-/Merge-Aktionen führen immer einen frischen
+Vollscan aus, auch nach einem Cache-Hit oder einem bereits laufenden Hintergrundscan. Die erste vollständige Beobachtung ist historische
 Baseline. Der Worker erhält sie einmal zur Übernahme noch offener Hinweise;
 bereits zuvor erkannte offene Versionen bleiben erhalten. Manuelle Gates und
 Dialog-AI werden durch diesen Eingang nicht dispatcht.
@@ -296,9 +313,31 @@ Prozessneustarts und beide Tooltransporte; Polling und Worker-Retries der
 betroffenen App warten mindestens bis zum Ablauf. Projektzustände und private
 Credentialquellen bleiben im jeweiligen Projekt.
 Nicht erschöpfte Diagnoseheader erzeugen keine Sperre. Ein fehlgeschlagener
-Dispatch-Refresh erhält den sichtbaren Retry samt Ergebnis und IDs. Auch eine
-erfolgreiche Antwort mit bestätigtem `remaining: 0` und verwertbarem zukünftigem
-Reset setzt die gemeinsame Sperrfrist.
+Dispatch-Refresh erhält den sichtbaren Retry samt Ergebnis und IDs. Auch erfolgreiche Antworten mit bestätigtem `remaining: 0`/`0.0` setzen eine Pause.
+Request-, Endpoint- und Complexity-Budgets werden getrennt ausgewertet;
+`Retry-After` akzeptiert Sekunden oder HTTP-Datum, Resets Epoch-Millisekunden
+(kompatibel auch Epoch-Sekunden). Nur Resets tatsächlich erschöpfter Budgets und
+gültige zukünftige Retry-After-Fristen bestimmen die Serverpause. Ohne verwertbare
+Frist gilt ein lokaler exponentieller Backoff ab 30 Sekunden, maximal 5 Minuten
+plus bis zu 25 Prozent Jitter. Die unter Sperre gewählte Deadline wird beim Lesen
+nicht verlängert und durch parallele Antworten nicht verkürzt. Dies koordiniert
+Prozesse auf demselben Rechner, keine Budgets zwischen mehreren Rechnern.
+Budgetdiagnosen enthalten nur erlaubte Zahlenheader und gültiges `Retry-After`,
+einschließlich `X-Complexity`; erfolgreiche Antworten sind im Debug-Log sichtbar.
+
+Die Transportregression `linear_budget_test.exs` vergleicht 3.600 simulierte Sekunden
+mit 5-Sekunden-Arbeitstakt, einer Seite je Abfrage und unveränderten Kommentaren,
+ohne Workeraktionen. Kaltstart und Token/Identity/Candidates/Status/Signal/Seiten
+werden getrennt gezählt; dies ist keine Live-Lastmessung:
+
+| Szenario | Vorher HTTP/h | Jetzt HTTP/h (warm) |
+| --- | ---: | ---: |
+| Idle, ein Workspace | 1.440 | 720 |
+| Ein aktives Ticket | 7.200 | 1.584 |
+| Drei aktive Projekte, ein Workspace | 18.720 | 3.312 |
+| Drei aktive Projekte, zwei Workspaces | 20.160 | 4.032 |
+
+Zusätzliche Aktionen/Checkpoints und geänderte Inhalte erhöhen den Verbrauch.
 Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
 zwischen Polls und keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
 Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehen.

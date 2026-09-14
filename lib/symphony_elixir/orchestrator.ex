@@ -79,6 +79,7 @@ defmodule SymphonyElixir.Orchestrator do
       review_cleanup_blocked: MapSet.new(),
       dialog_observations: %{},
       comment_scans: %{},
+      comment_scan_due: %{},
       codex_totals: nil,
       codex_rate_limits: nil
     ]
@@ -4209,16 +4210,21 @@ defmodule SymphonyElixir.Orchestrator do
     context = SymphonyElixir.ProjectContext.current()
     stop_comment_scans(Map.drop(state.comment_scans, Map.keys(state.running)))
     scans = Map.take(state.comment_scans, Map.keys(state.running))
-    scans = Enum.reduce(state.running, scans, &maybe_start_comment_scan(&1, &2, context))
-    %{state | comment_scans: scans}
+    due = Map.take(state.comment_scan_due, Map.keys(state.running))
+    {scans, due} = Enum.reduce(state.running, {scans, due}, &maybe_start_comment_scan(&1, &2, context))
+    %{state | comment_scans: scans, comment_scan_due: due}
   end
 
-  defp maybe_start_comment_scan({id, entry}, scans, context) do
+  defp maybe_start_comment_scan({id, entry}, {scans, due}, context) do
     previous = scans[id]
 
-    if CommentCheckpoint.active?(entry.issue) and not (is_pid(previous) and Process.alive?(previous)),
-      do: start_comment_scan(id, entry, scans, context),
-      else: scans
+    now = System.monotonic_time(:millisecond)
+
+    if CommentCheckpoint.active?(entry.issue) and now >= Map.get(due, id, now) and not (is_pid(previous) and Process.alive?(previous)) do
+      {start_comment_scan(id, entry, scans, context), Map.put(due, id, now + CommentCheckpoint.background_interval_ms())}
+    else
+      {scans, due}
+    end
   end
 
   defp start_comment_scan(id, entry, scans, context) do
@@ -4235,7 +4241,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp run_comment_scan(entry, context) do
     SymphonyElixir.ProjectContext.with_context(context, fn ->
       WriteContext.with_context(%{issue_id: entry.issue.id, issue_identifier: entry.issue.identifier, session_id: entry[:session_id]}, fn ->
-        CommentCheckpoint.scan(entry.issue)
+        CommentCheckpoint.background_scan(entry.issue, adoption: entry.pid)
       end)
     end)
   end
@@ -4308,10 +4314,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp refresh_runtime_config(%State{} = state) do
     config = Config.settings!()
+    due = if(state.poll_interval_ms == config.polling.interval_ms, do: state.comment_scan_due, else: %{})
 
     %{
       state
       | poll_interval_ms: config.polling.interval_ms,
+        comment_scan_due: due,
         idle_shutdown_ms: state.idle_shutdown_ms_override || config.polling.idle_shutdown_ms,
         max_concurrent_agents: config.agent.max_concurrent_agents
     }

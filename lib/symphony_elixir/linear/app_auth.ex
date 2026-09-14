@@ -59,16 +59,28 @@ defmodule SymphonyElixir.Linear.AppAuth do
         key = cache_key(binding, secret)
         now = Keyword.get(opts, :now, fn -> System.monotonic_time(:second) end).()
         {result, entry} = cached_token(state[key], binding, secret, now, opts)
+        state = drop_binding(state, binding)
         {:reply, result, Map.put(state, key, entry)}
 
       error ->
-        {:reply, error, state}
+        {:reply, error, drop_binding(state, binding)}
     end
   end
 
-  def handle_call({:invalidate, token}, _from, state) do
-    {:reply, :ok, Map.reject(state, fn {_key, current} -> current[:access_token] == token.access_token end)}
+  def handle_call({:identity, token, identity}, _from, state) do
+    state =
+      Map.new(state, fn {key, current} ->
+        if current[:generation] == token.generation, do: {key, Map.put(current, :identity, identity)}, else: {key, current}
+      end)
+
+    {:reply, :ok, state}
   end
+
+  def handle_call({:invalidate, token}, _from, state) do
+    {:reply, :ok, Map.reject(state, fn {_key, current} -> current[:generation] == token.generation end)}
+  end
+
+  defp drop_binding(state, binding), do: Map.reject(state, fn {{cached, _}, _} -> cached == binding end)
 
   @spec request(map(), map(), (map(), list() -> term()), keyword()) :: {:ok, map()} | {:error, term()}
   def request(tracker, payload, request_fun, opts \\ []) do
@@ -98,7 +110,13 @@ defmodule SymphonyElixir.Linear.AppAuth do
 
   defp business_request(cache, token, request_fun, payload, secrets) do
     result = redacted_request(request_fun, payload, headers(token), secrets)
-    if match?({:ok, %{status: 401}}, result), do: GenServer.call(cache, {:invalidate, token})
+
+    cond do
+      auth_failure?(result) -> GenServer.call(cache, {:invalidate, token})
+      not successful_response?(result) -> GenServer.call(cache, {:identity, token, nil})
+      true -> :ok
+    end
+
     result
   end
 
@@ -112,8 +130,16 @@ defmodule SymphonyElixir.Linear.AppAuth do
   defp cache(pid), do: {:ok, pid}
 
   defp verified_token(cache, binding, request, opts, retry?) do
+    # Only verification is serialized; business requests retain their caller's
+    # project/write context and mutations are never replayed.
+    :global.trans({{__MODULE__, cache, binding}, self()}, fn ->
+      verify_cached_token(cache, binding, request, opts, retry?)
+    end)
+  end
+
+  defp verify_cached_token(cache, binding, request, opts, retry?) do
     with {:ok, token} <- GenServer.call(cache, {:token, binding, opts}, 30_000) do
-      identity = verify_identity(token, binding, request, opts[:assignee])
+      identity = token[:identity] || verify_identity(token, binding, request, opts[:assignee])
       identity = preserve_rate_limit(identity, binding, opts)
       check_identity(identity, token, cache, binding, request, opts, retry?)
     end
@@ -126,14 +152,43 @@ defmodule SymphonyElixir.Linear.AppAuth do
     end
   end
 
-  defp check_identity(:ok, token, _cache, _binding, _request, _opts, _retry?), do: {:ok, token}
+  defp check_identity({:ok, viewer} = identity, token, cache, binding, _request, opts, _retry?) do
+    with :ok <- match_viewer(viewer, binding, opts[:assignee]),
+         {:ok, current} <- GenServer.call(cache, {:token, binding, opts}, 30_000),
+         true <- current.generation == token.generation do
+      :ok = GenServer.call(cache, {:identity, token, identity})
+      {:ok, token}
+    else
+      false ->
+        {:error, :linear_app_identity_unavailable}
+
+      error ->
+        :ok = GenServer.call(cache, {:identity, token, nil})
+        error
+    end
+  end
 
   defp check_identity({:error, :linear_app_token_expired}, token, cache, binding, request, opts, retry?) do
     :ok = GenServer.call(cache, {:invalidate, token})
-    if retry?, do: verified_token(cache, binding, request, opts, false), else: {:error, :linear_app_identity_denied}
+
+    if retry? do
+      verify_cached_token(cache, binding, request, opts, false)
+    else
+      {:error, :linear_app_identity_denied}
+    end
   end
 
-  defp check_identity(error, _token, _cache, _binding, _request, _opts, _retry?), do: error
+  defp check_identity(error, token, cache, _binding, _request, _opts, _retry?) do
+    :ok = GenServer.call(cache, {:identity, token, nil})
+    error
+  end
+
+  defp auth_failure?({:ok, %{status: 401}}), do: true
+  defp auth_failure?({:ok, %{status: 403} = response}), do: not RateLimit.limited?(response)
+  defp auth_failure?(_result), do: false
+
+  defp successful_response?({:ok, %{status: 200, body: body}}) when is_map(body), do: Map.get(body, "errors", []) in [nil, []]
+  defp successful_response?(_result), do: false
 
   defp cache_key(binding, secret), do: {binding, :crypto.hash(:sha256, secret)}
 
@@ -169,7 +224,6 @@ defmodule SymphonyElixir.Linear.AppAuth do
       {:error, {:linear_app_rate_limited, _}} = error -> error
       {:ok, %{status: 200, body: body}} -> parse_token(body, secret, now)
       {:ok, %{status: status}} when status in [400, 401, 403] -> {:error, :linear_app_credentials_denied}
-      {:ok, %{status: 429}} -> {:error, :linear_app_rate_limited}
       _ -> {:error, :linear_app_token_unavailable}
     end
   end
@@ -178,7 +232,7 @@ defmodule SymphonyElixir.Linear.AppAuth do
        when is_binary(access) and byte_size(access) > 0 and
               is_integer(ttl) and ttl > @expiry_margin and ttl <= 2_592_000 do
     if valid_scope?(scope),
-      do: {:ok, %{access_token: access, secret: secret, expires_at: now + ttl}},
+      do: {:ok, %{access_token: access, secret: secret, expires_at: now + ttl, generation: make_ref()}},
       else: {:error, :invalid_linear_app_token}
   end
 
@@ -244,7 +298,11 @@ defmodule SymphonyElixir.Linear.AppAuth do
   end
 
   defp verify_viewer(body, binding, assignee) do
-    if rate_limited?(body), do: {:error, :linear_app_rate_limited}, else: match_viewer(body, binding, assignee)
+    if rate_limited?(body) do
+      {:error, :linear_app_rate_limited}
+    else
+      with :ok <- match_viewer(body, binding, assignee), do: {:ok, body}
+    end
   end
 
   defp identity_error(body, fallback) do

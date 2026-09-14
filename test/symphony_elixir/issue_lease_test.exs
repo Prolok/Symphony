@@ -6,7 +6,6 @@ defmodule SymphonyElixir.IssueLeaseTest do
     root = Path.join(System.tmp_dir!(), "lease-#{System.unique_integer([:positive])}")
     helper_dir = Path.join(root, "priv/linear_app")
     File.mkdir_p!(helper_dir)
-    File.write!(Path.join(root, ".symphony-release.json"), "{}")
     File.cp!("priv/linear_app/issue_lease.py", Path.join(helper_dir, "issue_lease.py"))
     source = File.read!("priv/linear_app/state_lock.py")
 
@@ -15,7 +14,7 @@ defmodule SymphonyElixir.IssueLeaseTest do
       source <> "\noriginal_lock = state_lock\ndef state_lock(a, b, timeout=10):\n    return original_lock(a, b, timeout=timeout, root=" <> Jason.encode!(root) <> ")\n"
     )
 
-    System.put_env("SYMPHONY_RELEASE_ROOT", root)
+    System.put_env("SYMPHONY_ROOT_DIR", root)
     on_exit(fn -> File.rm_rf!(root) end)
     {:ok, root: root, helper_dir: helper_dir}
   end

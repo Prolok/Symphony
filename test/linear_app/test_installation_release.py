@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -13,7 +14,7 @@ release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 
 
-class InstallationReleaseTest(unittest.TestCase):
+class GitFixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(dir=REPO / "_build")
         self.addCleanup(self.temporary.cleanup)
@@ -34,6 +35,8 @@ class InstallationReleaseTest(unittest.TestCase):
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.source), *args], stderr=subprocess.DEVNULL)
 
+
+class InstallationReleaseTest(GitFixture):
     def test_separate_checkouts_keep_workflow_skills_helpers_and_git_storage(self):
         first = release.snapshot(self.source, self.root / "first")
         (self.source / "WORKFLOW.md").write_text("new workflow\n")
@@ -80,6 +83,25 @@ class InstallationReleaseTest(unittest.TestCase):
         snapshot = release.snapshot(self.source, self.root / "release")
         self.assertTrue((snapshot / "scripts").is_file())
         self.assertEqual((snapshot / "scripts").read_text(), "replacement file\n")
+
+    def test_prepared_build_copies_files_and_rebinds_dependency_links_to_the_release(self):
+        asset = self.source / "deps/demo/priv/asset"
+        asset.parent.mkdir(parents=True)
+        asset.write_text("built asset")
+        compiled = self.source / "_build/dev/lib/demo"
+        compiled.mkdir(parents=True)
+        (compiled / "priv").symlink_to(asset.parent)
+        (compiled / "module.beam").write_text("compiled module")
+        (self.source / "_build/test").mkdir()
+        with mock.patch.dict(os.environ, {"MIX_ENV": "dev"}):
+            prepared = release.prepare(self.source)
+        copied = prepared / "_build/dev/lib/demo"
+        self.assertEqual((copied / "priv").resolve(), prepared / "deps/demo/priv")
+        self.assertFalse((prepared / "_build/test").exists())
+        asset.write_text("updated asset")
+        (compiled / "module.beam").write_text("updated module")
+        self.assertEqual((copied / "priv/asset").read_text(), "built asset")
+        self.assertEqual((copied / "module.beam").read_text(), "compiled module")
 
     def test_sealing_records_actual_contents_without_touching_existing_global_links(self):
         old_link = self.root / "old-global-link"

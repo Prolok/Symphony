@@ -8,7 +8,7 @@ defmodule SymphonyElixir.RootEnvTest do
   setup do
     keys =
       EnvFile.root_config_names() ++
-        ~w(LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_STATE_ROOT LINEAR_APP_SECRET_ENV LINEAR_APP_SECRET LINEAR_ASSIGNEE SYMPHONY_ROOT_DIR SYMPHONY_LINEAR_ENV_DIR SYMPHONY_RELEASE_ROOT SYMPHONY_LINEAR_SECRET_ACCESS SECRET_SELECTOR SYNTHETIC_SECRET_DEFAULT SYNTHETIC_SECRET_LOCAL)
+        ~w(LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_STATE_ROOT LINEAR_APP_SECRET_ENV LINEAR_APP_SECRET LINEAR_ASSIGNEE SYMPHONY_ROOT_DIR SYMPHONY_LINEAR_ENV_DIR SYMPHONY_PROJECT_CONTEXT SYMPHONY_LINEAR_SECRET_ACCESS SECRET_SELECTOR SYNTHETIC_SECRET_DEFAULT SYNTHETIC_SECRET_LOCAL)
 
     previous = Map.new(keys, &{&1, System.get_env(&1)})
     Enum.each(keys, &System.delete_env/1)
@@ -138,94 +138,113 @@ defmodule SymphonyElixir.RootEnvTest do
     assert Enum.all?(results, fn {_mode, _indirect, exported} -> exported == false end), inspect(results)
   end
 
-  test "release snapshot pins only launch values and never stores project bindings or secrets", ctx do
-    File.write!(Path.join(ctx.release, ".env"), "SYM_CODEX_REASONING_EFFORT=release-default\nSYM_CODEX_MODEL=release-model\n")
-    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_REASONING_EFFORT=root-override\rLINEAR_APP_SECRET=synthetic-root-secret\r\nUNRELATED=private-value\n")
-    assert :ok = EnvFile.snapshot_root(ctx.source, ctx.release)
-    assert {:error, :eexist} = EnvFile.snapshot_root(ctx.source, ctx.release)
-    snapshot = File.read!(Path.join(ctx.release, ".symphony/root-config.json"))
-    refute snapshot =~ "synthetic-root-secret"
-    refute snapshot =~ "private-value"
-    refute snapshot =~ "LINEAR_APP_SECRET"
-    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_REASONING_EFFORT=changed-after-start\nLINEAR_APP_SECRET=synthetic-new-secret\n")
-    System.put_env("SYMPHONY_RELEASE_ROOT", ctx.release)
-    assert :ok = EnvFile.load_runtime(ctx.project)
-    assert System.get_env("SYM_CODEX_REASONING_EFFORT") == "root-override"
-    assert System.get_env("SYM_CODEX_MODEL") == "release-model"
-    assert {:error, :missing_linear_client_secret} = EnvFile.linear_secret("LINEAR_APP_SECRET")
+  test "root files are reread without snapshots or exporting private values", ctx do
+    File.write!(Path.join(ctx.source, ".env"), "SYM_CODEX_MODEL=default-model\n")
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_MODEL=local-model\nLINEAR_APP_SECRET=synthetic-secret\n")
+    assert {:ok, %{"SYM_CODEX_MODEL" => "local-model"}} = EnvFile.read_root(ctx.source)
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_MODEL=changed-model\n")
+    assert {:ok, %{"SYM_CODEX_MODEL" => "changed-model"}} = EnvFile.read_root(ctx.source)
+    File.rm!(Path.join(ctx.source, ".env.local"))
+    assert {:ok, %{"SYM_CODEX_MODEL" => "default-model"}} = EnvFile.read_root(ctx.source)
+    File.mkdir!(Path.join(ctx.source, ".env.local"))
+    assert {:error, {:env_file_read_failed, _, :eisdir}} = EnvFile.read_root(ctx.source)
+    File.rmdir!(Path.join(ctx.source, ".env.local"))
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_MODEL=\"unterminated\n")
+    assert {:error, {:invalid_env_file, _, 1, :unterminated_quote}} = EnvFile.read_root(ctx.source)
     assert System.get_env("LINEAR_APP_SECRET") == nil
   end
 
-  test "snapshots reject mismatched roots, unknown fields, malformed files and missing sources", ctx do
-    System.put_env("SYMPHONY_RELEASE_ROOT", ctx.release)
-    assert {:error, :invalid_root_config_snapshot} = EnvFile.load_root()
-    File.mkdir_p!(Path.join(ctx.release, ".symphony"))
-    path = Path.join(ctx.release, ".symphony/root-config.json")
-
-    for document <- ["invalid", Jason.encode!(%{root: ctx.project, values: %{}}), Jason.encode!(%{root: ctx.source, values: %{LINEAR_APP_SECRET: "synthetic"}})] do
-      File.write!(path, document)
-      assert {:error, :invalid_root_config_snapshot} = EnvFile.load_root()
-    end
-
-    System.delete_env("SYMPHONY_RELEASE_ROOT")
-    File.mkdir!(Path.join(ctx.source, ".env.local"))
-    assert {:error, {:env_file_read_failed, _, :eisdir}} = EnvFile.load_root()
-    File.mkdir!(Path.join(ctx.project, ".env.local"))
-    assert {:error, :linear_secret_source_unavailable} = EnvFile.linear_secret("LINEAR_APP_SECRET")
-    File.rmdir!(Path.join(ctx.source, ".env.local"))
-    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_MODEL=\"unterminated\n")
-    assert {:error, {:invalid_env_file, _, 1, :unterminated_quote}} = EnvFile.snapshot_root(ctx.source, ctx.release)
-  end
-
-  test "release keeps the root review budget across source updates and project overrides", ctx do
-    previous = System.get_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
-    System.delete_env("SYM_MAXIMUM_REVIEW_ITERATIONS")
-    on_exit(fn -> SymphonyElixir.TestSupport.restore_env_snapshot(%{"SYM_MAXIMUM_REVIEW_ITERATIONS" => previous}) end)
-    File.write!(Path.join(ctx.release, ".env"), "SYM_MAXIMUM_REVIEW_ITERATIONS=3\n")
-    File.write!(Path.join(ctx.source, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=5\nLINEAR_APP_SECRET=synthetic-root-secret\n")
-    File.write!(Path.join(ctx.project, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
-    assert :ok = EnvFile.snapshot_root(ctx.source, ctx.release)
-    File.write!(Path.join(ctx.source, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=7\n")
-    System.put_env("SYMPHONY_RELEASE_ROOT", ctx.release)
-    assert :ok = EnvFile.load_runtime(ctx.project)
-    assert Config.maximum_review_iterations!(ctx.release) == 5
-    refute File.read!(Path.join(ctx.release, ".symphony/root-config.json")) =~ "synthetic-root-secret"
-    System.put_env("SYM_MAXIMUM_REVIEW_ITERATIONS", "8")
-    assert :ok = EnvFile.load_runtime(ctx.project)
-    assert Config.maximum_review_iterations!(ctx.release) == 8
-  end
-
-  test "project discovery reads the release snapshot without exporting root values", ctx do
+  test "project discovery honors multiple base paths from the original env.local", ctx do
     previous = Application.get_env(:symphony_elixir, :project_contexts)
     settings = Application.get_env(:symphony_elixir, :service_settings)
 
     on_exit(fn ->
       Application.put_env(:symphony_elixir, :project_contexts, previous || [])
 
-      if settings do
-        Application.put_env(:symphony_elixir, :service_settings, settings)
-      else
-        Application.delete_env(:symphony_elixir, :service_settings)
-      end
+      if settings,
+        do: Application.put_env(:symphony_elixir, :service_settings, settings),
+        else: Application.delete_env(:symphony_elixir, :service_settings)
     end)
 
-    base = Path.join(ctx.root, "projects")
-    project = Path.join(base, "Pinned")
-    File.mkdir_p!(Path.join(project, ".symphony"))
-    File.write!(Path.join(project, ".symphony/.env"), "LINEAR_ASSIGNEE=human@example.invalid\n")
-    File.write!(Path.join(ctx.source, ".env"), "SYM_CODEX_MODEL=old-source-model\n")
-    File.write!(Path.join(ctx.release, ".env"), "SYM_PROJECT_ROOT=#{base}\nSYM_CODEX_MODEL=release-model\n")
-    File.write!(Path.join(ctx.source, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=7\n")
-    assert :ok = EnvFile.snapshot_root(ctx.source, ctx.release)
-    File.write!(Path.join(ctx.source, ".env.local"), "SYM_PROJECT_ROOT=/not-the-pinned-root\n")
-    System.put_env("SYMPHONY_RELEASE_ROOT", ctx.release)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: "$SYMPHONY_PROJECT_WORKTREES_ROOT", tracker_project_slug: "$LINEAR_PROJECT_SLUG")
+    bases = [Path.join(ctx.root, "QuantHub"), Path.join(ctx.root, "Project Hub")]
+    projects = Enum.map(bases, &Path.join(&1, "Project"))
+
+    for project <- projects do
+      File.mkdir_p!(Path.join(project, ".symphony"))
+      File.write!(Path.join(project, ".symphony/.env"), "LINEAR_ASSIGNEE=human@example.invalid\nLINEAR_PROJECT_SLUG=#{Path.basename(Path.dirname(project))}\n")
+    end
+
+    File.ln_s!(hd(bases), Path.join(ctx.root, "alias"))
+    File.write!(Path.join(ctx.source, ".env"), "SYM_PROJECT_ROOT=/unused-default\nSYM_CODEX_MODEL=default-model\n")
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_PROJECT_ROOT= ../QuantHub, ../Project Hub, ../alias \nSYM_MAXIMUM_REVIEW_ITERATIONS=7\n")
     before_env = System.get_env()
     assert :ok = SymphonyElixir.Projects.prepare(ctx.source, Workflow.workflow_file_path())
-    [context] = SymphonyElixir.Projects.configured()
-    assert context.root == project
-    assert context.env["SYM_CODEX_MODEL"] == "release-model"
-    assert context.env["SYM_MAXIMUM_REVIEW_ITERATIONS"] == "7"
+    contexts = SymphonyElixir.Projects.configured()
+    assert Enum.map(contexts, & &1.root) == projects
+    assert Enum.all?(contexts, &(&1.env["SYM_MAXIMUM_REVIEW_ITERATIONS"] == "7"))
     assert System.get_env() == before_env
+
+    System.put_env("SYM_PROJECT_ROOT", hd(bases))
+    assert :ok = SymphonyElixir.Projects.prepare(ctx.source, Workflow.workflow_file_path())
+    assert Enum.map(SymphonyElixir.Projects.configured(), & &1.root) == [hd(projects)]
+  end
+
+  test "reload applies public settings to new workers and preserves the running worker context", ctx do
+    alias SymphonyElixir.ProjectContext
+    on_exit(fn -> ProjectContext.bind(nil) end)
+    workflow = Workflow.workflow_file_path()
+    write_workflow_file!(workflow, tracker_assignee: "$LINEAR_ASSIGNEE")
+    project = Path.dirname(ctx.project)
+    File.write!(Path.join(ctx.source, ".env"), "SYM_CODEX_MODEL=default-model\nSYM_MAXIMUM_REVIEW_ITERATIONS=3\n")
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_MODEL=old-model\n")
+    File.write!(Path.join(ctx.project, ".env"), "LINEAR_ASSIGNEE=human@example.invalid\nPUBLIC_HOOK_VALUE=old\n")
+    assert {:ok, root_env} = EnvFile.read_root(ctx.source)
+    assert {:ok, old} = ProjectContext.load(project, workflow, root_env, ctx.source)
+    accepted = ProjectContext.with_context(old, &Config.linear_runtime_env/0)
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_MODEL=new-model\nSYM_MAXIMUM_REVIEW_ITERATIONS=7\n")
+    File.write!(Path.join(ctx.project, ".env.local"), "PUBLIC_HOOK_VALUE=new\nSYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
+    File.write!(workflow, "\nReloaded prompt.\n", [:append])
+    updated = ProjectContext.refresh(old)
+    assert updated.env["SYM_CODEX_MODEL"] == "new-model"
+    assert updated.env["PUBLIC_HOOK_VALUE"] == "new"
+    assert updated.workflow.prompt =~ "Reloaded prompt."
+    assert ProjectContext.with_context(updated, fn -> Config.maximum_review_iterations!(ctx.source) end) == 7
+    assert old.env["SYM_CODEX_MODEL"] == "old-model"
+    refute old.workflow.prompt =~ "Reloaded prompt."
+
+    File.rm!(Path.join(ctx.source, ".env.local"))
+    File.rm!(Path.join(ctx.project, ".env.local"))
+    reverted = ProjectContext.refresh(updated)
+    assert reverted.env["SYM_CODEX_MODEL"] == "default-model"
+    assert reverted.env["PUBLIC_HOOK_VALUE"] == "old"
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_MODEL=\"broken\n")
+    assert ProjectContext.refresh(reverted) == reverted
+    File.write!(Path.join(ctx.source, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=invalid\n")
+    assert ProjectContext.refresh(reverted) == reverted
+    File.rm!(Path.join(ctx.source, ".env.local"))
+    File.write!(Path.join(ctx.project, ".env.local"), "LINEAR_ASSIGNEE=another@example.invalid\n")
+    assert ProjectContext.refresh(reverted) == reverted
+
+    # A helper launched after the edits still receives the worker's accepted
+    # public configuration, including its workflow and identity.
+    System.put_env(accepted)
+    System.put_env("SYMPHONY_WORKFLOW_FILE", workflow)
+    assert :ok = EnvFile.load_runtime(ctx.project)
+    assert ProjectContext.current().workflow == old.workflow
+    assert ProjectContext.current().env == old.env
+    assert Config.settings!().tracker == old.settings.tracker
+    ProjectContext.bind(nil)
+
+    System.put_env("SYMPHONY_LINEAR_BINDING_HASH", "different-binding")
+    assert {:error, :invalid_project_context} = EnvFile.load_runtime(ctx.project)
+    assert ProjectContext.current() == nil
+
+    for invalid <- ["bad", Base.url_encode64("invalid compressed data"), Base.url_encode64(:zlib.compress("{}"))] do
+      System.put_env("SYMPHONY_PROJECT_CONTEXT", invalid)
+      assert {:error, :invalid_project_context} = EnvFile.load_runtime(ctx.project)
+      assert ProjectContext.current() == nil
+    end
   end
 
   test "non-auth children cannot regain project secret access by reloading config", ctx do
@@ -253,7 +272,7 @@ defmodule SymphonyElixir.RootEnvTest do
     project = Path.dirname(ctx.project)
     worker = Path.join(ctx.root, "worker")
     File.mkdir!(worker)
-    project_config = "LINEAR_APP_SECRET=synthetic-never-copy\nLINEAR_API_KEY=synthetic-never-copy\nLINEAR_TEST_PROJECT_SLUG=synthetic-test\nLINEAR_ASSIGNEE=human@example.invalid\n"
+    project_config = "LINEAR_APP_SECRET=synthetic-never-copy\nLINEAR_TEST_PROJECT_SLUG=synthetic-test\nLINEAR_ASSIGNEE=human@example.invalid\n"
     File.write!(Path.join(ctx.project, ".env.local"), project_config)
     File.write!(Path.join(project, ".env.local"), "SYM_CODEX_MODEL=synthetic-model\nOTHER_SECRET=synthetic-never-copy\n")
     workflow = Path.join(ctx.root, "app.md")
@@ -261,7 +280,6 @@ defmodule SymphonyElixir.RootEnvTest do
     Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
     Workflow.set_workflow_file_path(workflow)
     Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-    System.put_env("SYMPHONY_RELEASE_ROOT", ctx.release)
     script = Path.expand("../../.symphony/on_create_worktree.py", __DIR__)
     command = ~s|test "$SYMPHONY_LINEAR_AUTH_MODE" = app && "#{System.find_executable("python3")}" "#{script}" "#{project}" "#{worker}"|
     assert :ok = SymphonyElixir.HookRunner.run_local(command, worker, "synthetic-after-create")
@@ -326,16 +344,15 @@ defmodule SymphonyElixir.RootEnvTest do
 
   defp assert_parallel_projects(ctx, binding_name) do
     File.write!(Path.join(ctx.source, ".env.local"), "SYM_CODEX_MODEL=shared-model\nLINEAR_APP_CLIENT_ID=wrong-global\n")
-    assert :ok = EnvFile.snapshot_root(ctx.source, ctx.release)
-    File.cp!(Path.expand("../../WORKFLOW.md", __DIR__), Path.join(ctx.release, "WORKFLOW.md"))
-    File.mkdir_p!(Path.join(ctx.release, "priv/linear_app"))
+    File.cp!(Path.expand("../../WORKFLOW.md", __DIR__), Path.join(ctx.source, "WORKFLOW.md"))
+    File.mkdir_p!(Path.join(ctx.source, "priv/linear_app"))
 
     for helper <- ["issue_lease.py", "state_lock.py"] do
-      File.cp!(Path.expand("../../priv/linear_app/#{helper}", __DIR__), Path.join(ctx.release, "priv/linear_app/#{helper}"))
+      File.cp!(Path.expand("../../priv/linear_app/#{helper}", __DIR__), Path.join(ctx.source, "priv/linear_app/#{helper}"))
     end
 
-    File.write!(Path.join(ctx.release, ".symphony-release.json"), "{}")
-    File.write!(Path.join(ctx.release, ".symphony/.env.local"), "LINEAR_APP_SECRET=wrong-release\nLINEAR_APP_CLIENT_ID=wrong-release\n")
+    File.mkdir_p!(Path.join(ctx.source, ".symphony"))
+    File.write!(Path.join(ctx.source, ".symphony/.env.local"), "LINEAR_APP_SECRET=wrong-release\nLINEAR_APP_CLIENT_ID=wrong-release\n")
     code_paths = Enum.flat_map(:code.get_path(), &["-pa", to_string(&1)])
     probe = Path.expand("../support/linear_app/parallel_project_helper.exs", __DIR__)
     barrier = Path.join(ctx.root, "barrier")
@@ -353,9 +370,8 @@ defmodule SymphonyElixir.RootEnvTest do
         )
 
         env = [
-          {"SYMPHONY_RELEASE_ROOT", ctx.release},
           {"SYMPHONY_ROOT_DIR", ctx.source},
-          {"SYMPHONY_WORKFLOW_FILE", Path.join(ctx.release, "WORKFLOW.md")},
+          {"SYMPHONY_WORKFLOW_FILE", Path.join(ctx.source, "WORKFLOW.md")},
           {"PROBE_BARRIER", barrier},
           {"PROBE_INSTANCE", name},
           {"SYMPHONY_LINEAR_ENV_DIR", nil}

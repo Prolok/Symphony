@@ -417,10 +417,6 @@ defmodule SymphonyElixir.Orchestrator do
         state
       end
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        state
-
       {:error, :missing_linear_scope} ->
         Logger.error("Configure exactly one Linear scope using tracker.project_slug/tracker.team_key or LINEAR_PROJECT_SLUG/LINEAR_TEAM_KEY")
 

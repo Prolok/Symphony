@@ -182,14 +182,6 @@ defmodule SymphonyElixir.Codex.LinearGraphqlTool do
     }
   end
 
-  defp tool_error_payload(:missing_linear_api_token) do
-    %{
-      "error" => %{
-        "message" => "Symphony benötigt die projektgebundene Linear-App-Konfiguration und OAuth2 Client Credentials in .symphony/.env(.local)."
-      }
-    }
-  end
-
   defp tool_error_payload({:linear_api_status, status}) do
     %{
       "error" => %{

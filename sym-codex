@@ -121,12 +121,6 @@ sym_codex_run_mix() {
   local mix_runtime="$source_repo/scripts/mix-runtime"
   shift
 
-  if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" && "${1:-}" == run ]]; then
-    shift
-    "$mix_runtime" mix "$source_repo" run --no-compile "$@"
-    return "$?"
-  fi
-
   [[ -x "$mix_runtime" ]] || sym_codex_die "Mix-Preflight fehlt oder ist nicht ausführbar: $mix_runtime"
   "$mix_runtime" mix "$source_repo" "$@"
 }
@@ -134,12 +128,6 @@ sym_codex_run_mix() {
 sym_codex_prepare_mix() {
   local source_repo="$1"
   local mix_runtime="$source_repo/scripts/mix-runtime"
-
-  if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" ]]; then
-    [[ -f "$source_repo/.symphony-release.json" ]] || sym_codex_die "ungebundener Laufzeitstand"
-    "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" verify "$source_repo" || sym_codex_die "Laufzeitstand wurde verändert"
-    return 0
-  fi
 
   [[ -x "$mix_runtime" ]] || sym_codex_die "Mix-Preflight fehlt oder ist nicht ausführbar: $mix_runtime"
   "$mix_runtime" prepare "$source_repo" 1>&2
@@ -444,6 +432,8 @@ sym_codex_apply_launch_env_file() {
 
 sym_codex_load_launch_env() {
   local project_root="$1"
+  # Workers already carry the accepted settings, including absent overrides.
+  [[ -n "${SYMPHONY_PROJECT_CONTEXT:-}" ]] && return 0
   local keep_model=0
   local keep_reasoning=0
   local keep_service_tier=0
@@ -453,24 +443,6 @@ sym_codex_load_launch_env() {
   [[ -n "${SYM_CODEX_REASONING_EFFORT+x}" ]] && keep_reasoning=1
   [[ -n "${SYM_CODEX_SERVICE_TIER+x}" ]] && keep_service_tier=1
   [[ -n "${SYM_CODEX_HUMAN_SERVICE_TIER+x}" ]] && keep_human_service_tier=1
-
-  if [[ -f "$project_root/.symphony/root-config.json" ]]; then
-    local entries key value
-    entries="$("${SYMPHONY_PYTHON:-python3}" - "$project_root/.symphony/root-config.json" <<'PY'
-import json, os, sys
-values = json.load(open(sys.argv[1]))['values']
-for name in ('SYM_CODEX_MODEL', 'SYM_CODEX_REASONING_EFFORT', 'SYM_CODEX_SERVICE_TIER', 'SYM_CODEX_HUMAN_SERVICE_TIER'):
-    if name in values and name not in os.environ:
-        value = values[name]
-        assert isinstance(value, str) and '\n' not in value and '\r' not in value
-        print(name + '=' + value)
-PY
-)" || return 1
-    while IFS='=' read -r key value; do
-      [[ -z "$key" ]] || export "$key=$value"
-    done <<< "$entries"
-    return 0
-  fi
 
   sym_codex_apply_launch_env_file "$project_root/.env" "$keep_model" "$keep_reasoning" "$keep_service_tier" "$keep_human_service_tier"
   sym_codex_apply_launch_env_file "$project_root/.env.local" "$keep_model" "$keep_reasoning" "$keep_service_tier" "$keep_human_service_tier"
@@ -654,36 +626,6 @@ sym_codex_resolve_workspace() {
   printf '%s\n' "$workspace"
 }
 
-sym_codex_run_release() {
-  local source_repo="$1"
-  shift
-  if (( ! _sym_codex_sourced )); then
-    "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" codex "$source_repo" sym-codex "$@"
-    return "$?"
-  fi
-
-  local context_file status=0 selected_project selected_workspace selected_release
-  mkdir -p "$source_repo/.symphony/installations" || return 1
-  context_file="$(mktemp "$source_repo/.symphony/installations/sourced-XXXXXXXX")" || return 1
-  SYMPHONY_CODEX_SOURCED_CONTEXT="$context_file" \
-    "${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/installation-release.py" codex "$source_repo" sym-codex "$@" || status=$?
-
-  # The release child returns only its selected directories, never shell code
-  # or auth configuration. Preserve the existing sourced cwd/venv semantics.
-  if [[ -s "$context_file" ]]; then
-    if { IFS= read -r -d '' selected_project &&
-         IFS= read -r -d '' selected_workspace &&
-         IFS= read -r -d '' selected_release; } < "$context_file" &&
-        cd "$selected_workspace"; then
-      sym_codex_activate_venv "$selected_project" "$selected_workspace" "$selected_release" || status=$?
-    else
-      status=1
-    fi
-  fi
-  rm -f "$context_file"
-  return "$status"
-}
-
 sym_codex_select_project() {
   local source_repo="$1" workflow="$2" reference="$3" caller_cwd="$4"
   sym_codex_run_mix "$source_repo" run --no-compile --no-start -e '
@@ -696,7 +638,6 @@ sym_codex_select_project() {
 }
 
 sym_codex_run() {
-  local original_args=("$@")
   local observer_mode=0
   local issue_identifier_inferred=0
   local issue_identifier=""
@@ -750,18 +691,8 @@ sym_codex_run() {
     sym_codex_finish 1
   fi
 
-  if [[ -z "${SYMPHONY_RELEASE_ROOT:-}" && ! -f "$source_repo/.symphony-release.json" &&
-        -f "$source_repo/scripts/installation-release.py" ]]; then
-    sym_codex_run_release "$source_repo" "${original_args[@]}"
-    return "$?"
-  fi
-
-  if [[ -f "$source_repo/.symphony/root-config.json" ]]; then
-    export SYMPHONY_RELEASE_ROOT="$source_repo"
-    export SYMPHONY_ROOT_DIR="$("${SYMPHONY_PYTHON:-python3}" -c 'import json,sys; print(json.load(open(sys.argv[1]))["root"])' "$source_repo/.symphony/root-config.json")"
-  elif [[ -z "${SYMPHONY_ROOT_DIR:-}" ]]; then
-    export SYMPHONY_ROOT_DIR="$source_repo"
-  fi
+  export SYMPHONY_ROOT_DIR="$source_repo"
+  unset SYMPHONY_RELEASE_ROOT
 
   if ! project_root="$(sym_codex_project_root "$(pwd -P)")"; then
     sym_codex_die "cannot determine the local project root"
@@ -770,10 +701,14 @@ sym_codex_run() {
   workflow_file="$source_repo/WORKFLOW.md"
   interactive_workflow_file="$source_repo/WORKFLOW_INTERACTIVE.md"
   dialog_workflow_file="$source_repo/WORKFLOW_DIALOG.md"
-  if [[ "${SYMPHONY_RELEASE_ROOT:-}" == "$source_repo" ]]; then
+  if [[ "${SYMPHONY_ROOT_DIR:-}" == "$source_repo" ]]; then
     workflow_file="${SYMPHONY_WORKFLOW_FILE:-$workflow_file}"
     interactive_workflow_file="${SYMPHONY_WORKFLOW_INTERACTIVE_FILE:-$interactive_workflow_file}"
     dialog_workflow_file="${SYMPHONY_WORKFLOW_DIALOG_FILE:-$dialog_workflow_file}"
+  fi
+
+  if (( ! observer_mode )); then
+    sym_codex_prepare_mix "$source_repo" || return "$?"
   fi
 
   if [[ -n "$issue_identifier" ]] && (( ! observer_mode )); then
@@ -912,11 +847,6 @@ sym_codex_run() {
     else
       codex_args+=("$prompt")
     fi
-  fi
-
-  if [[ -n "${SYMPHONY_CODEX_SOURCED_CONTEXT:-}" ]]; then
-    printf '%s\0%s\0%s\0' "$project_root" "$PWD" "$source_repo" > "$SYMPHONY_CODEX_SOURCED_CONTEXT" || return 1
-    unset SYMPHONY_CODEX_SOURCED_CONTEXT
   fi
 
   if (( _sym_codex_sourced )); then

@@ -390,9 +390,9 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp global_skill_roots do
-    case present_path(System.get_env("SYMPHONY_RELEASE_ROOT")) do
+    case present_path(System.get_env("SYMPHONY_ROOT_DIR")) do
       nil -> unbound_global_skill_roots()
-      release -> [Path.join(release, ".symphony/codex/skills")]
+      root -> [Path.join(root, ".codex/skills")]
     end
   end
 

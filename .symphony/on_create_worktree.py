@@ -207,7 +207,7 @@ def quote_env_value(value: str) -> str:
 
 
 def ensure_managed_symlink(workspace: Path, binary_name: str) -> None:
-    if os.environ.get("SYMPHONY_RELEASE_ROOT"):
+    if os.environ.get("SYMPHONY_ROOT_DIR") or os.environ.get("SYMPHONY_RELEASE_ROOT"):
         return
     target = workspace / binary_name
     link_path = managed_link_path(workspace, binary_name)

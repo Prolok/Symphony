@@ -67,7 +67,7 @@ agent:
   max_concurrent_agents: 10
   max_turns: 20
 codex:
-  # Der lokale Release bindet dieses Standardkommando an seinen eigenen Helfer.
+  # Der Symphony-Checkout bindet dieses Standardkommando an seinen eigenen Helfer.
   # Andere Kommandos und SYMPHONY_CODEX_COMMAND behalten ihren konfigurierten Wert.
   command: sym-codex --observer
   approval_policy: never
@@ -205,12 +205,14 @@ Für manuelle Ticketstarts aus dem Fachprojektroot den absoluten `sym-codex`-Pfa
 der gewünschten Installation mit Ticket-ID verwenden; globale Links sind dafür
 nicht erforderlich und bleiben an ihre bisherige Installation gebunden.
 
-Der Release bindet Code, Workflow, Helfer, Skills und öffentliche Rootvorgaben.
-Spätere Rootänderungen gelten erst im neuen Release; Fachprojektdateien
-überschreiben weder Modellstartwerte noch Reviewbudget. Workflow-Reloads gelten
-für Polling und künftige Worker; laufende Worker behalten ihren Snapshot.
-Auth-/Scope- und Worktreeroot-Wechsel erfordern einen Neustart; ungültige
-Änderungen ersetzen keinen gültigen Projektkontext.
+Symphony und Helfer laufen aus dem ursprünglichen Checkout. Bestätigte Updates
+aktualisieren ihn; unveränderte Starts verwenden den bestehenden Build.
+Originale Workflow- und öffentliche Envdateien werden beim Poll neu geladen.
+Änderungen gelten für Polling und künftige Worker; laufende Worker behalten ihren
+Projektkontext. Fachprojektdateien überschreiben weder Modellstartwerte noch
+Reviewbudget. `SYM_PROJECT_ROOT` akzeptiert mehrere kommaseparierte Basispfade;
+deren Änderung sowie Auth-/Scope- und Worktreeroot-Wechsel erfordern einen Neustart.
+Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
 
 ### Projekte und gemeinsamer Dienst
 
@@ -224,7 +226,7 @@ Auth-/Scope- und Worktreeroot-Wechsel erfordern einen Neustart; ungültige
   unzulässig. Der `--yolo`-Sonderfall steht in der Statusübersicht.
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
-  `config.toml` oder des versiegelten Startprofils/der Skills blockieren den
+  `config.toml` oder der geprüften Repository-Skills blockieren den
   Start; vorhandene Sessions bleiben erhalten. Persönliche MCPs und Plugins
   bleiben gesperrt. Secrets bleiben aus öffentlicher Umgebung und Prompts
   ausgeschlossen; private Envdateien sind kein Agentenzugriffspfad.
@@ -240,7 +242,7 @@ Bei Änderungen an Discovery gezielt
 [Normale Einrichtung](docs/linear-app.md#normale-einrichtung) lesen;
 für Reload oder gemeinsame Kapazitäten
 [Projektbindung und Polling](docs/linear-app.md#projektbindung-und-polling)
-und für Release-/Trust-/Secret-Details
+und für Start-/Trust-/Secret-Details
 [Schutz der Zugangsdaten](docs/linear-app.md#schutz-der-zugangsdaten).
 
 ### Linear-Zugriff
@@ -901,8 +903,8 @@ Frische Symphony-/Codex-Prozesse erzwingen `features.memories=false`,
 `memories.generate_memories=false` und `memories.use_memories=false`.
 Persönliche Memory-Dateien werden weder importiert noch gelöscht. Die
 gemeinsame Wissensbasis bilden versionierte AGENTS-, Workflow-, Skill- und
-Projektdateien sowie Ticket und Workpad. Der Release übernimmt seine
-versionierten Skills; persönliche lokale Skill-Erweiterungen werden nicht
+Projektdateien sowie Ticket und Workpad. Codex übernimmt die
+versionierten Repository-Skills; persönliche lokale Skill-Erweiterungen werden nicht
 in den gemeinsamen Lauf importiert. Gesprächs-/Session-History, Wiederaufnahme
 und Tracker-/Journalzustand bleiben erhalten. Bereits geladener Alt-Kontext
 wird dadurch nicht rückwirkend entfernt.

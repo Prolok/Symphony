@@ -68,11 +68,11 @@ defmodule SymphonyElixir.EnvFileTest do
   test "loads .symphony/.env and lets .symphony/.env.local override repo defaults" do
     project_root = temp_project_root("load-order")
     env_dir = symphony_dir(project_root)
-    previous_api_key = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
+    previous_public_value = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
     previous_assignee = System.get_env("LINEAR_ASSIGNEE")
 
     on_exit(fn ->
-      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_public_value)
       restore_env("LINEAR_ASSIGNEE", previous_assignee)
       File.rm_rf(project_root)
     end)
@@ -91,10 +91,10 @@ defmodule SymphonyElixir.EnvFileTest do
   test "preserves externally provided env vars over .env files" do
     project_root = temp_project_root("preserve-system-env")
     env_dir = symphony_dir(project_root)
-    previous_api_key = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
+    previous_public_value = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
 
     on_exit(fn ->
-      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_public_value)
       File.rm_rf(project_root)
     end)
 
@@ -109,10 +109,10 @@ defmodule SymphonyElixir.EnvFileTest do
   test "can explicitly let project env files override inherited env vars" do
     project_root = temp_project_root("override-system-env")
     env_dir = symphony_dir(project_root)
-    previous_api_key = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
+    previous_public_value = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
 
     on_exit(fn ->
-      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_public_value)
       File.rm_rf(project_root)
     end)
 
@@ -162,14 +162,14 @@ defmodule SymphonyElixir.EnvFileTest do
   test "ignores blank lines and full-line comments" do
     project_root = temp_project_root("comments")
     env_dir = symphony_dir(project_root)
-    previous_api_key = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
+    previous_public_value = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
     previous_exported = System.get_env("EXPORTED_KEY")
     previous_empty = System.get_env("EMPTY_VALUE")
     previous_single = System.get_env("SINGLE_QUOTED")
     previous_double = System.get_env("DOUBLE_ESCAPED")
 
     on_exit(fn ->
-      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_public_value)
       restore_env("EXPORTED_KEY", previous_exported)
       restore_env("EMPTY_VALUE", previous_empty)
       restore_env("SINGLE_QUOTED", previous_single)

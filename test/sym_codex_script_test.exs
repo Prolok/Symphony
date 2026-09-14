@@ -676,7 +676,7 @@ defmodule SymCodexScriptTest do
     refute output =~ "mix should not run"
   end
 
-  test "sourced app launcher returns the selected worktree and venv through the release child" do
+  test "sourced app launcher returns the selected worktree and venv without a release child" do
     %{repo_dir: repo_dir, bin_dir: bin_dir, workspace_root: workspace_root, worktree: worktree} =
       build_script_worktree_fixture!("PRO-49")
 
@@ -686,25 +686,6 @@ defmodule SymCodexScriptTest do
       File.rm_rf(workspace_root)
     end)
 
-    File.cp!(Path.expand("../scripts/installation-release.py", __DIR__), Path.join(repo_dir, "scripts/installation-release.py"))
-    File.write!(Path.join(repo_dir, "WORKFLOW.md"), "---\ntracker:\n  auth_mode: app\n---\n")
-    File.write!(Path.join(repo_dir, ".gitignore"), ".symphony/\n")
-    File.rename!(Path.join(repo_dir, "scripts/mix-runtime"), Path.join(repo_dir, "scripts/mix-runtime-fixture"))
-
-    # Keep real snapshotting, argument forwarding and both sym-codex processes;
-    # stand in only for the external build/Linear peers in this shell contract.
-    File.write!(Path.join(repo_dir, "scripts/mix-runtime"), """
-    #!/bin/bash
-    if [[ "$1" == start ]]; then
-      release="$2"
-      shift 3
-      printf '{"files":{}}' > "$release/.symphony-release.json"
-      exec "$release/sym-codex" "$@"
-    fi
-    exec "$(dirname "${BASH_SOURCE[0]}")/mix-runtime-fixture" "$@"
-    """)
-
-    File.chmod!(Path.join(repo_dir, "scripts/mix-runtime"), 0o755)
     File.write!(Path.join(repo_dir, ".venv/bin/codex"), "\nexit 7\n", [:append])
 
     command =
@@ -723,7 +704,7 @@ defmodule SymCodexScriptTest do
                stderr_to_stdout: true
              )
 
-    assert output =~ "Eigener Laufzeitstand"
+    refute File.exists?(Path.join(repo_dir, ".symphony/installations"))
     assert output =~ "codex-stub pwd=#{worktree}"
     assert output =~ "after status=7 pwd=#{worktree} venv=#{Path.join(repo_dir, ".venv")}"
     assert Path.wildcard(Path.join(repo_dir, ".symphony/installations/sourced-*")) == []
@@ -870,6 +851,13 @@ defmodule SymCodexScriptTest do
     on_exit(fn -> Enum.each([repo, bin, workspace_root], &File.rm_rf/1) end)
     create = Path.expand("../.symphony/on_create_worktree.py", __DIR__)
     remove = Path.expand("../.symphony/on_remove_worktree.py", __DIR__)
+
+    bound_link = Path.join(user_bin, "sym-codex-PRO-678")
+    File.write!(bound_link, "operator command")
+    assert {_, 0} = System.cmd(System.find_executable("python3"), [create, repo, worktree], env: env ++ [{"SYMPHONY_ROOT_DIR", repo}])
+    assert File.read!(bound_link) == "operator command"
+    refute File.exists?(Path.join(user_bin, "symphony-PRO-678"))
+    File.rm!(bound_link)
 
     for _ <- 1..2 do
       assert {_, 0} = System.cmd(System.find_executable("python3"), [create, repo, worktree], env: env)

@@ -148,6 +148,10 @@ defmodule AutoupdateScriptTest do
 
     case "$1" in
       rev-parse)
+        if [ "$2" = "--path-format=absolute" ]; then
+          printf '%s/pending\\n' "$SYMPHONY_REPO"
+          exit 0
+        fi
         if [ "$2" = "--is-inside-work-tree" ]; then
           exit 0
         fi
@@ -238,7 +242,7 @@ defmodule AutoupdateScriptTest do
       "/bin/bash",
       ["-c", "printf '%s' \"$AUTOUPDATE_INPUT\" | \"$AUTOUPDATE_SCRIPT\" \"$SYMPHONY_REPO\""],
       env: [
-        {"SYMPHONY_RELEASE_ROOT", repo_dir},
+        {"SYMPHONY_RELEASE_ROOT", nil},
         {"AUTOUPDATE_INPUT", input},
         {"AUTOUPDATE_SCRIPT", @script_source},
         {"SYMPHONY_REPO", repo_dir},

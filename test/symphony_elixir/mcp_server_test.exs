@@ -407,29 +407,29 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
     previous_source_repo = System.get_env("SYMPHONY_SOURCE_REPO")
     previous_project_root = System.get_env("SYMPHONY_PROJECT_ROOT")
     previous_workflow_file = System.get_env("SYMPHONY_WORKFLOW_FILE")
-    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_project_slug = System.get_env("LINEAR_PROJECT_SLUG")
 
     File.mkdir_p!(source_repo)
     File.mkdir_p!(Path.join(source_repo, ".symphony"))
-    File.write!(Path.join(source_repo, ".symphony/.env"), "LINEAR_API_KEY=bootstrap-token\n")
-    write_workflow_file!(workflow_file)
+    File.write!(Path.join(source_repo, ".symphony/.env"), "LINEAR_PROJECT_SLUG=bootstrap-project\n")
+    write_workflow_file!(workflow_file, tracker_project_slug: "$LINEAR_PROJECT_SLUG")
 
     on_exit(fn ->
       restore_env("SYMPHONY_SOURCE_REPO", previous_source_repo)
       restore_env("SYMPHONY_PROJECT_ROOT", previous_project_root)
       restore_env("SYMPHONY_WORKFLOW_FILE", previous_workflow_file)
-      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+      restore_env("LINEAR_PROJECT_SLUG", previous_project_slug)
       File.rm_rf(source_repo)
     end)
 
     System.put_env("SYMPHONY_SOURCE_REPO", source_repo)
     System.delete_env("SYMPHONY_PROJECT_ROOT")
     System.put_env("SYMPHONY_WORKFLOW_FILE", workflow_file)
-    System.put_env("LINEAR_API_KEY", "inherited-shell-token")
+    System.put_env("LINEAR_PROJECT_SLUG", "inherited-shell-project")
 
     assert :ok = MCPServer.bootstrap(logger_configurer: fn -> :ok end)
     assert Workflow.workflow_file_path() == workflow_file
-    assert System.get_env("LINEAR_API_KEY") == "inherited-shell-token"
+    assert System.get_env("LINEAR_PROJECT_SLUG") == "bootstrap-project"
   end
 
   test "bootstrap removes the stdout logger handler from the MCP protocol stream" do
@@ -472,19 +472,19 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
     previous_source_repo = System.get_env("SYMPHONY_SOURCE_REPO")
     previous_project_root = System.get_env("SYMPHONY_PROJECT_ROOT")
     previous_workflow_file = System.get_env("SYMPHONY_WORKFLOW_FILE")
-    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_project_slug = System.get_env("LINEAR_PROJECT_SLUG")
 
     File.mkdir_p!(Path.join(source_repo, ".symphony"))
     File.mkdir_p!(Path.join(project_root, ".symphony"))
-    File.write!(Path.join(source_repo, ".symphony/.env"), "LINEAR_API_KEY=source-token\n")
-    File.write!(Path.join(project_root, ".symphony/.env"), "LINEAR_API_KEY=project-token\n")
-    write_workflow_file!(workflow_file)
+    File.write!(Path.join(source_repo, ".symphony/.env"), "LINEAR_PROJECT_SLUG=source-project\n")
+    File.write!(Path.join(project_root, ".symphony/.env"), "LINEAR_PROJECT_SLUG=selected-project\n")
+    write_workflow_file!(workflow_file, tracker_project_slug: "$LINEAR_PROJECT_SLUG")
 
     on_exit(fn ->
       restore_env("SYMPHONY_SOURCE_REPO", previous_source_repo)
       restore_env("SYMPHONY_PROJECT_ROOT", previous_project_root)
       restore_env("SYMPHONY_WORKFLOW_FILE", previous_workflow_file)
-      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+      restore_env("LINEAR_PROJECT_SLUG", previous_project_slug)
       File.rm_rf(source_repo)
       File.rm_rf(project_root)
     end)
@@ -492,11 +492,11 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
     System.put_env("SYMPHONY_SOURCE_REPO", source_repo)
     System.put_env("SYMPHONY_PROJECT_ROOT", project_root)
     System.put_env("SYMPHONY_WORKFLOW_FILE", workflow_file)
-    System.put_env("LINEAR_API_KEY", "inherited-shell-token")
+    System.put_env("LINEAR_PROJECT_SLUG", "inherited-shell-project")
 
     assert :ok = MCPServer.bootstrap(logger_configurer: fn -> :ok end)
     assert Workflow.workflow_file_path() == workflow_file
-    assert System.get_env("LINEAR_API_KEY") == "inherited-shell-token"
+    assert System.get_env("LINEAR_PROJECT_SLUG") == "selected-project"
   end
 
   defp restore_default_logger({:ok, config}) do

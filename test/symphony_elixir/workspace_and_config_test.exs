@@ -722,7 +722,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     raw_issue = %{
       "id" => "issue-email-1",
       "identifier" => "MT-EMAIL-1",
-      "title" => "Shared API key routing",
+      "title" => "Shared app scope routing",
       "state" => %{"name" => "Todo"},
       "assignee" => %{
         "id" => "user-123",
@@ -1849,7 +1849,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     override = System.get_env("SYMPHONY_CODEX_COMMAND")
     on_exit(fn -> restore_env("SYMPHONY_CODEX_COMMAND", override) end)
     System.delete_env("SYMPHONY_CODEX_COMMAND")
-    System.put_env("SYMPHONY_RELEASE_ROOT", "/synthetic/release with spaces")
+    root = Path.join(System.tmp_dir!(), "symphony checkout with spaces #{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+    System.put_env("SYMPHONY_ROOT_DIR", root)
 
     for command <- ["custom-agent --profile local app-server"] do
       write_workflow_file!(Workflow.workflow_file_path(), codex_command: command)
@@ -1857,12 +1860,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "sym-codex --observer")
-    assert String.ends_with?(Config.local_codex_command(), "'/synthetic/release with spaces/sym-codex' --observer")
+    assert String.ends_with?(Config.local_codex_command(), "'#{root}/sym-codex' --observer")
     System.put_env("SYMPHONY_CODEX_COMMAND", "explicit --profile personal")
     assert Config.local_codex_command() == "explicit --profile personal"
     System.put_env("SYMPHONY_CODEX_COMMAND", "  ")
-    assert String.ends_with?(Config.local_codex_command(), "'/synthetic/release with spaces/sym-codex' --observer")
-    System.delete_env("SYMPHONY_RELEASE_ROOT")
+    assert String.ends_with?(Config.local_codex_command(), "'#{root}/sym-codex' --observer")
+    System.delete_env("SYMPHONY_ROOT_DIR")
     helper = Path.join(Path.dirname(Workflow.default_workflow_file_path()), "sym-codex")
     command = Config.local_codex_command()
     assert String.ends_with?(command, "'#{helper}' --observer")
@@ -1882,10 +1885,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "config reads defaults for optional settings" do
-    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
-    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
-    System.delete_env("LINEAR_API_KEY")
-
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: nil,
       max_concurrent_agents: nil,
@@ -1895,13 +1894,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_turn_timeout_ms: nil,
       codex_read_timeout_ms: nil,
       codex_stall_timeout_ms: nil,
-      tracker_api_token: nil,
       tracker_project_slug: nil
     )
 
     config = Config.settings!()
     assert config.tracker.endpoint == "https://api.linear.app/graphql"
-    refute Map.has_key?(config.tracker, :api_key)
     assert config.tracker.project_slug == nil
     assert config.tracker.team_key == nil
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
@@ -2061,38 +2058,31 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command == "codex app-server"
   end
 
-  test "config resolves $VAR references for env-backed secret and path values" do
+  test "config resolves $VAR references for project scope and workspace paths" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
-    api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
     project_slug_env_var = "SYMP_LINEAR_PROJECT_SLUG_#{System.unique_integer([:positive])}"
     workspace_root = Path.join("/tmp", "symphony-workspace-root")
-    api_key = "resolved-secret"
     project_slug = "resolved-project-slug"
     codex_bin = Path.join(["~", "bin", "codex"])
 
     previous_workspace_root = System.get_env(workspace_env_var)
-    previous_api_key = System.get_env(api_key_env_var)
     previous_project_slug = System.get_env(project_slug_env_var)
 
     System.put_env(workspace_env_var, workspace_root)
-    System.put_env(api_key_env_var, api_key)
     System.put_env(project_slug_env_var, project_slug)
 
     on_exit(fn ->
       restore_env(workspace_env_var, previous_workspace_root)
-      restore_env(api_key_env_var, previous_api_key)
       restore_env(project_slug_env_var, previous_project_slug)
     end)
 
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "$#{api_key_env_var}",
       tracker_project_slug: "$#{project_slug_env_var}",
       workspace_root: "$#{workspace_env_var}",
       codex_command: "#{codex_bin} app-server"
     )
 
     config = Config.settings!()
-    refute Map.has_key?(config.tracker, :api_key)
     assert config.tracker.project_slug == project_slug
     assert config.workspace.root == Path.expand(workspace_root)
     assert config.codex.command == "#{codex_bin} app-server"
@@ -2217,7 +2207,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       Path.join(System.tmp_dir!(), "symphony-cli-team-scope-#{System.unique_integer([:positive])}")
 
     env_names =
-      ~w(LINEAR_API_KEY LINEAR_ASSIGNEE LINEAR_PROJECT_SLUG LINEAR_TEAM_KEY LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_SECRET)
+      ~w(LINEAR_ASSIGNEE LINEAR_PROJECT_SLUG LINEAR_TEAM_KEY LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_SECRET)
 
     previous_env = Map.new(env_names, fn name -> {name, System.get_env(name)} end)
     parent = self()
@@ -2233,7 +2223,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     File.write!(
       Path.join(config_dir, ".env.local"),
-      "LINEAR_API_KEY=test-token\nLINEAR_ASSIGNEE=dev@example.invalid\nLINEAR_PROJECT_SLUG=\nLINEAR_TEAM_KEY=QAI\n" <>
+      "LINEAR_ASSIGNEE=dev@example.invalid\nLINEAR_PROJECT_SLUG=\nLINEAR_TEAM_KEY=QAI\n" <>
         "LINEAR_APP_CLIENT_ID=synthetic-client\nLINEAR_APP_WORKSPACE_ID=synthetic-workspace\nLINEAR_APP_USER_ID=synthetic-app\n" <>
         "LINEAR_APP_INSTALLATION_ID=synthetic-installation\nLINEAR_APP_SECRET=synthetic-secret\n"
     )
@@ -2264,28 +2254,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "config no longer resolves legacy env: references" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
-    api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
     workspace_root = Path.join("/tmp", "symphony-workspace-root")
-    api_key = "resolved-secret"
 
     previous_workspace_root = System.get_env(workspace_env_var)
-    previous_api_key = System.get_env(api_key_env_var)
 
     System.put_env(workspace_env_var, workspace_root)
-    System.put_env(api_key_env_var, api_key)
 
     on_exit(fn ->
       restore_env(workspace_env_var, previous_workspace_root)
-      restore_env(api_key_env_var, previous_api_key)
     end)
 
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "env:#{api_key_env_var}",
       workspace_root: "env:#{workspace_env_var}"
     )
 
     config = Config.settings!()
-    refute Map.has_key?(config.tracker, :api_key)
     assert config.workspace.root == "env:#{workspace_env_var}"
   end
 
@@ -2495,34 +2478,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
   test "schema parse normalizes policy keys and env-backed fallbacks" do
     missing_workspace_env = "SYMP_MISSING_WORKSPACE_#{System.unique_integer([:positive])}"
-    empty_secret_env = "SYMP_EMPTY_SECRET_#{System.unique_integer([:positive])}"
-    missing_secret_env = "SYMP_MISSING_SECRET_#{System.unique_integer([:positive])}"
 
     previous_missing_workspace_env = System.get_env(missing_workspace_env)
-    previous_empty_secret_env = System.get_env(empty_secret_env)
-    previous_missing_secret_env = System.get_env(missing_secret_env)
-    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
 
     System.delete_env(missing_workspace_env)
-    System.put_env(empty_secret_env, "")
-    System.delete_env(missing_secret_env)
-    System.put_env("LINEAR_API_KEY", "fallback-linear-token")
 
     on_exit(fn ->
       restore_env(missing_workspace_env, previous_missing_workspace_env)
-      restore_env(empty_secret_env, previous_empty_secret_env)
-      restore_env(missing_secret_env, previous_missing_secret_env)
-      restore_env("LINEAR_API_KEY", previous_linear_api_key)
     end)
 
     assert {:ok, settings} =
              Schema.parse(%{
-               tracker: %{api_key: "$#{empty_secret_env}"},
                workspace: %{root: "$#{missing_workspace_env}"},
                codex: %{approval_policy: %{reject: %{sandbox_approval: true}}}
              })
 
-    refute Map.has_key?(settings.tracker, :api_key)
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
 
     assert settings.codex.approval_policy == %{
@@ -2531,11 +2501,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert {:ok, settings} =
              Schema.parse(%{
-               tracker: %{api_key: "$#{missing_secret_env}"},
                workspace: %{root: ""}
              })
 
-    refute Map.has_key?(settings.tracker, :api_key)
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 

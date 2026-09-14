@@ -84,6 +84,7 @@ defmodule SymphonyElixir.Config do
         name -> name
       end
 
+    # Never forward an inherited personal credential, even though it is no longer an auth input.
     ["LINEAR_APP_SECRET", "LINEAR_API_KEY", configured, System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")]
     |> Enum.filter(&(is_binary(&1) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, &1)))
     |> Enum.uniq()
@@ -118,6 +119,7 @@ defmodule SymphonyElixir.Config do
         "SYMPHONY_RUN_ID" => WriteContext.current()["run_id"] || "",
         "SYMPHONY_PHASE" => WriteContext.current()["phase"] || ""
       }
+      |> Map.merge(ProjectContext.runtime_env())
     else
       %{}
     end
@@ -207,11 +209,14 @@ defmodule SymphonyElixir.Config do
   @spec maximum_review_iterations!(Path.t()) :: pos_integer()
   def maximum_review_iterations!(symphony_root) do
     value =
-      case ProjectContext.env("SYM_MAXIMUM_REVIEW_ITERATIONS") do
-        value when is_binary(value) ->
+      case {ProjectContext.current(), ProjectContext.env("SYM_MAXIMUM_REVIEW_ITERATIONS")} do
+        {_, value} when is_binary(value) ->
           value
 
-        nil ->
+        {%ProjectContext{}, nil} ->
+          "3"
+
+        {nil, nil} ->
           case EnvFile.read(symphony_root) do
             {:ok, values} -> Map.get(values, "SYM_MAXIMUM_REVIEW_ITERATIONS", "3")
             {:error, reason} -> raise ArgumentError, "Invalid SYM_MAXIMUM_REVIEW_ITERATIONS config: #{inspect(reason)}"
@@ -248,14 +253,8 @@ defmodule SymphonyElixir.Config do
   end
 
   defp local_helper_root do
-    case System.get_env("SYMPHONY_RELEASE_ROOT") do
-      release when is_binary(release) and release != "" ->
-        release
-
-      _ ->
-        root = Path.dirname(Workflow.default_workflow_file_path())
-        if File.regular?(Path.join(root, "sym-codex")), do: root
-    end
+    root = SymphonyElixir.RuntimePaths.workflow_dir()
+    if System.get_env("SYMPHONY_ROOT_DIR") || File.regular?(Path.join(root, "sym-codex")), do: root
   end
 
   defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
@@ -400,10 +399,6 @@ defmodule SymphonyElixir.Config do
 
   defp format_simple_config_error(:workflow_front_matter_not_a_map) do
     "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
-  end
-
-  defp format_simple_config_error(:missing_linear_api_token) do
-    "Invalid WORKFLOW.md config: missing linear api token"
   end
 
   defp format_simple_config_error(:missing_linear_scope) do

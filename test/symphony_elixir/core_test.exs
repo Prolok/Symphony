@@ -31,7 +31,6 @@ defmodule SymphonyElixir.CoreTest do
 
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
       tracker_project_slug: nil,
       poll_interval_ms: nil,
       tracker_active_states: nil,
@@ -94,7 +93,6 @@ defmodule SymphonyElixir.CoreTest do
     assert message =~ "tracker.active_states"
 
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: "token",
       tracker_project_slug: nil
     )
 
@@ -205,7 +203,7 @@ defmodule SymphonyElixir.CoreTest do
 
       for {directory, value} <- [{root, 1}, {target, 8}, {worktree, 9}, {other_symphony, 5}] do
         File.mkdir_p!(Path.join(directory, ".symphony"))
-        File.write!(Path.join(directory, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=#{value}\nLINEAR_API_KEY=ignored\nSYM_CODEX_MODEL=ignored\n")
+        File.write!(Path.join(directory, ".env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=#{value}\nSYM_CODEX_MODEL=ignored\n")
         File.write!(Path.join(directory, ".symphony/.env.local"), "SYM_MAXIMUM_REVIEW_ITERATIONS=99\n")
       end
 
@@ -1112,24 +1110,6 @@ defmodule SymphonyElixir.CoreTest do
     """
 
     assert {:error, :status_overview_not_found} = Workflow.status_overview_from_prompt(prompt)
-  end
-
-  test "personal LINEAR_API_KEY does not enter the app configuration" do
-    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
-    env_api_key = "test-linear-api-key"
-
-    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
-    System.put_env("LINEAR_API_KEY", env_api_key)
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
-      tracker_project_slug: "project",
-      codex_command: "/bin/sh app-server"
-    )
-
-    refute Map.has_key?(Config.settings!().tracker, :api_key)
-    assert Config.settings!().tracker.project_slug == "project"
-    assert :ok = Config.validate!()
   end
 
   test "linear assignee resolves from LINEAR_ASSIGNEE env var" do
@@ -7287,25 +7267,24 @@ defmodule SymphonyElixir.CoreTest do
 
   test "script support loads env files from .symphony under the project root for manual prompts" do
     previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
-    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    previous_public_value = System.get_env("SYMPHONY_TEST_PUBLIC_VALUE")
     project_root = Path.join(System.tmp_dir!(), "sym-codex-project-root-#{System.unique_integer([:positive])}")
     interactive_workflow_path = Path.join(project_root, "WORKFLOW_INTERACTIVE.md")
 
     on_exit(fn ->
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
-      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+      restore_env("SYMPHONY_TEST_PUBLIC_VALUE", previous_public_value)
       File.rm_rf(project_root)
     end)
 
     File.mkdir_p!(project_root)
     File.mkdir_p!(Path.join(project_root, ".symphony"))
-    File.write!(Path.join(project_root, ".symphony/.env"), "LINEAR_API_KEY=project-root-key\n")
+    File.write!(Path.join(project_root, ".symphony/.env"), "SYMPHONY_TEST_PUBLIC_VALUE=project-root-value\n")
     File.write!(interactive_workflow_path, "---\n---\ninteractive={{ issue.identifier }}\n")
-    System.put_env("LINEAR_API_KEY", "inherited-shell-key")
+    System.put_env("SYMPHONY_TEST_PUBLIC_VALUE", "inherited-shell-value")
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
-      tracker_api_token: "$LINEAR_API_KEY",
       prompt: "{{ issue.identifier }}"
     )
 
@@ -7329,7 +7308,7 @@ defmodule SymphonyElixir.CoreTest do
                project_root
              )
 
-    refute Map.has_key?(Config.settings!().tracker, :api_key)
+    assert System.get_env("SYMPHONY_TEST_PUBLIC_VALUE") == "project-root-value"
   end
 
   test "script support exposes the workflow step alongside the manual prompt context" do

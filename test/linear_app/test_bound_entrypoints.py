@@ -8,9 +8,6 @@ import tempfile
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location('release', REPO / 'scripts/installation-release.py')
-release = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(release)
 
 
 class BoundEntrypointsTest(unittest.TestCase):
@@ -22,7 +19,7 @@ class BoundEntrypointsTest(unittest.TestCase):
             project.mkdir()
             workflow = project / 'app.md'
             workflow.write_text('synthetic workflow')
-            for name in ('sym-codex-mcp', 'scripts/linear-app', 'scripts/installation-release.py'):
+            for name in ('sym-codex-mcp', 'scripts/linear-app'):
                 shutil.copy2(REPO / name, runtime / name)
             runner = runtime / 'scripts/mix-runtime'
             runner.write_text('''#!/usr/bin/env python3
@@ -32,12 +29,8 @@ print(json.dumps({'args':sys.argv[1:],'source':os.environ['SYMPHONY_SOURCE_REPO'
 'root':os.environ['SYMPHONY_ROOT_DIR']}))
 ''')
             runner.chmod(0o755)
-            (runtime / '.symphony-release.json').write_text(json.dumps({'files': {}}))
-            (runtime / '.symphony').mkdir()
-            original_root = root / 'original-symphony'
-            (runtime / '.symphony/root-config.json').write_text(json.dumps({'root': str(original_root), 'values': {}}))
             env = {key: value for key, value in os.environ.items() if not key.startswith(('SYMPHONY_', 'LINEAR_'))}
-            env.update(SYMPHONY_RELEASE_ROOT=str(runtime), SYMPHONY_SOURCE_REPO=str(project),
+            env.update(SYMPHONY_ROOT_DIR=str(runtime), SYMPHONY_SOURCE_REPO=str(project),
                        SYMPHONY_WORKFLOW_FILE=str(workflow), SYMPHONY_LINEAR_AUTH_MODE='app',
                        SYMPHONY_LINEAR_BINDING_HASH='synthetic-binding')
             for with_project_binding in (False, True):
@@ -50,7 +43,7 @@ print(json.dumps({'args':sys.argv[1:],'source':os.environ['SYMPHONY_SOURCE_REPO'
                     self.assertEqual(data['source'], str(project))
                     self.assertEqual(data['workflow'], str(workflow))
                     self.assertEqual(data['binding'], 'synthetic-binding')
-                    self.assertEqual(data['root'], str(original_root))
+                    self.assertEqual(data['root'], str(runtime))
 
     def test_direct_observer_derives_app_context_before_starting_codex(self):
         with tempfile.TemporaryDirectory(dir=REPO / '_build') as temporary:
@@ -59,14 +52,14 @@ print(json.dumps({'args':sys.argv[1:],'source':os.environ['SYMPHONY_SOURCE_REPO'
             (runtime / 'scripts').mkdir(parents=True)
             project.mkdir()
             subprocess.run(['git', 'init', '-q', '-b', 'main', str(project)], check=True)
-            for name in ('sym-codex', 'sym-codex-mcp', 'scripts/installation-release.py'):
+            for name in ('sym-codex', 'sym-codex-mcp'):
                 shutil.copy2(REPO / name, runtime / name)
             for name in ('WORKFLOW.md', 'mix.exs'):
                 (runtime / name).write_text('')
-            (runtime / '.symphony-release.json').write_text(json.dumps({'files': {}}))
             runner = runtime / 'scripts/mix-runtime'
             runner.write_text('''#!/usr/bin/env python3
 import json,os,sys
+if sys.argv[1] == 'prepare': sys.exit(0)
 project=os.environ.get('SYMPHONY_SOURCE_REPO') or sys.argv[-1]
 if 'linear_runtime_env' in ' '.join(sys.argv):
     env={'SYMPHONY_LINEAR_AUTH_MODE':'app','SYMPHONY_LINEAR_CLIENT_SECRET_ENV':'SYMPHONY_TEST_SECRET','SYMPHONY_LINEAR_BINDING_HASH':'observer-binding',
@@ -79,9 +72,9 @@ else:
     print(os.environ['SYMPHONY_SOURCE_REPO']+'/worktrees')
 ''')
             runner.chmod(0o755)
-            (runtime / 'scripts/codex-app-context.py').write_text("import os,subprocess\nprint('app='+os.environ['SYMPHONY_LINEAR_BINDING_HASH'])\nsubprocess.run([os.environ['SYMPHONY_RELEASE_ROOT']+'/sym-codex-mcp'],check=True)\n")
+            (runtime / 'scripts/codex-app-context.py').write_text("import os,subprocess\nprint('app='+os.environ['SYMPHONY_LINEAR_BINDING_HASH'])\nsubprocess.run([os.environ['SYMPHONY_ROOT_DIR']+'/sym-codex-mcp'],check=True)\n")
             env = {key: value for key, value in os.environ.items() if not key.startswith('SYMPHONY_')}
-            env.update(SYMPHONY_RELEASE_ROOT=str(runtime), SYMPHONY_SOURCE_REPO=str(project),
+            env.update(SYMPHONY_ROOT_DIR=str(runtime), SYMPHONY_SOURCE_REPO=str(project),
                        SYMPHONY_WORKFLOW_FILE=str(runtime / 'WORKFLOW.md'))
             result = subprocess.run([runtime / 'sym-codex', '--observer'], cwd=project, env=env,
                                     text=True, capture_output=True, check=True)

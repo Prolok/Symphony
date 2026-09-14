@@ -591,7 +591,6 @@ defmodule SymphonyElixir.DialogTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "linear",
-        tracker_api_token: "token",
         tracker_project_slug: "project",
         workspace_root: workspace_root,
         codex_command: "#{codex_binary} app-server"
@@ -653,7 +652,6 @@ defmodule SymphonyElixir.DialogTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "linear",
-        tracker_api_token: "token",
         tracker_project_slug: "project",
         workspace_root: workspace_root,
         codex_command: "#{codex_binary} app-server"
@@ -1508,7 +1506,6 @@ defmodule SymphonyElixir.DialogTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "linear",
-        tracker_api_token: "token",
         tracker_project_slug: "project",
         workspace_root: workspace_root,
         codex_command: "#{codex_binary} app-server"
@@ -2089,7 +2086,6 @@ defmodule SymphonyElixir.DialogTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "linear",
-        tracker_api_token: "token",
         tracker_project_slug: "project",
         workspace_root: workspace_root,
         codex_command: "#{codex_binary} app-server"
@@ -2367,8 +2363,7 @@ defmodule SymphonyElixir.DialogTest do
     # durable receipts in a temporary project while controlling only HTTP.
     runtime = Path.dirname(Workflow.workflow_file_path())
     File.cp_r!(Path.expand("../../priv", __DIR__), Path.join(runtime, "priv"))
-    File.write!(Path.join(runtime, ".symphony-release.json"), "{}")
-    System.put_env("SYMPHONY_RELEASE_ROOT", runtime)
+    System.put_env("SYMPHONY_ROOT_DIR", runtime)
     System.put_env("SYMPHONY_LINEAR_ENV_DIR", Path.join(runtime, ".symphony"))
     Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
     Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)

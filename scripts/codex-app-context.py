@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Bind app-mode Codex skills/configuration to one release, without Linear secrets."""
+"""Prepare project-local Codex profiles without copying the Symphony checkout."""
 
+import fcntl
 import hashlib
 import json
 import os
@@ -8,7 +9,6 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
-import tempfile
 
 
 def skill_directories(root):
@@ -40,13 +40,13 @@ def project_root(directory):
     return Path(common).resolve(strict=True).parent
 
 
-def prepare(release, original_home, skill_roots, project_dir):
+def prepare(release, original_home, skill_roots, project_dir, target=None):
     release, original_home = Path(release).resolve(), Path(original_home)
-    target = release / ".symphony" / "codex"
+    target = Path(target) if target is not None else release / ".symphony" / "codex"
     if (target / "skills.json").is_file():
         return target
     target.mkdir(parents=True, exist_ok=True, mode=0o700)
-    skills = target / "skills"
+    skills = target / "repository-skills"
     skills.mkdir(exist_ok=True)
     captured = []
     # Caller serializes preparation before any worker is started. Copy contents,
@@ -56,18 +56,49 @@ def prepare(release, original_home, skill_roots, project_dir):
         selected.update({entry.name: entry for entry in skill_directories(root)})
     for entry in selected.values():
         destination = skills / entry.name
-        shutil.copytree(entry, destination, dirs_exist_ok=True, symlinks=False)
+        shutil.copytree(entry, destination, dirs_exist_ok=True, symlinks=False, ignore=shutil.ignore_patterns("__pycache__"))
         captured.append({"source": str(entry), "path": str(destination)})
     auth = original_home / "auth.json"
     if auth.is_file() and not (target / "auth.json").exists():
         # OpenAI login stays in its existing credential location. This helper
-        # neither reads its content nor copies it into a release.
+        # neither reads its content nor copies it into a profile.
         (target / "auth.json").symlink_to(auth.resolve())
-    # The operator's project start authorizes this one repository, including its
-    # worktrees. Codex otherwise persists this trust during thread/start, after
-    # sealing, and the required MCP correctly rejects the changed release.
+    # Trust only the project authorized by this start, including its worktrees.
     (target / "config.toml").write_text(project_config(project_dir))
     (target / "skills.json").write_text(json.dumps(captured))
+    return target
+
+
+def profile_home(checkout, state, original_home, project):
+    roots = [checkout / ".codex/skills"]
+    selected = {skill.name: skill for root in roots for skill in skill_directories(root)}
+    contents = {}
+    for name, skill in selected.items():
+        for path in sorted(skill.rglob("*")):
+            if path.is_file() and "__pycache__" not in path.parts:
+                contents[str(Path(name) / path.relative_to(skill))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    fingerprint = hashlib.sha256(json.dumps(["profile-v1", str(checkout), str(original_home), project_config(project), contents], sort_keys=True).encode())
+    profiles = state / "profiles"
+    profiles.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = profiles / fingerprint.hexdigest()
+    # Only the small Codex profile is captured. Its sessions stay in the
+    # existing state directory and concurrent workers share a complete profile.
+    with (profiles / ".prepare.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        prepare(checkout, original_home, roots, project, target=target)
+        if (target / "config.toml").is_symlink() or (target / "config.toml").read_text() != project_config(project):
+            raise RuntimeError("changed project configuration")
+        captured = [{"source": str(skill), "path": str(target / "repository-skills" / name)} for name, skill in selected.items()]
+        if json.loads((target / "skills.json").read_text()) != captured:
+            raise RuntimeError("changed skill bindings")
+        actual = {str(path.relative_to(target / "repository-skills")): hashlib.sha256(path.read_bytes()).hexdigest()
+                  for path in (target / "repository-skills").rglob("*") if path.is_file() and "__pycache__" not in path.parts}
+        if actual != contents:
+            raise RuntimeError("changed project skills")
+        auth = Path(original_home) / "auth.json"
+        if auth.is_file() and not (target / "auth.json").exists():
+            (target / "auth.json").symlink_to(auth.resolve())
+        bind_sessions(target, state)
     return target
 
 
@@ -76,38 +107,6 @@ def project_config(project_dir):
     return ('[features]\napps = false\nmemories = false\n\n'
             '[memories]\ngenerate_memories = false\nuse_memories = false\n\n'
             '[projects.' + project + ']\ntrust_level = "trusted"\n')
-
-
-def project_home(base, state, project_dir):
-    # Each project needs a distinct Codex home: the pinned release is shared,
-    # but session links and Codex's local databases must never cross projects.
-    key = hashlib.sha256(str(state.resolve()).encode()).hexdigest()
-    target = base / "projects" / key
-    target.mkdir(parents=True, exist_ok=True, mode=0o700)
-    config = project_config(project_dir)
-    with tempfile.NamedTemporaryFile(mode="w", dir=target, delete=False) as output:
-        temporary = Path(output.name)
-        output.write(config)
-    try:
-        try:
-            os.link(temporary, target / "config.toml")
-        except FileExistsError:
-            pass
-    finally:
-        temporary.unlink()
-    if (target / "config.toml").is_symlink() or (target / "config.toml").read_text() != config:
-        raise RuntimeError("changed project configuration")
-    for name in ("skills.json", "skills", "auth.json"):
-        source = base / name
-        if source.exists():
-            try:
-                (target / name).symlink_to(source.resolve(), target_is_directory=source.is_dir())
-            except FileExistsError:
-                pass
-            if not (target / name).is_symlink() or (target / name).resolve() != source.resolve():
-                raise RuntimeError("changed project resource binding")
-    bind_sessions(target, state)
-    return target
 
 
 def launch_config(release, target, cwd, user_home, environment=None):
@@ -150,7 +149,7 @@ def launch_config(release, target, cwd, user_home, environment=None):
     args.extend(["--config", "mcp_servers.symphony_linear.enabled=true",
                  "--config", "mcp_servers.symphony_linear.required=true",
                  "--config", "mcp_servers.symphony_linear.command=" + json.dumps(str(release / "sym-codex-mcp"))])
-    names = ("SYMPHONY_RELEASE_ROOT", "SYMPHONY_ROOT_DIR", "SYMPHONY_LINEAR_ENV_DIR", "SYMPHONY_LINEAR_AUTH_MODE", "SYMPHONY_LINEAR_CLIENT_SECRET_ENV", "SYMPHONY_LINEAR_BINDING_HASH",
+    names = ("SYMPHONY_ROOT_DIR", "SYMPHONY_PROJECT_CONTEXT", "SYMPHONY_LINEAR_ENV_DIR", "SYMPHONY_LINEAR_AUTH_MODE", "SYMPHONY_LINEAR_CLIENT_SECRET_ENV", "SYMPHONY_LINEAR_BINDING_HASH",
              "SYMPHONY_RUN_ID", "SYMPHONY_PHASE", "SYMPHONY_ISSUE_ID", "SYMPHONY_ISSUE_IDENTIFIER",
              "SYMPHONY_SOURCE_REPO", "SYMPHONY_PROJECT_ROOT", "SYMPHONY_PROJECT_WORKTREES_ROOT", "SYMPHONY_WORKFLOW_FILE", "SYMPHONY_CODEX_STATE_ROOT", "SYMPHONY_PYTHON")
     forwarded = ",".join(json.dumps(name) + "=" + json.dumps(environment[name]) for name in names if name in environment)
@@ -191,16 +190,12 @@ def bind_sessions(target, state):
 
 
 def main():
-    release = Path(os.environ["SYMPHONY_RELEASE_ROOT"]).resolve()
-    if not (release / ".symphony-release.json").is_file():
-        raise RuntimeError("unbound release")
-    target = release / ".symphony/codex"
-    if not (target / "skills.json").is_file():
-        raise RuntimeError("skills not captured before startup")
+    release = Path(os.environ["SYMPHONY_ROOT_DIR"]).resolve()
     state = Path(os.environ["SYMPHONY_CODEX_STATE_ROOT"])
     if not state.is_absolute():
         raise RuntimeError("unbound session state")
-    target = project_home(target, state, Path(os.environ["SYMPHONY_PROJECT_ROOT"]))
+    original = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    target = profile_home(release, state, original, Path(os.environ["SYMPHONY_PROJECT_ROOT"]))
     executable = shutil.which("codex")
     if not executable:
         raise RuntimeError("codex unavailable")

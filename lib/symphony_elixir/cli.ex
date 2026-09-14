@@ -153,10 +153,6 @@ defmodule SymphonyElixir.CLI do
     "Failed to start Symphony with workflow #{workflow_path}: #{message}"
   end
 
-  defp format_run_error(workflow_path, :missing_linear_api_token) do
-    "Failed to start Symphony with workflow #{workflow_path}: missing linear api token"
-  end
-
   defp format_run_error(workflow_path, :missing_linear_scope) do
     "Failed to start Symphony with workflow #{workflow_path}: configure exactly one Linear scope using tracker.project_slug/tracker.team_key or LINEAR_PROJECT_SLUG/LINEAR_TEAM_KEY"
   end

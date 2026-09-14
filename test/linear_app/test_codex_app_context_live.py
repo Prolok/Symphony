@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import queue
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -23,9 +24,9 @@ import tomllib
 import unittest
 
 REPO = Path(__file__).resolve().parents[2]
-SPEC = importlib.util.spec_from_file_location("installation_release", REPO / "scripts/installation-release.py")
-release_helper = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(release_helper)
+SPEC = importlib.util.spec_from_file_location("app_context", REPO / "scripts/codex-app-context.py")
+context = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(context)
 
 
 @unittest.skipUnless(os.environ.get("SYMPHONY_TEST_REAL_CODEX") == "1", "opt-in real Codex handshake")
@@ -67,7 +68,6 @@ class RealCodexContextTest(unittest.TestCase):
             "MISE_TRUSTED_CONFIG_PATHS": str(self.release / "mise.toml"),
             "MIX_ENV": "dev", "HEX_HOME": str(self.root / "hex"),
             "SYMPHONY_PYTHON": sys.executable,
-            "SYMPHONY_RELEASE_ROOT": str(self.release),
             "SYMPHONY_ROOT_DIR": str(self.release),
             "SYMPHONY_SOURCE_REPO": str(self.project),
             "SYMPHONY_PROJECT_ROOT": str(self.project),
@@ -89,13 +89,12 @@ class RealCodexContextTest(unittest.TestCase):
         for name in ("lib", "config", "deps", "_build/dev/lib"):
             shutil.copytree(REPO / name, self.release / name, symlinks=False)
         for name in ("mix.exs", "mix.lock", "mise.toml", "sym-codex-mcp",
-                     "scripts/mix-runtime", "scripts/installation-release.py", "scripts/codex-app-context.py"):
+                     "scripts/mix-runtime", "scripts/codex-app-context.py"):
             target = self.release / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPO / name, target)
         (self.release / "WORKFLOW.md").write_text('---\ntracker:\n  kind: linear\n  auth_mode: app\n---\nSynthetic handshake only.\n')
         (self.release / ".symphony").mkdir()
-        (self.release / ".symphony/root-config.json").write_text(json.dumps({"root": str(self.release), "values": {}}))
         self.git(self.release, "init", "-q")
         self.git(self.release, "-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
                  "commit", "--allow-empty", "-qm", "fixture")
@@ -104,12 +103,10 @@ class RealCodexContextTest(unittest.TestCase):
     def git(self, directory, *args):
         subprocess.run(["git", "-C", str(directory), *args], env=self.env, check=True, capture_output=True)
 
-    def seal(self, cwd):
-        subprocess.run([sys.executable, str(self.release / "scripts/installation-release.py"), "seal", str(self.release)],
-                       cwd=cwd, env=self.env, check=True, capture_output=True)
-        self.manifest = (self.release / ".symphony-release.json").read_bytes()
+    def prepare(self, cwd):
+        home = context.profile_home(self.release, Path(self.env["SYMPHONY_CODEX_STATE_ROOT"]), self.original, cwd)
+        self.config = home / "config.toml"
         self.config_before = self.config.read_bytes()
-        release_helper.verify(self.release)
 
     def handshake(self, cwd):
         # The deliberately unusable local provider prevents any remote model
@@ -118,6 +115,7 @@ class RealCodexContextTest(unittest.TestCase):
                 "--config", 'model_provider="offline_probe"',
                 "--config", 'model_providers.offline_probe={name="Offline probe",base_url="http://127.0.0.1:9",wire_api="responses",requires_openai_auth=false}',
                 "--config", 'cli_auth_credentials_store="file"',
+                "--config", "features.remote_plugin=false",
                 "app-server"]
         messages = queue.Queue()
         with tempfile.TemporaryFile(mode="w+") as stderr:
@@ -178,15 +176,17 @@ class RealCodexContextTest(unittest.TestCase):
                     # which prohibit process-group signals.
                     process.terminate()
                     process.wait(timeout=5)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 reader.join(timeout=5)
                 process.stdout.close()
                 stderr.seek(0)
                 self.last_stderr = stderr.read()
 
     def assert_unchanged(self):
-        self.assertEqual((self.release / ".symphony-release.json").read_bytes(), self.manifest)
         self.assertEqual(self.config.read_bytes(), self.config_before)
-        release_helper.verify(self.release)
         self.assertFalse(self.marker.exists(), "Personal/project MCP must stay disabled")
 
     def assert_direct_mcp(self):
@@ -209,7 +209,7 @@ class RealCodexContextTest(unittest.TestCase):
         (self.project / ".codex/config.toml").write_text(self.foreign_config)
         launch_worktree = self.root / "worktrees" / "launch"
         self.git(self.project, "worktree", "add", "--detach", str(launch_worktree))
-        self.seal(launch_worktree)
+        self.prepare(launch_worktree)
         self.assertEqual(tomllib.loads(self.config.read_text())["projects"], {
             str(self.project): {"trust_level": "trusted"},
         })
@@ -230,14 +230,11 @@ class RealCodexContextTest(unittest.TestCase):
         self.assertIn("linear_graphql", json.dumps(status))
         self.assert_unchanged()
         self.config.write_text(self.config.read_text().replace("apps = false", "apps = true"))
-        with self.assertRaisesRegex(RuntimeError, "content changed"):
-            release_helper.verify(self.release)
-        started, _ = self.handshake(worktree)
-        self.assertIn("error", started, started)
-        self.assertIn("symphony_linear", started["error"]["message"])
+        with self.assertRaisesRegex(RuntimeError, "changed project configuration"):
+            context.profile_home(self.release, Path(self.env["SYMPHONY_CODEX_STATE_ROOT"]), self.original, worktree)
 
     def test_second_project_uses_its_own_home_and_keeps_the_release_unchanged(self):
-        self.seal(self.project)
+        self.prepare(self.project)
         started, _ = self.handshake(self.project)
         self.assertIn("result", started, f"{started}\n{self.last_stderr}")
         second = self.root / "second-project"
@@ -249,7 +246,7 @@ class RealCodexContextTest(unittest.TestCase):
         started, status = self.handshake(second)
         self.assertIn("result", started, f"{started}\n{self.last_stderr}")
         self.assertIn("linear_graphql", json.dumps(status))
-        homes = list((self.release / ".symphony/codex/projects").iterdir())
+        homes = [path for state in ("sessions-state", "second-state") for path in (self.root / state / "profiles").iterdir() if path.is_dir()]
         self.assertEqual(len(homes), 2)
         self.assertEqual({(home / "sessions").resolve() for home in homes}, {
             self.root / "sessions-state/sessions", self.root / "second-state/sessions"})

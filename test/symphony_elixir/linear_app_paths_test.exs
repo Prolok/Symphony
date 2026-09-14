@@ -25,7 +25,7 @@ defmodule SymphonyElixir.LinearAppPathsTest do
     workflow = Path.join(root, "WORKFLOW.md")
 
     config = %{
-      "tracker" => %{"kind" => "linear", "auth_mode" => "app", "api_key" => "synthetic-personal", "app" => binding, "project_slug" => "pilot", "assignee" => "07fed51a-0ba0-4314-9179-a62cfb3af28d"}
+      "tracker" => %{"kind" => "linear", "auth_mode" => "app", "app" => binding, "project_slug" => "pilot", "assignee" => "07fed51a-0ba0-4314-9179-a62cfb3af28d"}
     }
 
     File.write!(workflow, "---\n" <> Jason.encode!(config) <> "\n---\nSynthetic instruction\n")
@@ -88,6 +88,9 @@ defmodule SymphonyElixir.LinearAppPathsTest do
   end
 
   test "all tool entrypoints visibly stop on missing client secret despite a personal API key" do
+    previous = System.get_env("LINEAR_API_KEY")
+    on_exit(fn -> restore_env("LINEAR_API_KEY", previous) end)
+    System.put_env("LINEAR_API_KEY", "synthetic-personal")
     System.delete_env("SYMPHONY_TEST_PATHS_SECRET")
     assert {:error, _} = Tracker.create_comment("issue", "blocked")
     assert %{"success" => false} = DynamicTool.execute("linear_graphql", %{"query" => create_query("blocked")})
@@ -109,27 +112,25 @@ defmodule SymphonyElixir.LinearAppPathsTest do
     end
   end
 
-  test "fallback EnvFile loading cannot change pinned auth while personal keys remain ignored", %{root: root} do
+  test "EnvFile loading preserves pinned app auth and rejects rebinding", %{root: root} do
     env = Config.linear_runtime_env()
     System.put_env(env)
-    File.write!(Path.join(root, ".env.local"), "LINEAR_API_KEY=synthetic-personal\n")
+    File.write!(Path.join(root, ".env.local"), "SYMPHONY_LINEAR_AUTH_MODE=app\n")
     assert :ok = EnvFile.load(root, override_existing: true)
-    refute Map.has_key?(Config.settings!().tracker, :api_key)
+    assert Config.linear_runtime_env() == env
     assert :ok = Tracker.create_comment("issue", "fallback reply")
     File.write!(Path.join(root, ".env.local"), "SYMPHONY_LINEAR_AUTH_MODE=legacy\n")
     assert {:error, :linear_runtime_binding_changed} = EnvFile.load(root, override_existing: true)
     assert System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app"
     System.delete_env("SYMPHONY_LINEAR_BINDING_HASH")
     assert {:error, :linear_runtime_binding_missing} = Config.settings()
-    System.delete_env("LINEAR_API_KEY")
   end
 
   test "app worker requires one app-owned active workpad before entering its callback", %{root: root} do
     directory = Path.join(root, "priv/linear_app")
     File.mkdir_p!(directory)
-    File.write!(Path.join(root, ".symphony-release.json"), "{}")
     File.write!(Path.join(directory, "issue_lease.py"), "import sys\nprint('locked', flush=True)\nsys.stdin.read()\n")
-    System.put_env("SYMPHONY_RELEASE_ROOT", root)
+    System.put_env("SYMPHONY_ROOT_DIR", root)
     Process.put(:workpad_comments, [])
     assert :bootstrap = IssueLease.run(%Issue{id: "issue"}, fn -> :bootstrap end)
     refute_received :http_write
@@ -237,13 +238,13 @@ defmodule SymphonyElixir.LinearAppPathsTest do
     assert Config.settings!().tracker.auth_mode == "app"
   end
 
-  test "workflow instructions resolve global skills only inside their bound release", context do
-    System.put_env("SYMPHONY_RELEASE_ROOT", context.root)
+  test "workflow instructions resolve global skills only inside their bound checkout", context do
+    System.put_env("SYMPHONY_ROOT_DIR", context.root)
     prompt = "globals={{ runtime.global_skill_roots_text }}"
     File.write!(context.workflow, "---\n" <> Jason.encode!(context.config) <> "\n---\n" <> prompt)
     assert :ok = WorkflowStore.force_reload()
     issue = %Issue{id: "issue", identifier: "PRO-676", state: "In Arbeit (AI)"}
-    assert PromptBuilder.build_prompt(issue) == "globals=#{context.root}/.symphony/codex/skills"
+    assert PromptBuilder.build_prompt(issue) == "globals=#{context.root}/.codex/skills"
   end
 
   defp create_query(body), do: "mutation { commentCreate(input: {issueId: \"issue\", body: #{Jason.encode!(body)}}) { success } }"

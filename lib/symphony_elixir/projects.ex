@@ -14,7 +14,7 @@ defmodule SymphonyElixir.Projects do
          root_env <- Map.merge(Map.take(values, EnvFile.root_config_names()), Map.take(System.get_env(), EnvFile.root_config_names())),
          {:ok, roots} <- ProjectContext.discover(Map.get(root_env, "SYM_PROJECT_ROOT", "~/QuantHub"), code_root),
          false <- roots == [],
-         {:ok, contexts} <- load_contexts(roots, workflow, root_env),
+         {:ok, contexts} <- load_contexts(roots, workflow, root_env, code_root),
          :ok <- validate_workspace_roots(contexts),
          :ok <- Client.validate_workspace_bindings(contexts) do
       Application.put_env(:symphony_elixir, :project_contexts, contexts)
@@ -111,9 +111,9 @@ defmodule SymphonyElixir.Projects do
     {:reply, result, contexts}
   end
 
-  defp load_contexts(roots, workflow, env) do
+  defp load_contexts(roots, workflow, env, code_root) do
     Enum.reduce_while(roots, {:ok, []}, fn root, {:ok, contexts} ->
-      case ProjectContext.load(root, workflow, env) do
+      case ProjectContext.load(root, workflow, env, code_root) do
         {:ok, context} -> {:cont, {:ok, contexts ++ [context]}}
         {:error, reason} -> {:halt, {:error, {:invalid_project, root, reason}}}
       end

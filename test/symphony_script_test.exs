@@ -45,7 +45,7 @@ defmodule SymphonyScriptTest do
 
       # Real release preparation, launcher and helper scripts; only external
       # build tools and Codex's JSON-RPC peer are fixtures. No tracker calls.
-      for name <- ["sym-codex", "sym-codex-mcp", "scripts/installation-release.py", "scripts/codex-app-context.py"] do
+      for name <- ["sym-codex", "sym-codex-mcp", "scripts/codex-app-context.py"] do
         File.cp!(Path.expand("../#{name}", __DIR__), Path.join(repo_dir, name))
       end
 
@@ -140,14 +140,14 @@ defmodule SymphonyScriptTest do
       set -eu
       # Bash 3.2 does not apply errexit to a failed [[ ... ]] expression.
       [[ "$*" == *app-server* ]] || exit 1
-      [[ "$CODEX_HOME" == "$SYMPHONY_RELEASE_ROOT/.symphony/codex/projects/"* ]] || exit 1
+      [[ "$CODEX_HOME" == "$SYMPHONY_CODEX_STATE_ROOT/profiles/"* ]] || exit 1
       [[ -L "$CODEX_HOME/sessions" ]] || exit 1
       [[ "$(readlink "$CODEX_HOME/sessions")" == "$SYMPHONY_CODEX_STATE_ROOT/sessions" ]] || exit 1
       [[ "$SYMPHONY_LINEAR_AUTH_MODE" == app ]] || exit 1
       [[ "$*" == *SYMPHONY_PYTHON* ]] || exit 1
       [[ -n "$SYMPHONY_LINEAR_BINDING_HASH" ]] || exit 1
       printf 'codex-app-bound\\n' >> #{shell_quote(trace)}
-      "$SYMPHONY_RELEASE_ROOT/sym-codex-mcp"
+      "$SYMPHONY_ROOT_DIR/sym-codex-mcp"
       printf 'mcp-helper-started\\n' >> #{shell_quote(trace)}
       while IFS= read -r line; do
         case "$line" in
@@ -268,7 +268,7 @@ defmodule SymphonyScriptTest do
     assert output =~ "symphony-stub"
 
     assert File.read!(Path.join(repo_dir, ".mix-calls")) ==
-             "deps.loadpaths\ndeps.get\ncompile\nescript.build\nrun\n"
+             "deps.loadpaths\ndeps.get\ncompile\nescript.build\n"
   end
 
   test "symphony clears inherited Mix artifact paths before preflight and launch" do
@@ -535,7 +535,7 @@ defmodule SymphonyScriptTest do
     assert {"", 1} = System.cmd("/bin/bash", ["-c", "command -v escript"], env: env)
     File.write!(Path.join(repo_dir, "bin/symphony"), "#!/bin/bash\ncommand -v escript\n")
     assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
-    assert String.trim(output) == Path.join(bin_dir, "runtime/escript")
+    assert String.ends_with?(output, Path.join(bin_dir, "runtime/escript") <> "\n")
     assert {"", 1} = System.cmd("/bin/bash", ["-c", "command -v escript"], env: env)
   end
 
@@ -576,6 +576,9 @@ defmodule SymphonyScriptTest do
           {[{"SYMPHONY_TEST_DEPS_LOADPATHS_STATUS", "1"}, {"SYMPHONY_TEST_DEPS_GET_STATUS", "7"}], 7},
           {[{"SYMPHONY_TEST_ESCRIPT_STATUS", "6"}], 6}
         ] do
+      # Require a new build so the injected failure cannot be skipped by a
+      # successfully cached escript from the preceding iteration.
+      File.write!(Path.join(repo_dir, "mix.exs"), "# changed build #{expected_status}\n")
       assert {_output, ^expected_status} = run_script(repo_dir, home_dir, bin_dir, [], env: env)
       await_service_unlock(home_dir)
       assert {_output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
@@ -661,21 +664,6 @@ defmodule SymphonyScriptTest do
     File.cp!(@script_source, Path.join(repo_dir, "symphony"))
     File.cp!(@mix_runtime_source, Path.join(repo_dir, "scripts/mix-runtime"))
     File.cp!(Path.expand("../scripts/service-lock.py", __DIR__), Path.join(repo_dir, "scripts/service-lock.py"))
-    # These tests exercise preflight, build locking and launch inside an
-    # isolated release. The real snapshot copier has separate process tests.
-    File.write!(Path.join(repo_dir, "scripts/installation-release.py"), """
-    import os, pathlib, re, sys
-    action, root, *args = sys.argv[1:]
-    if action == "app-workflow":
-        workflow = pathlib.Path(root) / "WORKFLOW.md"
-        sys.exit(0 if workflow.is_file() and re.search(r'auth_mode["\\x27]?\\s*:\\s*["\\x27]?app\\b', workflow.read_text()) else 1)
-    if action == "start":
-        os.environ["SYMPHONY_RELEASE_ROOT"] = root
-        os.environ["SYMPHONY_ROOT_DIR"] = root
-        target = os.path.join(root, "scripts/mix-runtime")
-        os.execv(target, [target, "start", root, *args])
-    """)
-
     File.write!(Path.join(repo_dir, "sym-codex"), "#!/usr/bin/env bash\n")
     File.write!(Path.join(repo_dir, "sym-watch"), "#!/usr/bin/env bash\n")
 

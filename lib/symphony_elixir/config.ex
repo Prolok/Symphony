@@ -7,6 +7,9 @@ defmodule SymphonyElixir.Config do
   alias SymphonyElixir.Linear.WriteContext
 
   alias SymphonyElixir.Config.Schema
+
+  alias SymphonyElixir.Relay.Config, as: RelayConfig
+
   alias SymphonyElixir.{EnvFile, ProjectContext, Workflow}
 
   @type linear_scope :: {:project, String.t()} | {:team, String.t()}
@@ -75,6 +78,19 @@ defmodule SymphonyElixir.Config do
     Application.get_env(:symphony_elixir, :linear_rate_limit_root, Path.join(System.user_home!(), ".cache/symphony/rate-limits"))
   end
 
+  @spec relay_state_root() :: Path.t()
+  def relay_state_root do
+    Application.get_env(:symphony_elixir, :relay_state_root, Path.join(System.user_home!(), ".local/state/symphony/relay"))
+  end
+
+  @spec relay_secret_reference() :: String.t() | nil
+  def relay_secret_reference do
+    case Workflow.current() do
+      {:ok, %{config: %{"tracker" => %{"relay" => relay}}}} when is_map(relay) -> relay["key_env"] || "LINEAR_RELAY_KEY"
+      _ -> "LINEAR_RELAY_KEY"
+    end
+  end
+
   @doc "Non-secret environment names excluded from non-authentication children."
   @spec linear_secret_env_names() :: [String.t()]
   def linear_secret_env_names do
@@ -85,7 +101,13 @@ defmodule SymphonyElixir.Config do
       end
 
     # Never forward an inherited personal credential, even though it is no longer an auth input.
-    ["LINEAR_APP_SECRET", "LINEAR_API_KEY", configured, System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")]
+    relay =
+      case relay_secret_reference() do
+        "$" <> name -> ProjectContext.env(name)
+        name -> name
+      end
+
+    ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_RELAY_KEY", relay, configured, System.get_env("SYMPHONY_RELAY_KEY_ENV"), System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")]
     |> Enum.filter(&(is_binary(&1) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, &1)))
     |> Enum.uniq()
   end
@@ -114,6 +136,7 @@ defmodule SymphonyElixir.Config do
       %{
         "SYMPHONY_LINEAR_AUTH_MODE" => tracker.auth_mode,
         "SYMPHONY_LINEAR_CLIENT_SECRET_ENV" => tracker.app["client_secret_env"],
+        "SYMPHONY_RELAY_KEY_ENV" => if(tracker.relay, do: tracker.relay["key_env"], else: "LINEAR_RELAY_KEY"),
         "SYMPHONY_CODEX_STATE_ROOT" => Path.join([tracker.app["state_root"], "codex", tracker.app["installation_id"]]),
         "SYMPHONY_LINEAR_BINDING_HASH" => binding_hash(tracker),
         "SYMPHONY_RUN_ID" => WriteContext.current()["run_id"] || "",
@@ -139,7 +162,7 @@ defmodule SymphonyElixir.Config do
   end
 
   defp binding_hash(tracker) do
-    {tracker.auth_mode, tracker.app, tracker.endpoint, tracker.project_slug, tracker.team_key, tracker.assignee}
+    {tracker.auth_mode, tracker.app, tracker.relay, tracker.endpoint, tracker.project_slug, tracker.team_key, tracker.assignee}
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
@@ -338,6 +361,7 @@ defmodule SymphonyElixir.Config do
 
   defp validate_linear_tracker(%{tracker: %{auth_mode: "app"} = tracker}) do
     with :ok <- AppAuth.validate(tracker),
+         :ok <- RelayConfig.validate(tracker.relay),
          :ok <- LocalState.validate(tracker.app),
          {:ok, _scope} <- linear_scope(tracker) do
       :ok

@@ -20,8 +20,13 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
     case {ProjectContext.current(), Process.whereis(ProjectPoller)} do
-      {%SymphonyElixir.ProjectContext{} = context, pid} when is_pid(pid) -> ProjectPoller.candidates(context)
-      _ -> adapter().fetch_candidate_issues()
+      {%SymphonyElixir.ProjectContext{} = context, pid} when is_pid(pid) ->
+        ProjectPoller.candidates(context)
+
+      _ ->
+        if Config.settings!().tracker.relay,
+          do: {:error, :relay_unavailable},
+          else: adapter().fetch_candidate_issues()
     end
   end
 

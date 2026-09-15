@@ -467,7 +467,7 @@ defmodule SymphonyElixir.Orchestrator do
     if running_ids == [] do
       state
     else
-      case Tracker.fetch_issue_states_by_ids(running_ids) do
+      case SymphonyElixir.Relay.background_issues(running_ids) do
         {:ok, issues} ->
           issues
           |> reconcile_running_issue_states(
@@ -1095,12 +1095,16 @@ defmodule SymphonyElixir.Orchestrator do
       dispatch_recovery_ready?(retry_attempts, review_cleanup_blocked, issue.id) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
-      available_slots(state) > 0 and
+      executor_has_capacity?(issue, state) and
       state_slots_available?(issue, state) and
       worker_slots_available?(issue, state, nil)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp executor_has_capacity?(issue, state) do
+    SymphonyElixir.Relay.execution_allowed(issue) == :ok and available_slots(state) > 0
+  end
 
   defp pending_retry?(retry_attempts, issue_id) when is_map(retry_attempts) and is_binary(issue_id) do
     Map.has_key?(retry_attempts, issue_id)
@@ -1416,7 +1420,9 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if retry_candidate_issue?(refreshed_issue, terminal_states) do
+        allowed = SymphonyElixir.Relay.execution_allowed(refreshed_issue) == :ok
+
+        if retry_candidate_issue?(refreshed_issue, terminal_states) and allowed do
           {:ok, refreshed_issue}
         else
           {:skip, refreshed_issue}
@@ -1492,6 +1498,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dialog_full_check_needed?(_issue, _state, _dialog_issue_count, _now_ms), do: true
 
+  # Relay invalidations and the workspace safety snapshot advance this key.
+  # Keep the candidate's epoch across the scan so a concurrent event cannot be
+  # mistaken for an already checked comment version.
+  defp dialog_safety_full_check_due?(%{comment_key: {:relay, _, _}}, _state, _count, _now), do: false
+
   defp dialog_safety_full_check_due?(observation, %State{} = state, dialog_issue_count, now_ms)
        when is_map(observation) and is_integer(now_ms) do
     case Map.get(observation, :last_full_check_at_ms) do
@@ -1563,6 +1574,10 @@ defmodule SymphonyElixir.Orchestrator do
         Map.has_key?(state_after_dispatch.retry_attempts, issue_id)
 
     new_running_entry? or new_retry_entry?
+  end
+
+  defp dialog_comment_signal_key(%{relay_epoch: epoch} = signal) do
+    {:relay, epoch, dialog_comment_signal_key(Map.delete(signal, :relay_epoch))}
   end
 
   defp dialog_comment_signal_key(%{id: id, created_at: created_at, updated_at: updated_at}) do

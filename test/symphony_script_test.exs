@@ -208,8 +208,8 @@ defmodule SymphonyScriptTest do
     File.mkdir_p!(project_dir)
     File.write!(Path.join(project_dir, "WORKFLOW.md"), "---\n---\n")
 
-    assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, ["--port", "4001"], cd: project_dir)
-    assert output =~ "symphony-stub args=--port 4001"
+    assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, ["--port", "4001", "--budget-capture", "/public/run.json"], cd: project_dir)
+    assert output =~ "symphony-stub args=--port 4001 --budget-capture /public/run.json"
     assert output =~ "symphony-stub cwd=#{project_dir}"
     assert output =~ "symphony-stub codex_command=\n"
     assert output =~ "symphony-stub project_root=\n"

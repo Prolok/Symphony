@@ -75,3 +75,31 @@ Complexity-Limit-, Remaining- und Resetwerte, `X-Complexity` und gültiges
 die gewählte lokale Deadline und Restpause. Vorhandene `issue_id`,
 `issue_identifier` und `session_id` bleiben erhalten; Payloads, unbekannte Header
 und Zugangsdaten werden nicht als Budgetdiagnose ausgegeben.
+
+`[:symphony, :linear, :request]` liefert je tatsächlich ausgeführter Anfrage
+`requests: 1`, Dauer, HTTP-Status (oder `transport_error`) und die erlaubten Antwortheader, gruppiert nach Workspace
+und Anfrageart. Lokal unterdrückte Anfragen zählen nicht. Für kontrollierte
+Messläufe aktiviert die vertrauenswürdige Runtime
+`Application.put_env(:symphony_elixir, :linear_budget_measurements, true)` und
+Debug-Logging; `Linear request measurement=` enthält dann dieselben Daten als
+JSON. `scripts/linear-budget-report.py <log>` fasst diese Datensätze zusammen.
+Fehlende `X-Complexity`-Header werden durch die separate Stichprobenzahl sichtbar,
+nicht als gemessener Nullverbrauch gewertet. Normale CLI-/MCP-Ausgabe bleibt frei
+von Messdatensätzen. Relay-Zustandslogs enthalten Workspace, Betriebszustand und
+einen sekretfreien Fehlercode; Receipts, Snapshot-Tokens und Ereignispayloads
+gehören nicht in Logs.
+
+`[:symphony, :relay, :request]` zählt tatsächliche Transportaufrufe je Workspace
+und `register`/`poll`/`ack`/`resync`, einschließlich HTTP-Fehlern und
+Transportabbrüchen. Lokale Key-/Konfigurationsfehler zählen nicht als HTTP.
+`symphony-PRO-716 --budget-capture /ABS/run.json` aktiviert
+`SymphonyElixir.BudgetCapture` ausschließlich im Testprozess vor Discovery/Auth
+bis zum Shutdown. Der bestehende Recorder zeichnet beide Ereignisse synchron als
+`Budget capture=`-JSONL auf: fortlaufende Sequenz, monotone Messzeit, UTC-Zeit,
+Phase, Dauer und erlaubte Metadaten. Die Datei wird exklusiv erstellt und an
+Phasengrenzen synchronisiert; kein Debug-Level oder rotierendes Log nötig.
+Ein verlorener Telemetry-Handler, fehlendes Ende oder eine fehlgeschlagene Aktion
+verhindert einen vollständigen Capture. Der Recorder erfasst den aktuellen
+BEAM-Prozess; andere App-Prozesse müssen separat erfasst/ausgewiesen werden.
+Aufruf, Lastvertrag und Wiederherstellung stehen unter
+[Operator-Messübergabe](linear-app.md#ausführbare-operator-messübergabe-pro-716).

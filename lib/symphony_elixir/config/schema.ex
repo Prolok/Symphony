@@ -64,6 +64,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
       field(:auth_mode, :string, default: "app")
       field(:app, :map, default: %{})
+      field(:relay, :map)
       field(:project_slug, :string)
       field(:team_key, :string)
       field(:assignee, :string)
@@ -81,7 +82,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        ~w(kind endpoint auth_mode app project_slug team_key assignee active_states terminal_states)a,
+        ~w(kind endpoint auth_mode app relay project_slug team_key assignee active_states terminal_states)a,
         empty_values: []
       )
       |> validate_inclusion(:auth_mode, ["app"])
@@ -402,6 +403,7 @@ defmodule SymphonyElixir.Config.Schema do
     tracker = %{
       settings.tracker
       | app: resolve_app_binding(settings.tracker),
+        relay: resolve_relay(settings.tracker.relay),
         project_slug: resolve_linear_scope_setting(settings.tracker.project_slug, @linear_project_slug_env),
         team_key: resolve_linear_scope_setting(settings.tracker.team_key, @linear_team_key_env),
         assignee: resolve_secret_setting(settings.tracker.assignee, ProjectContext.env("LINEAR_ASSIGNEE")),
@@ -432,6 +434,33 @@ defmodule SymphonyElixir.Config.Schema do
     end)
     |> Map.put("installation_id", "symphony")
     |> bind_project_state()
+  end
+
+  defp resolve_relay(nil), do: nil
+
+  defp resolve_relay(relay) do
+    resolved = Map.new(relay, fn {key, value} -> {key, if(is_binary(value), do: resolve_secret_setting(value, nil), else: value)} end)
+
+    owners =
+      case resolved["owners"] do
+        value when is_binary(value) ->
+          case Jason.decode(value) do
+            {:ok, owners} when is_map(owners) -> owners
+            _ -> :invalid
+          end
+
+        nil ->
+          %{}
+
+        value ->
+          value
+      end
+
+    resolved
+    |> Map.put("owners", owners)
+    |> Map.put_new("key_env", "LINEAR_RELAY_KEY")
+    |> Map.put_new("reconcile_ms", 3_600_000)
+    |> Map.put("state_root", resolved["state_root"] || SymphonyElixir.Config.relay_state_root())
   end
 
   defp bind_project_state(app) do

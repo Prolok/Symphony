@@ -79,6 +79,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </p>
         </section>
       <% else %>
+        <section :if={@payload[:relay] not in [nil, %{}]} class="section-card">
+          <h2>LinearRelay</h2>
+          <article :for={{workspace, relay} <- @payload.relay}>
+            <p><strong><%= workspace %></strong>: <%= relay.status %></p>
+            <p :if={relay[:consumer_id]}>Consumer: <%= relay.consumer_id %></p>
+            <p :if={relay.error}><%= relay.error %></p>
+            <p :for={{assignee, execution} <- relay.execution}><%= assignee %>: <%= execution %></p>
+          </article>
+        </section>
         <section class="metric-grid">
           <article class="metric-card">
             <p class="metric-label">Running</p>

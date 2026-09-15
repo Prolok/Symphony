@@ -52,7 +52,7 @@ defmodule SymphonyElixir.ProjectContext do
   def load(root, workflow_path, root_env, code_root \\ nil) do
     with {:ok, root} <- PathSafety.canonicalize(root),
          {:ok, workflow} <- Workflow.load(workflow_path),
-         {:ok, public_env} <- EnvFile.read_public(EnvFile.config_dir(root), get_in(workflow.config, ["tracker", "app", "client_secret_env"])) do
+         {:ok, public_env} <- EnvFile.read_public(EnvFile.config_dir(root), get_in(workflow.config, ["tracker", "app", "client_secret_env"]), get_in(workflow.config, ["tracker", "relay", "key_env"])) do
       env =
         public_env
         |> Map.drop(EnvFile.root_config_names() ++ SymphonyElixir.RuntimePaths.runtime_env_names())
@@ -147,7 +147,7 @@ defmodule SymphonyElixir.ProjectContext do
   defp accept_refreshed_context({:ok, %{workflow: workflow, env: env}}, %{workflow: workflow, env: env} = context), do: context
 
   defp accept_refreshed_context({:ok, updated}, context) do
-    keys = [:auth_mode, :app, :assignee, :endpoint, :kind, :project_slug, :team_key]
+    keys = [:auth_mode, :app, :relay, :assignee, :endpoint, :kind, :project_slug, :team_key]
 
     if Map.take(updated.settings.tracker, keys) == Map.take(context.settings.tracker, keys) and
          updated.settings.workspace.root == context.settings.workspace.root,

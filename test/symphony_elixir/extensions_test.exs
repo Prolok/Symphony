@@ -848,6 +848,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     state_payload = json_response(conn, 200)
 
     assert state_payload == %{
+             "relay" => %{},
              "projects" => [],
              "generated_at" => state_payload["generated_at"],
              "counts" => %{"running" => 1, "retrying" => 1},
@@ -1049,6 +1050,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     orchestrator_name = Module.concat(__MODULE__, :DashboardOrchestrator)
     snapshot = static_snapshot()
 
+    relay = %{
+      "relay-workspace" => %{status: :degraded, consumer_id: "rechner-anna", error: "relay_transport_unavailable", execution: %{"human" => "Starts gesperrt: Zuordnung fehlt oder ist mehrdeutig"}}
+    }
+
+    snapshot = Map.put(snapshot, :polling, %{relay: relay})
+
     {:ok, orchestrator_pid} =
       StaticOrchestrator.start_link(
         name: orchestrator_name,
@@ -1064,6 +1071,16 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
+    assert html =~ "relay-workspace"
+    assert html =~ "rechner-anna"
+    assert html =~ "Starts gesperrt"
+    assert html =~ "relay_transport_unavailable"
+    payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert payload["relay"]["relay-workspace"]["consumer_id"] == "rechner-anna"
+    terminal_snapshot = %{snapshot | running: [], retrying: []}
+    terminal = StatusDashboard.format_snapshot_content_for_test({:ok, terminal_snapshot}, 0)
+    assert terminal =~ "rechner-anna"
+    assert terminal =~ "Starts gesperrt"
     assert html =~ "Operations Dashboard"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"

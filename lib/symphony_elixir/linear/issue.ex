@@ -25,6 +25,7 @@ defmodule SymphonyElixir.Linear.Issue do
   ]
 
   @type comment_signal :: %{
+          optional(:relay_epoch) => String.t(),
           optional(:id) => String.t() | nil,
           optional(:created_at) => DateTime.t() | nil,
           optional(:updated_at) => DateTime.t() | nil

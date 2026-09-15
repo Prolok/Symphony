@@ -35,14 +35,24 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   @spec background_scan(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def background_scan(issue, opts \\ []) do
+    if SymphonyElixir.Relay.enabled?() do
+      with {:ok, epoch} <- SymphonyElixir.ProjectPoller.comment_epoch(ProjectContext.current(), issue.id) do
+        background_scan_with_epoch(issue, Keyword.put(opts, :relay_epoch, epoch))
+      end
+    else
+      background_scan_with_epoch(issue, opts)
+    end
+  end
+
+  defp background_scan_with_epoch(issue, opts) do
     # Persisted observations survive restarts; scheduling evidence does not.
     runtime = background_runtime()
-    key = :crypto.hash(:sha256, :erlang.term_to_binary({runtime, Config.settings!().tracker, opts[:adoption]})) |> Base.encode16()
+    key = :crypto.hash(:sha256, :erlang.term_to_binary({runtime, Config.settings!().tracker, opts[:adoption], opts[:relay_epoch]})) |> Base.encode16()
 
     opts =
       opts
       |> Keyword.put(:background_key, key)
-      |> Keyword.put(:background_interval, background_interval_ms())
+      |> Keyword.put(:background_interval, if(opts[:relay_epoch], do: 604_800_000, else: background_interval_ms()))
       |> Keyword.put_new(:signal, fn -> Client.comment_scan_signal(issue.id) end)
       |> Keyword.put_new(:fetch_after_signal, &Client.scan_issue_comments(issue.id, &1))
 

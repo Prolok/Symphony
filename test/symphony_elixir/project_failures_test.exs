@@ -192,8 +192,20 @@ defmodule SymphonyElixir.ProjectFailuresTest do
   test "full service refreshes one cache, exposes failures and stops only when all projects are idle", %{root: root} do
     project = Path.join(root, "ServiceProject")
     File.mkdir_p!(Path.join(project, ".symphony"))
-    File.write!(Path.join(project, ".symphony/.env"), "LINEAR_ASSIGNEE=dev@example.com\n")
+    File.write!(Path.join(project, ".symphony/.env"), "LINEAR_ASSIGNEE=dev@example.com\nLINEAR_RELAY_KEY=relay-key\n")
     {:ok, context} = ProjectContext.load(project, Workflow.workflow_file_path(), %{})
+
+    relay = %{
+      "endpoint" => "https://relay.test",
+      "key_env" => "LINEAR_RELAY_KEY",
+      "consumer_id" => "one",
+      "owners" => %{"human" => "one"},
+      "state_root" => Path.join(root, "relay-state"),
+      "reconcile_ms" => 3_600_000
+    }
+
+    context = put_in(context.settings.tracker.relay, relay)
+    context = put_in(context.workflow.config["tracker"]["relay"], relay)
     settings = context.settings
 
     settings = %{
@@ -204,6 +216,7 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     }
 
     context = %{context | settings: settings}
+    File.write!(context.workflow_path, "---\n" <> Jason.encode!(context.workflow.config) <> "\n---\n" <> context.workflow.prompt)
     mode = start_supervised!({Agent, fn -> :ok end})
     parent = self()
 
@@ -224,6 +237,25 @@ defmodule SymphonyElixir.ProjectFailuresTest do
       end
     end)
 
+    relay_server = start_supervised!(SymphonyElixir.RelayFixture)
+    token_plug = Req.default_options()[:plug]
+
+    Req.default_options(
+      plug: fn conn ->
+        if conn.host == "relay.test" do
+          send(parent, :relay_poll)
+
+          if Agent.get(mode, & &1) == :offline do
+            conn |> Plug.Conn.put_status(503) |> Req.Test.json(%{"version" => 1, "error" => "unavailable"})
+          else
+            SymphonyElixir.RelayFixture.http(conn, relay_server, %{"relay-key" => "synthetic-workspace"})
+          end
+        else
+          token_plug.(conn)
+        end
+      end
+    )
+
     :ok = Application.stop(:symphony_elixir)
     Application.put_env(:symphony_elixir, :project_contexts, [context])
     Application.put_env(:symphony_elixir, :service_settings, settings)
@@ -242,17 +274,22 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     send(ProjectPoller, {:poll, make_ref()})
     assert :sys.get_state(ProjectPoller).timer_token == poll.timer_token
     send(ProjectPoller, {:poll, poll.timer_token})
-    assert_receive :candidate_poll, 2_000
+    assert_receive :relay_poll, 2_000
     assert %{queued: true} = Orchestrator.request_refresh()
-    assert_receive :candidate_poll, 2_000
+    assert_receive :relay_poll, 2_000
     assert {:ok, []} = ProjectPoller.candidates(context)
     Agent.update(mode, fn _ -> :offline end)
     ProjectPoller.refresh()
-    assert_receive :candidate_poll, 2_000
+    assert_receive :relay_poll, 2_000
     assert {:error, _} = ProjectPoller.candidates(context)
     Agent.update(mode, fn _ -> :ok end)
+
+    :sys.replace_state(ProjectPoller, fn state ->
+      update_in(state.relays["synthetic-workspace"], &%{&1 | retry_at: 0})
+    end)
+
     ProjectPoller.refresh()
-    assert_receive :candidate_poll, 2_000
+    assert_receive :relay_poll, 2_000
     assert {:ok, []} = ProjectPoller.candidates(context)
     assert {:reply, :unavailable, _} = Projects.handle_call(:snapshot, nil, [%{context | id: "missing"}])
 

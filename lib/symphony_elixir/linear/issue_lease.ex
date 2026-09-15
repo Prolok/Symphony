@@ -10,10 +10,16 @@ defmodule SymphonyElixir.Linear.IssueLease do
   def run(issue, callback) do
     case Config.settings!().tracker do
       %{kind: "linear", auth_mode: "app", app: binding} ->
-        with_lock(binding["workspace_id"], issue.id, fn -> run_ready(binding, issue, callback) end)
+        run_owned(binding, issue, callback)
 
       _ ->
         callback.()
+    end
+  end
+
+  defp run_owned(binding, issue, callback) do
+    with :ok <- SymphonyElixir.Relay.execution_allowed(issue) do
+      with_lock(binding["workspace_id"], issue.id, fn -> run_ready(binding, issue, callback) end)
     end
   end
 

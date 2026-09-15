@@ -367,6 +367,7 @@ defmodule SymphonyElixir.StatusDashboard do
            project_link_lines,
            assignee_lines,
            project_refresh_line,
+           format_relay_lines(Map.get(snapshot, :polling)),
            colorize("├─ Running", @ansi_bold),
            "│",
            running_table_header_row(running_event_width),
@@ -451,6 +452,14 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_project_refresh_line(_) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("n/a", @ansi_gray)
   end
+
+  defp format_relay_lines(%{relay: relays}) do
+    Enum.map(relays, fn {workspace, state} ->
+      "│ Relay #{workspace} #{state[:consumer_id]}: #{state.status} " <> Enum.map_join(state.execution, ", ", fn {id, status} -> "#{id}: #{status}" end)
+    end)
+  end
+
+  defp format_relay_lines(_), do: []
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
   defp linear_team_url(team_key), do: "https://linear.app/team/#{team_key}/all"

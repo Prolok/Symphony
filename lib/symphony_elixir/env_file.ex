@@ -139,19 +139,20 @@ defmodule SymphonyElixir.EnvFile do
   end
 
   @doc "Read project settings without exporting variables or interpreting secret values."
-  @spec read_public(Path.t(), String.t() | nil) :: {:ok, map()} | {:error, term()}
-  def read_public(config_dir, secret_reference \\ "LINEAR_APP_SECRET") do
+  @spec read_public(Path.t(), String.t() | nil, String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def read_public(config_dir, secret_reference \\ "LINEAR_APP_SECRET", relay_reference \\ "LINEAR_RELAY_KEY") do
     paths = Enum.map(@env_files, fn {name, _} -> Path.join(config_dir, name) end)
 
     with {:ok, names} <- public_names(paths),
-         {:ok, selected_secrets} <- selected_secret_names(paths, secret_reference) do
-      excluded = ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_APP_INSTALLATION_ID" | selected_secrets]
+         {:ok, selected_secrets} <- selected_secret_names(paths, secret_reference),
+         {:ok, relay_secrets} <- selected_secret_names(paths, relay_reference) do
+      excluded = ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_RELAY_KEY", "LINEAR_APP_INSTALLATION_ID" | selected_secrets ++ relay_secrets]
       read_selected(paths, Enum.reject(names, &(&1 in excluded)))
     end
   end
 
   defp selected_secret_names(paths, "$" <> selector) do
-    Enum.reduce_while(paths, {:ok, []}, fn path, {:ok, names} ->
+    Enum.reduce_while(paths, {:ok, List.wrap(System.get_env(selector))}, fn path, {:ok, names} ->
       case read_selected([path], [selector]) do
         {:ok, values} -> {:cont, {:ok, names ++ Map.values(values)}}
         error -> {:halt, error}
@@ -200,20 +201,11 @@ defmodule SymphonyElixir.EnvFile do
   end
 
   defp project_secret_names(config_dir) do
-    case SymphonyElixir.Config.linear_secret_reference() do
-      "$" <> selector ->
-        Enum.reduce_while(@env_files, {:ok, []}, &collect_secret_names(&1, &2, config_dir, selector))
+    paths = Enum.map(@env_files, fn {file, _} -> Path.join(config_dir, file) end)
 
-      _ ->
-        {:ok, []}
-    end
-  end
-
-  defp collect_secret_names({filename, _}, {:ok, names}, config_dir, selector) do
-    case read_selected([Path.join(config_dir, filename)], [selector]) do
-      {:ok, values} -> {:cont, {:ok, Map.values(values) ++ names}}
-      error -> {:halt, error}
-    end
+    with {:ok, linear} <- selected_secret_names(paths, SymphonyElixir.Config.linear_secret_reference()),
+         {:ok, relay} <- selected_secret_names(paths, SymphonyElixir.Config.relay_secret_reference()),
+         do: {:ok, linear ++ relay}
   end
 
   defp load_public(config_dir, opts, selected_secrets) do
@@ -249,7 +241,7 @@ defmodule SymphonyElixir.EnvFile do
 
     names =
       if System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app",
-        do: names ++ ~w(SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_CLIENT_SECRET_ENV SYMPHONY_LINEAR_BINDING_HASH
+        do: names ++ ~w(SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_CLIENT_SECRET_ENV SYMPHONY_RELAY_KEY_ENV SYMPHONY_LINEAR_BINDING_HASH
         SYMPHONY_PROJECT_CONTEXT SYMPHONY_WORKFLOW_FILE SYMPHONY_WORKFLOW_DIR SYMPHONY_CODEX_STATE_ROOT),
         else: names
 

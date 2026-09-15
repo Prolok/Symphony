@@ -9,6 +9,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_project_slug: "$LINEAR_PROJECT_SLUG")
     root = Path.dirname(Workflow.workflow_file_path())
     client = "cross-project-#{System.unique_integer([:positive])}"
+    relay = start_supervised!(SymphonyElixir.RelayFixture)
 
     contexts =
       for {name, workspace} <- [{"A", "shared"}, {"B", "shared"}, {"C", "independent"}] do
@@ -18,11 +19,23 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
         File.write!(Path.join(project, ".symphony/.env"), """
         LINEAR_PROJECT_SLUG=#{name}
         LINEAR_ASSIGNEE=dev@example.com
+        LINEAR_RELAY_KEY=relay-#{workspace}
         """)
 
         {:ok, context} = ProjectContext.load(project, Workflow.workflow_file_path(), %{})
         context = put_in(context.settings.tracker.app["workspace_id"], workspace)
         context = put_in(context.settings.tracker.app["client_id"], client)
+
+        context =
+          put_in(context.settings.tracker.relay, %{
+            "endpoint" => "https://relay.test",
+            "key_env" => "LINEAR_RELAY_KEY",
+            "consumer_id" => "one",
+            "owners" => %{"human" => "one"},
+            "state_root" => Path.join(root, "relay-state"),
+            "reconcile_ms" => 3_600_000
+          })
+
         put_in(context.settings.polling.interval_ms, 60_000)
       end
 
@@ -30,8 +43,12 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
 
     Req.default_options(
       plug: fn conn ->
-        send(parent, :token_request)
-        Req.Test.json(conn, %{"access_token" => "synthetic-token", "token_type" => "Bearer", "expires_in" => 3600, "scope" => "read,write"})
+        if conn.host == "relay.test" do
+          SymphonyElixir.RelayFixture.http(conn, relay, %{"relay-shared" => "shared", "relay-independent" => "independent"})
+        else
+          send(parent, :token_request)
+          Req.Test.json(conn, %{"access_token" => "synthetic-token", "token_type" => "Bearer", "expires_in" => 3600, "scope" => "read,write"})
+        end
       end
     )
 
@@ -100,7 +117,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
       assert {:error, _} = ProjectPoller.candidates(a)
       assert {:error, _} = ProjectPoller.candidates(b)
       assert {:ok, []} = ProjectPoller.candidates(c)
-      assert_received {:candidates, "independent"}
+      refute_received {:candidates, "independent"}
       refute_received {:http, "shared", _}
       refute_received {:candidates, "shared"}
       assert ProjectPoller.polling().next_poll_in_ms <= 60_000
@@ -108,7 +125,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
       # Even explicit refreshes cannot issue HTTP for a blocked app.
       ProjectPoller.refresh()
       assert {:ok, []} = ProjectPoller.candidates(c)
-      assert_received {:candidates, "independent"}
+      refute_received {:candidates, "independent"}
       refute_received {:http, "shared", _}
 
       limit(c, "7200")
@@ -125,7 +142,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
       assert {:ok, []} = ProjectPoller.candidates(a)
       assert {:ok, []} = ProjectPoller.candidates(b)
       assert {:error, _} = ProjectPoller.candidates(c)
-      assert_received {:candidates, "shared"}
+      refute_received {:candidates, "shared"}
       refute_received {:http, "independent", _}
       assert ProjectPoller.polling().next_poll_in_ms <= 60_000
     end
@@ -150,6 +167,10 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
     refute_received {:http, "shared", _}
     refute_received {:candidates, "shared"}
     assert ProjectPoller.polling().next_poll_in_ms <= 60_000
+
+    ProjectPoller.refresh()
+    assert {:error, _} = ProjectPoller.candidates(a)
+    refute_received {:http, "shared", _}
 
     expire(a)
     ProjectPoller.refresh()
@@ -339,6 +360,17 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
     path = Path.join(Config.linear_rate_limit_root(), key <> ".json")
     {:ok, record} = DurableState.read(path)
     assert :ok = DurableState.write(path, Map.put(record, "retry_at_ms", System.system_time(:millisecond) - 1))
+
+    if Process.whereis(ProjectPoller) do
+      :sys.replace_state(ProjectPoller, &expire_relay(&1, binding["workspace_id"]))
+    end
+  end
+
+  defp expire_relay(state, workspace) do
+    case state.relays[workspace] do
+      nil -> state
+      entry -> put_in(state.relays[workspace], %{entry | retry_at: 0})
+    end
   end
 
   defp drain_http do

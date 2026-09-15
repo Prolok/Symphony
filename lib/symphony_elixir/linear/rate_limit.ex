@@ -26,12 +26,39 @@ defmodule SymphonyElixir.Linear.RateLimit do
   @spec request(map(), (-> term()), keyword()) :: term()
   def request(binding, callback, opts \\ []) do
     with :ok <- check(binding, opts) do
-      result = callback.()
+      started = System.monotonic_time(:millisecond)
 
-      diagnostics = response_hints(result)
-      if diagnostics != %{}, do: Logger.debug("Linear budget headers=#{inspect(diagnostics)}#{context_log(opts)}")
+      result =
+        try do
+          callback.()
+        catch
+          kind, reason ->
+            record_request(binding, {:error, :transport_error}, started, opts)
+            :erlang.raise(kind, reason, __STACKTRACE__)
+        end
+
+      record_request(binding, result, started, opts)
       finish_request(binding, deadline(result, now(opts)), result, opts)
     end
+  end
+
+  defp record_request(binding, result, started, opts) do
+    diagnostics = response_hints(result)
+    measurement = %{requests: 1, duration_ms: System.monotonic_time(:millisecond) - started}
+
+    metadata = %{
+      workspace_id: binding["workspace_id"],
+      kind: Keyword.get(opts, :budget_kind, :other),
+      status: response_status(result),
+      headers: diagnostics
+    }
+
+    :telemetry.execute([:symphony, :linear, :request], measurement, metadata)
+
+    if Application.get_env(:symphony_elixir, :linear_budget_measurements, false),
+      do: Logger.debug("Linear request measurement=" <> Jason.encode!(Map.merge(measurement, metadata)))
+
+    if diagnostics != %{}, do: Logger.debug("Linear budget headers=#{inspect(diagnostics)}#{context_log(opts)}")
   end
 
   defp finish_request(_binding, nil, result, _opts), do: result
@@ -153,6 +180,8 @@ defmodule SymphonyElixir.Linear.RateLimit do
   end
 
   defp response_hints(_result), do: %{}
+  defp response_status({:ok, %{status: status}}), do: status
+  defp response_status(_result), do: "transport_error"
   defp error_codes(%{"errors" => errors}) when is_list(errors), do: Enum.map(errors, &get_in(&1, ["extensions", "code"]))
   defp error_codes(_body), do: []
 

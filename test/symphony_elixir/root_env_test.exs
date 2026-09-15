@@ -370,6 +370,7 @@ defmodule SymphonyElixir.RootEnvTest do
         )
 
         env = [
+          {"LINEAR_RELAY_URL", "https://relay.example"},
           {"SYMPHONY_ROOT_DIR", ctx.source},
           {"SYMPHONY_WORKFLOW_FILE", Path.join(ctx.source, "WORKFLOW.md")},
           {"PROBE_BARRIER", barrier},

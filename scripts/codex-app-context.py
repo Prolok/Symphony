@@ -167,8 +167,12 @@ def launch_config(release, target, cwd, user_home, environment=None):
     # it. The allowlist contains names only and also prevents a lower-layer `set`
     # from restoring the excluded secret. Disable snapshots and unrelated hooks
     # in this app context so those subprocesses cannot capture the host env.
-    allowed = sorted({name for name in environment if name.upper() not in {secret_name.upper(), "LINEAR_API_KEY", "LINEAR_APP_SECRET"}} | {"SYMPHONY_LINEAR_SECRET_ACCESS"})
-    args.extend(["--config", "shell_environment_policy.exclude=" + json.dumps([secret_name, "LINEAR_API_KEY", "LINEAR_APP_SECRET"]),
+    secrets = [secret_name, "LINEAR_API_KEY", "LINEAR_APP_SECRET", "LINEAR_RELAY_KEY"]
+    relay_secret = environment.get("SYMPHONY_RELAY_KEY_ENV", "")
+    if relay_secret:
+        secrets.append(relay_secret)
+    allowed = sorted({name for name in environment if name.upper() not in {key.upper() for key in secrets}} | {"SYMPHONY_LINEAR_SECRET_ACCESS"})
+    args.extend(["--config", "shell_environment_policy.exclude=" + json.dumps(secrets),
                  "--config", "shell_environment_policy.include_only=" + json.dumps(allowed),
                  "--config", 'shell_environment_policy.set.SYMPHONY_LINEAR_SECRET_ACCESS="denied"',
                  "--config", "features.shell_snapshot=false", "--config", "features.hooks=false",
@@ -201,6 +205,8 @@ def main():
         raise RuntimeError("codex unavailable")
     env = dict(os.environ, CODEX_HOME=str(target))
     env.pop("LINEAR_API_KEY", None)
+    env.pop("LINEAR_RELAY_KEY", None)
+    env.pop(env.get("SYMPHONY_RELAY_KEY_ENV", "LINEAR_RELAY_KEY"), None)
     supplied = sys.argv[1:]
     index = 0
     while index < len(supplied) and supplied[index] in ("-c", "--config", "--model", "-m"):

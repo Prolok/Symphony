@@ -3,11 +3,17 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with a repo-managed WORKFLOW.md.
   """
 
-  alias SymphonyElixir.{EnvFile, LogFile, Workflow}
+  alias SymphonyElixir.{BudgetCapture, EnvFile, LogFile, Workflow}
 
   # Keep the legacy acknowledgement flag accepted so older scripts still parse.
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer, yolo: :boolean]
+  @switches [
+    {@acknowledgement_switch, :boolean},
+    logs_root: :string,
+    port: :integer,
+    yolo: :boolean,
+    budget_capture: :string
+  ]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
@@ -32,6 +38,7 @@ defmodule SymphonyElixir.CLI do
         wait_for_shutdown()
 
       {:error, message} ->
+        BudgetCapture.close_run(:startup_error)
         IO.puts(:stderr, message)
         System.halt(1)
     end
@@ -41,7 +48,8 @@ defmodule SymphonyElixir.CLI do
   def evaluate(args, deps \\ runtime_deps()) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
-        with :ok <- maybe_set_logs_root(opts, deps),
+        with :ok <- BudgetCapture.start_run(Keyword.get(opts, :budget_capture)),
+             :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps),
              :ok <- maybe_set_yolo_mode(opts, deps) do
           run(deps.default_workflow_path.(), deps.env_files_dir.(), deps)
@@ -85,7 +93,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [--yolo]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [--yolo] [--budget-capture <public-run.json>]"
   end
 
   @spec runtime_deps() :: deps()
@@ -221,6 +229,7 @@ defmodule SymphonyElixir.CLI do
   defp wait_for_shutdown do
     case Process.whereis(SymphonyElixir.Supervisor) do
       nil ->
+        BudgetCapture.close_run(:supervisor_missing)
         IO.puts(:stderr, "Symphony supervisor is not running")
         System.halt(1)
 
@@ -229,6 +238,8 @@ defmodule SymphonyElixir.CLI do
 
         receive do
           {:DOWN, ^ref, :process, ^pid, reason} ->
+            BudgetCapture.close_run(if(reason in [:normal, :shutdown], do: :supervisor_down, else: :supervisor_error))
+
             case reason do
               :normal -> System.halt(0)
               _ -> System.halt(1)

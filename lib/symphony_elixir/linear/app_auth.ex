@@ -82,11 +82,31 @@ defmodule SymphonyElixir.Linear.AppAuth do
 
   defp drop_binding(state, binding), do: Map.reject(state, fn {{cached, _}, _} -> cached == binding end)
 
+  defp budget_kind(payload) do
+    query = payload[:query] || payload["query"] || ""
+
+    kinds = [
+      {"SymphonyAppIdentity", :identity},
+      {"SymphonyHumanAssignees", :assignees},
+      {"SymphonyWorkspacePoll", :candidates},
+      {"SymphonyCommentScanSignal", :comment_signal},
+      {"SymphonyLinearIssueComments", :comments},
+      {"mutation", :write}
+    ]
+
+    case Enum.find(kinds, fn {name, _} -> String.contains?(query, name) end) do
+      {_, kind} -> kind
+      nil -> :read
+    end
+  end
+
   @spec request(map(), map(), (map(), list() -> term()), keyword()) :: {:ok, map()} | {:error, term()}
   def request(tracker, payload, request_fun, opts \\ []) do
     opts = Keyword.put(opts, :assignee, tracker.assignee)
 
-    guarded_request = fn body, headers -> RateLimit.request(tracker.app, fn -> request_fun.(body, headers) end, opts) end
+    guarded_request = fn body, headers ->
+      RateLimit.request(tracker.app, fn -> request_fun.(body, headers) end, Keyword.put(opts, :budget_kind, budget_kind(body)))
+    end
 
     with :ok <- validate(tracker),
          :ok <- RateLimit.check(tracker.app, opts),
@@ -211,7 +231,7 @@ defmodule SymphonyElixir.Linear.AppAuth do
   defp acquire(binding, secret, now, request, opts) do
     form = %{"grant_type" => "client_credentials", "scope" => "read,write", "client_id" => binding["client_id"], "client_secret" => secret}
 
-    result = RateLimit.request(binding, fn -> request.(form) end, opts)
+    result = RateLimit.request(binding, fn -> request.(form) end, Keyword.put(opts, :budget_kind, :token))
     with :ok <- RateLimit.check(binding, opts), do: token_result(result, secret, now)
   rescue
     _ -> {:error, :linear_app_token_unavailable}

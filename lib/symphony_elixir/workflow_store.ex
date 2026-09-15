@@ -122,7 +122,7 @@ defmodule SymphonyElixir.WorkflowStore do
   defp auth_binding(workflow) do
     tracker = Map.get(workflow.config, "tracker", %{})
 
-    {Map.get(tracker, "auth_mode", "app"), Map.take(tracker, ~w(app assignee endpoint project_slug team_key))}
+    {Map.get(tracker, "auth_mode", "app"), Map.take(tracker, ~w(app relay assignee endpoint project_slug team_key))}
   end
 
   defp reload_current_path(path, state) do

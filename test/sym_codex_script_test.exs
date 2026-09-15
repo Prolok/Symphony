@@ -28,11 +28,13 @@ defmodule SymCodexScriptTest do
     import os
     print('bound-app=' + os.environ['SYMPHONY_LINEAR_BINDING_HASH'])
     print('state=' + os.environ['SYMPHONY_CODEX_STATE_ROOT'])
+    print('relay-reference=' + os.environ['SYMPHONY_RELAY_KEY_ENV'])
     """)
 
     runtime = %{
       "SYMPHONY_LINEAR_AUTH_MODE" => "app",
       "SYMPHONY_LINEAR_CLIENT_SECRET_ENV" => "SYMPHONY_TEST_SECRET",
+      "SYMPHONY_RELAY_KEY_ENV" => "CUSTOM_RELAY_SECRET",
       "SYMPHONY_LINEAR_BINDING_HASH" => "synthetic-binding",
       "SYMPHONY_CODEX_STATE_ROOT" => Path.join(repo_dir, "state"),
       "SYMPHONY_RUN_ID" => "synthetic-run",
@@ -49,7 +51,16 @@ defmodule SymCodexScriptTest do
 
     assert output =~ "bound-app=synthetic-binding"
     assert output =~ "state=#{repo_dir}/state"
+    assert output =~ "relay-reference=CUSTOM_RELAY_SECRET"
     refute output =~ "codex-stub"
+
+    for invalid <- [Map.delete(runtime, "SYMPHONY_RELAY_KEY_ENV"), Map.put(runtime, "UNEXPECTED_FIELD", "value")] do
+      invalid_prompt = "SYM_CODEX_CONTEXT_V3\n#{Jason.encode!(invalid)}\nIn Arbeit (AI)\n\nSYM_CODEX_PROMPT_V1\nTest"
+      {output, status} = run_script(Path.join(worktree, "sym-codex"), bin_dir, [], cd: worktree, env: [{"SYMPHONY_TEST_MANUAL_PROMPT_OUTPUT", invalid_prompt}])
+      assert status != 0
+      assert output =~ "invalid app runtime context"
+      refute output =~ "bound-app="
+    end
   end
 
   test "sym-codex derives the issue identifier from the current worktree path" do
@@ -1163,6 +1174,7 @@ defmodule SymCodexScriptTest do
     runtime = %{
       "SYMPHONY_LINEAR_AUTH_MODE" => "app",
       "SYMPHONY_LINEAR_CLIENT_SECRET_ENV" => "SYMPHONY_TEST_SECRET",
+      "SYMPHONY_RELAY_KEY_ENV" => "LINEAR_RELAY_KEY",
       "SYMPHONY_LINEAR_BINDING_HASH" => "synthetic-binding",
       "SYMPHONY_CODEX_STATE_ROOT" => "/synthetic/state",
       "SYMPHONY_RUN_ID" => "synthetic-run",

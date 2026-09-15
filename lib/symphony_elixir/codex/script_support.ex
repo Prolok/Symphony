@@ -61,7 +61,8 @@ defmodule SymphonyElixir.Codex.ScriptSupport do
              is_binary(dialog_workflow_path) and is_binary(issue_identifier) and
              is_binary(env_files_dir) do
     with :ok <- load_runtime_context(workflow_path, env_files_dir),
-         {:ok, issue} <- Tracker.fetch_issue_by_identifier(issue_identifier) do
+         {:ok, issue} <- Tracker.fetch_issue_by_identifier(issue_identifier),
+         :ok <- SymphonyElixir.Relay.execution_allowed(issue) do
       manual_prompt_context_for_issue(issue, interactive_workflow_path, dialog_workflow_path, env_files_dir)
     end
   end

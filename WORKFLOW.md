@@ -9,6 +9,12 @@ tracker:
     client_secret_env: LINEAR_APP_SECRET
     workspace_id: $LINEAR_APP_WORKSPACE_ID
     user_id: $LINEAR_APP_USER_ID
+  relay:
+    endpoint: $LINEAR_RELAY_URL
+    key_env: LINEAR_RELAY_KEY
+    consumer_id: $LINEAR_RELAY_CONSUMER_ID
+    owners: $LINEAR_RELAY_OWNERS
+    reconcile_ms: 3600000
   # Der Scope wird repository-lokal über LINEAR_PROJECT_SLUG/LINEAR_TEAM_KEY gewählt;
   # fehlende Tracker-Felder erhalten den jeweils gleichnamigen Env-Fallback.
   project_slug: $LINEAR_PROJECT_SLUG
@@ -27,7 +33,7 @@ tracker:
     - Fertig
     - Abgebrochen
 polling:
-  interval_ms: 5000
+  interval_ms: 30000
   idle_shutdown_ms: 3600000
 workspace:
   # Ohne root oder bei null, leerem Wert bzw. fehlendem/leerem Env-Wert gilt
@@ -201,6 +207,8 @@ Nutze regulär `./symphony` unter Linux oder macOS. Voraussetzungen und
 Start-/Build-Details stehen bei Bedarf in [README.md](README.md#voraussetzungen)
 und [Einrichtung](README.md#einrichtung). `bin/symphony` benötigt bereits
 aktives Erlang, etwa über `mise exec -- bin/symphony`.
+Optionale Betreiber-Messläufe verwenden den normalen Launcher mit
+`--budget-capture` gemäß [Messübergabe](docs/linear-app.md#ausführbare-operator-messübergabe-pro-716).
 Für manuelle Ticketstarts aus dem Fachprojektroot den absoluten `sym-codex`-Pfad
 der gewünschten Installation mit Ticket-ID verwenden; globale Links sind dafür
 nicht erforderlich und bleiben an ihre bisherige Installation gebunden.
@@ -244,6 +252,14 @@ für Reload oder gemeinsame Kapazitäten
 [Projektbindung und Polling](docs/linear-app.md#projektbindung-und-polling)
 und für Start-/Trust-/Secret-Details
 [Schutz der Zugangsdaten](docs/linear-app.md#schutz-der-zugangsdaten).
+
+Der Dienst empfängt LinearRelay v1 je Workspace über einen gemeinsamen geschützten
+Key und eine dauerhafte Consumer-ID. Die gemeinsame Zuordnung menschlicher
+Assignees zu genau einer ausführenden Instanz gilt auch für `--yolo`, Retries und
+manuelle Helfer; fehlende/mehrdeutige Zuständigkeit sperrt Starts. Kein automatischer
+Rechnerwechsel oder Linear-Ersatzpoll bei Relay-Störung. Frische kritische Prüfungen,
+lokale Leases und Pflichtgates bleiben erhalten. Einrichtung und gemeinsamer
+Versionswechsel: [LinearRelay](docs/linear-app.md#linearrelay-empfang-zuständigkeit-und-gemeinsame-umstellung).
 
 ### Linear-Zugriff
 
@@ -326,8 +342,9 @@ und `Freigabe Review` unabhängig von gesetzten Labels als übersprungen.
 Review-Findings, Review-Fixes, Dirty-Workspace oder uneindeutige
 No-Findings-Signale müssen weiterhin vom Hauptagenten behandelt und dokumentiert
 werden; danach überspringt `--yolo` aber auch `Freigabe Review`. Außerdem
-bearbeitet Symphony dann alle passenden Tickets unabhängig vom konfigurierten
-Assignee; die Hauptmaske zeigt in diesem Modus `--yolo` statt des Assignees.
+berücksichtigt Symphony Tickets ohne konfigurierte Assignee-Auswahl; die feste
+Relay-Ausführungszuordnung zu einem menschlichen Assignee bleibt wirksam;
+die Hauptmaske zeigt in diesem Modus `--yolo` statt des Assignees.
 
 Jeder automatische Statuswechsel beendet den aktuellen Codex-Turn. Der
 Zielstatus wird erst in einer neuen Codex-Session bearbeitet; Skip-Ketten

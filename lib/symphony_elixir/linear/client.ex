@@ -158,6 +158,77 @@ defmodule SymphonyElixir.Linear.Client do
     |> Enum.reduce_while(:ok, &verify_workspace_assignees/2)
   end
 
+  @doc "Resolve the shared relay subscription using the existing human-user verification."
+  @spec relay_assignees([ProjectContext.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def relay_assignees([first | _] = contexts) do
+    configured = contexts |> Enum.flat_map(&Assignees.parse(&1.settings.tracker.assignee)) |> Enum.uniq()
+
+    with {:ok, users} <- ProjectContext.with_context(first, fn -> fetch_assignees(configured, nil, %{}, []) end),
+         true <- configured != [] and Enum.all?(configured, &verified_human?(&1, users)) do
+      ids = users |> Enum.filter(&(&1["app"] == false)) |> Enum.map(& &1["id"]) |> Enum.uniq() |> Enum.sort()
+      if length(ids) in 1..20, do: {:ok, ids}, else: {:error, :relay_requires_one_to_twenty_humans}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :relay_requires_verified_humans}
+    end
+  end
+
+  @doc "A complete paginated snapshot including previously observed issues in any state."
+  @spec fetch_relay_snapshot([ProjectContext.t()], [String.t()]) :: {:ok, [map()]} | {:error, term()}
+  def fetch_relay_snapshot([first | _] = contexts, known) do
+    candidates = Enum.map(contexts, &project_candidate_filter/1)
+    filters = if known == [], do: candidates, else: [relay_id_filter(contexts, known) | candidates]
+    ProjectContext.with_context(first, fn -> fetch_workspace_page(%{"or" => filters}, nil, %{}, []) end)
+  end
+
+  @spec fetch_relay_issues([ProjectContext.t()], [String.t()]) :: {:ok, [map()]} | {:error, term()}
+  def fetch_relay_issues([first | _] = contexts, ids) do
+    ids
+    |> Enum.uniq()
+    |> Enum.chunk_every(@issue_page_size)
+    |> Enum.reduce_while({:ok, []}, &collect_relay_issues(&1, &2, first, contexts))
+  end
+
+  defp collect_relay_issues(chunk, {:ok, acc}, first, contexts) do
+    fetch = fn -> fetch_workspace_page(relay_id_filter(contexts, chunk), nil, %{}, []) end
+
+    case ProjectContext.with_context(first, fetch) do
+      {:ok, nodes} -> {:cont, {:ok, acc ++ nodes}}
+      error -> {:halt, error}
+    end
+  end
+
+  defp relay_id_filter(contexts, ids) do
+    scopes =
+      Enum.map(contexts, fn context ->
+        {:ok, scope} = Config.linear_scope(context.settings.tracker)
+        scope_filter(scope)
+      end)
+
+    %{"and" => [%{"id" => %{"in" => ids}}, %{"or" => scopes}]}
+  end
+
+  @spec relay_candidates([ProjectContext.t()], [map()]) :: {:ok, map()} | {:error, term()}
+  def relay_candidates(contexts, nodes) do
+    with :ok <- validate_unambiguous_candidates(nodes, contexts, &relay_candidate?/2) do
+      Enum.reduce_while(contexts, {:ok, %{}}, fn context, acc ->
+        selected = Enum.filter(nodes, &relay_candidate?(&1, context))
+        collect_project_candidates(context, acc, selected)
+      end)
+    end
+  end
+
+  defp relay_candidate?(node, context) do
+    ids = context.settings.tracker.app["allowed_issue_ids"]
+    project_candidate?(node, context) and (not is_list(ids) or node["id"] in ids)
+  end
+
+  @spec relay_issue(map()) :: Issue.t()
+  def relay_issue(node) do
+    {:ok, filter} = routing_assignee_filter()
+    normalize_issue(node, filter)
+  end
+
   defp verify_workspace_assignees({workspace, [first | _] = contexts}, :ok) do
     configured = contexts |> Enum.flat_map(&Assignees.parse(&1.settings.tracker.assignee)) |> Enum.uniq()
     result = ProjectContext.with_context(first, fn -> fetch_assignees(configured, nil, %{}, []) end)
@@ -268,8 +339,8 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp validate_unambiguous_candidates(nodes, projects) do
-    if Enum.any?(nodes, fn node -> Enum.count(projects, &project_candidate?(node, &1)) > 1 end), do: {:error, :ambiguous_workspace_project_scope}, else: :ok
+  defp validate_unambiguous_candidates(nodes, projects, candidate? \\ &project_candidate?/2) do
+    if Enum.any?(nodes, fn node -> Enum.count(projects, &candidate?.(node, &1)) > 1 end), do: {:error, :ambiguous_workspace_project_scope}, else: :ok
   end
 
   defp collect_project_candidates(context, {:ok, acc}, nodes) do
@@ -1135,9 +1206,9 @@ defmodule SymphonyElixir.Linear.Client do
   defp assignee_field(%{} = assignee, field) when is_binary(field), do: assignee[field]
   defp assignee_field(_assignee, _field), do: nil
 
-  defp assigned_to_worker?(_assignee, nil), do: true
-
   defp assigned_to_worker?(%{"app" => true}, _filter), do: false
+
+  defp assigned_to_worker?(_assignee, nil), do: true
 
   defp assigned_to_worker?(assignee, %{mode: :any, filters: filters}) do
     Enum.any?(filters, &assigned_to_worker?(assignee, &1))

@@ -1,10 +1,11 @@
 defmodule SymphonyElixir.ProjectPoller do
-  @moduledoc "One periodic candidate fetch per workspace, shared by project loops and retries."
+  @moduledoc "One durable relay consumer per workspace, shared by project loops and retries."
   use GenServer
   require Logger
 
   alias SymphonyElixir.Linear.{Client, RateLimit}
-  alias SymphonyElixir.{ProjectContext, Projects}
+  alias SymphonyElixir.{ProjectContext, Projects, Relay}
+  alias SymphonyElixir.Relay.Session
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -17,6 +18,18 @@ defmodule SymphonyElixir.ProjectPoller do
 
   @spec refresh() :: :ok
   def refresh, do: GenServer.cast(__MODULE__, :refresh)
+
+  @spec relay_issues(ProjectContext.t() | nil, [String.t()]) :: {:ok, list()} | {:error, term()}
+  def relay_issues(context, ids), do: relay_call({:relay_issues, context, ids})
+
+  @spec comment_epoch(ProjectContext.t() | nil, String.t()) :: {:ok, term()} | {:error, term()}
+  def comment_epoch(context, id), do: relay_call({:comment_epoch, context, id})
+
+  defp relay_call(message) do
+    GenServer.call(__MODULE__, message, 120_000)
+  catch
+    :exit, _ -> {:error, :relay_unavailable}
+  end
 
   @spec service_settings() :: SymphonyElixir.Config.Schema.t() | nil
   def service_settings do
@@ -45,6 +58,7 @@ defmodule SymphonyElixir.ProjectPoller do
           result: Map.new(contexts, &{&1.id, {:error, :initial_poll_pending}}),
           timer: nil,
           timer_token: nil,
+          relays: %{},
           verified_workspaces: verified_workspaces
         }
 
@@ -63,7 +77,19 @@ defmodule SymphonyElixir.ProjectPoller do
   @impl true
   def handle_call(:polling, _from, state) do
     remaining = if state.timer, do: Process.read_timer(state.timer), else: false
-    {:reply, %{checking?: false, next_poll_in_ms: remaining || 0, poll_interval_ms: state.interval}, state}
+
+    relays =
+      Map.new(state.relays, fn {workspace, entry} ->
+        status = entry |> Map.take([:status, :error, :retry_at]) |> Map.update!(:error, &if(&1, do: inspect(&1), else: nil))
+
+        execution = execution_summary(entry)
+
+        consumer = if match?(%Session{}, entry), do: entry.record["consumer"]
+        {workspace, status |> Map.put(:execution, execution) |> Map.put(:consumer_id, consumer)}
+      end)
+
+    polling = %{checking?: false, next_poll_in_ms: remaining || 0, poll_interval_ms: state.interval, relay: relays}
+    {:reply, polling, state}
   end
 
   def handle_call({:candidates, id}, _from, state) do
@@ -73,6 +99,46 @@ defmodule SymphonyElixir.ProjectPoller do
   def handle_call({:context, id}, _from, state) do
     {:reply, Enum.find(state.contexts, &(&1.id == id)), state}
   end
+
+  def handle_call({:relay_issues, %ProjectContext{} = context, ids}, _from, state) do
+    workspace = context.settings.tracker.app["workspace_id"]
+
+    case state.relays[workspace] do
+      %Session{} = session ->
+        session = Session.watch(session, ids)
+
+        result =
+          if session.status == :ready do
+            nodes = session.record["issues"] |> Map.take(ids) |> Map.values()
+            {:ok, ProjectContext.with_context(context, fn -> Enum.map(nodes, &Client.relay_issue/1) end)}
+          else
+            {:error, {:relay_not_ready, session.status}}
+          end
+
+        {:reply, result, put_in(state.relays[workspace], session)}
+
+      _ ->
+        {:reply, {:error, :relay_unavailable}, state}
+    end
+  end
+
+  def handle_call({:comment_epoch, %ProjectContext{} = context, id}, _from, state) do
+    workspace = context.settings.tracker.app["workspace_id"]
+
+    result =
+      case state.relays[workspace] do
+        %Session{status: :ready, record: record} ->
+          if id in record["known"], do: {:ok, {record["generation"], record["epochs"][id]}}, else: {:error, :relay_issue_unknown}
+
+        _ ->
+          {:error, :relay_unavailable}
+      end
+
+    {:reply, result, state}
+  end
+
+  def handle_call({operation, _, _}, _from, state) when operation in [:relay_issues, :comment_epoch],
+    do: {:reply, {:error, :relay_context_required}, state}
 
   @impl true
   def handle_cast(:refresh, state) do
@@ -84,6 +150,19 @@ defmodule SymphonyElixir.ProjectPoller do
   def handle_info({:poll, token}, %{timer_token: token} = state), do: {:noreply, poll(state)}
   def handle_info({:poll, _stale_token}, state), do: {:noreply, state}
 
+  def handle_info({:relay_replay, workspace, generation, cursor}, state) do
+    case state.relays[workspace] do
+      %Session{status: :catching_up, record: %{"generation" => ^generation, "cursor" => ^cursor}} ->
+        contexts = Enum.filter(state.contexts, &(&1.settings.tracker.app["workspace_id"] == workspace))
+        {candidates, _delay, relays} = poll_workspace({workspace, contexts}, state.relays)
+        notify_projects(contexts)
+        {:noreply, %{state | result: Map.merge(state.result, candidates), relays: relays}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   defp poll(state) do
     contexts = Enum.map(state.contexts, &ProjectContext.refresh/1)
     interval = contexts |> Enum.map(& &1.settings.polling.interval_ms) |> Enum.min()
@@ -92,10 +171,10 @@ defmodule SymphonyElixir.ProjectPoller do
     publish_settings(contexts)
     groups = Enum.group_by(contexts, & &1.settings.tracker.app["workspace_id"])
 
-    {results, verified_workspaces} =
-      Enum.map_reduce(groups, state.verified_workspaces, fn group, verified ->
-        {candidates, delay, verified} = poll_workspace(group, verified)
-        {{candidates, delay}, verified}
+    {results, relays} =
+      Enum.map_reduce(groups, state.relays, fn group, relays ->
+        {candidates, delay, relays} = poll_workspace(group, relays)
+        {{candidates, delay}, relays}
       end)
 
     result = results |> Enum.map(&elem(&1, 0)) |> Enum.reduce(%{}, &Map.merge/2)
@@ -103,22 +182,44 @@ defmodule SymphonyElixir.ProjectPoller do
     delay = results |> Enum.map(&elem(&1, 1)) |> Enum.min()
     timer = Process.send_after(self(), {:poll, token}, delay)
 
-    for context <- state.contexts do
-      if pid = GenServer.whereis(Projects.server(context)), do: send(pid, {:project_poll, context})
-    end
+    notify_projects(state.contexts)
 
-    %{state | result: result, timer: timer, timer_token: token, verified_workspaces: verified_workspaces}
+    %{state | result: result, timer: timer, timer_token: token, relays: relays}
   end
 
-  defp poll_workspace({workspace, contexts}, verified_workspaces) do
-    {result, verified_workspaces} =
-      case verify_workspace_assignees(workspace, contexts, verified_workspaces) do
-        {:ok, verified} -> {Client.fetch_project_candidates(contexts), verified}
-        {:error, reason, verified} -> {{:error, reason}, verified}
+  defp notify_projects(contexts) do
+    for context <- contexts do
+      if pid = GenServer.whereis(Projects.server(context)), do: send(pid, {:project_poll, context})
+    end
+  end
+
+  defp execution_status(config, record, assignee) do
+    case Relay.owner(config["owners"], assignee, record["consumer"]) do
+      :ok -> "zuständig"
+      {:error, :relay_other_executor} -> "empfängt; anderer Rechner zuständig"
+      _ -> "Starts gesperrt: Zuordnung fehlt oder ist mehrdeutig"
+    end
+  end
+
+  defp execution_summary(%Session{record: record, config: config}) do
+    assignees = Enum.uniq(record["subscription"]["assigneeIds"] ++ Map.keys(config["owners"]))
+    assignees = if assignees == [], do: ["Zuständigkeit nicht konfiguriert"], else: assignees
+    Map.new(assignees, &{&1, execution_status(config, record, &1)})
+  end
+
+  defp execution_summary(_), do: %{}
+
+  defp poll_workspace({workspace, contexts}, relays) do
+    entry = relay_tick(relays[workspace], contexts)
+
+    result =
+      case entry do
+        %Session{} -> Relay.candidates(entry, contexts)
+        %{error: reason} -> {:error, reason}
       end
 
-    if match?({:error, _}, result),
-      do: Logger.error("Gemeinsames Linear-Polling fehlgeschlagen workspace_id=#{workspace}: #{inspect(result)}")
+    if entry.status != get_in(relays, [workspace, Access.key(:status)]),
+      do: Logger.info("Relay state workspace_id=#{workspace} status=#{entry.status} reason=#{inspect(entry.error)}")
 
     candidates =
       Map.new(contexts, fn context ->
@@ -133,7 +234,48 @@ defmodule SymphonyElixir.ProjectPoller do
 
     interval = contexts |> Enum.map(& &1.settings.polling.interval_ms) |> Enum.min()
     cooldown = contexts |> Enum.map(&ProjectContext.with_context(&1, fn -> RateLimit.remaining_ms() end)) |> Enum.max()
-    {candidates, max(interval, cooldown), verified_workspaces}
+
+    candidates =
+      if cooldown > 0 do
+        Map.new(candidates, fn
+          {id, {:ok, _}} -> {id, {:error, {:linear_app_rate_limited, %{retry_after_ms: cooldown}}}}
+          entry -> entry
+        end)
+      else
+        candidates
+      end
+
+    delay = max(interval, max(cooldown, entry.retry_at - System.system_time(:millisecond)))
+
+    # Drain one page per mailbox turn. Idle workspaces retain their regular
+    # interval; stale continuations cannot replay a newer generation or cursor.
+    if entry.status == :catching_up do
+      send(self(), {:relay_replay, workspace, entry.record["generation"], entry.record["cursor"]})
+    end
+
+    {candidates, delay, Map.put(relays, workspace, entry)}
+  end
+
+  defp relay_tick(%Session{} = session, contexts) do
+    # Accepted workflow reloads affect future snapshots and local routing.
+    snapshot = &Client.fetch_relay_snapshot(contexts, &1)
+    fetch = &Client.fetch_relay_issues(contexts, &1)
+    %{session | snapshot: snapshot, fetch: fetch} |> Session.reconfigure(Relay.binding_key(contexts)) |> Session.tick()
+  end
+
+  defp relay_tick(previous, contexts) do
+    now = System.system_time(:millisecond)
+
+    if previous && previous.retry_at > now do
+      previous
+    else
+      result = if hd(contexts).settings.tracker.relay, do: Relay.open(contexts), else: {:error, :missing_relay_configuration}
+
+      case result do
+        {:ok, session} -> Session.tick(session)
+        {:error, reason} -> %{status: :degraded, error: reason, retry_at: now + 300_000}
+      end
+    end
   end
 
   defp verify_initial_workspace_assignees(contexts) do
@@ -161,17 +303,6 @@ defmodule SymphonyElixir.ProjectPoller do
     if MapSet.size(verified) > 0 or Enum.all?(deferred, &rate_limited?/1),
       do: {:ok, verified},
       else: {:error, List.last(deferred)}
-  end
-
-  defp verify_workspace_assignees(workspace, contexts, verified) do
-    if MapSet.member?(verified, workspace) do
-      {:ok, verified}
-    else
-      case Client.verify_project_assignees(contexts) do
-        :ok -> {:ok, MapSet.put(verified, workspace)}
-        {:error, reason} -> {:error, reason, verified}
-      end
-    end
   end
 
   defp rate_limited?({:linear_api_status, _status, %{classification: "rate_limited"}}), do: true

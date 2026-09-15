@@ -2207,7 +2207,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       Path.join(System.tmp_dir!(), "symphony-cli-team-scope-#{System.unique_integer([:positive])}")
 
     env_names =
-      ~w(LINEAR_ASSIGNEE LINEAR_PROJECT_SLUG LINEAR_TEAM_KEY LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_SECRET)
+      ~w(LINEAR_RELAY_URL LINEAR_ASSIGNEE LINEAR_PROJECT_SLUG LINEAR_TEAM_KEY LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID LINEAR_APP_INSTALLATION_ID LINEAR_APP_SECRET)
 
     previous_env = Map.new(env_names, fn name -> {name, System.get_env(name)} end)
     parent = self()
@@ -2223,7 +2223,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     File.write!(
       Path.join(config_dir, ".env.local"),
-      "LINEAR_ASSIGNEE=dev@example.invalid\nLINEAR_PROJECT_SLUG=\nLINEAR_TEAM_KEY=QAI\n" <>
+      "LINEAR_RELAY_URL=https://relay.example\nLINEAR_ASSIGNEE=dev@example.invalid\nLINEAR_PROJECT_SLUG=\nLINEAR_TEAM_KEY=QAI\n" <>
         "LINEAR_APP_CLIENT_ID=synthetic-client\nLINEAR_APP_WORKSPACE_ID=synthetic-workspace\nLINEAR_APP_USER_ID=synthetic-app\n" <>
         "LINEAR_APP_INSTALLATION_ID=synthetic-installation\nLINEAR_APP_SECRET=synthetic-secret\n"
     )

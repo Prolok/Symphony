@@ -18,16 +18,34 @@ defmodule SymphonyElixir.Linear.DurableState do
     temporary = path <> "." <> Ecto.UUID.generate() <> ".tmp"
 
     try do
-      with :ok <- File.mkdir_p(directory),
+      with :ok <- mkdir(directory),
            :ok <- File.chmod(directory, 0o700),
            :ok <- write_file(temporary, Jason.encode!(value)),
-           :ok <- File.rename(temporary, path) do
+           :ok <- File.rename(temporary, path),
+           :ok <- sync_directory(directory) do
         :ok
       else
         _ -> {:error, :runtime_state_persist_failed}
       end
     after
       File.rm(temporary)
+    end
+  end
+
+  defp mkdir(directory) do
+    if File.dir?(directory) do
+      :ok
+    else
+      parent = Path.dirname(directory)
+      with :ok <- mkdir(parent), result when result in [:ok, {:error, :eexist}] <- File.mkdir(directory), do: sync_directory(parent)
+    end
+  end
+
+  defp sync_directory(directory) do
+    with {:ok, descriptor} <- :file.open(String.to_charlist(directory), [:read, :raw, :directory]) do
+      result = :file.sync(descriptor)
+      closed = :file.close(descriptor)
+      if result == :ok, do: closed, else: result
     end
   end
 

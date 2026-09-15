@@ -9,6 +9,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
     old_request = Application.get_env(:symphony_elixir, :linear_client_request_fun)
     old_req = Req.default_options()
     parent = self()
+    relay = start_supervised!(SymphonyElixir.RelayFixture)
     original_service_settings = Application.get_env(:symphony_elixir, :service_settings)
     Supervisor.terminate_child(SymphonyElixir.Supervisor, Orchestrator)
 
@@ -41,6 +42,10 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
         LINEAR_APP_SECRET=synthetic-#{workspace}
         LINEAR_PROJECT_SLUG=#{name}
         LINEAR_ASSIGNEE=#{assignee}
+        LINEAR_RELAY_URL=https://relay.test
+        LINEAR_RELAY_KEY=relay-#{workspace}
+        LINEAR_RELAY_CONSUMER_ID=executor
+        LINEAR_RELAY_OWNERS={"human-first":"executor","human-second":"executor"}
         PUBLIC_HOOK_VALUE=#{name}
         """)
 
@@ -71,12 +76,16 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
 
     Req.default_options(
       plug: fn conn ->
-        assert conn.request_path == "/oauth/token"
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        form = URI.decode_query(body)
-        workspace = String.replace_prefix(form["client_id"], "client-", "")
-        assert form["client_secret"] == "synthetic-#{workspace}"
-        Req.Test.json(conn, %{"access_token" => workspace, "token_type" => "Bearer", "expires_in" => 3600, "scope" => "read,write"})
+        if conn.host == "relay.test" do
+          SymphonyElixir.RelayFixture.http(conn, relay, %{"relay-workspace-a" => "workspace-a", "relay-workspace-b" => "workspace-b"})
+        else
+          assert conn.request_path == "/oauth/token"
+          {:ok, body, conn} = Plug.Conn.read_body(conn)
+          form = URI.decode_query(body)
+          workspace = String.replace_prefix(form["client_id"], "client-", "")
+          assert form["client_secret"] == "synthetic-#{workspace}"
+          Req.Test.json(conn, %{"access_token" => workspace, "token_type" => "Bearer", "expires_in" => 3600, "scope" => "read,write"})
+        end
       end
     )
 
@@ -93,7 +102,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
             %{"viewer" => %{"id" => "app-#{workspace}", "app" => true, "organization" => %{"id" => workspace}}}
 
           String.contains?(query, "SymphonyHumanAssignees") ->
-            users = for email <- ["first@example.com", "second@example.com"], do: %{"id" => email, "email" => email, "app" => false}
+            users = for email <- ["first@example.com", "second@example.com"], do: %{"id" => human_id(email), "email" => email, "app" => false}
             %{"users" => %{"nodes" => users, "pageInfo" => %{"hasNextPage" => false}}}
 
           String.contains?(query, "SymphonyWorkspacePoll") ->
@@ -194,9 +203,11 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
       "state" => %{"name" => "In Arbeit (AI)"},
       "project" => %{"slugId" => context.name},
       "team" => %{"key" => "A"},
-      "assignee" => %{"id" => assignee, "email" => assignee, "app" => false}
+      "assignee" => %{"id" => human_id(assignee), "email" => assignee, "app" => false}
     }
   end
+
+  defp human_id(email), do: "human-" <> hd(String.split(email, "@"))
 
   defp page(nodes, more, cursor), do: %{"issues" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => more, "endCursor" => cursor}}}
 
@@ -224,7 +235,9 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
       if method=='thread/start': result={'thread':{'id':'thread-fixture'}}
       if method=='turn/start':
         result={'turn':{'id':'turn-fixture'}}
-        pathlib.Path('result.json').write_text(json.dumps({'project':os.environ.get('SYMPHONY_PROJECT_ROOT'),'cwd':os.getcwd(),'state_root':os.environ.get('SYMPHONY_CODEX_STATE_ROOT'),'public_value':os.environ.get('PUBLIC_HOOK_VALUE'),'secret_visible':bool(os.environ.get('LINEAR_APP_SECRET'))}))
+        target=pathlib.Path('result.json.tmp')
+        target.write_text(json.dumps({'project':os.environ.get('SYMPHONY_PROJECT_ROOT'),'cwd':os.getcwd(),'state_root':os.environ.get('SYMPHONY_CODEX_STATE_ROOT'),'public_value':os.environ.get('PUBLIC_HOOK_VALUE'),'secret_visible':bool(os.environ.get('LINEAR_APP_SECRET'))}))
+        target.replace('result.json')
       if 'id' in m: print(json.dumps({'id':m['id'],'result':result}),flush=True)
       if method=='turn/start': print(json.dumps({'method':'turn/completed'}),flush=True)
     """)

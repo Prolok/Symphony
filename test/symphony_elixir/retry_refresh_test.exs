@@ -127,11 +127,12 @@ defmodule SymphonyElixir.RetryRefreshTest do
     end)
   end
 
-  for owner <- [:local, :other] do
-    test "fresh completion follow-up respects #{owner} relay ownership" do
+  for assignee <- [:local, :other] do
+    test "fresh completion follow-up respects #{assignee} relay assignee selection" do
       {context, issue, workspace, state} = completion_fixture(:missing)
-      relay = %{"consumer_id" => "local", "state_root" => Path.join(context.root, "relay"), "owners" => %{"human" => Atom.to_string(unquote(owner))}}
+      relay = %{"consumer_id" => "local", "state_root" => Path.join(context.root, "relay")}
       context = put_in(context.settings.tracker.relay, relay)
+      context = %{context | assignee_ids: [if(unquote(assignee) == :local, do: "human", else: "another-human")]}
       context = put_in(context.settings.codex.command, "sleep 20")
 
       if is_nil(Process.whereis(SymphonyElixir.TaskSupervisor)) do
@@ -147,7 +148,7 @@ defmodule SymphonyElixir.RetryRefreshTest do
         assert next.retry_attempts == %{}
         assert {:noreply, ^next} = Orchestrator.handle_info({:retry_issue, issue.id, token}, next)
 
-        if unquote(owner) == :local do
+        if unquote(assignee) == :local do
           assert next.running[issue.id].issue.state == "Test (AI)"
           assert next.running[issue.id].dispatch_issue.state == "Test (AI)"
           Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, next.running[issue.id].pid)

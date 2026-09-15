@@ -586,6 +586,11 @@ defmodule SymphonyElixir.Orchestrator do
 
           cancel_issue_workflow(state, issue)
 
+        terminal_issue_state?(issue.state, terminal_states) and pending_merge_handoff?(state, issue) ->
+          # The runner still owns its post-turn/dirty-merge checks, including
+          # the exit-message drain. Its completion retry will resolve cleanup.
+          state
+
         terminal_issue_state?(issue.state, terminal_states) ->
           Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
@@ -609,6 +614,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp pending_merge_handoff?(state, %Issue{id: issue_id, state: issue_state}) do
+    case Map.get(state.running, issue_id) do
+      running_entry when is_map(running_entry) ->
+        started_issue = completed_issue_for_running_entry(running_entry)
+        normalize_issue_state(started_issue.state) == "merge (ai)" and normalize_issue_state(issue_state) == "review"
+
+      _ ->
+        false
+    end
+  end
 
   defp review_departure_running_entry(%Issue{} = issue, %State{} = state) do
     case Map.get(state.running, issue.id) do
@@ -1652,7 +1668,8 @@ defmodule SymphonyElixir.Orchestrator do
             review_subagent_call_ids: review_subagent_call_ids,
             review_subagent_ids: review_subagent_ids,
             codex_token_checkpoint: codex_token_checkpoint,
-            review_stay: review_stay
+            review_stay: review_stay,
+            completion_pending: Map.get(metadata, :completion_pending, Map.get(previous_retry, :completion_pending, false))
           })
     }
   end
@@ -1669,13 +1686,26 @@ defmodule SymphonyElixir.Orchestrator do
           review_subagent_call_ids: Map.get(retry_entry, :review_subagent_call_ids),
           review_subagent_ids: Map.get(retry_entry, :review_subagent_ids),
           codex_token_checkpoint: Map.get(retry_entry, :codex_token_checkpoint),
-          review_stay: Map.get(retry_entry, :review_stay, false)
+          review_stay: Map.get(retry_entry, :review_stay, false),
+          completion_pending: Map.get(retry_entry, :completion_pending, false)
         }
 
         {:ok, attempt, metadata, state}
 
       _ ->
         :missing
+    end
+  end
+
+  defp handle_retry_issue(%State{} = state, issue_id, attempt, %{completion_pending: true} = metadata) do
+    case fetch_completed_issue(issue_id) do
+      {:ok, issue} ->
+        handle_retry_issue_lookup(issue, state, issue_id, attempt, metadata)
+
+      {:error, reason} ->
+        Logger.warning("Completion refresh failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+
+        {:noreply, schedule_issue_retry(state, issue_id, attempt + 1, Map.put(metadata, :error, "completion refresh failed: #{inspect(reason)}"))}
     end
   end
 
@@ -1696,6 +1726,15 @@ defmodule SymphonyElixir.Orchestrator do
            attempt + 1,
            Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
          )}
+    end
+  end
+
+  defp fetch_completed_issue(issue_id) do
+    with {:ok, issues} <- Tracker.fetch_issue_states_by_ids([issue_id]) do
+      case find_issue_by_id(issues, issue_id) do
+        %Issue{state: issue_state} = issue when is_binary(issue_state) and issue_state != "" -> {:ok, issue}
+        _ -> {:error, :completion_issue_state_unresolved}
+      end
     end
   end
 
@@ -1834,14 +1873,7 @@ defmodule SymphonyElixir.Orchestrator do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(issue, state, metadata[:worker_host]) do
-      {:noreply,
-       dispatch_issue(
-         state,
-         issue,
-         attempt,
-         metadata[:worker_host],
-         retry_run_opts(metadata)
-       )}
+      {:noreply, dispatch_retry_issue(state, issue, attempt, metadata)}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
@@ -1856,6 +1888,20 @@ defmodule SymphonyElixir.Orchestrator do
          })
        )}
     end
+  end
+
+  defp dispatch_retry_issue(state, issue, attempt, %{completion_pending: true} = metadata) do
+    # The completion lookup already fetched this issue directly. Apply the
+    # remaining dispatch gate without a second, potentially conflicting read.
+    if SymphonyElixir.Relay.execution_allowed(issue) == :ok do
+      do_dispatch_issue(state, issue, attempt, metadata[:worker_host], retry_run_opts(metadata))
+    else
+      release_issue_claim(state, issue.id)
+    end
+  end
+
+  defp dispatch_retry_issue(state, issue, attempt, metadata) do
+    dispatch_issue(state, issue, attempt, metadata[:worker_host], retry_run_opts(metadata))
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
@@ -1952,6 +1998,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> schedule_issue_retry(issue_id, 1, %{
         identifier: running_entry.identifier,
         delay_type: :continuation,
+        completion_pending: true,
         worker_host: Map.get(running_entry, :worker_host),
         workspace_path: Map.get(running_entry, :workspace_path),
         recovered_turn_context: Map.get(running_entry, :recovered_turn_context),

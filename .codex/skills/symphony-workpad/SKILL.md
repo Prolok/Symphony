@@ -80,6 +80,9 @@ widersprüchlich war.
 - Jeden Validierungspunkt mit Aktion, ausführendem Verantwortlichen und fälliger
   Phase führen. Später fällige Nachweise offen lassen; `[x]` setzt einen passenden
   Beleg voraus. Keine stillschweigende Verschiebung vereinbarter Fälligkeiten.
+- Eine weiterhin fällige PO-Abnahme in `### Validierung` als offenen Punkt mit
+  `; fällig: Freigabe Review` führen. Auch der automatische No-Findings-Handoff
+  erhält dann das manuelle Gate; autorisierte Skip-Labels und `--yolo` gelten weiter.
 - Für offene Validierung erst in `Merge (AI)` jeden Punkt auf einer eigenen Zeile
   mit dem eindeutigen Suffix `; fällig: Merge (AI)` schreiben, ohne Backticks oder
   weitere Fälligkeitsangaben. Der Test-Handoff erkennt nur dieses spätere Gate;

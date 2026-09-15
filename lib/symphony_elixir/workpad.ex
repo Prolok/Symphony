@@ -29,7 +29,7 @@ defmodule SymphonyElixir.Workpad do
     ~r/\bfixrunde\s+\d+\b/iu
   ]
 
-  @type review_handoff_status :: {:ready, :no_findings | :unknown} | :open | :blocked
+  @type review_handoff_status :: {:ready, :no_findings | :approval_required | :unknown} | :open | :blocked
   @type merge_handoff_status :: :ready | :blocked
 
   @spec marker() :: String.t()
@@ -127,10 +127,7 @@ defmodule SymphonyElixir.Workpad do
       :open ->
         {:ok, validation} = section_body(body, "Validierung")
 
-        open_items =
-          validation
-          |> String.split(~r/(?=^[\t ]*[-*][\t ]+\[[ xX]\](?:[\t ]|$))/m)
-          |> Enum.filter(&Regex.match?(~r/^[\t ]*[-*][\t ]+\[ \](?:[\t ]|$)/m, &1))
+        open_items = open_checklist_items(validation)
 
         if open_items != [] and Enum.all?(open_items, &merge_due_item?/1), do: :deferred, else: :open
 
@@ -140,6 +137,12 @@ defmodule SymphonyElixir.Workpad do
   end
 
   def section_checklist_status(body, section_title, _phase), do: section_checklist_status(body, section_title)
+
+  defp open_checklist_items(section) do
+    section
+    |> String.split(~r/(?=^\s*[-*]\s+\[[ xX]\](?:\s|$))/m)
+    |> Enum.filter(&Regex.match?(~r/^\s*[-*]\s+\[ \](?:\s|$)/m, &1))
+  end
 
   defp merge_due_item?(item) do
     [first_line | _] = String.split(item, "\n", parts: 2)
@@ -198,7 +201,23 @@ defmodule SymphonyElixir.Workpad do
   defp review_result(body) when is_binary(body) do
     {:ok, review_body} = section_body(body, "Review")
 
-    if review_section_no_findings?(review_body), do: :no_findings, else: :unknown
+    cond do
+      not review_section_no_findings?(review_body) -> :unknown
+      review_approval_pending?(body) -> :approval_required
+      true -> :no_findings
+    end
+  end
+
+  defp review_approval_pending?(body) do
+    case section_body(body, "Validierung") do
+      {:ok, validation} ->
+        validation
+        |> open_checklist_items()
+        |> Enum.any?(&Regex.match?(~r/;\s*fällig:\s*Freigabe Review\b/u, &1))
+
+      :error ->
+        false
+    end
   end
 
   defp review_section_no_findings?(section_body) when is_binary(section_body) do

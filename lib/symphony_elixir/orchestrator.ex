@@ -3940,7 +3940,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(state) and is_map(metadata) do
     normalize_issue_state(state) == "review (ai)" and
       review_recovered_context_kind(metadata[:recovered_turn_context]) == :no_findings and
-      review_retry_workpad_no_findings?(issue) and
+      review_retry_workpad_result(issue) in [:no_findings, :approval_required] and
       review_retry_workspace_clean?(issue, metadata)
   end
 
@@ -3977,36 +3977,36 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp review_handoff_target_state(%Issue{} = issue, metadata) when is_map(metadata) do
-    if review_retry_workpad_no_findings?(issue) and review_retry_workspace_clean?(issue, metadata) do
+    if review_retry_workpad_result(issue) == :no_findings and review_retry_workspace_clean?(issue, metadata) do
       @review_no_findings_handoff_state_name
     else
       @review_handoff_state_name
     end
   end
 
-  defp review_retry_workpad_no_findings?(%Issue{id: issue_id} = issue) when is_binary(issue_id) do
+  defp review_retry_workpad_result(%Issue{id: issue_id} = issue) when is_binary(issue_id) do
     case Tracker.fetch_issue_comment_bodies(issue_id) do
       {:ok, comments} ->
         comments
         |> Workpad.review_handoff_status()
         |> case do
-          {:ready, :no_findings} ->
-            true
+          {:ready, result} when result in [:no_findings, :approval_required] ->
+            result
 
           status ->
             Logger.info("Recovered review no-findings handoff is not safe because workpad evidence is incomplete: #{issue_context(issue)} workpad_status=#{inspect(status)}")
 
-            false
+            :blocked
         end
 
       {:error, reason} ->
         Logger.warning("Failed to inspect workpad review checklist before recovered no-findings handoff; skipping direct no-findings handoff: #{issue_context(issue)} reason=#{inspect(reason)}")
 
-        false
+        :blocked
     end
   end
 
-  defp review_retry_workpad_no_findings?(_issue), do: false
+  defp review_retry_workpad_result(_issue), do: :blocked
 
   defp review_retry_workspace_clean?(%Issue{} = issue, metadata) when is_map(metadata) do
     case Map.get(metadata, :workspace_path) do

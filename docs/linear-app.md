@@ -246,6 +246,14 @@ offene Produktentscheidung wird nach `Planung` zurückgegeben. Bereits vereinbar
 Abnahmen bleiben zu ihrer Fälligkeit bindend. Vor Merge müssen alle dafür
 erforderlichen Nachweise vorliegen, auch bei bewusstem technischem Review-Skip.
 
+Eine weiterhin fällige PO-Abnahme steht als offener Punkt unter `### Validierung`
+mit `; fällig: Freigabe Review`. Der automatische Review-Handoff übergibt dann
+auch bei sauberem Workspace und technischem No-Findings-Ergebnis an dieses
+manuelle Gate, auch bei Wiederaufnahme ohne neue Review-Session. Ein späterer
+Merge-Nachweis oder eine belegte, abgehakte Abnahme
+erzwingt diesen Handoff nicht. Autorisierte manuelle Skip-Labels und `--yolo`
+bleiben wirksam; übersprungene Abnahmen werden nicht als bestanden markiert.
+
 Der Worker erledigt seinen erlaubten Anteil. Fehlt danach ein fälliger externer
 Nachweis, ergänzt er im einen Workpad die Übergabe und wechselt gemäß Workflow
 nach `BLOCKER`. Der Grund lautet konkret „ausstehende Betreiberaktion“ mit der

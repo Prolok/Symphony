@@ -502,6 +502,20 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert Workpad.section_checklist_status("### Validierung\nNur Prosa", "Validierung", "Test (AI)") == :no_checklist
     assert Workpad.section_checklist_status("### Validierung\n- [ ] ", "Validierung", "Test (AI)") == :open
     assert Workpad.section_checklist_status(body, "Test", "Test (AI)") == :closed
+
+    for open_item <- [
+          "-\n  [ ] Testumgebung; fällig: Test (AI)\n",
+          "\f- [ ] Testumgebung; fällig: Test (AI)\n",
+          "- [ ]\r\n"
+        ],
+        items <- [
+          open_item <> "- [ ] Paketabnahme; fällig: Merge (AI)\n",
+          "- [ ] Paketabnahme; fällig: Merge (AI)\n" <> open_item
+        ] do
+      validation = "### Validierung\n" <> items
+      assert Workpad.section_checklist_status(validation, "Validierung") == :open
+      assert Workpad.section_checklist_status(validation, "Validierung", "Test (AI)") == :open
+    end
   end
 
   test "workpad helper classifies review handoff evidence" do
@@ -539,6 +553,20 @@ defmodule SymphonyElixir.ExtensionsTest do
     """
 
     assert Workpad.review_handoff_status(no_findings_workpad) == {:ready, :no_findings}
+
+    for checkbox <- ["- [ ]", "-\n  [ ]"] do
+      approval = "\n### Validierung\n#{checkbox} PO: Paketabnahme; fällig: Freigabe Review\n"
+      assert Workpad.review_handoff_status(no_findings_workpad <> approval) == {:ready, :approval_required}
+    end
+
+    for validation <- [
+          "- [x] PO: Paketabnahme; fällig: Freigabe Review",
+          "- [ ] Betreiber: Paketabnahme; fällig: Merge (AI)"
+        ] do
+      assert Workpad.review_handoff_status(no_findings_workpad <> "\n### Validierung\n" <> validation) ==
+               {:ready, :no_findings}
+    end
+
     assert Workpad.review_handoff_status(findings_marker_workpad) == {:ready, :unknown}
     assert Workpad.review_handoff_status(unknown_result_workpad) == {:ready, :unknown}
 

@@ -4968,48 +4968,58 @@ defmodule SymphonyElixir.CoreTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
       Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
-        issue_id => [no_findings_review_workpad()]
-      })
+      pending_approval =
+        no_findings_review_workpad() <>
+          "\n### Validierung\n- [ ] PO: Paketabnahme; fällig: Freigabe Review\n"
 
-      File.cd!(source_repo, fn ->
-        orchestrator_name = Module.concat(__MODULE__, :CleanRecoveredReviewRetryHandoffOrchestrator)
-        {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+      for {workpad, expected} <- [
+            {no_findings_review_workpad(), "Test (AI)"},
+            {pending_approval, "Freigabe Review"}
+          ] do
+        Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+          issue_id => [workpad]
+        })
 
-        on_exit(fn ->
-          if Process.alive?(pid) do
-            Process.exit(pid, :normal)
-          end
-        end)
+        File.cd!(source_repo, fn ->
+          orchestrator_name = Module.concat(__MODULE__, :CleanRecoveredReviewRetryHandoffOrchestrator)
+          {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
-        initial_state = :sys.get_state(pid)
+          on_exit(fn ->
+            if Process.alive?(pid) do
+              Process.exit(pid, :normal)
+            end
+          end)
 
-        :sys.replace_state(pid, fn _ ->
-          %{
-            initial_state
-            | retry_attempts: %{
-                issue_id => %{
-                  attempt: 1,
-                  timer_ref: nil,
-                  retry_token: retry_token,
-                  due_at_ms: System.monotonic_time(:millisecond) + 30_000,
-                  identifier: issue_identifier,
-                  workspace_path: workspace,
-                  recovered_turn_context: "Keine Findings."
+          initial_state = :sys.get_state(pid)
+
+          :sys.replace_state(pid, fn _ ->
+            %{
+              initial_state
+              | retry_attempts: %{
+                  issue_id => %{
+                    attempt: 1,
+                    timer_ref: nil,
+                    retry_token: retry_token,
+                    due_at_ms: System.monotonic_time(:millisecond) + 30_000,
+                    identifier: issue_identifier,
+                    workspace_path: workspace,
+                    recovered_turn_context: "Keine Findings."
+                  }
                 }
-              }
-          }
+            }
+          end)
+
+          send(pid, {:retry_issue, issue_id, retry_token})
+
+          assert_receive {:memory_tracker_state_update, ^issue_id, ^expected}, 1_000
+          Process.sleep(500)
+
+          state = orchestrator_state(pid)
+          refute Map.has_key?(state.running, issue_id)
+          refute Map.has_key?(state.retry_attempts, issue_id)
+          GenServer.stop(pid)
         end)
-
-        send(pid, {:retry_issue, issue_id, retry_token})
-
-        assert_receive {:memory_tracker_state_update, ^issue_id, "Test (AI)"}, 1_000
-        Process.sleep(500)
-
-        state = orchestrator_state(pid)
-        refute Map.has_key?(state.running, issue_id)
-        refute Map.has_key?(state.retry_attempts, issue_id)
-      end)
+      end
     after
       restore_app_env(:memory_tracker_issues, previous_memory_issues)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
@@ -9838,6 +9848,14 @@ defmodule SymphonyElixir.CoreTest do
         """
       )
 
+      run_case.(
+        "issue-test-multiline-validation",
+        "MT-TEST-MULTILINE",
+        "Test (AI)",
+        "## Symphony Workpad\n### Validierung\n-\n  [ ] Testumgebung; fällig: Test (AI)\n" <>
+          "- [ ] Paketabnahme; fällig: Merge (AI)\n### Test\n- [x] Testlauf abgeschlossen\n"
+      )
+
       for {due, index} <- Enum.with_index(["Test (AI)", "Freigabe Review", "unbekannt", "Test (AI); fällig: Merge (AI)"]) do
         run_case.(
           "issue-test-due-validation-#{index}",
@@ -10011,6 +10029,8 @@ defmodule SymphonyElixir.CoreTest do
     previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
     previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
 
+    previous_yolo = Application.get_env(:symphony_elixir, :yolo)
+
     try do
       template_repo = Path.join(test_root, "source")
       workspace_root = Path.join(test_root, "workspaces")
@@ -10058,58 +10078,67 @@ defmodule SymphonyElixir.CoreTest do
         max_turns: 1
       )
 
-      {:ok, state_agent} = Agent.start_link(fn -> "Review (AI)" end)
-      parent = self()
+      cases = [
+        {"", [], false, "Test (AI)"},
+        {"- [ ] PO: Paketabnahme; fällig: Freigabe Review", [], false, "Freigabe Review"},
+        {"- [x] PO: Paketabnahme; fällig: Freigabe Review", [], false, "Test (AI)"},
+        {"- [ ] Betreiber: Paketabnahme; fällig: Merge (AI)", [], false, "Test (AI)"},
+        {"- [ ] PO: Paketabnahme; fällig: Freigabe Review", [~s(Skip "Freigabe Review")], false, "Test (AI)"},
+        {"- [ ] PO: Paketabnahme; fällig: Freigabe Review", [], true, "Test (AI)"}
+      ]
 
-      recipient =
-        spawn(fn ->
-          review_handoff_test_recipient(parent, state_agent)
-        end)
+      for {{validation, labels, yolo?, expected}, index} <- Enum.with_index(cases) do
+        Application.put_env(:symphony_elixir, :yolo, yolo?)
+        issue_id = "issue-review-handoff-#{index}"
+        identifier = "MT-REVIEW-#{index}"
+        {:ok, state_agent} = Agent.start_link(fn -> "Review (AI)" end)
+        parent = self()
 
-      Application.put_env(:symphony_elixir, :memory_tracker_recipient, recipient)
+        recipient =
+          spawn(fn ->
+            review_handoff_test_recipient(parent, state_agent)
+          end)
 
-      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
-        "issue-review-handoff" => [
-          """
-          ## Symphony Workpad
+        Application.put_env(:symphony_elixir, :memory_tracker_recipient, recipient)
 
-          ### Review
+        Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+          issue_id => [
+            """
+            ## Symphony Workpad
 
-          - [x] Review step one
-          - [x] Review subagent completed without findings
-          """
-        ]
-      })
+            ### Review
 
-      state_fetcher = fn [_issue_id] ->
-        current_state = Agent.get(state_agent, & &1)
+            - [x] Review step one
+            - [x] Review subagent completed without findings
 
-        {:ok,
-         [
-           %Issue{
-             id: "issue-review-handoff",
-             identifier: "MT-REVIEW",
-             title: "Review handoff",
-             description: "Advance after clean review turn",
-             state: current_state
-           }
-         ]}
+            ### Validierung
+
+            #{validation}
+            """
+          ]
+        })
+
+        issue = %Issue{
+          id: issue_id,
+          identifier: identifier,
+          title: "Review handoff",
+          description: "Advance after clean review turn while preserving pending approval",
+          state: "Review (AI)",
+          url: "https://example.org/issues/#{identifier}",
+          labels: labels
+        }
+
+        state_fetcher = fn [_issue_id] ->
+          {:ok, [%{issue | state: Agent.get(state_agent, & &1)}]}
+        end
+
+        assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+        assert_receive {:memory_tracker_state_update, ^issue_id, ^expected}
+        assert expected == Agent.get(state_agent, & &1)
+        Agent.stop(state_agent)
       end
-
-      issue = %Issue{
-        id: "issue-review-handoff",
-        identifier: "MT-REVIEW",
-        title: "Review handoff",
-        description: "Advance after clean review turn",
-        state: "Review (AI)",
-        url: "https://example.org/issues/MT-REVIEW",
-        labels: []
-      }
-
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
-      assert_receive {:memory_tracker_state_update, "issue-review-handoff", "Test (AI)"}
-      assert "Test (AI)" == Agent.get(state_agent, & &1)
     after
+      restore_app_env(:yolo, previous_yolo)
       restore_app_env(:memory_tracker_comments, previous_memory_comments)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
       File.rm_rf(test_root)

@@ -318,7 +318,7 @@ sym_codex_parse_manual_prompt_context() {
   runtime_entries="$("${SYMPHONY_PYTHON:-python3}" -c '
 import json,sys
 data=json.loads(sys.argv[1])
-allowed={"SYMPHONY_LINEAR_AUTH_MODE","SYMPHONY_LINEAR_CLIENT_SECRET_ENV","SYMPHONY_LINEAR_BINDING_HASH","SYMPHONY_CODEX_STATE_ROOT","SYMPHONY_RUN_ID","SYMPHONY_PHASE"}
+allowed={"SYMPHONY_LINEAR_AUTH_MODE","SYMPHONY_LINEAR_CLIENT_SECRET_ENV","SYMPHONY_RELAY_KEY_ENV","SYMPHONY_LINEAR_BINDING_HASH","SYMPHONY_CODEX_STATE_ROOT","SYMPHONY_RUN_ID","SYMPHONY_PHASE"}
 assert set(data) == allowed and data["SYMPHONY_LINEAR_AUTH_MODE"] == "app"
 for key,value in data.items():
     assert isinstance(value,str) and "\n" not in value and "\r" not in value

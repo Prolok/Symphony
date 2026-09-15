@@ -3,6 +3,73 @@ defmodule SymphonyElixir.RelayBudgetTest do
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, WorkerCapacity}
   alias SymphonyElixir.RelayFixture, as: Server
 
+  test "a workspace drains queued pages promptly without polling idle peers or bypassing backoff" do
+    root = Path.dirname(Workflow.workflow_file_path())
+    server = start_supervised!(Server)
+    {:ok, counts} = Agent.start_link(fn -> %{} end)
+    contexts = contexts(root, ["one", "two"])
+    bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
+    configure_http(server, contexts, Enum.map(contexts, &issue_node/1), bump)
+    start_supervised!({WorkerCapacity, contexts: contexts})
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    start_supervised!({ProjectPoller, contexts: contexts})
+    background(contexts, 0)
+    Agent.update(counts, fn _ -> %{} end)
+    before = Server.calls(server)
+
+    for _ <- 1..251, do: Server.publish(server, "one", %{"assigneeIds" => ["other"]})
+    Server.publish(server, "one", %{"issueId" => "issue-0"})
+    ProjectPoller.refresh()
+    assert await_cursor(server, 252)
+    background(contexts, 0)
+    calls = Enum.drop(Server.calls(server), length(before))
+    assert Enum.count(calls, &(elem(&1, 0) == "one" and elem(&1, 2) == :poll)) == 3
+    assert Enum.count(calls, &(elem(&1, 0) == "two" and elem(&1, 2) == :poll)) == 1
+    assert Agent.get(counts, & &1) == %{read: 1}
+
+    # Obsolete replay messages do not poll a ready or unknown workspace.
+    record = :sys.get_state(ProjectPoller).relays["one"].record
+    send(ProjectPoller, {:relay_replay, "one", record["generation"], 100})
+    send(ProjectPoller, {:relay_replay, "unknown", "old", 0})
+    background(contexts, 0)
+    assert Server.calls(server) == before ++ calls
+
+    for _ <- 1..201, do: Server.publish(server, "one", %{"assigneeIds" => ["other"]})
+
+    :sys.replace_state(ProjectPoller, fn state ->
+      session = state.relays["one"]
+
+      request = fn op, body ->
+        result = session.request.(op, body)
+        if op == :ack, do: Server.fault(server, "one", "one", :poll, {:error, {:relay_http, 503, "unavailable"}})
+        result
+      end
+
+      put_in(state.relays["one"].request, request)
+    end)
+
+    ProjectPoller.refresh()
+
+    assert Enum.any?(1..100, fn _ ->
+             Process.sleep(10)
+             :sys.get_state(ProjectPoller).relays["one"].status == :degraded
+           end)
+
+    failed_calls = Server.calls(server)
+    Process.sleep(30)
+    assert Server.calls(server) == failed_calls
+    assert Server.consumer(server, "one", "one").cursor == 352
+    assert {:ok, [_]} = ProjectPoller.candidates(List.last(contexts))
+    assert Agent.get(counts, & &1) == %{read: 1}
+  end
+
+  defp await_cursor(server, expected) do
+    Enum.any?(1..100, fn _ ->
+      Process.sleep(10)
+      Server.consumer(server, "one", "one").cursor == expected
+    end)
+  end
+
   for {label, workspaces, active} <- [
         {:idle, ["one"], 0},
         {:active, ["one"], 1},

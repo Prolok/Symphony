@@ -233,9 +233,24 @@ defmodule SymphonyElixir.Relay.Session do
     # The entire page/receipt is durable before the first ack attempt. Its dirty
     # set remains durable even when hydration fails or the process is killed.
     ids = page["events"] |> Enum.map(& &1["issueId"]) |> Enum.filter(&is_binary/1)
+    ids = ids ++ dependent_issue_ids(session.record["issues"], ids)
     r = session.record |> Map.put("pending", page) |> Map.update!("dirty", &Enum.uniq(&1 ++ ids))
     continue_saved(session, r, &acknowledge/1)
   end
+
+  defp dependent_issue_ids(issues, ids) do
+    changed = MapSet.new(ids)
+
+    for {id, issue} <- issues,
+        Enum.any?(get_in(issue, ["inverseRelations", "nodes"]) || [], &changed_blocker?(&1, changed)),
+        do: id
+  end
+
+  defp changed_blocker?(%{"type" => type, "issue" => %{"id" => id}}, changed) when is_binary(type) do
+    String.downcase(String.trim(type)) == "blocks" and MapSet.member?(changed, id)
+  end
+
+  defp changed_blocker?(_, _), do: false
 
   defp acknowledge(session) do
     page = session.record["pending"]

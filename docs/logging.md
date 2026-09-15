@@ -78,7 +78,9 @@ und Zugangsdaten werden nicht als Budgetdiagnose ausgegeben.
 
 `[:symphony, :linear, :request]` liefert je tatsächlich ausgeführter Anfrage
 `requests: 1`, Dauer, HTTP-Status (oder `transport_error`) und die erlaubten Antwortheader, gruppiert nach Workspace
-und Anfrageart. Lokal unterdrückte Anfragen zählen nicht. Für kontrollierte
+und Anfrageart. Auch Exceptions, Exits und Throws aus einem begonnenen Transport
+erzeugen genau eine `transport_error`-Messzeile ohne Fehlerinhalt; ihre bisherige
+Weitergabe bleibt erhalten. Lokal unterdrückte Anfragen zählen nicht. Für kontrollierte
 Messläufe aktiviert die vertrauenswürdige Runtime
 `Application.put_env(:symphony_elixir, :linear_budget_measurements, true)` und
 Debug-Logging; `Linear request measurement=` enthält dann dieselben Daten als

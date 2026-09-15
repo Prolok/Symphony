@@ -342,8 +342,9 @@ und `Freigabe Review` unabhängig von gesetzten Labels als übersprungen.
 Review-Findings, Review-Fixes, Dirty-Workspace oder uneindeutige
 No-Findings-Signale müssen weiterhin vom Hauptagenten behandelt und dokumentiert
 werden; danach überspringt `--yolo` aber auch `Freigabe Review`. Außerdem
-bearbeitet Symphony dann alle passenden Tickets unabhängig vom konfigurierten
-Assignee; die Hauptmaske zeigt in diesem Modus `--yolo` statt des Assignees.
+berücksichtigt Symphony Tickets ohne konfigurierte Assignee-Auswahl; die feste
+Relay-Ausführungszuordnung zu einem menschlichen Assignee bleibt wirksam;
+die Hauptmaske zeigt in diesem Modus `--yolo` statt des Assignees.
 
 Jeder automatische Statuswechsel beendet den aktuellen Codex-Turn. Der
 Zielstatus wird erst in einer neuen Codex-Session bearbeitet; Skip-Ketten

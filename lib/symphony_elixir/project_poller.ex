@@ -150,6 +150,19 @@ defmodule SymphonyElixir.ProjectPoller do
   def handle_info({:poll, token}, %{timer_token: token} = state), do: {:noreply, poll(state)}
   def handle_info({:poll, _stale_token}, state), do: {:noreply, state}
 
+  def handle_info({:relay_replay, workspace, generation, cursor}, state) do
+    case state.relays[workspace] do
+      %Session{status: :catching_up, record: %{"generation" => ^generation, "cursor" => ^cursor}} ->
+        contexts = Enum.filter(state.contexts, &(&1.settings.tracker.app["workspace_id"] == workspace))
+        {candidates, _delay, relays} = poll_workspace({workspace, contexts}, state.relays)
+        notify_projects(contexts)
+        {:noreply, %{state | result: Map.merge(state.result, candidates), relays: relays}}
+
+      _ ->
+        {:noreply, state}
+    end
+  end
+
   defp poll(state) do
     contexts = Enum.map(state.contexts, &ProjectContext.refresh/1)
     interval = contexts |> Enum.map(& &1.settings.polling.interval_ms) |> Enum.min()
@@ -169,11 +182,15 @@ defmodule SymphonyElixir.ProjectPoller do
     delay = results |> Enum.map(&elem(&1, 1)) |> Enum.min()
     timer = Process.send_after(self(), {:poll, token}, delay)
 
-    for context <- state.contexts do
-      if pid = GenServer.whereis(Projects.server(context)), do: send(pid, {:project_poll, context})
-    end
+    notify_projects(state.contexts)
 
     %{state | result: result, timer: timer, timer_token: token, relays: relays}
+  end
+
+  defp notify_projects(contexts) do
+    for context <- contexts do
+      if pid = GenServer.whereis(Projects.server(context)), do: send(pid, {:project_poll, context})
+    end
   end
 
   defp execution_status(config, record, assignee) do
@@ -229,6 +246,13 @@ defmodule SymphonyElixir.ProjectPoller do
       end
 
     delay = max(interval, max(cooldown, entry.retry_at - System.system_time(:millisecond)))
+
+    # Drain one page per mailbox turn. Idle workspaces retain their regular
+    # interval; stale continuations cannot replay a newer generation or cursor.
+    if entry.status == :catching_up do
+      send(self(), {:relay_replay, workspace, entry.record["generation"], entry.record["cursor"]})
+    end
+
     {candidates, delay, Map.put(relays, workspace, entry)}
   end
 

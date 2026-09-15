@@ -133,6 +133,20 @@ defmodule SymphonyElixir.ProjectContractsTest do
     assert_receive {:human_page, "next"}
   end
 
+  test "relay candidates apply each project's start allowlist without poisoning the workspace", %{contexts: [one, two]} do
+    one = put_in(one.settings.tracker.app["allowed_issue_ids"], ["allowed"])
+    two = put_in(two.settings.tracker.app["allowed_issue_ids"], [])
+    allowed = Map.put(issue_node(one), "id", "allowed")
+    outside = Map.put(issue_node(one), "id", "outside")
+    read_only = Map.put(issue_node(two), "id", "read-only")
+
+    assert {:ok, candidates} = Client.relay_candidates([one, two], [allowed, outside, read_only])
+    assert [%{id: "allowed"}] = candidates[one.id]
+    assert candidates[two.id] == []
+    rejected = Client.validate_candidate_scope(one.settings.tracker, [%Issue{id: "outside"}])
+    assert {:error, :linear_app_candidate_scope_changed} = rejected
+  end
+
   test "shared yolo polling accepts issues without any configured assignee", %{contexts: [one, _]} do
     previous = Application.get_env(:symphony_elixir, :yolo)
     on_exit(fn -> Application.put_env(:symphony_elixir, :yolo, previous) end)

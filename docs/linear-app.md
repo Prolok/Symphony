@@ -117,6 +117,8 @@ Ein zusätzlicher Consumer für dieselbe Person empfängt und bestätigt unabhä
 startet jedoch keine Arbeit. Fehlende oder mehrdeutige Zuordnungen sperren neue
 Starts und erscheinen in Terminal, Dashboard und Status-API. Die Zuordnung gilt
 für alle Projekte, automatische Starts, Retries/Resume und manuelle Helfer.
+Die Reconciliation beendet laufende Worker bei Verlust der Zuständigkeit,
+auch nach einem Wechsel zwischen zwei konfigurierten menschlichen Assignees.
 Offline-Zeit löst keinen Wechsel aus. Menschliche Assignees, lokale Leases,
 Service-Mutex und beide PO-Freigaben bleiben erhalten. Konsistente gemeinsame
 Konfiguration ist Betriebsvoraussetzung; widersprüchliche Konfigurationen auf
@@ -132,9 +134,16 @@ Payload und Position ersetzen keinen frischen Linear-Stand. Gebündeltes Nachlad
 berücksichtigt auch bisher bekannte, entzogene oder entfernte Issues. Ältere
 Issue-Versionen überschreiben keine neueren. Kommentarereignisse invalidieren den
 bestehenden vollständigen Inbox-Scan; Teilfehler liefern keinen Löschbeleg.
+Ereignisse zu bekannten Blockern invalidieren auch abhängige Cacheeinträge mit
+eingebettetem Blockerstatus. Die lokale Kandidatenauswahl berücksichtigt je Projekt
+`tracker.app.allowed_issue_ids`; zusätzlich gelesene Issues außerhalb dieser
+Startfreigabeliste blockieren die übrigen Kandidaten nicht.
 
 Reguläre HTTPS-Polls laufen alle 30 Sekunden. Ein warmer Leertick verursacht keine
 Linear-Anfrage, auch für laufende Issues und unveränderten Kommentarhintergrund.
+Bei Rückstand folgen weitere Seiten unmittelbar, jeweils in einem eigenen
+Verarbeitungsschritt des bestehenden Pollers. Andere Workspaces behalten ihren
+regulären Takt; Fehler beenden das Aufholen und beachten den bestehenden Backoff.
 `reconcile_ms` ist standardmäßig eine Stunde, mindestens fünf Minuten, zusätzlich
 mit stabilem Jitter bis 25 Prozent je Workspace/Consumer. Diese Sicherheitsabgleiche
 und Änderungen laden Daten gezielt nach. Explizite Checkpoints, Schreiboperationen,

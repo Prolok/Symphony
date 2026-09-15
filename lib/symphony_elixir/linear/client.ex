@@ -210,9 +210,17 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec relay_candidates([ProjectContext.t()], [map()]) :: {:ok, map()} | {:error, term()}
   def relay_candidates(contexts, nodes) do
-    with :ok <- validate_unambiguous_candidates(nodes, contexts) do
-      Enum.reduce_while(contexts, {:ok, %{}}, &collect_project_candidates(&1, &2, nodes))
+    with :ok <- validate_unambiguous_candidates(nodes, contexts, &relay_candidate?/2) do
+      Enum.reduce_while(contexts, {:ok, %{}}, fn context, acc ->
+        selected = Enum.filter(nodes, &relay_candidate?(&1, context))
+        collect_project_candidates(context, acc, selected)
+      end)
     end
+  end
+
+  defp relay_candidate?(node, context) do
+    ids = context.settings.tracker.app["allowed_issue_ids"]
+    project_candidate?(node, context) and (not is_list(ids) or node["id"] in ids)
   end
 
   @spec relay_issue(map()) :: Issue.t()
@@ -331,8 +339,8 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp validate_unambiguous_candidates(nodes, projects) do
-    if Enum.any?(nodes, fn node -> Enum.count(projects, &project_candidate?(node, &1)) > 1 end), do: {:error, :ambiguous_workspace_project_scope}, else: :ok
+  defp validate_unambiguous_candidates(nodes, projects, candidate? \\ &project_candidate?/2) do
+    if Enum.any?(nodes, fn node -> Enum.count(projects, &candidate?.(node, &1)) > 1 end), do: {:error, :ambiguous_workspace_project_scope}, else: :ok
   end
 
   defp collect_project_candidates(context, {:ok, acc}, nodes) do

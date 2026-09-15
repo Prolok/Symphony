@@ -215,6 +215,29 @@ defmodule SymphonyElixir.RelayMeasurementTest do
     Agent.stop(SymphonyBudgetCapture)
   end
 
+  test "Linear transport exceptions and exits are recorded once without changing propagation" do
+    path = Path.join([File.cwd!(), "_build", "linear-exceptions-#{System.unique_integer([:positive])}.jsonl"])
+    on_exit(fn -> File.rm(path) end)
+    :ok = SymphonyBudgetCapture.start(path, %{evidence: "fixture"})
+    binding = %{"workspace_id" => "fixture", "client_id" => Ecto.UUID.generate()}
+
+    phases = ~w(cold_start idle active burst reconcile outage checkpoint)
+    for phase <- phases, do: SymphonyBudgetCapture.phase(phase, 0.001)
+    assert_raise RuntimeError, "private-secret", fn -> RateLimit.request(binding, fn -> raise "private-secret" end, budget_kind: :graphql) end
+    exited = catch_exit(RateLimit.request(binding, fn -> exit(:private_secret) end, budget_kind: :token))
+    assert exited == :private_secret
+    assert catch_throw(RateLimit.request(binding, fn -> throw(:private_secret) end)) == :private_secret
+    assert {:ok, _} = RateLimit.request(binding, fn -> {:ok, %{status: 429, headers: %{"retry-after" => "60"}}} end)
+    assert {:error, {:linear_app_rate_limited, _}} = RateLimit.request(binding, fn -> flunk("suppressed transport ran") end)
+    :ok = SymphonyBudgetCapture.finish(%{})
+
+    text = File.read!(path)
+    refute text =~ "private"
+    requests = decode_capture(text) |> Enum.filter(&(&1["event"] == "request"))
+    assert Enum.map(requests, & &1["metadata"]["status"]) == ["transport_error", "transport_error", "transport_error", 429]
+    assert Enum.all?(Enum.take(requests, 3), &(&1["metadata"]["headers"] == %{}))
+  end
+
   test "concurrent telemetry remains inside its recorded phase boundaries" do
     path = Path.join([File.cwd!(), "_build", "concurrent-capture-#{System.unique_integer([:positive])}.jsonl"])
     on_exit(fn -> File.rm(path) end)

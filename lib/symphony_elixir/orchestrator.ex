@@ -591,7 +591,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           terminate_running_issue(state, issue.id, true)
 
-        !issue_routable_to_worker?(issue) ->
+        !issue_routable_to_worker?(issue) or SymphonyElixir.Relay.execution_allowed(issue) != :ok ->
           Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
           terminate_running_issue(state, issue.id, false)

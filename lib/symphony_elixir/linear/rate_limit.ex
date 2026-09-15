@@ -27,26 +27,38 @@ defmodule SymphonyElixir.Linear.RateLimit do
   def request(binding, callback, opts \\ []) do
     with :ok <- check(binding, opts) do
       started = System.monotonic_time(:millisecond)
-      result = callback.()
 
-      diagnostics = response_hints(result)
-      measurement = %{requests: 1, duration_ms: System.monotonic_time(:millisecond) - started}
+      result =
+        try do
+          callback.()
+        catch
+          kind, reason ->
+            record_request(binding, {:error, :transport_error}, started, opts)
+            :erlang.raise(kind, reason, __STACKTRACE__)
+        end
 
-      metadata = %{
-        workspace_id: binding["workspace_id"],
-        kind: Keyword.get(opts, :budget_kind, :other),
-        status: response_status(result),
-        headers: diagnostics
-      }
-
-      :telemetry.execute([:symphony, :linear, :request], measurement, metadata)
-
-      if Application.get_env(:symphony_elixir, :linear_budget_measurements, false),
-        do: Logger.debug("Linear request measurement=" <> Jason.encode!(Map.merge(measurement, metadata)))
-
-      if diagnostics != %{}, do: Logger.debug("Linear budget headers=#{inspect(diagnostics)}#{context_log(opts)}")
+      record_request(binding, result, started, opts)
       finish_request(binding, deadline(result, now(opts)), result, opts)
     end
+  end
+
+  defp record_request(binding, result, started, opts) do
+    diagnostics = response_hints(result)
+    measurement = %{requests: 1, duration_ms: System.monotonic_time(:millisecond) - started}
+
+    metadata = %{
+      workspace_id: binding["workspace_id"],
+      kind: Keyword.get(opts, :budget_kind, :other),
+      status: response_status(result),
+      headers: diagnostics
+    }
+
+    :telemetry.execute([:symphony, :linear, :request], measurement, metadata)
+
+    if Application.get_env(:symphony_elixir, :linear_budget_measurements, false),
+      do: Logger.debug("Linear request measurement=" <> Jason.encode!(Map.merge(measurement, metadata)))
+
+    if diagnostics != %{}, do: Logger.debug("Linear budget headers=#{inspect(diagnostics)}#{context_log(opts)}")
   end
 
   defp finish_request(_binding, nil, result, _opts), do: result

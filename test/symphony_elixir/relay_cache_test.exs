@@ -141,6 +141,38 @@ defmodule SymphonyElixir.RelayCacheTest do
     assert Enum.uniq([a.path, b.path, other.path]) |> length() == 3
   end
 
+  test "a blocker event refreshes dependent candidates before the sparse reconcile", c do
+    parent = self()
+    blocked = Map.put(issue(), "inverseRelations", %{"nodes" => [%{"type" => "blocks", "issue" => %{"id" => "blocker", "state" => %{"name" => "In Arbeit (AI)"}}}]})
+    unblocked = put_in(blocked, ["inverseRelations", "nodes"], [%{"type" => "blocks", "issue" => %{"id" => "blocker", "state" => %{"name" => "Fertig"}}}])
+
+    unrelated =
+      issue()
+      |> Map.put("id", "unrelated")
+      |> Map.put("inverseRelations", %{"nodes" => [%{"type" => "relatesTo", "issue" => %{"id" => "blocker"}}, %{"type" => "blocks", "issue" => nil}]})
+
+    {:ok, s} =
+      open(c,
+        snapshot: fn _ -> {:ok, [blocked, unrelated]} end,
+        fetch: fn ids ->
+          send(parent, {:refreshed, Enum.sort(ids)})
+          {:ok, if("issue" in ids, do: [unblocked], else: [])}
+        end
+      )
+
+    s = Session.tick(s)
+    deadline = s.record["reconcile_at"]
+    Server.publish(c.server, "workspace", %{"issueId" => "blocker"})
+    s = Session.tick(s)
+    assert_received {:refreshed, ["blocker", "issue"]}
+    assert s.status == :ready
+    assert s.record["issues"]["issue"] == unblocked
+    assert s.record["issues"]["unrelated"] == unrelated
+    assert s.record["reconcile_at"] == deadline
+    assert {:ok, restarted} = open(c)
+    assert restarted.record["issues"]["issue"] == unblocked
+  end
+
   test "retention loss, server signals, receipt conflict and consumer expiry resnapshot conservatively", c do
     {:ok, s} = open(c)
     s = Session.tick(s)

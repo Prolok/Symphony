@@ -63,11 +63,12 @@ if sys.argv[1] == 'prepare': sys.exit(0)
 project=os.environ.get('SYMPHONY_SOURCE_REPO') or sys.argv[-1]
 if 'linear_runtime_env' in ' '.join(sys.argv):
     env={'SYMPHONY_LINEAR_AUTH_MODE':'app','SYMPHONY_LINEAR_CLIENT_SECRET_ENV':'SYMPHONY_TEST_SECRET','SYMPHONY_LINEAR_BINDING_HASH':'observer-binding',
-         'SYMPHONY_CODEX_STATE_ROOT':project+'/state',
+         'SYMPHONY_CODEX_STATE_ROOT':project+'/state','SYMPHONY_RELAY_KEY_ENV':'CUSTOM_RELAY_SECRET',
          'SYMPHONY_RUN_ID':'observer-run','SYMPHONY_PHASE':''}
     print('SYM_CODEX_CONTEXT_V3\\n'+json.dumps(env)+'\\n\\n\\nSYM_CODEX_PROMPT_V1')
 elif 'MCPServer.main' in ' '.join(sys.argv):
     print('mcp-project='+os.environ['SYMPHONY_SOURCE_REPO'])
+    print('relay-reference='+os.environ['SYMPHONY_RELAY_KEY_ENV'])
 else:
     print(os.environ['SYMPHONY_SOURCE_REPO']+'/worktrees')
 ''')
@@ -79,6 +80,7 @@ else:
             result = subprocess.run([runtime / 'sym-codex', '--observer'], cwd=project, env=env,
                                     text=True, capture_output=True, check=True)
             self.assertIn('app=observer-binding', result.stdout)
+            self.assertIn('relay-reference=CUSTOM_RELAY_SECRET', result.stdout)
 
             del env['SYMPHONY_SOURCE_REPO']
             result = subprocess.run([runtime / 'sym-codex', '--observer'], cwd=project, env=env,

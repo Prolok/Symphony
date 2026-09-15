@@ -258,7 +258,8 @@ defmodule SymphonyElixir.Orchestrator do
                   review_subagent_call_ids: review_subagent_call_ids_for_retry(running_entry),
                   review_subagent_ids: review_subagent_ids_for_retry(running_entry),
                   codex_token_checkpoint: codex_token_checkpoint(running_entry),
-                  review_stay: running_review_stay?(running_entry)
+                  review_stay: running_review_stay?(running_entry),
+                  completion_pending: Map.get(running_entry, :completion_pending, false)
                 })
 
               Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
@@ -384,7 +385,8 @@ defmodule SymphonyElixir.Orchestrator do
                 review_subagent_call_ids: review_subagent_call_ids_for_retry(running_entry),
                 review_subagent_ids: review_subagent_ids_for_retry(running_entry),
                 codex_token_checkpoint: codex_token_checkpoint(running_entry),
-                review_stay: running_review_stay?(running_entry)
+                review_stay: running_review_stay?(running_entry),
+                completion_pending: Map.get(running_entry, :completion_pending, false)
               })
           end
 
@@ -588,8 +590,8 @@ defmodule SymphonyElixir.Orchestrator do
 
         terminal_issue_state?(issue.state, terminal_states) and pending_merge_handoff?(state, issue) ->
           # The runner still owns its post-turn/dirty-merge checks, including
-          # the exit-message drain. Its completion retry will resolve cleanup.
-          state
+          # the exit-message drain. Preserve cleanup even if the runner fails.
+          put_in(state.running[issue.id][:completion_pending], true)
 
         terminal_issue_state?(issue.state, terminal_states) ->
           Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")

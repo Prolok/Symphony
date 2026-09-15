@@ -31,6 +31,28 @@ defmodule SymphonyElixir.RetryRefreshTest do
     end
   end
 
+  for cache <- [:stale, :missing] do
+    test "failed merge worker resolves deferred cleanup with #{cache} candidates" do
+      {context, issue, workspace, state} = completion_fixture(unquote(cache))
+
+      ProjectContext.with_context(context, fn ->
+        terminal = %{issue | state: "Review"}
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [terminal])
+        reconciled = Orchestrator.reconcile_issue_states_for_test([terminal], state)
+        assert File.dir?(workspace)
+        assert {:noreply, failed} = Orchestrator.handle_info({:DOWN, state.running[issue.id].ref, :process, self(), :shutdown}, reconciled)
+        refute Map.has_key?(failed.completed_states, issue.id)
+        assert File.dir?(workspace)
+        retry = failed.retry_attempts[issue.id]
+        Process.cancel_timer(retry.timer_ref)
+        assert {:noreply, cleaned} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, failed)
+        refute File.exists?(workspace)
+        refute MapSet.member?(cleaned.claimed, issue.id)
+        assert cleaned.retry_attempts == %{}
+      end)
+    end
+  end
+
   test "missing live issue retains completion until authoritative recovery" do
     {context, issue, workspace, state} = completion_fixture(:missing)
 

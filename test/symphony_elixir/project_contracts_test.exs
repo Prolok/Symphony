@@ -58,6 +58,64 @@ defmodule SymphonyElixir.ProjectContractsTest do
     assert {:error, {:project_lookup_failed, [_]}} = ProjectSelection.resolve("PRO-1", contexts)
   end
 
+  test "manual relay selection verifies fresh contexts before looking up issues", %{contexts: contexts} do
+    parent = self()
+    [one, two] = Enum.map(contexts, &put_in(&1.settings.tracker.relay, %{"consumer_id" => "manual"}))
+    assert one.assignee_ids == nil
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
+      context = ProjectContext.current()
+      query = payload[:query] || payload["query"]
+
+      data =
+        if query =~ "SymphonyHumanAssignees" do
+          send(parent, {:verified, context.id})
+          %{"users" => %{"nodes" => [%{"id" => "human", "email" => "dev@example.com", "app" => false}], "pageInfo" => %{"hasNextPage" => false}}}
+        else
+          %{"issues" => %{"nodes" => [issue_node(context)]}}
+        end
+
+      {:ok, %{status: 200, body: %{"data" => data}}}
+    end)
+
+    assert {:ok, verified, %{assigned_to_worker: true}} = ProjectSelection.resolve("PRO-1", [one, two], one.root)
+    assert verified.assignee_ids == ["human"]
+    assert_receive {:verified, id}
+    assert id == one.id
+    refute_receive {:verified, _}
+
+    assert {:ok, ^verified, _} = ProjectSelection.resolve("One:PRO-1", [verified, two])
+    refute_receive {:verified, _}
+    assert {:ok, %{id: id, assignee_ids: ["human"]}, _} = ProjectSelection.resolve("Two:PRO-1", [one, two], one.root)
+    assert id == two.id
+    assert {:error, {:ambiguous_issue_identifier, "PRO-1", ["One", "Two"]}} = ProjectSelection.resolve("PRO-1", [one, two])
+
+    foreign = %{one | assignee_ids: ["other"]}
+    assert {:error, {:issue_not_found_in_projects, "PRO-1"}} = ProjectSelection.resolve("PRO-1", [foreign])
+  end
+
+  test "manual relay selection fails closed when human verification fails", %{contexts: [one, _]} do
+    context = put_in(one.settings.tracker.relay, %{"consumer_id" => "manual"})
+    parent = self()
+    app_user = %{"id" => "app", "email" => "dev@example.com", "app" => true}
+    users = %{"nodes" => [app_user], "pageInfo" => %{"hasNextPage" => false}}
+
+    for result <- [
+          {:error, :controlled_unavailable},
+          {:ok, %{status: 200, body: %{"data" => %{"users" => users}}}}
+        ] do
+      SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
+        send(parent, {:lookup_query, payload[:query] || payload["query"]})
+        result
+      end)
+
+      assert {:error, {:project_lookup_failed, [{"One", _}]}} = ProjectSelection.resolve("One:PRO-1", [context])
+      assert_receive {:lookup_query, query}
+      assert query =~ "SymphonyHumanAssignees"
+      refute_receive {:lookup_query, _}
+    end
+  end
+
   test "an absent issue in one project does not hide the unique match in another", %{contexts: [one, two] = contexts} do
     SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
       nodes = if ProjectContext.current().id == one.id, do: [], else: [issue_node(two)]

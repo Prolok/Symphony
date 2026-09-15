@@ -22,10 +22,7 @@ defmodule SymphonyElixir.ProjectSelection do
       end
 
     with {:ok, candidates} <- candidates(contexts, qualifier, cwd) do
-      results =
-        Enum.map(candidates, fn context ->
-          {context, ProjectContext.with_context(context, fn -> Client.fetch_issue_by_identifier(identifier) end)}
-        end)
+      results = Enum.map(candidates, &lookup(&1, identifier))
 
       matches = for {context, {:ok, issue}} <- results, do: {context, issue}
       errors = for {context, {:error, reason}} <- results, not scope_miss?(reason), do: {context.name, reason}
@@ -37,6 +34,22 @@ defmodule SymphonyElixir.ProjectSelection do
         {errors, _} -> {:error, {:project_lookup_failed, errors}}
       end
     end
+  end
+
+  defp lookup(context, identifier) do
+    case verified_context(context) do
+      {:ok, verified} ->
+        {verified, ProjectContext.with_context(verified, fn -> Client.fetch_issue_by_identifier(identifier) end)}
+
+      error ->
+        {context, error}
+    end
+  end
+
+  defp verified_context(%{settings: %{tracker: %{relay: nil}}} = context), do: {:ok, context}
+
+  defp verified_context(context) do
+    with {:ok, [verified]} <- Client.resolve_relay_contexts([context]), do: {:ok, verified}
   end
 
   defp scope_miss?({:issue_not_found, _}), do: true

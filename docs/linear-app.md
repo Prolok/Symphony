@@ -832,6 +832,9 @@ oder terminalen Abgang beendet sie den laufenden Reviewworker vor der
 Zustandslöschung; bei einem aktiven Phasenübergang wird die Löschung bis zum Ende
 desselben Workers vorgemerkt. Ein bereits wartender Review-Retry wird bereinigt,
 sobald das Ticket die Phase verlassen hat oder nicht mehr sichtbar ist.
+Bei einem Retry zur Abschlussklärung genügt ein fehlender Cache-Kandidat dagegen
+nicht: Erst der direkte Ticketabruf klärt den Abgang. Fehler oder eine leere
+Antwort erhalten den Retry und den Reviewzustand bis zur verlässlichen Klärung.
 Ist nach einem Dienstneustart weder ein Worker noch ein Retry vorhanden, räumt
 bereits ein sichtbar gepollter manueller Handoff den gebundenen Reviewzustand
 auf. Die Abkehr wird dabei zuerst dauerhaft markiert; bis zur bestätigten

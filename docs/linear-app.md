@@ -19,6 +19,18 @@ Pro Fachprojekt stehen öffentliche Werte in `.symphony/.env`:
 | `LINEAR_RELAY_URL` | Gemeinsamer HTTPS-Endpunkt des Relay v1 |
 | `LINEAR_RELAY_CONSUMER_ID` | Optional vorgegebene stabile Rechnerkennung (1–80 Buchstaben, Ziffern, `_`, `-`) |
 
+`LINEAR_APP_CLIENT_ID`, `LINEAR_APP_WORKSPACE_ID` und `LINEAR_APP_USER_ID`
+sind nichtgeheime Symphony-Installationskennungen. Sie verleihen für sich keinen
+Zugang und dürfen in der dafür vorgesehenen versionierten `.symphony/.env`
+stehen; allein ihr Vorhandensein ist kein Secret- oder Veröffentlichungsblocker
+und verlangt keine Secret-Migration. Das ist eine enge Ausnahme für diese drei
+Konfigurationsfelder, keine Freigabe produktiver Payloads oder fachlicher
+Konto-/Workspace- und Kundendaten. `LINEAR_APP_SECRET`, `LINEAR_RELAY_KEY` und
+Zugangstoken bleiben privat/geschützt und dürfen nicht veröffentlicht werden.
+Widerspricht eine Fachrepositoryregel dieser Ausnahme, wird nur ihr minimales,
+wertfreies Regeldelta repo-gebunden an den Betreiber übergeben; der Worker
+bearbeitet keine fremden Checkouts und liest keine privaten Bindungen.
+
 Die private `.symphony/.env.local` enthält `LINEAR_APP_SECRET`,
 `LINEAR_RELAY_KEY` und `LINEAR_ASSIGNEE`. Die Datei darf nur für das Laufzeitkonto lesbar sein, etwa
 mit Modus `0600`. Assignees sind kommagetrennte menschliche E-Mail-Adressen oder
@@ -224,6 +236,89 @@ Jedes Projekt verwendet ein kleines Codex-Profil unter
 wiederverwendet; sie enthalten weder Checkout noch Build oder Projektkonfiguration.
 Die erzeugte Codex-Konfiguration und die kopierten Skills werden vor dem Start
 geprüft. Sessions bleiben unabhängig vom Profil im bestehenden Zustandsverzeichnis.
+
+## Betreiberpflichten und Wiederaufnahme
+
+Planung ordnet jeden Pflichtnachweis einer konkreten Aktion, einer ausführenden
+Rolle und einer fälligen Phase zu. Festgelegte Zuständigkeiten werden übernommen.
+Eine bekannte spätere Betreiberpflicht lässt die lokale Umsetzung zu; eine echte
+offene Produktentscheidung wird nach `Planung` zurückgegeben. Bereits vereinbarte
+Abnahmen bleiben zu ihrer Fälligkeit bindend. Vor Merge müssen alle dafür
+erforderlichen Nachweise vorliegen, auch bei bewusstem technischem Review-Skip.
+
+Eine weiterhin fällige PO-Abnahme steht als offener Punkt unter `### Validierung`
+mit `; fällig: Freigabe Review`. Der automatische Review-Handoff übergibt dann
+auch bei sauberem Workspace und technischem No-Findings-Ergebnis an dieses
+manuelle Gate, auch bei Wiederaufnahme ohne neue Review-Session. Ein späterer
+Merge-Nachweis oder eine belegte, abgehakte Abnahme
+erzwingt diesen Handoff nicht. Autorisierte manuelle Skip-Labels und `--yolo`
+bleiben wirksam; übersprungene Abnahmen werden nicht als bestanden markiert.
+
+Der Worker erledigt seinen erlaubten Anteil. Fehlt danach ein fälliger externer
+Nachweis, ergänzt er im einen Workpad die Übergabe und wechselt gemäß Workflow
+nach `BLOCKER`. Der Grund lautet konkret „ausstehende Betreiberaktion“ mit der
+fehlenden Aktion, nicht pauschal „kein Authzugriff“. Eine Übergabe enthält:
+
+| Feld | Sekretfreies synthetisches Beispiel |
+| --- | --- |
+| Aktion und Rolle | Betreiber/Pai stellt die erlaubte Docker-Testlaufzeit für Projekt `Beispiel` bereit und bestätigt die Testdatenbank-Erreichbarkeit. |
+| Quell-/Paketstand | Commit `1111111`; bei ungecommittiertem Stand zusätzlich eindeutiger Diff-/Paketbezug `Paket A`. |
+| Bestandene lokale Prüfungen | Format/Lint für `Paket A` bestanden; keine Aussage über noch ausstehende Datenbanktests. |
+| Fehlende externe Nachweise | Docker-Daemon erreichbar, bestehender repo-lokaler Testdatenbank-Start erfolgreich, Datenbank erreichbar; Bezug zu Projekt und Testumgebung. |
+| Fortsetzungsphase | `Test (AI)`; nach Entblockung repo-lokale Wiederholungsregel anwenden. |
+
+Der Betreiber übernimmt die autorisierte Aktion über den vorhandenen
+Kommentar-/Statusweg, führt sie in seinem Zuständigkeitsbereich aus und liefert
+Ergebnis, Belegquelle, Geltungsbereich und Quell-/Paketstand. Ein Statuswechsel
+allein bestätigt weder Ausführung noch Abnahme. Ein Worker darf keine
+Betreiberübernahme oder erfolgreiche externe Aktion erfinden.
+
+Bei Wiederaufnahme prüft der Hauptworker diese Belege vor weiterer Phasenarbeit:
+fehlender, negativer, veralteter oder unpassender Nachweis erfüllt das Gate nicht.
+Ohne passenden neuen Beleg bleibt dieselbe Übergabe bestehen; gemäß Workflow
+zurück nach `BLOCKER`, ohne den unerfüllbaren Auftrag neu zu versuchen oder
+allein wegen Wartezeit einen Review neu zu starten. Passende Nachweise erlauben
+die dokumentierte Fortsetzung. Reine Wartezeit entwertet keinen Quellenstand;
+relevante Änderungen entwerten betroffene Belege. Lokale Tests werden entsprechend
+dem geänderten Stand und der repo-lokalen Wiederholungsregel ausgeführt. Negative
+Abnahmen führen bei einem im Scope lösbaren Fehler zur regulären Behebung und
+erneuten Prüfung, bei einer neuen materiellen Entscheidung nach `Planung`.
+
+Für Docker/Testdatenbank zunächst den erlaubten repo-lokalen Startpfad verwenden
+(bei QuantInvest `npm run startTestDb`). Fehlende Host-Laufzeit oder fehlende
+Erlaubnis zu ihrer Bereitstellung begründet die konkrete Betreiberübergabe.
+Teilprüfungen bleiben dokumentiert; Vitest/E2E oder andere von der Datenbank
+abhängige Gates werden nicht als bestanden ausgegeben. Keine Host-/Colima-Reparatur,
+neue Containerplattform oder Datenlöschung durch den Symphony-Worker.
+
+### Synthetische Vertragsfälle
+
+Die folgenden Fälle prüfen den Entscheidungsvertrag ohne Live-Betriebsumstellung.
+Runtime-Regressionen prüfen zusätzlich den tatsächlichen Workpad-/AgentRunner-Pfad.
+
+| Eingabe | Erwartete Einordnung und Fortsetzung |
+| --- | --- |
+| Betreiber/Pai bereits festgelegt, Abnahme erst in Merge fällig | Keine erneute Zuständigkeitsfrage; Aktion/Phase übernehmen, aktuelle lokale Phase abschließen, Nachweis offen lassen. |
+| Lokale Tests für Paket A grün; Betreiberabnahme jetzt fällig, fehlt | Vollständige Übergabe für Paket A, ausstehende Betreiberaktion in BLOCKER; keine Abnahme behaupten. |
+| Manuell weitergeschoben, kein neuer Beleg | Übergabe erhalten, zurück nach BLOCKER; kein erneuter Betreiberauftrag oder zusätzlicher Review. |
+| Positiver Beleg für Paket B oder anderes Projekt statt Paket A | Geltungsbereich/Stand unpassend; fehlenden passenden Nachweis benennen, keine Fortsetzung. |
+| Positiver Beleg für Paket A, unveränderter relevanter Stand | In der vereinbarten Phase fortsetzen; reine Wartezeit erzeugt keine neue Reviewrunde. |
+| Negative Abnahme für Paket A | Gate bleibt offen; im Scope beheben/erneut prüfen, neue Produktentscheidung nach Planung. |
+| Echter HTTP 401/403 ohne Rate-Limit; andererseits `RATELIMITED` | Zugriffsfehler über erlaubte Fallbacks/Escape Hatch behandeln; Rate-Limit bleibt Rate-Limit, kein Betreiber- oder Authersatzgrund. |
+| Expliziter Nutzerauftrag zum Review-Skip, bewusster Test-/Merge-Einstieg oder `Skip "Review (AI)"` | Quelle und Geltungsbereich als `bewusst übersprungen` dokumentieren; historische Reviewpunkte nicht als bestanden abhaken oder als Nachholrunde fordern. |
+| Nur `Skip "Freigabe Review"` | Nur manuelles PO-Gate übersprungen; kein technischer Review-Skip. |
+| Älterer Beschreibungs-/Workpad-Default verlangt beide manuellen PO-Gates, spätere belegte menschliche Entscheidung setzt deren Skip-Labels | Spätere Entscheidung und Labels erhalten; frühere Pflichtpunkte mit Quelle als bewusst übersprungen einordnen. Separate PO-Prüfung außerhalb der fälligen Gate-Checkliste führen, kein versteckter Pflichtstop und keine erneute Zustimmung. Technische Gates bleiben eigenständig. |
+| Früherer Zustand unbekannt | Kein Review-Erfolg und kein nachgewiesener Skip; nur für aktuelle Gates nötige Evidenz abgleichen, keine historische Pflicht erfinden. |
+| Review bewusst übersprungen, Docker/Testdatenbank fehlt | Erlaubten Startpfad prüfen, konkrete Betreiberübergabe mit Fortsetzung Test; Review-/Linear-Authdiagnose wäre falsch. |
+| Passender neuer Docker-/Testdatenbank-Verfügbarkeitsbeleg | Testpfad gemäß repo-lokaler Wiederholungsregel fortsetzen; Verfügbarkeit ersetzt keine bestandenen Tests. |
+| Nur drei öffentliche Installations-IDs in versionierter `.symphony/.env` | Kein Secret-Blocker; regulärer Commit-/Testpfad erlaubt. |
+| Tatsächliches Secret in öffentlicher Konfiguration | Veröffentlichung verhindern; autorisierten Bereinigungsweg verwenden, keine Werte in Diagnose/Fixtures übernehmen. |
+| Review-Skip, aber Test-Evidenz fehlt oder `Requires Manual Review` ohne gültiges Approval | Test-/GitHub-Gate bleibt erforderlich; Skip liefert weder Tests noch Approval oder Betreiberbelege. |
+
+Die koordinierte PO-Prüfung gleicht den Worker-Vertrag mit der Betreiberübernahme
+und gegebenenfalls dem repo-gebundenen öffentlichen Konfigurations-Regeldelta ab.
+Die Vertragsänderung selbst belegt keine externen Aktionen und entblockt keine
+Ursprungstickets. Ihre lokale Prüfung verlangt keine vorgezogene Host-/AWS-Abnahme.
 
 ## Einmalige Betreiberübergabe
 

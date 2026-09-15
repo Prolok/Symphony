@@ -26,6 +26,15 @@ Nur im Merge-Schritt des Workflows verwenden.
 
 ## Ablauf
 
+Bei autorisiertem Direkteinstieg fehlende frühere Planungs-/PreReview-/Reviewhistorie
+nicht nachfordern; den bewussten Skip mit Quelle und Geltungsbereich gemäß
+`symphony-workpad` einordnen. Vor dem Merge sämtliche dafür fälligen Nachweise
+einschließlich Betreiberbelegen auf Ergebnis, Scope und Stand prüfen. Ohne neue
+passende Belege eine bestehende Betreiberübergabe erhalten und gemäß Workflow
+nach `BLOCKER` zurückgeben. Fehlt aktuelle lokale Test-Evidenz, nach `Test (AI)`
+übergeben; ein Review-Skip ersetzt weder Tests noch das GitHub-Approval-Gate
+`Requires Manual Review`.
+
 1. PR-/Remote-Preflight ausführen: aktueller Branch muss
    `symphony/<IssueId>` sein, `origin/<branch>` muss existieren, eine offene PR
    für genau diesen Branch muss existieren und die PR-Head-SHA muss dem

@@ -58,12 +58,17 @@ defmodule SymphonyElixir.ProjectContextTest do
         LINEAR_APP_USER_ID=app-user
         LINEAR_ASSIGNEE=first@example.com, second@example.com
         LINEAR_APP_SECRET=fixture-secret
+        LINEAR_RELAY_KEY=fixture-relay-key
         SYMPHONY_CODEX_COMMAND=project-#{name}
         PUBLIC_HOOK_VALUE=value-#{name}
         """)
 
         assert {:ok, context} = ProjectContext.load(project, workflow, %{})
+        assert context.env["LINEAR_APP_CLIENT_ID"] == "client"
+        assert context.env["LINEAR_APP_WORKSPACE_ID"] == "workspace"
+        assert context.env["LINEAR_APP_USER_ID"] == "app-user"
         refute Map.has_key?(context.env, "LINEAR_APP_SECRET")
+        refute Map.has_key?(context.env, "LINEAR_RELAY_KEY")
         context
       end
 

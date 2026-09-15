@@ -110,6 +110,12 @@ Nur im Status `Review (AI)` verwenden. Pull und der einmalige
 
 ## Abschluss
 
+Eine ausdrücklich vereinbarte, nicht später autorisiert übersprungene PO-Abnahme
+am manuellen Gate bleibt gemäß Workflow fällig. Sie dort übergeben; ein technischer
+No-Findings-Befund ersetzt ihren Beleg nicht. Diese Ausnahme gilt auch für den
+folgenden direkten Test-Handoff. Autorisierte Skips gemäß Statusübersicht und
+spätere belegte menschliche Skip-Entscheidungen gemäß `symphony-workpad` erhalten.
+
 Solange die Review-Checkliste im Workpad offen, fehlend oder nicht explizit
 abgehakt ist, keinen Statuswechsel vornehmen und den Hauptturn nicht final
 beenden. Arbeite im selben Turn in der Review-/Fix-Schleife weiter oder

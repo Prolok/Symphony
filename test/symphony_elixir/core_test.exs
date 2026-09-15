@@ -4,6 +4,7 @@ defmodule SymphonyElixir.CoreTest do
   alias SymphonyElixir.AutocommitMessage
   alias SymphonyElixir.Codex.{ReviewState, ScriptSupport}
   alias SymphonyElixir.Linear.DurableState
+  alias SymphonyElixir.Workpad
 
   setup_all do
     # The application also schedules polls when its initial poll is disabled.
@@ -536,8 +537,9 @@ defmodule SymphonyElixir.CoreTest do
     assert review_skill =~ "Findings sofort im Hauptturn behandeln"
     assert review_skill =~ ~r/`agent.max_turns` ist kein\s+normaler Phasenabschluss\./
 
-    assert test_skill =~
-             ~r/offener, fehlender oder nicht explizit abgehakter `### Test`-\s*oder `### Validierung`-Checkliste/
+    assert test_skill =~ "offenen fälligen Validierungspunkten"
+    assert test_skill =~ "fehlender/unbewertbarer Pflichtcheckliste"
+    assert test_skill =~ "Explizit später fällige Nachweise"
 
     assert test_skill =~ "im selben Turn weiterarbeiten"
 
@@ -984,6 +986,11 @@ defmodule SymphonyElixir.CoreTest do
     assert implementation_handoff_skip_status == "Review (AI)"
     assert review_skip_status == "Test (AI)"
     assert review_handoff_skip_status == "Test (AI)"
+
+    assert Workflow.resolve_target_status("Review (AI)", [~s|Skip "Review (AI)"|]) == "Freigabe Review"
+    assert Workflow.resolve_target_status("Review (AI)", [~s|Skip "Freigabe Review"|]) == "Review (AI)"
+    assert Workflow.resolve_target_status("Review (AI)", []) == "Review (AI)"
+    assert Workflow.resolve_target_status("Review (AI)", ["Review vielleicht übersprungen"]) == "Review (AI)"
   end
 
   test "workflow treats yolo mode like approval skip labels without skipping manual planning" do
@@ -7595,7 +7602,7 @@ defmodule SymphonyElixir.CoreTest do
              ~r/(This is an unattended orchestration session\.|Dies ist eine unbeaufsichtigte Orchestrierungssitzung\.)/
 
     assert prompt =~
-             ~r/(Only stop early for a true blocker|Stoppe nur bei einem echten Blocker frühzeitig)/
+             "Stoppe bei einem echten Zugriffsblocker oder einer fälligen, extern zu erfüllenden Betreiberpflicht"
 
     assert prompt =~ ~r/(Local system time for this turn|Lokale Systemzeit für diesen Turn):/
     assert prompt =~ ~r/(local system time|lokale Systemzeit)/
@@ -7623,6 +7630,8 @@ defmodule SymphonyElixir.CoreTest do
              "Nutze das Workpad in diesem Status für `### Test`, `### Verlauf`, Pull-Nachweise und die bereits aus früheren Phasen übernommene `### Validierung`."
 
     assert prompt =~ "Die dort festgehaltenen ticketseitigen Validierungsvorgaben bleiben bindend."
+    assert prompt =~ "Spätere belegte menschliche Gateentscheidungen haben Vorrang"
+    assert prompt =~ "Zugehörige Skip-Labels erhalten"
     assert prompt =~ "Das Workpad dient in diesem Status primär der Fortschritts- und Merge-Dokumentation."
 
     assert prompt =~
@@ -9828,6 +9837,26 @@ defmodule SymphonyElixir.CoreTest do
         - [x] Testlauf abgeschlossen
         """
       )
+
+      for {due, index} <- Enum.with_index(["Test (AI)", "Freigabe Review", "unbekannt", "Test (AI); fällig: Merge (AI)"]) do
+        run_case.(
+          "issue-test-due-validation-#{index}",
+          "MT-TEST-DUE-#{index}",
+          "Test (AI)",
+          """
+          ## Symphony Workpad
+
+          ### Validierung
+
+          - [x] Lokale Teilprüfungen bestanden
+          - [ ] Betreiber: Testumgebung bestätigen; fällig: #{due}
+
+          ### Test
+
+          - [x] Testlauf abgeschlossen
+          """
+        )
+      end
     after
       restore_app_env(:memory_tracker_comments, previous_memory_comments)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
@@ -12527,7 +12556,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner moves Test (AI) issues to Merge (AI) after a clean test turn without code changes" do
+  test "agent runner hands off clean Test AI with future operator evidence and historical skipped review still open" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -12597,6 +12626,11 @@ defmodule SymphonyElixir.CoreTest do
           ### Validierung
 
           - [x] Ticketseitige Validierung abgeschlossen
+          - [ ] Betreiber: Paketabnahme für denselben Stand; fällig: Merge (AI)
+
+          ### Review
+
+          - [ ] Historischer Review: bewusst übersprungen; Quelle: synthetische Nutzeranweisung, Geltungsbereich: übergebener Stand
 
           ### Test
 
@@ -12633,6 +12667,9 @@ defmodule SymphonyElixir.CoreTest do
       assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
       assert_receive {:memory_tracker_state_update, "issue-test-clean-handoff", "Merge (AI)"}
       assert "Merge (AI)" == Agent.get(state_agent, & &1)
+      [workpad] = Application.get_env(:symphony_elixir, :memory_tracker_comments)["issue-test-clean-handoff"]
+      assert Workpad.section_checklist_status(workpad, "Validierung") == :open
+      assert Workpad.section_checklist_status(workpad, "Review") == :open
     after
       restore_app_env(:memory_tracker_comments, previous_memory_comments)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)

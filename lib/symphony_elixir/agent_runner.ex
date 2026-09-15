@@ -1757,22 +1757,23 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp required_handoff_workpad_sections(_state_name), do: []
 
-  defp workpad_sections_handoff_status(%Issue{id: issue_id}, section_titles)
+  defp workpad_sections_handoff_status(%Issue{id: issue_id, state: phase}, section_titles)
        when is_binary(issue_id) and is_list(section_titles) do
     with {:ok, comments} <- Tracker.fetch_issue_comment_bodies(issue_id) do
       comments
       |> Workpad.find_comment_body()
-      |> workpad_body_sections_handoff_status(section_titles)
+      |> workpad_body_sections_handoff_status(section_titles, phase)
     end
   end
 
   defp workpad_sections_handoff_status(_issue, section_titles), do: {:blocked, format_section_titles(section_titles)}
 
-  defp workpad_body_sections_handoff_status(body, section_titles)
+  defp workpad_body_sections_handoff_status(body, section_titles, phase)
        when is_binary(body) and is_list(section_titles) do
     Enum.reduce_while(section_titles, :ready, fn section_title, :ready ->
-      case Workpad.section_checklist_status(body, section_title) do
+      case Workpad.section_checklist_status(body, section_title, phase) do
         :closed -> {:cont, :ready}
+        :deferred -> {:cont, :ready}
         :open -> {:halt, {:open, section_title}}
         :missing -> {:halt, {:blocked, section_title}}
         :no_checklist -> {:halt, {:blocked, section_title}}
@@ -1780,7 +1781,7 @@ defmodule SymphonyElixir.AgentRunner do
     end)
   end
 
-  defp workpad_body_sections_handoff_status(_body, section_titles), do: {:blocked, format_section_titles(section_titles)}
+  defp workpad_body_sections_handoff_status(_body, section_titles, _phase), do: {:blocked, format_section_titles(section_titles)}
 
   defp format_section_titles(section_titles) when is_list(section_titles) do
     Enum.join(section_titles, "/")

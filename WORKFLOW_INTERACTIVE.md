@@ -39,7 +39,9 @@ Frage den Benutzer anschließend, ob der Plan wie vorgeschlagen final angepasst 
 
 Nach Freigabe durch den Benutzer aktualisiere den finalen Plan und die geplante Validierung automatisch in Linear im bestehenden Symphony Workpad. Verwende dafür `symphony-workpad` für die Workpad-Struktur, `symphony-planning` für `Plan` und `Validierung` und `symphony-linear` für Linear-Lese- und Schreibzugriffe. Verschiebe den Status nicht automatisch; der Benutzer verschiebt das Ticket anschließend manuell nach `In Arbeit (AI)` oder `Planung (AI)`.
 {% else %}
-Beginne nicht sofort mit der Ausführung, sondern frage den Benutzer zunächst was zu tun ist.
+Liegt noch kein konkreter Auftrag vor, frage den Benutzer zunächst, was zu tun
+ist. Eine bereits eindeutige Anweisung oder ein bewusstes Test-/Merge-Handoff
+nicht erneut bestätigen lassen.
 {% endif %}
 
 Sobald der Benutzer die gewünschte Aufgabe benannt hat:
@@ -52,8 +54,14 @@ Sobald der Benutzer die gewünschte Aufgabe benannt hat:
 - Oeffne globale `symphony-*`-Skills immer direkt unter den globalen Skill-Wurzeln `{{ runtime.global_skill_roots_text }}` und nicht relativ zum Repository.
 - Behandle `symphony-workpad` nur als Quelle fuer Workpad-Aufbau und -Pflege.
 - Behandle die Statuslogik in diesem Modus nicht als Teil dieser Skills und leite sie nicht aus `WORKFLOW.md` ab.
+- Übernimm bekannte Betreiberzuständigkeit und Fälligkeit. Pflege Übergabe,
+  Wiederaufnahmebelege und autorisierte Review-Skips gemäß `symphony-workpad`;
+  fehlende frühere Historie allein verlangt beim autorisierten Test-/Merge-Einstieg
+  keine Nachholrunde. Tests, sichere Veröffentlichung und Merge-Gates bleiben
+  erforderlich. Statusänderungen erfolgen nur im benannten Benutzerauftrag.
 
 WICHTIG:
 - schreibe ausschließlich in das Linear-Ticket {{ issue.identifier }}, andere Tickets dürfen lediglich auf Anforderung des Benutzers gelesen werden.
-- Ändere nie das Ticket, ohne zuvor vom Benutzer die Bestätigung einzuholen, was du ändern möchtest
+- Ändere das Ticket nur im bestätigten Auftrag; bereits eindeutige Autorisierung
+  nicht erneut abfragen.
 - ignoriere die WORKFLOW.md

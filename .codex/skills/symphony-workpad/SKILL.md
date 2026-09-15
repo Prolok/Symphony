@@ -75,6 +75,41 @@ widersprüchlich war.
 - Finalen Handoff-Zustand inklusive lokalem Stand, Validierung und bei Bedarf
   bewusst ungecommitteten Änderungen im selben Kommentar festhalten.
 
+## Pflichtnachweise und Übergaben
+
+- Jeden Validierungspunkt mit Aktion, ausführendem Verantwortlichen und fälliger
+  Phase führen. Später fällige Nachweise offen lassen; `[x]` setzt einen passenden
+  Beleg voraus. Keine stillschweigende Verschiebung vereinbarter Fälligkeiten.
+- Für offene Validierung erst in `Merge (AI)` jeden Punkt auf einer eigenen Zeile
+  mit dem eindeutigen Suffix `; fällig: Merge (AI)` schreiben, ohne Backticks oder
+  weitere Fälligkeitsangaben. Der Test-Handoff erkennt nur dieses spätere Gate;
+  er schließt den Punkt nicht. Unzugeordnete, aktuelle, überfällige, unbekannte
+  oder mehrdeutige Einträge sperren weiterhin. `### Test` und `### Review` haben
+  keine solche Ausnahme; vor Merge müssen alle dafür erforderlichen Belege da sein.
+- Eine fällige Betreiberübergabe im selben Workpad enthält konkrete Aktion,
+  zuständige Rolle, Quell-/Paketstand (bei offenen Änderungen HEAD plus Diffbezug),
+  bereits bestandene lokale Prüfungen, fehlende externe Nachweise und genaue
+  Fortsetzungsphase. Als ausstehende Betreiberaktion kennzeichnen; fehlende
+  Testumgebung nicht als Review-/Linear-Authfehler ausgeben.
+- Vor Wiederaufnahme Belegquelle, Ergebnis, Geltungsbereich und relevanten Stand
+  abgleichen. Statusschieben allein ist keine Abnahme. Ohne passenden neuen Beleg
+  Übergabe erhalten, keinen unerfüllbaren Auftrag oder Review wegen Wartezeit
+  neu starten. Relevante Änderungen entwerten betroffene Belege, reine Wartezeit
+  nicht. Negative Abnahme bleibt offen; Details und Fälle stehen in
+  `docs/linear-app.md`, Abschnitt „Betreiberpflichten und Wiederaufnahme“.
+- Autorisierten technischen Review-Skip als `bewusst übersprungen` mit
+  Entscheidungsquelle und Geltungsbereich dokumentieren. Historische Reviewpunkte
+  als übersprungen einordnen, nicht als bestanden abhaken. Fehlende Historie
+  allein fordert beim autorisierten Test-/Merge-Einstieg keine Nachholrunde;
+  unbekannter Vorzustand ist kein Skipbeleg. `Skip "Freigabe Review"` ersetzt
+  keinen technischen Review-Skip. Fällige Test-/Merge-Gates bleiben bestehen.
+- Spätere belegte menschliche Gateentscheidungen ersetzen ältere Beschreibungs-/
+  Workpad-Defaults. Skip-Labels erhalten; betroffene frühere Pflichtpunkte mit
+  Quelle und Geltungsbereich als `bewusst übersprungen` einordnen, nie als bestanden.
+  Separat übernommene PO-Prüfungen außerhalb der fälligen Gate-Checkliste führen,
+  damit sie keinen autorisierten manuellen Skip als versteckten Pflichtstop
+  aufheben. Tatsächlich weiterhin fällige Betreiberbelege bleiben bindend.
+
 ## Ticket-Interaktionen
 
 - Issue-Beschreibung nicht für Fortschritt oder Workpad-Pflege ändern.

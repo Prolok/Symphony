@@ -180,7 +180,7 @@ Zusätzliche Review-Hinweise:
 ## Zweck und Grundregeln
 
 1. Dies ist eine unbeaufsichtigte Orchestrierungssitzung. Frage niemals einen Menschen nach Folgeaktionen.
-2. Stoppe nur bei einem echten Blocker frühzeitig (fehlende erforderliche Authentifizierung/Berechtigungen/Secrets). Wenn du blockiert bist, halte das im Workpad fest und verschiebe das Issue gemäß Workflow.
+2. Stoppe bei einem echten Zugriffsblocker oder einer fälligen, extern zu erfüllenden Betreiberpflicht frühzeitig. Halte den konkreten Grund im Workpad fest und verschiebe das Issue gemäß Workflow.
 3. Die Abschlussnachricht darf nur abgeschlossene Aktionen und Blocker enthalten. Füge keine "next steps for user" hinzu.
 
 - Arbeite nur in der bereitgestellten Repository-Kopie. Berühre keinen anderen Pfad.
@@ -199,6 +199,26 @@ Zusätzliche Review-Hinweise:
 - Arbeite autonom von Anfang bis Ende, solange du nicht durch fehlende Anforderungen, Secrets oder Berechtigungen blockiert bist.
 
 ## Voraussetzungen und globale Kontrakte
+
+### Phasenpflichten und Betreiberübergaben
+
+Jeden Pflichtnachweis in Planung/Workpad mit Aktion, Verantwortlichem
+(Worker oder Betreiber) und fälliger Phase führen; bekannte Zuständigkeit
+übernehmen. Nur ausdrücklich später fällige Punkte dürfen offen bleiben,
+vereinbarte Abnahmen nicht still verschieben. Vor Merge müssen sämtliche dafür
+erforderlichen Belege vorliegen. Fehlende materielle Entscheidungen nach `Planung`
+zurückgeben; eine bekannte Betreiberzuständigkeit ist keine neue Produktfrage.
+
+Fehlt ein fälliger Betreiberbeleg, erlaubten Worker-Anteil erledigen und im einen
+Workpad Aktion, Rolle, Quell-/Paketstand, bestandene lokale Prüfungen, fehlende
+externe Belege und Fortsetzungsphase übergeben; nach `BLOCKER` wechseln und den
+Turn beenden. Das gilt auch für externe Testvoraussetzungen. Kein erfundener
+Authfehler, keine fremden Checkouts oder Betriebsumstellung durch den Worker.
+Bei Wiederaufnahme vor weiterer Phasenarbeit Beleg, Geltungsbereich und Stand
+abgleichen: Statusschieben allein ist keine Abnahme. Ohne passenden neuen Beleg
+dieselbe Übergabe erhalten und nach `BLOCKER` zurückgeben; keinen unerfüllbaren
+Betreiberauftrag oder zusätzlichen Review allein wegen Wartezeit neu starten.
+Details und synthetische Fälle: [Betreiberpflichten und Wiederaufnahme](docs/linear-app.md#betreiberpflichten-und-wiederaufnahme).
 
 ### Start- und Laufzeitvertrag
 
@@ -244,6 +264,11 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
 - Die interne Zustandskennung ist `symphony`. Abweichenden Altzustand nur gemäß
   [Betreiberübergabe](docs/linear-app.md#einmalige-betreiberübergabe) behandeln;
   keine automatische Löschung oder beliebigen Installations-IDs.
+
+`LINEAR_APP_CLIENT_ID`, `LINEAR_APP_WORKSPACE_ID` und `LINEAR_APP_USER_ID`
+sind nichtgeheime Installationskennungen und in versionierter `.symphony/.env`
+zulässig. `LINEAR_APP_SECRET`, `LINEAR_RELAY_KEY`, Zugangstoken und produktive
+Kundendaten bleiben geschützt; Details unter [Normale Einrichtung](docs/linear-app.md#normale-einrichtung).
 
 Bei Änderungen an Discovery gezielt
 [Normale Einrichtung](docs/linear-app.md#normale-einrichtung) lesen;
@@ -322,7 +347,7 @@ lesen.
 ### Turn-Abschlussvertrag für aktive AI-Status
 
 - Vor einer finalen Antwort in einem aktiven AI-Status öffne den Workpad-Kommentar erneut und prüfe die phasenspezifischen Abschlussbedingungen.
-- Beende den Hauptturn regulär nur nach sauber abgeschlossenem Phasenschritt und zulässigem Statuswechsel. Offene, fehlende oder nicht explizit abgehakte Checklisten sowie fehlende Merge-Evidenz bedeuten: im selben Turn weiterarbeiten.
+- Beende den Hauptturn regulär nur nach sauber abgeschlossenem Phasenschritt und zulässigem Statuswechsel. Offene fällige Punkte, fehlende oder nicht bewertbare Pflichtchecklisten sowie fehlende Merge-Evidenz bedeuten: im selben Turn weiterarbeiten oder die fällige Betreiberübergabe ausführen.
 - Wenn ein `wait_agent`-Ergebnis mit Review-Findings erst spät im Turn eintrifft, zuerst diese Findings bearbeiten und die Review-Schleife fortsetzen; der Findings-Erhalt allein erfüllt den Abschlussvertrag nicht.
 - Ein finaler Antworttext ohne Statuswechsel ist nur für dokumentierte echte Blocker oder `agent.max_turns` zulässig.
 - Runtime-Fallbacks, die ein Issue nach normalem Turn-Ende weiter aktiv halten oder einen Handoff nachholen, sind Guardrails und kein regulärer Skill-Abschluss.
@@ -350,6 +375,23 @@ die Hauptmaske zeigt in diesem Modus `--yolo` statt des Assignees.
 Jeder automatische Statuswechsel beendet den aktuellen Codex-Turn. Der
 Zielstatus wird erst in einer neuen Codex-Session bearbeitet; Skip-Ketten
 werden dabei weiter in Tabellenreihenfolge aufgelöst.
+
+Ein ausdrücklich angewiesener technischer Review-Skip oder nachvollziehbar
+bewusster manueller Einstieg in `Test (AI)`/`Merge (AI)` ist zulässig.
+Spätere belegte menschliche Gateentscheidungen haben Vorrang vor älteren
+Beschreibungs-/Workpad-Defaults. Zugehörige Skip-Labels erhalten, Quelle und
+Geltungsbereich dokumentieren; keine erneute Zustimmung oder pauschale
+Labelbereinigung. Eine separat übernommene PO-Prüfung darf einen autorisierten
+manuellen Gate-Skip nicht als versteckten Pflichtstop wieder aufheben.
+`Skip "Review (AI)"` verwenden, soweit passend; eindeutige Anweisungen brauchen
+keine erneute Bestätigung oder ein zusätzliches Label. Im Workpad
+`bewusst übersprungen` mit Entscheidungsquelle und Geltungsbereich festhalten, historische
+Review-Checkboxen entsprechend einordnen, keinen Erfolg behaupten. Fehlende
+Planungs-/PreReview-/Reviewhistorie allein erzwingt dort weder Nachholrunde noch
+BLOCKER; unbekannter Vorzustand belegt keinen bewussten Skip.
+`Skip "Freigabe Review"` betrifft nur das manuelle PO-Gate. Aktuelle Tests, Testumgebung,
+geheimnisfreie Veröffentlichung, PR-/Head-/Merge-Gates und `Requires Manual Review`
+bleiben wirksam; ein Review-Skip ersetzt keinen Betreiberbeleg.
 
 | Status | Im Scope | Bedeutung / Verhalten | Nächster regulärer Status |
 | --- | --- | --- | --- |
@@ -510,7 +552,7 @@ Umsetzung eine produkt-/verhaltensrelevante Entscheidung offen bleibt.
 5. Erfasse vor der Implementierung ein konkretes Reproduktionssignal im Abschnitt `### Verlauf`.
 6. Implementiere entlang der vorhandenen Plan-Checkliste und aktualisiere den Workpad-Kommentar nach jedem wesentlichen Meilenstein.
 7. Führe die für den Scope erforderlichen Validierungen/Tests aus.
-   - Verpflichtendes Gate: Führe alle im Ticket vorgegebenen und in `### Validierung` des Workpads übernommenen Anforderungen aus `Validation`, `Test Plan` oder `Testing` aus; behandle unerfüllte Punkte als unvollständige Arbeit.
+   - Verpflichtendes Gate: Erfülle alle jetzt fälligen Anforderungen aus `Validation`, `Test Plan` oder `Testing` in `### Validierung`; unerfüllte fällige Punkte verhindern den Abschluss. Explizit später fällige Nachweise bleiben bindend offen gemäß Phasenpflichten.
    - Bevorzuge einen gezielten Nachweis, der direkt das geänderte Verhalten zeigt.
    - Du darfst temporäre lokale Proof-Änderungen machen, um Annahmen zu validieren, wenn das die Sicherheit erhöht.
    - Nimm jede temporäre Proof-Änderung vor der Übergabe nach `PreReview (AI)` wieder zurück.
@@ -523,7 +565,7 @@ Umsetzung eine produkt-/verhaltensrelevante Entscheidung offen bleibt.
    - Halte explizit fest, dass der Arbeitsstand absichtlich ungecommittet für den `PreReview (AI)`- und anschließenden manuellen Schritt `Freigabe Implementierung` übergeben wird.
    - Füge unten einen kurzen Abschnitt `### Unklarheiten` hinzu, wenn irgendein Teil der Ausführung unklar/verwirrend war, mit knappen Stichpunkten.
    - Poste keinen zusätzlichen Abschluss- oder Zusammenfassungs-Kommentar.
-11. Bestätige vor dem Wechsel nach `PreReview (AI)`, dass jeder erforderliche ticketseitige Validierungs-/Test-Plan-Punkt im Workpad explizit als abgeschlossen markiert ist.
+11. Bestätige vor dem Wechsel nach `PreReview (AI)`, dass jeder jetzt fällige ticketseitige Validierungs-/Test-Plan-Punkt im Workpad explizit abgeschlossen ist; später fällige Punkte bleiben mit Verantwortlichkeit und Phase offen.
 12. Öffne das Workpad vor dem Statuswechsel erneut und aktualisiere es, sodass `Plan` und `Validierung` exakt zur erledigten Arbeit passen.
 13. Verschiebe das Issue erst danach nach `PreReview (AI)` und beende den Turn; führe `PreReview (AI)` nicht im selben Turn aus.
 
@@ -532,11 +574,11 @@ Umsetzung eine produkt-/verhaltensrelevante Entscheidung offen bleibt.
 - Der reguläre Abschluss dieser Phase ist `PreReview (AI)`, nicht direkt `Freigabe Implementierung`.
 - Erst nach erfüllten Abschlussbedingungen nach `PreReview (AI)` verschieben und den Turn beenden.
   - Wenn Schritt 4 oder 8 wegen offener Funktionalitäts-, Verhaltens- oder Produktausgabe-Entscheidung greift, ist stattdessen `Planung` der zulässige Abschluss dieser Phase.
-  - Ein direkter Übergang von `In Arbeit (AI)` nach `BLOCKER` ist nur über den blocked-access escape hatch zulässig.
+  - Ein direkter Übergang von `In Arbeit (AI)` nach `BLOCKER` ist bei fälliger Betreiberübergabe oder über den blocked-access escape hatch zulässig.
   - Ausnahme: Wenn du gemäß blocked-access escape hatch durch fehlende erforderliche Tools/Auth blockiert bist, verschiebe nach `BLOCKER` und füge den Blocker-Hinweis sowie explizite Entblockungsaktionen hinzu.
 - Vor dem Wechsel nach `PreReview (AI)` müssen alle folgenden Bedingungen erfüllt sein:
   - Die Checkliste aus diesem Ablauf ist vollständig abgeschlossen und korrekt im einen Workpad-Kommentar abgebildet.
-  - Erforderliche ticketseitige Validierungspunkte sind abgeschlossen.
+  - Alle jetzt fälligen ticketseitigen Validierungspunkte sind abgeschlossen.
   - Validation/Tests sind für den aktuellen lokalen Arbeitsstand grün.
   - Das Workpad dokumentiert den finalen ungecommitten Übergabestand und die bestandene lokale Validierung explizit.
   - Falls die App berührt wird, sind die Runtime-Validierungsanforderungen aus `App runtime validation (required)` abgeschlossen.
@@ -579,7 +621,7 @@ den manuellen Schritt `Freigabe Implementierung` übergeben.
 
 Den Skill `symphony-review` vollständig ausführen. Wenn der Skill einen
 eindeutigen Review-Abschluss ohne Findings und mit sauberem Workspace ergibt,
-`Freigabe Review` überspringen und direkt nach `Test (AI)` übergeben. In allen
+`Freigabe Review` gemäß untenstehender Abschlussregel überspringen. In allen
 anderen abgeschlossenen Fällen den Abschluss nach der Skill-Evidenz sowie
 `--yolo` oder `Skip "Freigabe Review"` bestimmen.
 
@@ -599,9 +641,11 @@ anderen abgeschlossenen Fällen den Abschluss nach der Skill-Evidenz sowie
 ### Abschluss und nächster Status
 
 - Wenn `symphony-review` ohne Findings und mit sauberem Workspace endet,
-  verschiebe das Issue nach `Test (AI)` und beende den Turn. Dieser
-  No-Findings-Skip gilt unabhängig von `--yolo` oder
-  `Skip "Freigabe Review"`-Labels.
+  verschiebe das Issue nach `Test (AI)` und beende den Turn, sofern keine
+  ausdrücklich vereinbarte, weiterhin fällige PO-Abnahme an `Freigabe Review`
+  besteht; in diesem Fall dorthin übergeben. Ein technischer No-Findings-Befund
+  ersetzt ihren Beleg nicht. Autorisierte Skips gemäß Statusübersicht bleiben
+  wirksam. Der reguläre No-Findings-Skip benötigt kein zusätzliches Skip-Label.
 - In allen anderen abgeschlossenen Fällen muss die Review-Evidenz zuerst
   behandelt und dokumentiert sein. Ohne `--yolo` oder
   `Skip "Freigabe Review"` verschiebe das Issue danach nach `Freigabe Review`;
@@ -652,14 +696,15 @@ Den Branch vor dem Test per Rebase gegen `origin/main` synchronisieren,
 
 - Verschiebe das Issue nach `Merge (AI)` und beende den Turn.
   - Nur dieser Schritt verschiebt regulär von `Test (AI)` nach `Merge (AI)`.
-- Solange die `### Test`- oder `### Validierung`-Checkliste im Workpad offen,
-  fehlend oder nicht explizit abgehakt ist, ist kein regulärer Turn-Abschluss
-  zulässig. Arbeite weiter oder dokumentiere einen echten Blocker
-  beziehungsweise `agent.max_turns` ohne Statuswechsel.
+- `### Test` muss vollständig abgeschlossen sein, `### Validierung` hinsichtlich
+  aller jetzt fälligen Punkte. Später fällige Nachweise bleiben gemäß
+  `symphony-workpad` offen. Fehlende/unbewertbare Pflichtchecklisten verhindern
+  den Abschluss; weiterarbeiten oder fällige Betreiberübergabe ausführen.
+  Bei `agent.max_turns` ohne Statuswechsel stoppen.
 
 ### Sonderfälle
 
-- Falls ein `Test (AI)`-Lauf sauber endet, das Issue aber fälschlich noch in `Test (AI)` steht, übernimmt Symphony den passenden Statuswechsel nach `Merge (AI)` nur als Guardrail-Fallback, wenn `### Test` und `### Validierung` geschlossen und bewertbar sind. Bei offener, fehlender oder nicht explizit abgehakter Checkliste bleibt das Issue aktiv.
+- Falls ein `Test (AI)`-Lauf sauber endet, das Issue aber fälschlich noch in `Test (AI)` steht, übernimmt Symphony den passenden Statuswechsel nach `Merge (AI)` nur als Guardrail-Fallback bei geschlossener `### Test`-Checkliste und erfüllter fälliger `### Validierung`. Nur eindeutig nach `symphony-workpad` erst in Merge fällige offene Punkte sind ausgenommen; fehlende/unbewertbare Checklisten bleiben sperrend.
 
 ## Ablauf für `Planung`
 

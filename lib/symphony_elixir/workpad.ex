@@ -120,6 +120,34 @@ defmodule SymphonyElixir.Workpad do
 
   def section_checklist_status(_body, _section_title), do: :missing
 
+  @doc "Evaluates test-phase validation without closing evidence explicitly due at merge."
+  @spec section_checklist_status(term(), term(), term()) :: :open | :closed | :deferred | :missing | :no_checklist
+  def section_checklist_status(body, "Validierung", "Test (AI)") when is_binary(body) do
+    case section_checklist_status(body, "Validierung") do
+      :open ->
+        {:ok, validation} = section_body(body, "Validierung")
+
+        open_items =
+          validation
+          |> String.split(~r/(?=^[\t ]*[-*][\t ]+\[[ xX]\](?:[\t ]|$))/m)
+          |> Enum.filter(&Regex.match?(~r/^[\t ]*[-*][\t ]+\[ \](?:[\t ]|$)/m, &1))
+
+        if open_items != [] and Enum.all?(open_items, &merge_due_item?/1), do: :deferred, else: :open
+
+      status ->
+        status
+    end
+  end
+
+  def section_checklist_status(body, section_title, _phase), do: section_checklist_status(body, section_title)
+
+  defp merge_due_item?(item) do
+    [first_line | _] = String.split(item, "\n", parts: 2)
+
+    length(Regex.scan(~r/fällig\s*:/iu, item)) == 1 and
+      Regex.match?(~r/; fällig: Merge \(AI\)\s*$/u, first_line)
+  end
+
   @spec review_handoff_status(term()) :: review_handoff_status()
   def review_handoff_status(comments) when is_list(comments) do
     comments

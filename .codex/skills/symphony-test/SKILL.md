@@ -17,23 +17,36 @@ Workflows.
   dokumentieren und stoppen.
 - Fehlende Pull-Evidence im Workpad ergänzen.
 - `### Test` pflegen, Details knapp in `### Verlauf`.
+- Autorisierten Direkteinstieg und Review-Skip gemäß `symphony-workpad`
+  dokumentieren; fehlende frühere Planungs-/PreReview-/Reviewhistorie allein
+  erfordert keine Nachholrunde. Aktuelle Pflichtnachweise bleiben erforderlich.
 
 ## Test-/Fix-Schleife
 
-1. Mit dem ersten repo-lokalen Testschritt beginnen.
+1. Bei Wiederaufnahme zuerst passende neue Betreiberbelege gemäß
+   `symphony-workpad` prüfen, dann die repo-lokale Wiederholungsregel anwenden;
+   ohne besondere Regel mit dem ersten repo-lokalen Testschritt beginnen.
 2. Nach jedem Schritt den zugehörigen `### Test`-Punkt aktualisieren.
 3. Bei Fehlern Fix umsetzen, Workpad aktualisieren und wieder bei Schritt 1
    starten.
 4. Lokale Fixes dürfen mit `<Issue-Key> Test (AI) Autocommit` plus kurzem Body
    committet werden.
 
+Fehlt eine externe Testvoraussetzung, den erlaubten repo-lokalen Startpfad
+nutzen. Ist etwa Docker/Testdatenbank nicht erreichbar und die Host-Bereitstellung
+Betreiberaufgabe, bestandene Teilprüfungen erhalten und einmalig konkret mit
+benötigtem Verfügbarkeitsnachweis und Fortsetzung in `Test (AI)` übergeben.
+Keine Host-/Colima-Reparatur, neue Containerplattform oder Datenlöschung.
+Ohne neuen passenden Beleg denselben unerfüllbaren Auftrag nicht wiederholen;
+Status-/BLOCKER-Weg gemäß aufrufendem Workflow verwenden.
+
 ## Abschluss
 
-Wenn alle Schritte sauber sind, `### Test` und die bindenden Punkte in
-`### Validierung` vollständig abhaken, nach `Merge (AI)` verschieben und den
-Turn beenden. Bei offener, fehlender oder nicht explizit abgehakter `### Test`-
-oder `### Validierung`-Checkliste den Hauptturn nicht final beenden:
-im selben Turn weiterarbeiten oder einen echten Blocker im Workpad
-dokumentieren. Bei
+Wenn alle Schritte sauber sind, `### Test` und die jetzt fälligen Punkte in
+`### Validierung` abhaken, nach `Merge (AI)` verschieben und den Turn beenden.
+Explizit später fällige Nachweise gemäß `symphony-workpad` bleiben bindend offen.
+Bei offener `### Test`-Checkliste, offenen fälligen Validierungspunkten oder
+fehlender/unbewertbarer Pflichtcheckliste im selben Turn weiterarbeiten oder
+eine fällige Betreiberübergabe gemäß Workflow ausführen. Bei
 `agent.max_turns` Abweichungen dokumentieren und ohne Statuswechsel stoppen;
 `agent.max_turns` ist kein normaler Phasenabschluss.

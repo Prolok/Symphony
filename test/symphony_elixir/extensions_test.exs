@@ -457,6 +457,53 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute Workpad.section_has_open_checklist_items?(workpad_body, "Review")
   end
 
+  test "test handoff defers only explicitly merge-due validation without closing it" do
+    body = """
+    ## Symphony Workpad
+
+    ### Validierung
+
+    - [x] Lokale Tests bestanden
+    - [ ] Betreiber: Paketabnahme; fällig: Merge (AI)
+
+    ### Test
+
+    - [x] Testlauf bestanden
+    """
+
+    assert Workpad.section_checklist_status(body, "Validierung") == :open
+    assert Workpad.section_checklist_status(body, "Validierung", "Test (AI)") == :deferred
+    assert Workpad.section_checklist_status(body, "Validierung", "Merge (AI)") == :open
+
+    for entry <- [
+          "Betreiberbeleg fehlt",
+          "Betreiberbeleg; fällig: Test (AI)",
+          "Betreiberbeleg; fällig: Freigabe Review",
+          "Betreiberbeleg; fällig: unbekannt",
+          "Betreiberbeleg; fällig: Review",
+          "Betreiberbeleg; fällig: Test (AI); fällig: Merge (AI)",
+          "Betreiberbeleg; fällig: Merge (AI)\n  fällig: Test (AI)",
+          "Betreiberbeleg; fällig: Merge (AI)\nfällig: unbekannt",
+          "Betreiberbeleg; fällig: Merge (AI) oder Test (AI)",
+          "Betreiberbeleg; fällig: Merge (AI)\n- [ ]",
+          "Betreiberbeleg; fällig: Merge (AI)\n- [ ] Weiterer Pflichtbeleg"
+        ] do
+      changed = String.replace(body, "Betreiber: Paketabnahme; fällig: Merge (AI)", entry)
+      assert Workpad.section_checklist_status(changed, "Validierung", "Test (AI)") == :open
+    end
+
+    for section <- ["Test", "Review"] do
+      changed = "### #{section}\n\n- [ ] Pflichtschritt; fällig: Merge (AI)"
+      assert Workpad.section_checklist_status(changed, section, "Test (AI)") == :open
+    end
+
+    assert Workpad.section_checklist_status(nil, "Validierung", "Test (AI)") == :missing
+    assert Workpad.section_checklist_status("### Test\n- [x] fertig", "Validierung", "Test (AI)") == :missing
+    assert Workpad.section_checklist_status("### Validierung\nNur Prosa", "Validierung", "Test (AI)") == :no_checklist
+    assert Workpad.section_checklist_status("### Validierung\n- [ ] ", "Validierung", "Test (AI)") == :open
+    assert Workpad.section_checklist_status(body, "Test", "Test (AI)") == :closed
+  end
+
   test "workpad helper classifies review handoff evidence" do
     no_findings_workpad = """
     ## Symphony Workpad

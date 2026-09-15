@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Relay.Session do
 
   defstruct path: nil,
             record: nil,
+            contexts: [],
             config: nil,
             request: nil,
             snapshot: nil,
@@ -29,6 +30,7 @@ defmodule SymphonyElixir.Relay.Session do
       "workspace" => workspace,
       "consumer" => consumer,
       "binding" => binding,
+      "authority" => opts[:authority],
       "subscription" => subscription,
       "generation" => nil,
       "phase" => "register",
@@ -47,6 +49,7 @@ defmodule SymphonyElixir.Relay.Session do
        %__MODULE__{
          path: path,
          record: record,
+         contexts: Keyword.get(opts, :contexts, []),
          config: config,
          request: Keyword.fetch!(opts, :request),
          snapshot: Keyword.fetch!(opts, :snapshot),
@@ -72,16 +75,30 @@ defmodule SymphonyElixir.Relay.Session do
           not same_identity or not valid_record?(stored) ->
             {:error, :relay_cache_corrupt}
 
-          stored["binding"] != fresh["binding"] or stored["subscription"] != fresh["subscription"] ->
-            known = Enum.uniq(stored["known"] ++ stored["dirty"])
-            {:ok, Map.merge(fresh, Map.put(Map.take(stored, ~w(issues epochs)), "known", known))}
+          Map.has_key?(stored, "authority") and stored["authority"] != fresh["authority"] ->
+            {:error, :relay_cache_binding_mismatch}
 
           true ->
-            {:ok, stored}
+            {:ok, resume_record(stored, fresh)}
         end
 
       _ ->
         {:error, :relay_cache_corrupt}
+    end
+  end
+
+  defp resume_record(stored, fresh) do
+    # v1 records predate the separate authority fingerprint. Registration with
+    # the authenticated workspace key still confirms generation/cursor before
+    # any cached candidate can become ready. Reconcile old scopes in place.
+    changed = stored["binding"] != fresh["binding"] or not Map.has_key?(stored, "authority")
+    record = Map.merge(stored, Map.take(fresh, ~w(binding authority)))
+    record = if changed, do: Map.put(record, "reconcile_at", 0), else: record
+
+    if stored["subscription"] == fresh["subscription"] do
+      Map.delete(record, "next_subscription")
+    else
+      Map.put(record, "next_subscription", fresh["subscription"])
     end
   end
 
@@ -117,6 +134,8 @@ defmodule SymphonyElixir.Relay.Session do
     end
   end
 
+  defp advance(%{record: %{"next_subscription" => _, "pending" => nil}} = session), do: change_subscription(session)
+
   defp advance(session) do
     case session.record["phase"] do
       "register" -> advance(%{session | registered: false})
@@ -125,6 +144,16 @@ defmodule SymphonyElixir.Relay.Session do
       "complete" -> complete(session)
       _ -> receive_page(session)
     end
+  end
+
+  defp change_subscription(session) do
+    record =
+      session.record
+      |> Map.put("subscription", session.record["next_subscription"])
+      |> Map.delete("next_subscription")
+      |> Map.put("phase", "register")
+
+    continue_saved(%{session | registered: false, status: :resyncing}, record, &advance/1)
   end
 
   defp register(session, view) do
@@ -271,7 +300,14 @@ defmodule SymphonyElixir.Relay.Session do
     resync = Enum.any?(page["events"], &(&1["signal"] == "resync_required"))
     phase = if resync, do: "resync", else: "replay"
     r = Map.merge(session.record, %{"pending" => nil, "cursor" => page["scannedThrough"], "phase" => phase})
-    continuation = if resync, do: &begin_snapshot/1, else: &refresh(&1, page)
+
+    continuation =
+      cond do
+        r["next_subscription"] -> &change_subscription/1
+        resync -> &begin_snapshot/1
+        true -> &refresh(&1, page)
+      end
+
     continue_saved(session, r, continuation)
   end
 
@@ -327,6 +363,8 @@ defmodule SymphonyElixir.Relay.Session do
   end
 
   defp latest(_, fresh), do: fresh
+
+  defp ready(%{record: %{"next_subscription" => _}} = session, _page), do: change_subscription(session)
 
   defp ready(session, page) do
     ready = page["scannedThrough"] == page["head"]
@@ -388,7 +426,7 @@ defmodule SymphonyElixir.Relay.Session do
     if session.record["binding"] == binding do
       session
     else
-      record = Map.merge(session.record, %{"binding" => binding, "phase" => "resync"})
+      record = Map.merge(session.record, %{"binding" => binding, "reconcile_at" => 0})
 
       case save(session, record) do
         {:ok, saved} -> %{saved | status: :resyncing}

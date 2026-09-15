@@ -1051,7 +1051,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     snapshot = static_snapshot()
 
     relay = %{
-      "relay-workspace" => %{status: :degraded, consumer_id: "rechner-anna", error: "relay_transport_unavailable", execution: %{"human" => "Starts gesperrt: Zuordnung fehlt oder ist mehrdeutig"}}
+      "relay-workspace" => %{status: :degraded, consumer_id: "rechner-anna", error: "relay_transport_unavailable", execution: %{"human" => "zuständig"}}
     }
 
     snapshot = Map.put(snapshot, :polling, %{relay: relay})
@@ -1073,14 +1073,14 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, view, html} = live(build_conn(), "/")
     assert html =~ "relay-workspace"
     assert html =~ "rechner-anna"
-    assert html =~ "Starts gesperrt"
+    assert html =~ "zuständig"
     assert html =~ "relay_transport_unavailable"
     payload = json_response(get(build_conn(), "/api/v1/state"), 200)
     assert payload["relay"]["relay-workspace"]["consumer_id"] == "rechner-anna"
     terminal_snapshot = %{snapshot | running: [], retrying: []}
     terminal = StatusDashboard.format_snapshot_content_for_test({:ok, terminal_snapshot}, 0)
-    assert terminal =~ "rechner-anna"
-    assert terminal =~ "Starts gesperrt"
+    refute terminal =~ "rechner-anna"
+    refute terminal =~ "zuständig"
     assert html =~ "Operations Dashboard"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"

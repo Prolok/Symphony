@@ -23,6 +23,92 @@ defmodule SymphonyElixir.RelayCacheTest do
   defp issue(time \\ "2026-09-14T20:00:00Z"), do: %{"id" => "issue", "updatedAt" => time, "title" => time}
   defp retry(s), do: %{s | retry_at: 0}
 
+  test "legacy binding migration keeps the durable receipt and cursor until authenticated registration", c do
+    {:ok, s} = open(c)
+    s = Session.tick(s)
+    Server.publish(c.server, "workspace")
+    s = Session.tick(s)
+    Server.publish(c.server, "workspace")
+    Server.fault(c.server, "workspace", "one", :ack, {:error, :lost_connection})
+    pending = Session.tick(s)
+    legacy = pending.record |> Map.delete("authority") |> Map.put("binding", "old-owners-and-raw-assignee-hash")
+    :ok = DurableState.write(s.path, legacy)
+
+    {:ok, resumed} = open(c, authority: "verified-app-binding")
+
+    for field <- ~w(consumer cursor generation issues epochs known dirty pending subscription) do
+      assert resumed.record[field] == legacy[field]
+    end
+
+    before = length(Server.calls(c.server))
+    ready = Session.tick(resumed)
+    assert ready.status == :ready
+    assert ready.record["cursor"] == 2
+    assert ready.record["generation"] == legacy["generation"]
+    assert ready.record["authority"] == "verified-app-binding"
+    assert Enum.map(Enum.drop(Server.calls(c.server), before), &elem(&1, 2)) == [:register, :ack]
+    assert {:error, :relay_cache_binding_mismatch} = open(c, authority: "different-app")
+  end
+
+  test "subscription expansion acknowledges old receipt before generation change and survives snapshot failure", c do
+    {:ok, s} = open(c)
+    s = Session.tick(s)
+    Server.publish(c.server, "workspace")
+    Server.fault(c.server, "workspace", "one", :ack, {:error, :offline})
+    pending = Session.tick(s)
+    before = length(Server.calls(c.server))
+    {:ok, expanded} = open(c, assignees: ["second", "human"], binding: "expanded", snapshot: fn _ -> {:error, :snapshot_unavailable} end)
+    assert expanded.record["cursor"] == pending.record["cursor"]
+    assert expanded.record["pending"] == pending.record["pending"]
+    assert expanded.record["issues"] == pending.record["issues"]
+    failed = Session.tick(expanded)
+    assert failed.status == :degraded
+    assert failed.record["phase"] == "snapshot"
+    assert failed.record["cursor"] == 1
+    calls = Enum.drop(Server.calls(c.server), before)
+    assert Enum.map(calls, &elem(&1, 2)) == [:register, :ack, :register]
+    assert failed.record["generation"] != pending.record["generation"]
+    assert "issue" in failed.record["known"]
+
+    Server.publish(c.server, "workspace", %{"assigneeIds" => ["second"]})
+    {:ok, resumed} = open(c, assignees: ["human", "second"], binding: "expanded")
+    ready = Session.tick(resumed)
+    assert ready.status == :ready
+    assert ready.record["consumer"] == "one"
+    assert ready.record["cursor"] == 2
+    assert ready.record["generation"] == failed.record["generation"]
+    {:ok, reordered} = open(c, assignees: ["second", "human", "human"], binding: "expanded")
+    assert reordered.record == ready.record
+  end
+
+  test "an idle subscription changes without resetting its local progress before registration", c do
+    {:ok, s} = open(c)
+    s = Session.tick(s)
+    Server.publish(c.server, "workspace")
+    s = Session.tick(s)
+    {:ok, expanded} = open(c, assignees: ["human", "second"])
+    assert expanded.record["cursor"] == 1
+    assert expanded.record["generation"] == s.record["generation"]
+    before = length(Server.calls(c.server))
+    ready = Session.tick(expanded)
+    assert ready.status == :ready
+    assert ready.record["cursor"] == 1
+    assert ready.record["subscription"]["assigneeIds"] == ["human", "second"]
+    assert Enum.map(Enum.drop(Server.calls(c.server), before), &elem(&1, 2)) == [:register, :register, :resync, :poll]
+  end
+
+  test "expansion during an incomplete old snapshot completes recovery before releasing candidates", c do
+    {:ok, s} = open(c, snapshot: fn _ -> {:error, :offline} end)
+    assert Session.tick(s).status == :degraded
+    {:ok, expanded} = open(c, assignees: ["human", "second"])
+    assert expanded.status == :initializing
+    ready = Session.tick(expanded)
+    assert ready.status == :ready
+    assert ready.record["subscription"]["assigneeIds"] == ["human", "second"]
+    refute Map.has_key?(ready.record, "next_subscription")
+    assert ready.record["issues"]["issue"] == issue()
+  end
+
   test "subscription precedes snapshot; changes during snapshot replay before ready", c do
     parent = self()
 
@@ -252,11 +338,12 @@ defmodule SymphonyElixir.RelayCacheTest do
     assert Session.tick(fresh).record["generation"] != s.record["generation"]
   end
 
-  test "corrupt cache and invalid subscription cannot bootstrap, binding changes require new snapshot", c do
+  test "corrupt cache and invalid subscription cannot bootstrap, binding changes reconcile without resetting delivery", c do
     {:ok, s} = open(c)
     s = Session.tick(s)
     {:ok, changed} = open(c, binding: "changed")
-    assert Session.tick(changed).record["generation"] != s.record["generation"]
+    assert changed.record["cursor"] == s.record["cursor"]
+    assert Session.tick(changed).record["generation"] == s.record["generation"]
     File.write!(s.path, "invalid")
     assert {:error, :relay_cache_corrupt} = open(c)
     assert {:error, :relay_requires_one_to_twenty_humans} = open(c, assignees: [])

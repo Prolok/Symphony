@@ -158,18 +158,42 @@ defmodule SymphonyElixir.Linear.Client do
     |> Enum.reduce_while(:ok, &verify_workspace_assignees/2)
   end
 
-  @doc "Resolve the shared relay subscription using the existing human-user verification."
-  @spec relay_assignees([ProjectContext.t()]) :: {:ok, [String.t()]} | {:error, term()}
-  def relay_assignees([first | _] = contexts) do
+  @doc "Resolve each project's local selection once; only the subscription uses their union."
+  @spec resolve_relay_contexts([ProjectContext.t()]) :: {:ok, [ProjectContext.t()]} | {:error, term()}
+  def resolve_relay_contexts(contexts) do
+    if Enum.all?(contexts, &is_list(&1.assignee_ids)),
+      do: {:ok, contexts},
+      else: resolve_unverified_contexts(contexts)
+  end
+
+  defp resolve_unverified_contexts([first | _] = contexts) do
     configured = contexts |> Enum.flat_map(&Assignees.parse(&1.settings.tracker.assignee)) |> Enum.uniq()
 
     with {:ok, users} <- ProjectContext.with_context(first, fn -> fetch_assignees(configured, nil, %{}, []) end),
-         true <- configured != [] and Enum.all?(configured, &verified_human?(&1, users)) do
-      ids = users |> Enum.filter(&(&1["app"] == false)) |> Enum.map(& &1["id"]) |> Enum.uniq() |> Enum.sort()
-      if length(ids) in 1..20, do: {:ok, ids}, else: {:error, :relay_requires_one_to_twenty_humans}
+         true <- Enum.all?(configured, &verified_human?(&1, users)) do
+      {:ok, Enum.map(contexts, &resolve_context_assignees(&1, users))}
     else
       {:error, _} = error -> error
       _ -> {:error, :relay_requires_verified_humans}
+    end
+  end
+
+  defp resolve_context_assignees(context, users) do
+    selected = Assignees.parse(context.settings.tracker.assignee)
+    ids = users |> Enum.filter(&selected_human?(&1, selected)) |> Enum.map(& &1["id"]) |> Enum.uniq() |> Enum.sort()
+    %{context | assignee_ids: ids}
+  end
+
+  defp selected_human?(user, selected) do
+    is_binary(user["id"]) and user["app"] == false and
+      Enum.any?(selected, &(&1 in [user["id"], String.downcase(user["email"] || "")]))
+  end
+
+  @spec relay_assignees([ProjectContext.t()]) :: {:ok, [String.t()]} | {:error, term()}
+  def relay_assignees(contexts) do
+    with {:ok, contexts} <- resolve_relay_contexts(contexts) do
+      ids = contexts |> Enum.flat_map(& &1.assignee_ids) |> Enum.uniq() |> Enum.sort()
+      if length(ids) in 1..20, do: {:ok, ids}, else: {:error, :relay_requires_one_to_twenty_humans}
     end
   end
 
@@ -220,8 +244,13 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp relay_candidate?(node, context) do
     ids = context.settings.tracker.app["allowed_issue_ids"]
-    project_candidate?(node, context) and (not is_list(ids) or node["id"] in ids)
+
+    project_candidate?(node, context) and relay_assignee_matches?(node, context) and
+      (not is_list(ids) or node["id"] in ids)
   end
+
+  defp relay_assignee_matches?(_node, %{assignee_ids: nil}), do: false
+  defp relay_assignee_matches?(node, context), do: get_in(node, ["assignee", "app"]) == false and get_in(node, ["assignee", "id"]) in context.assignee_ids
 
   @spec relay_issue(map()) :: Issue.t()
   def relay_issue(node) do
@@ -1186,13 +1215,19 @@ defmodule SymphonyElixir.Linear.Client do
       last_comment_signal: extract_last_comment_signal(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
-      assigned_to_worker: assigned_to_worker?(assignee, assignee_filter) and issue_in_context?(issue, context),
+      assigned_to_worker:
+        assigned_to_worker?(assignee, assignee_filter) and issue_in_context?(issue, context) and
+          relay_authorized?(issue, context),
       created_at: parse_datetime(issue["createdAt"]),
       updated_at: parse_datetime(issue["updatedAt"])
     }
   end
 
   defp normalize_issue(_issue, _assignee_filter), do: nil
+
+  defp relay_authorized?(_issue, nil), do: true
+  defp relay_authorized?(_issue, %{settings: %{tracker: %{relay: nil}}}), do: true
+  defp relay_authorized?(issue, context), do: relay_assignee_matches?(issue, context)
 
   defp issue_in_context?(_issue, nil), do: true
 

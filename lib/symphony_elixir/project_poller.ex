@@ -182,9 +182,17 @@ defmodule SymphonyElixir.ProjectPoller do
     delay = results |> Enum.map(&elem(&1, 1)) |> Enum.min()
     timer = Process.send_after(self(), {:poll, token}, delay)
 
-    notify_projects(state.contexts)
+    contexts =
+      Enum.map(contexts, fn context ->
+        case relays[context.settings.tracker.app["workspace_id"]] do
+          %Session{} = session -> hd(Relay.resolved_contexts(session, [context]))
+          _ -> context
+        end
+      end)
 
-    %{state | result: result, timer: timer, timer_token: token, relays: relays}
+    notify_projects(contexts)
+
+    %{state | contexts: contexts, result: result, timer: timer, timer_token: token, relays: relays}
   end
 
   defp notify_projects(contexts) do
@@ -193,18 +201,10 @@ defmodule SymphonyElixir.ProjectPoller do
     end
   end
 
-  defp execution_status(config, record, assignee) do
-    case Relay.owner(config["owners"], assignee, record["consumer"]) do
-      :ok -> "zuständig"
-      {:error, :relay_other_executor} -> "empfängt; anderer Rechner zuständig"
-      _ -> "Starts gesperrt: Zuordnung fehlt oder ist mehrdeutig"
-    end
-  end
-
-  defp execution_summary(%Session{record: record, config: config}) do
-    assignees = Enum.uniq(record["subscription"]["assigneeIds"] ++ Map.keys(config["owners"]))
-    assignees = if assignees == [], do: ["Zuständigkeit nicht konfiguriert"], else: assignees
-    Map.new(assignees, &{&1, execution_status(config, record, &1)})
+  defp execution_summary(%Session{} = session) do
+    session.contexts
+    |> Enum.flat_map(&(&1.assignee_ids || []))
+    |> Map.new(&{&1, "zuständig"})
   end
 
   defp execution_summary(_), do: %{}

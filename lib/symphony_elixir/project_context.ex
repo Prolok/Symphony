@@ -7,7 +7,19 @@ defmodule SymphonyElixir.ProjectContext do
   alias SymphonyElixir.{Config, EnvFile, PathSafety, Workflow}
   require Logger
 
-  defstruct [:id, :name, :root, :workflow_path, :workflow, :settings, :code_root, root_env: %{}, env: %{}]
+  defstruct [
+    :id,
+    :name,
+    :root,
+    :workflow_path,
+    :workflow,
+    :settings,
+    :code_root,
+    :assignee_ids,
+    root_env: %{},
+    env: %{}
+  ]
+
   @type t :: %__MODULE__{}
   @key {__MODULE__, :context}
 
@@ -109,7 +121,7 @@ defmodule SymphonyElixir.ProjectContext do
         %{}
 
       context ->
-        payload = Map.take(context, [:root, :workflow_path, :workflow, :env])
+        payload = Map.take(context, [:root, :workflow_path, :workflow, :env, :assignee_ids])
         encoded = payload |> Jason.encode!() |> :zlib.compress() |> Base.url_encode64()
         %{"SYMPHONY_PROJECT_CONTEXT" => encoded}
     end
@@ -123,6 +135,7 @@ defmodule SymphonyElixir.ProjectContext do
          true <- EnvFile.config_dir(root) == Path.expand(config_dir),
          true <- path == System.get_env("SYMPHONY_WORKFLOW_FILE"),
          true <- is_map(env) and Enum.all?(env, fn {key, value} -> is_binary(key) and is_binary(value) end),
+         true <- valid_assignee_ids?(payload["assignee_ids"]),
          %{"config" => config, "prompt" => prompt, "prompt_template" => template} <- workflow do
       context = %__MODULE__{
         id: root,
@@ -130,7 +143,8 @@ defmodule SymphonyElixir.ProjectContext do
         root: root,
         workflow_path: path,
         workflow: %{config: config, prompt: prompt, prompt_template: template},
-        env: env
+        env: env,
+        assignee_ids: payload["assignee_ids"]
       }
 
       case with_context(context, &resolve_context/0) do
@@ -144,6 +158,9 @@ defmodule SymphonyElixir.ProjectContext do
     _ -> {:error, :invalid_project_context}
   end
 
+  defp valid_assignee_ids?(nil), do: true
+  defp valid_assignee_ids?(ids), do: is_list(ids) and Enum.all?(ids, &is_binary/1)
+
   defp accept_refreshed_context({:ok, %{workflow: workflow, env: env}}, %{workflow: workflow, env: env} = context), do: context
 
   defp accept_refreshed_context({:ok, updated}, context) do
@@ -151,7 +168,7 @@ defmodule SymphonyElixir.ProjectContext do
 
     if Map.take(updated.settings.tracker, keys) == Map.take(context.settings.tracker, keys) and
          updated.settings.workspace.root == context.settings.workspace.root,
-       do: updated,
+       do: %{updated | assignee_ids: context.assignee_ids},
        else: keep_context(context, :project_binding_change_requires_restart)
   end
 

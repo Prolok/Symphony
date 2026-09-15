@@ -276,7 +276,7 @@ defmodule SymphonyElixir.TestSupport do
             "Merge (AI)"
           ],
           tracker_terminal_states: ["Review", "Fertig", "Abgebrochen"],
-          poll_interval_ms: 30_000,
+          poll_interval_ms: 5_000,
           poll_idle_shutdown_ms: 3_600_000,
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],

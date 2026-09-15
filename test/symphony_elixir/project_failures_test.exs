@@ -199,7 +199,6 @@ defmodule SymphonyElixir.ProjectFailuresTest do
       "endpoint" => "https://relay.test",
       "key_env" => "LINEAR_RELAY_KEY",
       "consumer_id" => "one",
-      "owners" => %{"human" => "one"},
       "state_root" => Path.join(root, "relay-state"),
       "reconcile_ms" => 3_600_000
     }
@@ -310,6 +309,7 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     assert :sys.get_state(ProjectPoller).interval == 61_000
     [reloaded] = :sys.get_state(ProjectPoller).contexts
     assert reloaded.workflow.prompt == "Reloaded project prompt"
+    assert reloaded.assignee_ids == ["human"]
     assert Config.settings!().agent.max_concurrent_agents == 2
     assert Config.settings!().observability.refresh_ms == 777
     assert Config.settings!().observability.render_interval_ms == 888

@@ -19,7 +19,7 @@ defmodule SymphonyElixir.RelayConfigTest do
     {:ok, root: root, relay: relay}
   end
 
-  test "config validates public bindings and fails closed on missing or ambiguous execution owners", %{relay: relay} do
+  test "config validates public bindings without a second routing source", %{relay: relay} do
     assert :ok = Relay.Config.validate(nil)
     assert :ok = Relay.Config.validate(relay)
 
@@ -27,18 +27,32 @@ defmodule SymphonyElixir.RelayConfigTest do
           {"endpoint", "http://relay.test", :invalid_relay_endpoint},
           {"key_env", "$SECRET", :invalid_relay_key_reference},
           {"consumer_id", "..", :invalid_relay_consumer_id},
-          {"owners", [], :invalid_relay_owners},
           {"reconcile_ms", 5_000, :invalid_relay_reconcile_interval},
           {"state_root", "", :invalid_relay_state_root}
         ] do
       assert {:error, ^error} = Relay.Config.validate(Map.put(relay, key, value))
     end
 
-    assert Relay.owner(%{"human" => "one"}, "human", "one") == :ok
-    assert {:error, :relay_other_executor} = Relay.owner(%{"human" => "one"}, "human", "two")
+    for owners <- [%{}, [], "invalid-json", %{"human" => "other"}] do
+      assert :ok = Relay.Config.validate(Map.put(relay, "owners", owners))
+    end
+  end
 
-    for owners <- [%{}, %{"human" => ["one", "two"]}, %{"human" => nil}],
-        do: assert({:error, :relay_executor_missing_or_ambiguous} = Relay.owner(owners, "human", "one"))
+  test "setup needs no owners", %{relay: relay} do
+    assert :ok = Relay.Config.validate(Map.delete(relay, "owners"))
+  end
+
+  test "default poll interval is five seconds" do
+    assert {:ok, settings} = Schema.parse(%{})
+    assert settings.polling.interval_ms == 5_000
+  end
+
+  test "owners and assignee ordering do not define consumer binding", %{relay: relay} do
+    tracker = %Schema.Tracker{relay: relay, assignee: "a@example.com,b@example.com"}
+    one = %ProjectContext{id: "project", settings: %Schema{tracker: tracker}}
+    two = put_in(one.settings.tracker.assignee, " b@example.com, a@example.com ")
+    two = put_in(two.settings.tracker.relay["owners"], %{"a" => "different"})
+    assert Relay.binding_key([one]) == Relay.binding_key([two])
   end
 
   test "identity survives restart and rejects silently changing the configured executor", %{relay: relay} do
@@ -77,6 +91,8 @@ defmodule SymphonyElixir.RelayConfigTest do
     File.write!(Path.join(other, ".env"), "TEST_RELAY_KEY=one\n")
     contexts = Enum.map([root, other], fn dir -> %ProjectContext{settings: %Schema{tracker: %Schema.Tracker{relay: relay, app: %{"env_dir" => dir}}}} end)
     assert Relay.Config.shared(contexts) == :ok
+    [first, second] = contexts
+    assert Relay.Config.shared([first, put_in(second.settings.tracker.relay["owners"], "ignored-invalid-value")]) == :ok
     File.write!(Path.join(other, ".env"), "TEST_RELAY_KEY=two\n")
     assert {:error, :conflicting_workspace_relay_keys} = Relay.Config.shared(contexts)
     [one, two] = contexts
@@ -92,14 +108,14 @@ defmodule SymphonyElixir.RelayConfigTest do
     ProjectContext.with_context(context, fn ->
       assert {:ok, settings} = Schema.parse(%{"tracker" => %{"relay" => %{relay | "endpoint" => "$RELAY_URL", "owners" => "$RELAY_OWNERS"}}})
       assert settings.tracker.relay["endpoint"] == "https://relay.test"
-      assert settings.tracker.relay["owners"] == %{"human" => "one"}
+      refute Map.has_key?(settings.tracker.relay, "owners")
     end)
 
     assert is_binary(Config.relay_state_root())
     assert {:ok, settings} = Schema.parse(%{"tracker" => %{"relay" => %{"owners" => "broken"}}})
-    assert settings.tracker.relay["owners"] == :invalid
+    refute Map.has_key?(settings.tracker.relay, "owners")
     assert {:ok, settings} = Schema.parse(%{"tracker" => %{"relay" => %{"owners" => []}}})
-    assert settings.tracker.relay["owners"] == []
+    refute Map.has_key?(settings.tracker.relay, "owners")
     assert {:error, :invalid_relay_endpoint} = Relay.Config.shared([%ProjectContext{settings: %Schema{tracker: %Schema.Tracker{relay: %{relay | "endpoint" => nil}}}}])
   end
 

@@ -16,8 +16,7 @@ defmodule SymphonyElixir.RelayPollingTest do
       "key_env" => "LINEAR_RELAY_KEY",
       "consumer_id" => "one",
       "state_root" => Path.join(root, "relay-state"),
-      "reconcile_ms" => 3_600_000,
-      "owners" => %{"human" => "one"}
+      "reconcile_ms" => 3_600_000
     }
 
     context = put_in(context.settings.tracker.relay, config)
@@ -72,6 +71,7 @@ defmodule SymphonyElixir.RelayPollingTest do
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: [context]})
     assert {:ok, [issue]} = ProjectPoller.candidates(context)
+    context = ProjectPoller.context(context)
 
     ProjectContext.with_context(context, fn ->
       assert Relay.enabled?()
@@ -162,6 +162,18 @@ defmodule SymphonyElixir.RelayPollingTest do
       assert {:error, _} = CommentCheckpoint.background_scan(issue)
       refute_received {:linear, _}
       assert ProjectPoller.polling().relay["synthetic-workspace"].status == :degraded
+      snapshot = %{running: [], retrying: [], codex_totals: %{}, rate_limits: nil, polling: ProjectPoller.polling()}
+
+      snapshot_server =
+        spawn_link(fn ->
+          receive do
+            {:"$gen_call", from, :snapshot} -> GenServer.reply(from, snapshot)
+          end
+        end)
+
+      api = SymphonyElixirWeb.Presenter.state_payload(snapshot_server, 1_000)
+      assert api.relay["synthetic-workspace"].status == :degraded
+      assert api.relay["synthetic-workspace"].error =~ "relay_http, 503"
     end)
 
     assert {:error, :relay_context_required} = ProjectPoller.relay_issues(nil, [])
@@ -169,13 +181,7 @@ defmodule SymphonyElixir.RelayPollingTest do
     foreign = put_in(context.settings.tracker.app["workspace_id"], "unbound")
     assert {:error, :relay_unavailable} = ProjectPoller.relay_issues(foreign, ["issue"])
 
-    for {owners, expected} <- [
-          {%{"human" => "another"}, "empfängt; anderer Rechner zuständig"},
-          {%{}, "Starts gesperrt: Zuordnung fehlt oder ist mehrdeutig"}
-        ] do
-      :sys.replace_state(ProjectPoller, fn state -> put_in(state.relays["synthetic-workspace"].config["owners"], owners) end)
-      assert ProjectPoller.polling().relay["synthetic-workspace"].execution["human"] == expected
-    end
+    assert ProjectPoller.polling().relay["synthetic-workspace"].execution == %{"human" => "zuständig"}
 
     stop_supervised!(ProjectPoller)
     assert {:error, :relay_unavailable} = ProjectPoller.relay_issues(context, ["issue"])

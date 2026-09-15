@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.Relay do
   @moduledoc "Workspace relay integration; explicit critical actions continue to use Linear directly."
   alias SymphonyElixir.{Config, ProjectContext, ProjectPoller, Tracker}
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.{Assignees, Client}
   alias SymphonyElixir.Relay.{Session, Store}
 
   @spec open([ProjectContext.t()]) :: {:ok, Session.t()} | {:error, term()}
@@ -10,12 +10,15 @@ defmodule SymphonyElixir.Relay do
     app = first.settings.tracker.app
 
     with :ok <- SymphonyElixir.Relay.Config.shared(contexts),
+         {:ok, contexts} <- Client.resolve_relay_contexts(contexts),
          {:ok, assignees} <- subscription_assignees(contexts),
          {:ok, consumer} <- Store.identity(relay, app["workspace_id"]) do
       binding = binding_key(contexts)
 
       Session.open(relay, app["workspace_id"], consumer, assignees, binding,
         workspace_wide: Config.yolo?(),
+        contexts: contexts,
+        authority: Store.digest({relay["endpoint"], Map.take(app, ~w(workspace_id client_id user_id))}),
         request: fn op, body -> SymphonyElixir.Relay.Client.request(relay, app, consumer, op, body) end,
         snapshot: &Client.fetch_relay_snapshot(contexts, &1),
         fetch: &Client.fetch_relay_issues(contexts, &1)
@@ -28,10 +31,28 @@ defmodule SymphonyElixir.Relay do
   end
 
   @spec binding_key([ProjectContext.t()]) :: String.t()
-  def binding_key(contexts), do: Store.digest(Enum.map(contexts, &{&1.id, &1.settings.tracker}))
+  def binding_key(contexts) do
+    contexts
+    |> Enum.map(fn context ->
+      tracker = context.settings.tracker
+      assignees = context.assignee_ids || Enum.sort(Assignees.parse(tracker.assignee))
+      relay = if tracker.relay, do: Map.delete(tracker.relay, "owners")
+      {context.id, %{tracker | assignee: assignees, relay: relay}}
+    end)
+    |> Enum.sort()
+    |> Store.digest()
+  end
+
+  @spec resolved_contexts(Session.t(), [ProjectContext.t()]) :: [ProjectContext.t()]
+  def resolved_contexts(session, contexts) do
+    ids = Map.new(session.contexts, &{&1.id, &1.assignee_ids})
+    Enum.map(contexts, &%{&1 | assignee_ids: Map.get(ids, &1.id, &1.assignee_ids)})
+  end
 
   @spec candidates(Session.t(), [ProjectContext.t()]) :: {:ok, map()} | {:error, term()}
   def candidates(%{status: :ready} = session, contexts) do
+    contexts = resolved_contexts(session, contexts)
+
     with {:ok, found} <- Client.relay_candidates(contexts, Map.values(session.record["issues"])) do
       {:ok, Map.new(found, fn {project, issues} -> {project, Enum.map(issues, &stamp_issue(&1, session.record))} end)}
     end
@@ -63,22 +84,18 @@ defmodule SymphonyElixir.Relay do
         :ok
 
       %{relay: relay, app: app} ->
-        with true <- Map.get(issue, :assigned_to_worker, true) and issue.assignee_id != app["user_id"],
-             {:ok, consumer} <- Store.identity(relay, app["workspace_id"]) do
-          owner(relay["owners"], issue.assignee_id, consumer)
+        context = ProjectContext.current()
+        ids = if context, do: context.assignee_ids || [], else: []
+
+        with true <-
+               Map.get(issue, :assigned_to_worker, false) and is_binary(issue.assignee_id) and
+                 issue.assignee_id != app["user_id"] and issue.assignee_id in ids,
+             {:ok, _consumer} <- Store.identity(relay, app["workspace_id"]) do
+          :ok
         else
           false -> {:error, :relay_requires_authorized_human}
           error -> error
         end
-    end
-  end
-
-  @spec owner(map(), term(), String.t()) :: :ok | {:error, atom()}
-  def owner(owners, assignee, consumer) do
-    case owners[assignee] do
-      ^consumer when is_binary(assignee) -> :ok
-      other when is_binary(other) -> {:error, :relay_other_executor}
-      _ -> {:error, :relay_executor_missing_or_ambiguous}
     end
   end
 end

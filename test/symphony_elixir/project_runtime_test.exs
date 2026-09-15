@@ -45,7 +45,6 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
         LINEAR_RELAY_URL=https://relay.test
         LINEAR_RELAY_KEY=relay-#{workspace}
         LINEAR_RELAY_CONSUMER_ID=executor
-        LINEAR_RELAY_OWNERS={"human-first":"executor","human-second":"executor"}
         PUBLIC_HOOK_VALUE=#{name}
         """)
 

@@ -13,7 +13,6 @@ tracker:
     endpoint: $LINEAR_RELAY_URL
     key_env: LINEAR_RELAY_KEY
     consumer_id: $LINEAR_RELAY_CONSUMER_ID
-    owners: $LINEAR_RELAY_OWNERS
     reconcile_ms: 3600000
   # Der Scope wird repository-lokal über LINEAR_PROJECT_SLUG/LINEAR_TEAM_KEY gewählt;
   # fehlende Tracker-Felder erhalten den jeweils gleichnamigen Env-Fallback.
@@ -33,7 +32,7 @@ tracker:
     - Fertig
     - Abgebrochen
 polling:
-  interval_ms: 30000
+  interval_ms: 5000
   idle_shutdown_ms: 3600000
 workspace:
   # Ohne root oder bei null, leerem Wert bzw. fehlendem/leerem Env-Wert gilt
@@ -254,9 +253,11 @@ und für Start-/Trust-/Secret-Details
 [Schutz der Zugangsdaten](docs/linear-app.md#schutz-der-zugangsdaten).
 
 Der Dienst empfängt LinearRelay v1 je Workspace über einen gemeinsamen geschützten
-Key und eine dauerhafte Consumer-ID. Die gemeinsame Zuordnung menschlicher
-Assignees zu genau einer ausführenden Instanz gilt auch für `--yolo`, Retries und
-manuelle Helfer; fehlende/mehrdeutige Zuständigkeit sperrt Starts. Kein automatischer
+Key und eine dauerhafte Consumer-ID. Die verifizierten lokalen `LINEAR_ASSIGNEE`-
+Werte bestimmen je Projekt die Ausführung, auch für `--yolo`, Retries und manuelle
+Helfer; ohne lokale Zuständigkeit bleiben Starts gesperrt. Pro Workspace/Assignee
+ist genau ein ausführender Rechner zu konfigurieren; keine globale Sperrgarantie.
+Reguläre Relay-Abrufe erfolgen standardmäßig alle fünf Sekunden. Kein automatischer
 Rechnerwechsel oder Linear-Ersatzpoll bei Relay-Störung. Frische kritische Prüfungen,
 lokale Leases und Pflichtgates bleiben erhalten. Einrichtung und gemeinsamer
 Versionswechsel: [LinearRelay](docs/linear-app.md#linearrelay-empfang-zuständigkeit-und-gemeinsame-umstellung).
@@ -342,8 +343,8 @@ und `Freigabe Review` unabhängig von gesetzten Labels als übersprungen.
 Review-Findings, Review-Fixes, Dirty-Workspace oder uneindeutige
 No-Findings-Signale müssen weiterhin vom Hauptagenten behandelt und dokumentiert
 werden; danach überspringt `--yolo` aber auch `Freigabe Review`. Außerdem
-berücksichtigt Symphony Tickets ohne konfigurierte Assignee-Auswahl; die feste
-Relay-Ausführungszuordnung zu einem menschlichen Assignee bleibt wirksam;
+empfängt Symphony Relay-Ereignisse workspaceweit; die Ausführung bleibt auf
+lokal konfigurierte, verifizierte menschliche Assignees begrenzt;
 die Hauptmaske zeigt in diesem Modus `--yolo` statt des Assignees.
 
 Jeder automatische Statuswechsel beendet den aktuellen Codex-Turn. Der

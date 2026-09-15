@@ -3,6 +3,65 @@ defmodule SymphonyElixir.RelayBudgetTest do
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, WorkerCapacity}
   alias SymphonyElixir.RelayFixture, as: Server
 
+  test "the actual five-second timer fetches an available event then stays Linear-free on warm ticks" do
+    root = Path.dirname(Workflow.workflow_file_path())
+    server = start_supervised!(Server)
+    counts = start_supervised!({Agent, fn -> %{} end})
+    interval = Config.settings!().polling.interval_ms
+    assert interval == 5_000
+    [context] = Enum.map(contexts(root, ["one"]), &put_in(&1.settings.polling.interval_ms, interval))
+    bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
+    configure_http(server, [context], [issue_node(context)], bump)
+    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    start_supervised!({ProjectPoller, contexts: [context]})
+    assert {:ok, [_]} = ProjectPoller.candidates(context)
+    context = ProjectPoller.context(context)
+    Agent.update(counts, fn _ -> %{} end)
+    polling = ProjectPoller.polling()
+    assert polling.poll_interval_ms == 5_000
+    assert polling.next_poll_in_ms in 4_001..5_000
+    state = :sys.get_state(ProjectPoller)
+    assert Process.read_timer(state.timer) <= polling.next_poll_in_ms
+    before = Server.calls(server)
+
+    for _ <- 1..20 do
+      snapshot = %{running: [], retrying: [], codex_totals: %{}, rate_limits: nil, polling: ProjectPoller.polling()}
+      rendered = StatusDashboard.format_snapshot_content_for_test({:ok, snapshot}, 0.0, 115)
+      assert Regex.replace(~r/\e\[[0-9;]*m/, rendered, "") =~ "Next refresh: 5s"
+    end
+
+    assert Server.calls(server) == before
+    assert Agent.get(counts, & &1) == %{}
+    Server.publish(server, "one", %{"issueId" => "issue-0"})
+    Process.sleep(100)
+    assert Server.consumer(server, "one", "one").cursor == 0
+    assert Server.calls(server) == before
+    assert wait_for_poll(server, length(before))
+    assert Server.consumer(server, "one", "one").cursor == 1
+    assert Agent.get_and_update(counts, &{&1, %{}}) == %{read: 1}
+
+    for _ <- 1..2 do
+      calls = length(Server.calls(server))
+      assert wait_for_poll(server, calls)
+      assert {:ok, [issue]} = ProjectPoller.candidates(context)
+
+      ProjectContext.with_context(context, fn ->
+        assert :ok = Relay.execution_allowed(issue)
+        assert {:ok, [_]} = Relay.background_issues([issue.id])
+      end)
+
+      assert Agent.get(counts, & &1) == %{}
+    end
+  end
+
+  defp wait_for_poll(server, count) do
+    Enum.any?(1..65, fn _ ->
+      Process.sleep(100)
+      length(Server.calls(server)) > count and ProjectPoller.polling().next_poll_in_ms > 0
+    end)
+  end
+
   test "a workspace drains queued pages promptly without polling idle peers or bypassing backoff" do
     root = Path.dirname(Workflow.workflow_file_path())
     server = start_supervised!(Server)
@@ -154,8 +213,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
         "key_env" => "LINEAR_RELAY_KEY",
         "consumer_id" => "one",
         "state_root" => Path.join(root, "relay-state"),
-        "reconcile_ms" => 3_600_000,
-        "owners" => %{"human" => "one"}
+        "reconcile_ms" => 3_600_000
       }
 
       context = put_in(context.settings.tracker.relay, relay)

@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.Codex.ScriptSupport do
   @moduledoc false
 
-  alias SymphonyElixir.{Config, Dialog, EnvFile, PromptBuilder, Tracker, Workflow}
+  alias SymphonyElixir.{Config, Dialog, EnvFile, ProjectContext, PromptBuilder, Relay, Tracker, Workflow}
+  alias SymphonyElixir.Linear.Client
 
   @spec workspace_root(String.t(), String.t()) :: {:ok, String.t()} | {:error, term()}
   def workspace_root(workflow_path, env_files_dir)
@@ -61,6 +62,7 @@ defmodule SymphonyElixir.Codex.ScriptSupport do
              is_binary(dialog_workflow_path) and is_binary(issue_identifier) and
              is_binary(env_files_dir) do
     with :ok <- load_runtime_context(workflow_path, env_files_dir),
+         :ok <- verify_relay_context(workflow_path, env_files_dir),
          {:ok, issue} <- Tracker.fetch_issue_by_identifier(issue_identifier),
          :ok <- SymphonyElixir.Relay.execution_allowed(issue) do
       manual_prompt_context_for_issue(issue, interactive_workflow_path, dialog_workflow_path, env_files_dir)
@@ -144,6 +146,20 @@ defmodule SymphonyElixir.Codex.ScriptSupport do
   defp load_prompt_template(workflow_path) when is_binary(workflow_path) do
     with {:ok, %{prompt_template: prompt_template}} <- Workflow.load(workflow_path) do
       {:ok, prompt_template}
+    end
+  end
+
+  defp verify_relay_context(workflow_path, root) do
+    if Relay.enabled?() do
+      current = ProjectContext.current()
+      loaded = if current, do: {:ok, current}, else: ProjectContext.load(root, workflow_path, Map.take(System.get_env(), EnvFile.root_config_names()))
+
+      with {:ok, context} <- loaded,
+           {:ok, [verified]} <- Client.resolve_relay_contexts([context]) do
+        ProjectContext.bind(verified)
+      end
+    else
+      :ok
     end
   end
 

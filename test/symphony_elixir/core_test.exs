@@ -39,7 +39,7 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     config = Config.settings!()
-    assert config.polling.interval_ms == 30_000
+    assert config.polling.interval_ms == 5_000
     assert config.polling.idle_shutdown_ms == 3_600_000
 
     assert config.tracker.active_states == [

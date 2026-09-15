@@ -96,7 +96,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:interval_ms, :integer, default: 30_000)
+      field(:interval_ms, :integer, default: 5_000)
       field(:idle_shutdown_ms, :integer, default: 3_600_000)
     end
 
@@ -439,25 +439,9 @@ defmodule SymphonyElixir.Config.Schema do
   defp resolve_relay(nil), do: nil
 
   defp resolve_relay(relay) do
-    resolved = Map.new(relay, fn {key, value} -> {key, if(is_binary(value), do: resolve_secret_setting(value, nil), else: value)} end)
-
-    owners =
-      case resolved["owners"] do
-        value when is_binary(value) ->
-          case Jason.decode(value) do
-            {:ok, owners} when is_map(owners) -> owners
-            _ -> :invalid
-          end
-
-        nil ->
-          %{}
-
-        value ->
-          value
-      end
+    resolved = Map.new(Map.delete(relay, "owners"), fn {key, value} -> {key, if(is_binary(value), do: resolve_secret_setting(value, nil), else: value)} end)
 
     resolved
-    |> Map.put("owners", owners)
     |> Map.put_new("key_env", "LINEAR_RELAY_KEY")
     |> Map.put_new("reconcile_ms", 3_600_000)
     |> Map.put("state_root", resolved["state_root"] || SymphonyElixir.Config.relay_state_root())

@@ -5,6 +5,30 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
 
   @terminal_columns 115
 
+  test "two workspace relay details disappear while countdown and errors remain" do
+    snapshot = %{
+      running: [],
+      retrying: [retry_entry(%{error: "relay unavailable"})],
+      codex_totals: %{},
+      rate_limits: nil,
+      polling: %{
+        next_poll_in_ms: 5_000,
+        relay: %{
+          "workspace-one" => %{consumer_id: "consumer-one", status: :ready, execution: %{"human-one" => "zuständig"}},
+          "workspace-two" => %{consumer_id: "consumer-two", status: :degraded, execution: %{"human-two" => "zuständig"}}
+        }
+      }
+    }
+
+    rendered = render_snapshot({:ok, snapshot}, 0.0) |> then(&Regex.replace(~r/\e\[[0-9;]*m/, &1, ""))
+    assert rendered =~ "Next refresh: 5s"
+    assert rendered =~ "relay unavailable"
+
+    for detail <- ~w(Relay workspace-one workspace-two consumer-one consumer-two human-one human-two zuständig) do
+      refute rendered =~ detail
+    end
+  end
+
   test "snapshot fixture: idle dashboard" do
     snapshot_data =
       {:ok,

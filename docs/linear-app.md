@@ -18,7 +18,6 @@ Pro Fachprojekt stehen öffentliche Werte in `.symphony/.env`:
 | `LINEAR_PROJECT_SLUG` oder `LINEAR_TEAM_KEY` | Genau ein Projektscope oder exaktes Team |
 | `LINEAR_RELAY_URL` | Gemeinsamer HTTPS-Endpunkt des Relay v1 |
 | `LINEAR_RELAY_CONSUMER_ID` | Optional vorgegebene stabile Rechnerkennung (1–80 Buchstaben, Ziffern, `_`, `-`) |
-| `LINEAR_RELAY_OWNERS` | Gemeinsame JSON-Zuordnung menschlicher Assignee-UUIDs zu ausführenden Consumer-IDs |
 
 Die private `.symphony/.env.local` enthält `LINEAR_APP_SECRET`,
 `LINEAR_RELAY_KEY` und `LINEAR_ASSIGNEE`. Die Datei darf nur für das Laufzeitkonto lesbar sein, etwa
@@ -26,8 +25,9 @@ mit Modus `0600`. Assignees sind kommagetrennte menschliche E-Mail-Adressen oder
 UUIDs; Trimmen und Deduplizieren gelten für Polling, Dispatch und Reconciliation.
 `me` und App-Identitäten sind unzulässig. Je Workspace gibt es genau einen
 gemeinsamen Relay-Key für alle Projekte und Rechner. Empfangende Consumer sind
-unabhängig; eine gemeinsame feste Zuordnung bestimmt den ausführenden Rechner
-je menschlichem Assignee. Issue-Leases bleiben zusätzlich hostlokal.
+unabhängig; die verifizierte lokale Assignee-Liste bestimmt die Ausführung.
+Je Workspace/Assignee darf genau ein Rechner ausführend konfiguriert sein.
+Issue-Leases bleiben zusätzlich hostlokal.
 
 Im Symphony-Code-Root stehen `.env` und optional `.env.local` mit
 `SYM_PROJECT_ROOT=~/QuantHub` oder beispielsweise `~/QuantHub,~/ProjectHub`.
@@ -87,7 +87,7 @@ Kennung darf niemals das erste von mehreren Ergebnissen auswählen.
 
 Der Dienst benötigt den [Transportvertrag v1](https://github.com/Prolok/LinearRelay/blob/96ccb515e527b9ee8dd708d274aa6015e05c0ab5/docs/transport-v1.md).
 `tracker.relay` bindet `endpoint`, die Secret-Referenz `key_env`, optional
-`consumer_id`, `owners`, `reconcile_ms` und optional einen absoluten `state_root`.
+`consumer_id`, `reconcile_ms` und optional einen absoluten `state_root`.
 Der Standardroot ist `~/.local/state/symphony/relay`, unabhängig von Release und
 Projekt. Alle Projekte eines Workspace müssen dieselbe Relay-Konfiguration und
 denselben Key haben. Auth-/Scope-/Relay-Konfigurationsänderungen erfordern einen
@@ -105,24 +105,23 @@ weder zwischen gleichzeitig laufenden Rechnern teilen noch die ID klonen.
 Beschädigter Zustand sperrt Starts sichtbar, statt einen leeren Erfolg zu melden.
 
 Normale Subscriptions enthalten die deduplizierten, verifizierten menschlichen
-UUIDs (maximal 20). `--yolo` empfängt workspaceweit; auch dann braucht jedes
-startbare Ticket einen menschlichen Assignee mit fester Ausführungszuordnung.
-Beispiel einer auf allen Rechnern gemeinsamen `LINEAR_RELAY_OWNERS`-Zuordnung:
+UUIDs aus `LINEAR_ASSIGNEE` (maximal 20 je Workspace). Mehrere kommagetrennte
+E-Mails/UUIDs sind möglich; Trimmen und Deduplizieren erfassen auch dieselbe Person
+per E-Mail und UUID. Die lokale Auswahl bestimmt je Projekt die Ausführung;
+die vereinigte Workspace-Subscription erweitert keine Projektberechtigung.
+`--yolo` empfängt workspaceweit, darf aber ebenfalls nur Issues lokal
+konfigurierter, verifizierter Menschen ausführen. Ohne lokale Auswahl bleiben
+Starts gesperrt. Consumer-ID und Zustellstand hängen nicht von der Reihenfolge
+oder Schreibweise der Auswahl ab.
 
-```json
-{"11111111-1111-4111-8111-111111111111":"rechner-anna","22222222-2222-4222-8222-222222222222":"rechner-ben"}
-```
-
-Ein zusätzlicher Consumer für dieselbe Person empfängt und bestätigt unabhängig,
-startet jedoch keine Arbeit. Fehlende oder mehrdeutige Zuordnungen sperren neue
-Starts und erscheinen in Terminal, Dashboard und Status-API. Die Zuordnung gilt
-für alle Projekte, automatische Starts, Retries/Resume und manuelle Helfer.
-Die Reconciliation beendet laufende Worker bei Verlust der Zuständigkeit,
-auch nach einem Wechsel zwischen zwei konfigurierten menschlichen Assignees.
-Offline-Zeit löst keinen Wechsel aus. Menschliche Assignees, lokale Leases,
-Service-Mutex und beide PO-Freigaben bleiben erhalten. Konsistente gemeinsame
-Konfiguration ist Betriebsvoraussetzung; widersprüchliche Konfigurationen auf
-verschiedenen Rechnern werden nicht durch verteilte Claims abgesichert.
+Genau ein ausführender Rechner pro Workspace/Assignee ist gemeinsame
+Betriebsvoraussetzung: Dieselbe Person darf nicht gleichzeitig auf mehreren
+Symphony-Rechnern konfiguriert sein. Es gibt keine globale Erkennung, verteilte
+Sperre oder automatisches Failover. Eine zusätzliche Beobachter-/Executorrolle
+über OWNERS entfällt. Andere Relay-Consumer bleiben davon unberührt.
+Diese Zuständigkeit gilt für Dispatch, Retry/Resume und manuelle Helfer.
+Reconciliation beendet laufende Worker bei einem nicht mehr lokalen Assignee.
+Lokale Issue-Leases, Service-Mutex und beide PO-Freigaben bleiben erhalten.
 
 Die Subscription bzw. `resync begin` wird vor dem Initialsnapshot registriert.
 Erst nach dauerhaftem Snapshot folgen `complete` und Replay ab dem gespeicherten
@@ -139,7 +138,11 @@ eingebettetem Blockerstatus. Die lokale Kandidatenauswahl berücksichtigt je Pro
 `tracker.app.allowed_issue_ids`; zusätzlich gelesene Issues außerhalb dieser
 Startfreigabeliste blockieren die übrigen Kandidaten nicht.
 
-Reguläre HTTPS-Polls laufen alle 30 Sekunden. Ein warmer Leertick verursacht keine
+Reguläre HTTPS-Polls laufen standardmäßig alle fünf Sekunden. `Next refresh`
+zeigt den tatsächlichen lokalen Abruf-Countdown; ein bereits verfügbares Event
+wird beim nächsten Poll zuzüglich Transport/Verarbeitung abgeholt. Das Intervall
+ist kein Netzwerk-Timeout, und UI-Neuzeichnen löst keinen API-Poll aus.
+Ein warmer Leertick verursacht keine
 Linear-Anfrage, auch für laufende Issues und unveränderten Kommentarhintergrund.
 Bei Rückstand folgen weitere Seiten unmittelbar, jeweils in einem eigenen
 Verarbeitungsschritt des bestehenden Pollers. Andere Workspaces behalten ihren
@@ -151,7 +154,7 @@ Dispatch-Refresh sowie Status- und Merge-Gates prüfen Linear weiterhin frisch u
 unter den gemeinsamen App-Budgets. Eine Linear-Sperrfrist blockiert neue Starts,
 während Relay-Empfang möglich bleibt.
 
-Die Statusanzeige unterscheidet `initializing`, `catching_up`, `ready`, `resyncing`,
+Die bestehende Status-API unterscheidet `initializing`, `catching_up`, `ready`, `resyncing`,
 `degraded`, `access_error` und `upgrade_required`. Fehler sperren neue Starts aus
 unvollständigem Cache. Relay-Ausfälle erhalten exponentiellen Backoff ab 30 Sekunden
 bis 15 Minuten plus Jitter; es gibt keinen Ersatzpoll gegen Linear. Retention-Lücke,
@@ -160,15 +163,33 @@ Consumer-Verlust, Generation-/Receipt-Konflikt oder explizites Resync-Signal fü
 unbestätigt. Fehlender Cache bei bestehendem Consumer verlangt ebenfalls einen
 neuen Snapshot; verlorene Zwischenhistorie wird nicht als rekonstruiert dargestellt.
 
-Die gemeinsame Umstellung erfolgt nach Ende aller alten Arbeiten: Sessions,
-Kommentar-Inbox/-Journal und vorhandenen Relay-Zustand sichern, die freigegebene
-Symphony-/Relay-Version und je Workspace identische Keys/Zuordnungen verteilen,
-Rechner mit ihren jeweiligen stabilen IDs neu starten und `ready` sowie die
-Ausführungszuordnung prüfen. Für einen bewussten Rechnerwechsel zuerst alte Arbeit
-beenden, dann die Zuordnung gemeinsam ändern und neu starten. Es gibt keinen
-parallelen dauerhaften Legacy-Pollbetrieb. Cloudbereitstellung und gemeinsame
-Abnahme auf 3–5 Rechnern sind eigenständige Betriebsnachweise; lokale HTTP- und
-Prozess-E2E-Tests belegen keine Cloudabnahme.
+Die gemeinsame Umstellung erfolgt nach gesichertem Ende aller laufenden Jobs und
+Retryarbeit. Sessions, Kommentar-Inbox/-Journal und vorhandenen Relay-Zustand
+sichern, die freigegebene Symphony-Version gemeinsam übernehmen und lokale
+Assignee-Listen ohne Überschneidung zwischen Rechnern festlegen.
+`LINEAR_RELAY_OWNERS` und `tracker.relay.owners` aus der eigenen Konfiguration
+entfernen; verbliebene Werte werden ignoriert und sind keine zweite Routingquelle.
+Benutzerdateien werden nicht automatisch geändert, lokale Zustände nicht gelöscht.
+Relay/AWS und LinearBridge benötigen dafür keine Änderung oder neuen Secrets.
+
+Mit derselben Consumer-ID und demselben Zustandsroot neu starten, niemals parallel
+zu einer bestehenden Symphony-Instanz. Ein vorhandenes Receipt wird vor einer
+Subscription-Änderung bestätigt; danach verwendet Symphony bei Bedarf den vom
+Relay bestätigten Snapshot-Anker und spielt Ereignisse nach. Reihenfolge und
+E-Mail-/UUID-Aliase erzeugen keine neue Identität oder Generation. Ältere lokale
+Records werden beim authentifizierten Registrierungsabgleich mit anschließendem
+Sicherheitsabgleich übernommen; Cache und Zustellfortschritt bleiben erhalten.
+Fehler sind über Logs, reguläre Fehlerpfade und Status-API diagnostizierbar;
+die zusätzlichen Relay-UUID-Zeilen entfallen im Terminal-Dashboard.
+
+Vor der Produktprüfung den normalen Ticketlauncher `symphony-PRO-720` für den
+geprüften Worktree verwenden, erst nach kontrolliertem Ende der bisherigen Instanz.
+Fokussiert prüfen: zwei lokale Menschen ohne OWNERS und fremder Assignee gesperrt;
+zwei Workspaces ohne Relay-Detailzeilen mit 5s-Countdown; verfügbare Änderung beim
+nächsten Poll; Neustart und Listenänderung mit gleicher Consumer-ID und fortgesetztem
+Zustand. Hauptkonfiguration und laufenden Testbetrieb dabei erhalten.
+Lokale HTTP-/Prozesstests und diese Vorbereitung sind keine Cloudabnahme auf
+3–5 Rechnern. Die nachfolgenden PRO-716-Messwerte beschreiben den damaligen Stand.
 
 ## Schutz der Zugangsdaten
 

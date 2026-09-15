@@ -107,18 +107,21 @@ Dependabot-CI; der verpflichtende Produkt-Smoke erfolgt im Symphony-Ablauf.
 
    `LINEAR_ASSIGNEE` akzeptiert mehrere menschliche E-Mail-Adressen oder UUIDs,
    etwa `person@example.com,second@example.com`; Leerzeichen und Duplikate werden
-   entfernt. App-Identitäten und `me` sind nicht zulässig. Verschiedene Rechner
-   können unabhängig dieselben Assignees empfangen; die feste Ausführungszuordnung
-   bestimmt, welcher Rechner arbeiten darf, auch unter `--yolo`.
+   entfernt, auch dieselbe Person per E-Mail und UUID. App-Identitäten und `me`
+   sind nicht zulässig. Die verifizierte lokale Auswahl bestimmt die
+   Ausführungszuständigkeit, auch unter `--yolo`. Pro Workspace/Assignee darf
+   genau ein ausführender Rechner konfiguriert sein; dies ist eine gemeinsame
+   Betriebsregel ohne verteilte Sperre oder automatisches Failover.
 
-   Für den Standardworkflow zusätzlich `LINEAR_RELAY_URL` (HTTPS-Endpunkt) und
-   `LINEAR_RELAY_OWNERS` (JSON-Zuordnung menschlicher Assignee-UUIDs zu Consumer-IDs)
+   Für den Standardworkflow zusätzlich `LINEAR_RELAY_URL` (HTTPS-Endpunkt)
    konfigurieren. `LINEAR_RELAY_KEY` bleibt ausschließlich in der privaten
-   `.symphony/.env.local`; alle Projekte eines Workspace verwenden denselben Key
-   und dieselbe Zuordnung. `LINEAR_RELAY_CONSUMER_ID` bezeichnet optional die
-   stabile Instanz-ID, andernfalls erzeugt Symphony sie im lokalen Relay-Zustand.
-   Die Owner-Zuordnung muss auf diese ID zeigen. Ohne eindeutige Zuordnung bleiben
-   Starts gesperrt. Einrichtung und gemeinsame Umstellung stehen unter
+   `.symphony/.env.local`; alle Projekte eines Workspace verwenden denselben Key.
+   `LINEAR_RELAY_CONSUMER_ID` bezeichnet optional die stabile Empfängerkennung,
+   andernfalls erzeugt Symphony sie im lokalen Relay-Zustand. Sie bleibt bei
+   Änderungen der Assignee-Liste erhalten. Eine zusätzliche OWNERS-Zuordnung
+   entfällt. Reguläre Relay-Abrufe erfolgen alle fünf Sekunden; verfügbare Events
+   werden beim nächsten Abruf zuzüglich Transport/Verarbeitung berücksichtigt.
+   Einrichtung und gemeinsame Umstellung stehen unter
    [LinearRelay](docs/linear-app.md#linearrelay-empfang-zuständigkeit-und-gemeinsame-umstellung).
 
    Projekt-Scope begrenzt auf ein Linear-Projekt; Team-Scope auf das exakte Team
@@ -271,11 +274,11 @@ nur den hook-freien SSH-/App-Server-Transport und bilden keinen vollständigen
 Repository-, Test- oder Merge-Worker ab.
 
 Der gemeinsame Dienst pollt LinearRelay je Workspace mit `polling.interval_ms`
-(Standard 30 Sekunden). Relay-Backoff und Linear-Sperrfristen können den nächsten
+(Standard fünf Sekunden). Relay-Backoff und Linear-Sperrfristen können den nächsten
 Abruf verzögern. Initialsnapshot, geänderte Issues und seltene Sicherheitsabgleiche
 laden Linear-Daten nach; ein warmer Leertick verursacht keine Linear-Anfrage.
 
-Für private, unbeaufsichtigte Projekte kann Symphony mit `./symphony --yolo` gestartet werden. In diesem Modus empfängt der Relay-Consumer workspaceweit ohne konfigurierte Assignee-Auswahl. Die lokale Projektauswahl und die feste Ausführungszuordnung bleiben wirksam: Bearbeitung erfordert weiterhin einen menschlichen Assignee, dessen Owner diese Instanz ist. Die Freigaben `Freigabe Implementierung` und `Freigabe Review` werden wie durch passende Skip-Labels übersprungen, und das Dashboard zeigt `--yolo` statt des Assignees. Der manuelle Status `Planung` wird auch im `--yolo`-Modus nicht übersprungen. Review-Findings müssen weiterhin vom Hauptagenten behandelt und dokumentiert werden; nach dieser Behandlung überspringt `--yolo` aber auch `Freigabe Review`.
+Für private, unbeaufsichtigte Projekte kann Symphony mit `./symphony --yolo` gestartet werden. In diesem Modus empfängt der Relay-Consumer workspaceweit ohne konfigurierte Assignee-Auswahl. Die lokale Projektauswahl bleibt wirksam: Bearbeitung erfordert weiterhin einen lokal konfigurierten, verifizierten menschlichen Assignee. Die Freigaben `Freigabe Implementierung` und `Freigabe Review` werden wie durch passende Skip-Labels übersprungen, und das Dashboard zeigt `--yolo` statt des Assignees. Der manuelle Status `Planung` wird auch im `--yolo`-Modus nicht übersprungen. Review-Findings müssen weiterhin vom Hauptagenten behandelt und dokumentiert werden; nach dieser Behandlung überspringt `--yolo` aber auch `Freigabe Review`.
 
 Das Linear-Label `Requires Manual Review` ist davon unabhängig: Es ist kein internes Symphony-Skip-Label, sondern ein externes GitHub-Merge-Gate im Status `Merge (AI)`. Wenn das Label gesetzt ist, muss vor dem Merge ein menschliches GitHub-Approval eines Nicht-Autors auf der aktuellen PR-Head-SHA vorliegen. `--yolo` und `Skip "Freigabe Review"` umgehen dieses Gate nicht; das Label wird von Symphony weder automatisch angelegt noch nach Approval oder Merge entfernt.
 

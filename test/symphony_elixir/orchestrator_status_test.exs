@@ -1019,6 +1019,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   end
 
   test "orchestrator snapshot includes poll countdown and checking status" do
+    write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 30_000)
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 

@@ -11,7 +11,6 @@ defmodule SymphonyElixir.Relay.Config do
       not endpoint?(relay["endpoint"]) -> {:error, :invalid_relay_endpoint}
       not env_name?(relay["key_env"]) -> {:error, :invalid_relay_key_reference}
       relay["consumer_id"] != nil and not id?(relay["consumer_id"]) -> {:error, :invalid_relay_consumer_id}
-      not is_map(relay["owners"]) -> {:error, :invalid_relay_owners}
       true -> validate_storage(relay)
     end
   end
@@ -50,7 +49,7 @@ defmodule SymphonyElixir.Relay.Config do
 
   @spec shared([SymphonyElixir.ProjectContext.t()]) :: :ok | {:error, atom()}
   def shared(contexts) do
-    configs = Enum.map(contexts, & &1.settings.tracker.relay) |> Enum.uniq()
+    configs = Enum.map(contexts, &without_owners(&1.settings.tracker.relay)) |> Enum.uniq()
 
     case configs do
       [nil] -> :ok
@@ -58,6 +57,9 @@ defmodule SymphonyElixir.Relay.Config do
       _ -> {:error, :conflicting_workspace_relay_binding}
     end
   end
+
+  defp without_owners(nil), do: nil
+  defp without_owners(relay), do: Map.delete(relay, "owners")
 
   defp shared_keys(contexts, relay) do
     with :ok <- validate(relay),

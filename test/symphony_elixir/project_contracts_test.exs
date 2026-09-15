@@ -58,6 +58,64 @@ defmodule SymphonyElixir.ProjectContractsTest do
     assert {:error, {:project_lookup_failed, [_]}} = ProjectSelection.resolve("PRO-1", contexts)
   end
 
+  test "manual relay selection verifies fresh contexts before looking up issues", %{contexts: contexts} do
+    parent = self()
+    [one, two] = Enum.map(contexts, &put_in(&1.settings.tracker.relay, %{"consumer_id" => "manual"}))
+    assert one.assignee_ids == nil
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
+      context = ProjectContext.current()
+      query = payload[:query] || payload["query"]
+
+      data =
+        if query =~ "SymphonyHumanAssignees" do
+          send(parent, {:verified, context.id})
+          %{"users" => %{"nodes" => [%{"id" => "human", "email" => "dev@example.com", "app" => false}], "pageInfo" => %{"hasNextPage" => false}}}
+        else
+          %{"issues" => %{"nodes" => [issue_node(context)]}}
+        end
+
+      {:ok, %{status: 200, body: %{"data" => data}}}
+    end)
+
+    assert {:ok, verified, %{assigned_to_worker: true}} = ProjectSelection.resolve("PRO-1", [one, two], one.root)
+    assert verified.assignee_ids == ["human"]
+    assert_receive {:verified, id}
+    assert id == one.id
+    refute_receive {:verified, _}
+
+    assert {:ok, ^verified, _} = ProjectSelection.resolve("One:PRO-1", [verified, two])
+    refute_receive {:verified, _}
+    assert {:ok, %{id: id, assignee_ids: ["human"]}, _} = ProjectSelection.resolve("Two:PRO-1", [one, two], one.root)
+    assert id == two.id
+    assert {:error, {:ambiguous_issue_identifier, "PRO-1", ["One", "Two"]}} = ProjectSelection.resolve("PRO-1", [one, two])
+
+    foreign = %{one | assignee_ids: ["other"]}
+    assert {:error, {:issue_not_found_in_projects, "PRO-1"}} = ProjectSelection.resolve("PRO-1", [foreign])
+  end
+
+  test "manual relay selection fails closed when human verification fails", %{contexts: [one, _]} do
+    context = put_in(one.settings.tracker.relay, %{"consumer_id" => "manual"})
+    parent = self()
+    app_user = %{"id" => "app", "email" => "dev@example.com", "app" => true}
+    users = %{"nodes" => [app_user], "pageInfo" => %{"hasNextPage" => false}}
+
+    for result <- [
+          {:error, :controlled_unavailable},
+          {:ok, %{status: 200, body: %{"data" => %{"users" => users}}}}
+        ] do
+      SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
+        send(parent, {:lookup_query, payload[:query] || payload["query"]})
+        result
+      end)
+
+      assert {:error, {:project_lookup_failed, [{"One", _}]}} = ProjectSelection.resolve("One:PRO-1", [context])
+      assert_receive {:lookup_query, query}
+      assert query =~ "SymphonyHumanAssignees"
+      refute_receive {:lookup_query, _}
+    end
+  end
+
   test "an absent issue in one project does not hide the unique match in another", %{contexts: [one, two] = contexts} do
     SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
       nodes = if ProjectContext.current().id == one.id, do: [], else: [issue_node(two)]
@@ -133,7 +191,83 @@ defmodule SymphonyElixir.ProjectContractsTest do
     assert_receive {:human_page, "next"}
   end
 
+  test "resolved selections deduplicate aliases, retain project boundaries and ignore unsolicited users", %{contexts: [one, two]} do
+    parent = self()
+    first_id = "11111111-1111-4111-8111-111111111111"
+    second_id = "22222222-2222-4222-8222-222222222222"
+
+    users = [
+      %{"id" => first_id, "email" => "dev@example.com", "app" => false},
+      %{"id" => second_id, "email" => "second@example.com", "app" => false},
+      %{"id" => "foreign", "email" => "foreign@example.com", "app" => false}
+    ]
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ ->
+      send(parent, :users_requested)
+      {:ok, %{status: 200, body: %{"data" => %{"users" => %{"nodes" => users, "pageInfo" => %{"hasNextPage" => false}}}}}}
+    end)
+
+    one = put_in(one.settings.tracker.assignee, " DEV@example.com, #{first_id}, dev@example.com ")
+    two = put_in(two.settings.tracker.assignee, "second@example.com, #{second_id}")
+    assert {:ok, [a, b]} = Client.resolve_relay_contexts([one, two])
+    assert_receive :users_requested
+    assert a.assignee_ids == [first_id]
+    assert b.assignee_ids == [second_id]
+    assert {:ok, [^first_id, ^second_id]} = Client.relay_assignees([a, b])
+    refute_receive :users_requested
+    reordered = put_in(one.settings.tracker.assignee, first_id)
+    assert {:ok, [alias_context, _]} = Client.resolve_relay_contexts([reordered, two])
+    assert SymphonyElixir.Relay.binding_key([a, b]) == SymphonyElixir.Relay.binding_key([b, alias_context])
+
+    for yolo <- [false, true] do
+      Application.put_env(:symphony_elixir, :yolo, yolo)
+      own = put_in(issue_node(a)["assignee"], hd(users))
+      foreign_project_assignee = own |> Map.put("id", "wrong-assignee") |> Map.put("assignee", Enum.at(users, 1))
+      assert {:ok, found} = Client.relay_candidates([a, b], [own, foreign_project_assignee])
+      assert [%{id: "One"}] = found[a.id]
+      assert found[b.id] == []
+    end
+  end
+
+  test "relay resolution rejects unavailable or app users including yolo", %{contexts: [one, _]} do
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ ->
+      users = [%{"id" => "synthetic-app", "email" => "dev@example.com", "app" => true}]
+      {:ok, %{status: 200, body: %{"data" => %{"users" => %{"nodes" => users, "pageInfo" => %{"hasNextPage" => false}}}}}}
+    end)
+
+    for yolo <- [false, true], selection <- ["dev@example.com", "unknown@example.com", "me", "synthetic-app"] do
+      Application.put_env(:symphony_elixir, :yolo, yolo)
+      context = put_in(one.settings.tracker.assignee, selection)
+      assert {:error, _} = Client.resolve_relay_contexts([context])
+    end
+  end
+
+  test "verified local IDs survive worker context transfer and accepted reloads", %{contexts: [one, _]} do
+    {:ok, context} = ProjectContext.load(one.root, one.workflow_path, %{})
+    context = %{context | assignee_ids: ["human"]}
+    previous_path = System.get_env("SYMPHONY_WORKFLOW_FILE")
+    on_exit(fn -> restore_env("SYMPHONY_WORKFLOW_FILE", previous_path) end)
+    System.put_env("SYMPHONY_WORKFLOW_FILE", context.workflow_path)
+
+    ProjectContext.with_context(context, fn ->
+      encoded = ProjectContext.runtime_env()["SYMPHONY_PROJECT_CONTEXT"]
+      assert :ok = ProjectContext.restore(encoded, Path.join(context.root, ".symphony"))
+      assert ProjectContext.current().assignee_ids == ["human"]
+    end)
+
+    config = put_in(context.workflow.config, ["polling", "interval_ms"], 7_000)
+    File.write!(context.workflow_path, "---\n" <> Jason.encode!(config) <> "\n---\nUpdated prompt\n")
+    refreshed = ProjectContext.refresh(context)
+    assert refreshed.settings.polling.interval_ms == 7_000
+    assert refreshed.assignee_ids == ["human"]
+    changed = put_in(config, ["tracker", "assignee"], "other@example.com")
+    File.write!(context.workflow_path, "---\n" <> Jason.encode!(changed) <> "\n---\nChanged binding\n")
+    assert ProjectContext.refresh(refreshed) == refreshed
+  end
+
   test "relay candidates apply each project's start allowlist without poisoning the workspace", %{contexts: [one, two]} do
+    one = %{one | assignee_ids: ["human"]}
+    two = %{two | assignee_ids: ["human"]}
     one = put_in(one.settings.tracker.app["allowed_issue_ids"], ["allowed"])
     two = put_in(two.settings.tracker.app["allowed_issue_ids"], [])
     allowed = Map.put(issue_node(one), "id", "allowed")
@@ -247,7 +381,7 @@ defmodule SymphonyElixir.ProjectContractsTest do
       "identifier" => "PRO-1",
       "project" => %{"slugId" => context.settings.tracker.project_slug},
       "state" => %{"name" => "In Arbeit (AI)"},
-      "assignee" => %{"email" => "dev@example.com", "app" => false}
+      "assignee" => %{"id" => "human", "email" => "dev@example.com", "app" => false}
     }
   end
 end

@@ -80,8 +80,20 @@ defmodule SymphonyElixir.Config do
 
   @spec relay_state_root() :: Path.t()
   def relay_state_root do
-    Application.get_env(:symphony_elixir, :relay_state_root, Path.join(System.user_home!(), ".local/state/symphony/relay"))
+    case test_instance() do
+      nil -> Application.get_env(:symphony_elixir, :relay_state_root, Path.join(System.user_home!(), ".local/state/symphony/relay"))
+      _ -> Path.join(SymphonyElixir.TestInstance.state_root(), "relay")
+    end
   end
+
+  @spec test_instance() :: map() | nil
+  def test_instance, do: SymphonyElixir.TestInstance.current()
+
+  @spec test_run_stage() :: String.t() | nil
+  def test_run_stage, do: if(test_instance(), do: System.get_env("SYMPHONY_TEST_RUN_STAGE"))
+
+  @spec test_run_plan() :: Path.t() | nil
+  def test_run_plan, do: if(test_instance(), do: System.get_env("SYMPHONY_TEST_RUN_PLAN"))
 
   @spec relay_secret_reference() :: String.t() | nil
   def relay_secret_reference do

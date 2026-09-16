@@ -16,6 +16,7 @@ defmodule SymphonyElixir.ProjectContext do
     :settings,
     :code_root,
     :assignee_ids,
+    :test_instance,
     root_env: %{},
     env: %{}
   ]
@@ -78,6 +79,7 @@ defmodule SymphonyElixir.ProjectContext do
           "SYMPHONY_WORKFLOW_FILE" => workflow_path,
           "SYMPHONY_WORKFLOW_DIR" => SymphonyElixir.RuntimePaths.workflow_dir()
         })
+        |> Map.merge(SymphonyElixir.TestInstance.context_env(root))
 
       context = %__MODULE__{
         id: root,
@@ -87,6 +89,7 @@ defmodule SymphonyElixir.ProjectContext do
         workflow: workflow,
         code_root: code_root,
         root_env: root_env,
+        test_instance: SymphonyElixir.TestInstance.current(),
         env: env
       }
 
@@ -121,7 +124,7 @@ defmodule SymphonyElixir.ProjectContext do
         %{}
 
       context ->
-        payload = Map.take(context, [:root, :workflow_path, :workflow, :env, :assignee_ids])
+        payload = Map.take(context, [:root, :workflow_path, :workflow, :env, :assignee_ids, :test_instance])
         encoded = payload |> Jason.encode!() |> :zlib.compress() |> Base.url_encode64()
         %{"SYMPHONY_PROJECT_CONTEXT" => encoded}
     end
@@ -144,6 +147,7 @@ defmodule SymphonyElixir.ProjectContext do
         workflow_path: path,
         workflow: %{config: config, prompt: prompt, prompt_template: template},
         env: env,
+        test_instance: payload["test_instance"],
         assignee_ids: payload["assignee_ids"]
       }
 

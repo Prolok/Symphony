@@ -1181,6 +1181,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
+      SymphonyElixir.TestRun.start_allowed?(issue) and
       dispatch_state?(issue, active_states) and
       !cancel_issue_state?(state_name) and
       !terminal_issue_state?(state_name, terminal_states)

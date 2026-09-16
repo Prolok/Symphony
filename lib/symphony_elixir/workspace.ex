@@ -24,7 +24,9 @@ defmodule SymphonyElixir.Workspace do
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host) do
         case maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
           :ok ->
-            {:ok, workspace}
+            with :ok <- SymphonyElixir.TestRun.record_workspace(workspace, issue_context, created?) do
+              {:ok, workspace}
+            end
 
           {:error, _reason} = error ->
             cleanup_failed_new_workspace(workspace, created?, worker_host, issue_context)

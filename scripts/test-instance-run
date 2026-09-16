@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""Operator entrypoint for the bounded two-project Symphony bootstrap proof."""
+import argparse
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+
+def module(name):
+    spec = importlib.util.spec_from_file_location(name.replace("-", "_"), Path(__file__).with_name(name + ".py"))
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+class RunFailure(Exception):
+    pass
+
+
+def atomic(path, value):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as stream:
+        json.dump(value, stream, sort_keys=True, indent=2)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(path)
+    descriptor = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--checkout", type=Path, required=True)
+    result.add_argument("--test-instance", required=True)
+    result.add_argument("--manifest", type=Path, required=True)
+    result.add_argument("--run-id", required=True)
+    result.add_argument("--expected-sha", required=True)
+    result.add_argument("--expected-source", required=True)
+    result.add_argument("--port", type=int, required=True)
+    result.add_argument("--result-dir", type=Path, required=True)
+    result.add_argument("--source-mode", choices=("development", "merged"), default="development")
+    result.add_argument("--timeout", type=float, default=180)
+    result.add_argument("--resume", action="store_true")
+    result.add_argument("--cleanup-only", action="store_true", help="Nur eigenes Journal aufräumen; verlangt --resume")
+    return result
+
+
+class Run:
+    def __init__(self, args):
+        self.args = args
+        self.test = module("test-instance")
+        self.processes = module("test-processes")
+        self.children = []
+        self.known = {}
+        self.service = None
+        self.result = {"evidence": "live", "run_id": args.run_id, "status": "failed", "scenarios": {}, "cleanup": False}
+        self.result_path = args.result_dir / "result.json"
+        self.plan_path = args.result_dir / "plan.json"
+        self.deadline = time.monotonic() + args.timeout
+        self.result["timeout_seconds"] = args.timeout
+        self.result["started_at"] = time.time()
+        self.env = dict(os.environ, SYMPHONY_TEST_MANIFEST=str(args.manifest),
+                        SYMPHONY_TEST_EXPECTED_SHA=args.expected_sha, SYMPHONY_TEST_EXPECTED_SOURCE=args.expected_source,
+                        SYMPHONY_TEST_RUN_PLAN=str(self.plan_path),
+                        SYMPHONY_ROOT_DIR=str(args.checkout), SYMPHONY_WORKFLOW_FILE=str(args.checkout / "WORKFLOW.md"),
+                        MISE_TRUSTED_CONFIG_PATHS=str(args.checkout / "mise.toml"))
+        for key in ("SYMPHONY_PROJECT_CONTEXT", "SYMPHONY_LINEAR_AUTH_MODE", "SYMPHONY_LINEAR_BINDING_HASH"):
+            self.env.pop(key, None)
+
+    def save(self):
+        atomic(self.result_path, self.result)
+
+    def remaining(self):
+        value = self.deadline - time.monotonic()
+        if value <= 0:
+            raise RunFailure("timeout")
+        return value
+
+    def start(self, stage, direct=False):
+        env = dict(self.env, SYMPHONY_TEST_RUN_STAGE=stage)
+        flags = ["--test-instance", self.args.test_instance, "--port", str(self.args.port)]
+        command = (["mise", "exec", "--", str(self.args.checkout / "bin/symphony")] if direct else [str(self.args.checkout / "symphony")]) + flags
+        # The parent owns the fixture reservation through build, run and cleanup.
+        # All child entrypoints still validate the explicit test mode and source.
+        trampoline = "import os,sys; os.environ['SYMPHONY_SERVICE_OWNER_PID']=str(os.getpid()); os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+        output = subprocess.PIPE
+        if stage == "run":
+            output = os.fdopen(os.open(self.args.result_dir / "service.log", os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
+        try:
+            child = subprocess.Popen([sys.executable, "-c", trampoline, *command], cwd=self.args.checkout,
+                                     env=env, start_new_session=True, stdin=subprocess.DEVNULL,
+                                     stdout=output, stderr=subprocess.STDOUT)
+        finally:
+            if stage == "run":
+                output.close()
+        self.children.append(child)
+        return child
+
+    def invoke(self, stage, timeout=None):
+        child = self.start(stage, direct=stage in ("probe", "cleanup"))
+        try:
+            output, _ = child.communicate(timeout=timeout or self.remaining())
+        except subprocess.TimeoutExpired as error:
+            raise RunFailure(stage + "_timeout") from error
+        # Preserve local process evidence; provider contents never enter result.json.
+        log = self.args.result_dir / (stage + ".log")
+        with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab") as stream:
+            stream.write(output)
+        if child.returncode:
+            raise RunFailure(stage + "_failed")
+        lines = [line[len(b"Test run result="):] for line in output.splitlines() if line.startswith(b"Test run result=")]
+        if len(lines) != 1:
+            raise RunFailure(stage + "_missing_receipt")
+        return json.loads(lines[0])
+
+    def stop_children(self):
+        self.processes.descendants(os.getpid(), self.known, {int(os.environ.get("SYMPHONY_SERVICE_GUARD_PID", "0"))})
+        for child in self.children:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        for child in self.children:
+            try:
+                child.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.communicate(timeout=5)
+        self.processes.cleanup(os.getpid(), self.known, {int(os.environ.get("SYMPHONY_SERVICE_GUARD_PID", "0"))})
+        self.children = []
+        self.known = {}
+
+    def state(self):
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{self.args.port}/api/v1/state", timeout=min(2, self.remaining())) as response:
+                return json.load(response)
+        except (OSError, ValueError, urllib.error.URLError):
+            return {}
+
+    def ready(self, state, capsule):
+        service = state.get("service", {})
+        expected = capsule["manifest"]["projects"]
+        actual = service.get("bindings", [])
+        return (str(service.get("pid")) == str(self.service.pid) and service.get("source") == capsule["source"]
+                and service.get("test_instance") == self.args.test_instance
+                and {entry["name"] for entry in actual} == expected.keys()
+                and all(entry.get("project_id") == expected[entry["name"]]["project_id"]
+                        and entry.get("workspace_id") == expected[entry["name"]]["workspace_id"] for entry in actual)
+                and all(state.get("relay", {}).get(binding["workspace_id"], {}).get("status") == "ready" for binding in expected.values()))
+
+    def competition(self):
+        env = dict(self.env)
+        for key in ("SYMPHONY_SERVICE_OWNER_PID", "SYMPHONY_SERVICE_GUARD_PID", "SYMPHONY_SERVICE_LOCK_MODE"):
+            env.pop(key, None)
+        launcher = str(self.args.checkout / "symphony")
+        ticket = self.args.result_dir / "symphony-PRO-736"
+        if ticket.exists() or ticket.is_symlink():
+            if not ticket.is_symlink() or ticket.resolve() != Path(launcher):
+                raise RunFailure("foreign_ticket_launcher")
+        else:
+            ticket.symlink_to(launcher)
+        commands = [[launcher], [launcher, "--test-instance", "contention"],
+                    [str(ticket), "--test-instance", "contention"],
+                    ["mise", "exec", "--", str(self.args.checkout / "bin/symphony"), "--test-instance", "contention"]]
+        for command in commands:
+            result = subprocess.run(command, cwd=self.args.checkout, env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=min(15, self.remaining()))
+            if result.returncode == 0 or b"Symphony l\xc3\xa4uft bereits" not in result.stdout:
+                raise RunFailure("concurrent_start_not_rejected")
+        self.result["scenarios"]["exclusive_access"] = {"passed": True, "entrypoints": ["normal", "test", "ticket", "escript"]}
+
+    def fetch(self):
+        child = subprocess.Popen(["git", "-C", str(self.args.checkout), "fetch", "origin"],
+                                 env=dict(self.env, GIT_TERMINAL_PROMPT="0"), start_new_session=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.children.append(child)
+        try:
+            child.communicate(timeout=self.remaining())
+        except subprocess.TimeoutExpired as error:
+            # Keep the leader alive until stop_children inventories and reaps
+            # its entire process group, including a stalled SSH transport.
+            raise RunFailure("fetch_timeout") from error
+        if child.returncode:
+            raise RunFailure("fetch_failed")
+
+    def execute(self):
+        prepared = False
+        originals = {}
+        capsule = None
+        # Archive before any fallible preflight. If archival itself fails, do
+        # not enter the finally block that writes the next result.json.
+        if self.args.resume and self.result_path.exists():
+            previous = json.loads(self.result_path.read_text())
+            originals = previous.get("original_projects", {})
+            history = self.args.result_dir / ("result-" + str(time.time_ns()) + ".json")
+            atomic(history, previous)
+            self.result["original_projects"] = originals
+        try:
+            self.env["SYM_PROJECT_ROOT"] = json.loads(self.args.manifest.read_text())["project_root"]
+            if self.args.cleanup_only:
+                self.env["SYMPHONY_TEST_RUN_STAGE"] = "cleanup"
+            capsule = self.test.preflight(self.args.test_instance, self.args.checkout, self.env)
+            if self.args.source_mode == "merged" and not self.args.cleanup_only:
+                self.fetch()
+                remote = self.test.git(self.args.checkout, "rev-parse", "origin/main").decode().strip()
+                if capsule["source"]["dirty"] or remote != capsule["source"]["sha"]:
+                    raise RunFailure("merged_source_mismatch")
+            self.result.update(source=capsule["source"], source_mode=self.args.source_mode,
+                               projects=capsule["manifest"]["projects"])
+            originals = originals or {name: self.test.source(Path(capsule["manifest"]["project_root"]) / name) for name in capsule["manifest"]["projects"]}
+            self.result["original_projects"] = originals
+            if self.plan_path.exists():
+                existing = json.loads(self.plan_path.read_text())
+                if not self.args.resume or existing["source"] != capsule["source"] or existing["run_id"] != self.args.run_id:
+                    raise RunFailure("run_already_exists_or_changed")
+            else:
+                atomic(self.plan_path, {"evidence": "live", "instance": self.args.test_instance,
+                                        "run_id": self.args.run_id, "source": capsule["source"]})
+            self.save()
+            prepared = True  # Intent may be durable even when prepare loses its response.
+            if self.args.cleanup_only:
+                self.result["scenarios"]["cleanup_only"] = True
+                return 1  # Cleanup in finally is a recovery receipt, never a test pass.
+            fixtures = self.invoke("prepare")["fixtures"]
+            self.result["fixtures"] = fixtures
+            self.competition()
+            self.service = self.start("run")
+            sessions = {}
+            observed_ready = False
+            last_probe = 0
+            while self.remaining():
+                if self.service.poll() is not None:
+                    raise RunFailure("service_exited")
+                self.processes.descendants(os.getpid(), self.known, {int(os.environ.get("SYMPHONY_SERVICE_GUARD_PID", "0"))})
+                state = self.state()
+                if self.ready(state, capsule):
+                    observed_ready = True
+                    self.result["scenarios"]["readiness"] = {"passed": True, "service": state["service"]}
+                    self.result["consumers"] = {key: value["consumer_id"] for key, value in state["relay"].items()}
+                for entry in state.get("running", []):
+                    if entry.get("session_id") and entry["issue_id"] in {f["id"] for f in fixtures}:
+                        sessions[entry["issue_id"]] = entry["session_id"]
+                self.result["sessions"] = sessions
+                self.save()
+                if observed_ready and len(sessions) == 2 and time.monotonic() - last_probe >= 3:
+                    probed = self.invoke("probe")["fixtures"]
+                    last_probe = time.monotonic()
+                    if len(probed) == 2 and all(f["complete"] for f in probed):
+                        self.result["scenarios"]["bootstrap"] = {"passed": True, "fixtures": probed}
+                        consumers = self.result["consumers"]
+                        self.stop_children()
+                        self.service = self.start("run", direct=True)
+                        while self.remaining():
+                            if self.service.poll() is not None:
+                                raise RunFailure("restart_exited")
+                            resumed = self.state()
+                            if self.ready(resumed, capsule):
+                                actual = {key: value["consumer_id"] for key, value in resumed["relay"].items()}
+                                if actual != consumers:
+                                    raise RunFailure("consumer_changed_on_restart")
+                                self.result["scenarios"]["resume"] = {"passed": True, "consumers": actual}
+                                break
+                            time.sleep(min(0.2, self.remaining()))
+                        self.result["status"] = "passed"
+                        break
+                time.sleep(min(0.2, self.remaining()))
+        except (RunFailure, ValueError, KeyError, OSError, subprocess.SubprocessError) as error:
+            self.result["error"] = str(error) if isinstance(error, RunFailure) else "preflight_or_runtime_failed"
+        finally:
+            self.stop_children()
+            if prepared:
+                try:
+                    restored = self.invoke("cleanup", timeout=60)
+                    self.result["cleanup"] = all(f["deleted"] for f in restored["fixtures"])
+                    self.result["fixtures"] = restored["fixtures"]
+                except (RunFailure, ValueError, KeyError, OSError):
+                    self.result["cleanup_error"] = "cleanup_unconfirmed_journal_retained"
+                finally:
+                    self.stop_children()
+            if not self.result["cleanup"]:
+                self.result["status"] = "failed"
+            try:
+                self.result["originals_preserved"] = bool(originals) and all(self.test.source(value["checkout"]) == value for value in originals.values())
+                if not self.result["originals_preserved"]:
+                    self.result["status"] = "failed"
+            except (OSError, subprocess.SubprocessError):
+                self.result["status"] = "failed"
+                self.result["originals_preserved"] = False
+            if capsule and not self.args.cleanup_only:
+                main = capsule["manifest"]["main_instance"]
+                try:
+                    intact = self.test.normal_service_running() and self.test.process_started(main["pid"]) == main["started"]
+                except (OSError, subprocess.SubprocessError, ValueError):
+                    intact = False
+                self.result["main_preserved"] = intact
+                if not intact:
+                    self.result["status"] = "failed"
+            self.result["finished_at"] = time.time()
+            self.save()
+        return 0 if self.result["status"] == "passed" else 1
+
+
+def main():
+    args = parser().parse_args()
+    test = module("test-instance")
+    test.instance_name(sys.argv[1:])
+    if not test.NAME.fullmatch(args.test_instance) or not test.NAME.fullmatch(args.run_id) or not 0 < args.timeout <= 3600 or not 0 < args.port <= 65535:
+        raise SystemExit("Ungültiger Testname, Lauf, Port oder Timeout")
+    args.checkout = test.canonical(args.checkout)
+    args.manifest = test.canonical(args.manifest)
+    args.result_dir = test.canonical(args.result_dir)
+    if args.cleanup_only and not args.resume:
+        raise SystemExit("--cleanup-only verlangt --resume")
+    if os.environ.get("SYMPHONY_SERVICE_OWNER_PID") != str(os.getpid()):
+        module("service-lock").launch([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]], name=args.test_instance)
+    if (args.result_dir / "result.json").exists() and not args.resume:
+        raise SystemExit("Lauf existiert bereits; unveränderten Lauf explizit mit --resume wiederaufnehmen")
+    if args.resume:
+        plan = json.loads((args.result_dir / "plan.json").read_text())
+        if (plan.get("run_id") != args.run_id or plan.get("instance") != args.test_instance
+                or plan.get("source", {}).get("sha") != args.expected_sha
+                or plan.get("source", {}).get("source_sha256") != args.expected_source
+                or plan.get("source", {}).get("checkout") != str(args.checkout)):
+            raise SystemExit("Wiederaufnahme gehört nicht zum bestehenden Lauf; Resultate erhalten")
+    signalled = []
+    def interrupted(signum, _frame):
+        if not signalled:
+            signalled.append(signum)
+            raise RunFailure("signal_" + str(signum))
+    for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(number, interrupted)
+    status = Run(args).execute()
+    print("Testresultat: " + str(args.result_dir / "result.json"))
+    return status
+
+
+if __name__ == "__main__":
+    sys.exit(main())

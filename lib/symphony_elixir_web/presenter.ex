@@ -13,6 +13,7 @@ defmodule SymphonyElixirWeb.Presenter do
       %{} = snapshot ->
         %{
           generated_at: generated_at,
+          service: SymphonyElixir.TestInstance.public_info(),
           projects: Map.get(snapshot, :projects, []),
           counts: %{
             running: length(snapshot.running),

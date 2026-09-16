@@ -45,14 +45,15 @@ defmodule SymphonyElixir.Application do
   def start(_type, _args) do
     with :ok <- maybe_run_startup_preflight(),
          :ok <- SymphonyElixir.LogFile.configure() do
-      children = [
-        {Phoenix.PubSub, name: SymphonyElixir.PubSub},
-        {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
-        SymphonyElixir.WorkflowStore,
-        orchestrator_child(),
-        SymphonyElixir.HttpServer,
-        SymphonyElixir.StatusDashboard
-      ]
+      children =
+        [
+          {Phoenix.PubSub, name: SymphonyElixir.PubSub},
+          {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
+          SymphonyElixir.WorkflowStore,
+          orchestrator_child(),
+          SymphonyElixir.HttpServer,
+          SymphonyElixir.StatusDashboard
+        ] ++ if(Config.test_instance(), do: [SymphonyElixir.TestInstanceGuard], else: [])
 
       Supervisor.start_link(
         children,

@@ -1,3 +1,17 @@
+defmodule Mix.Tasks.Compile.SymphonySource do
+  use Mix.Task.Compiler
+
+  @impl true
+  def run(_args) do
+    python = System.get_env("SYMPHONY_PYTHON") || System.find_executable("python3") || "python3"
+
+    case System.cmd(python, ["scripts/test-instance.py", "stamp", File.cwd!()], stderr_to_stdout: true) do
+      {_, 0} -> {:ok, []}
+      _ -> Mix.raise("Quellstempel konnte nicht erstellt werden")
+    end
+  end
+end
+
 defmodule SymphonyElixir.MixProject do
   use Mix.Project
 
@@ -6,7 +20,7 @@ defmodule SymphonyElixir.MixProject do
       app: :symphony_elixir,
       version: "0.1.0",
       elixir: "~> 1.19",
-      compilers: [:phoenix_live_view] ++ Mix.compilers(),
+      compilers: [:symphony_source, :phoenix_live_view] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [

@@ -12,6 +12,7 @@ defmodule SymphonyElixir.CLI do
     logs_root: :string,
     port: :integer,
     yolo: :boolean,
+    test_instance: :string,
     budget_capture: :string
   ]
 
@@ -31,7 +32,8 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    result = with :ok <- SymphonyElixir.ServiceMutex.acquire(), do: evaluate(args)
+    result =
+      with {:ok, name} <- SymphonyElixir.TestInstance.name(args), :ok <- SymphonyElixir.ServiceMutex.acquire(name), :ok <- SymphonyElixir.TestInstance.configure(args), do: evaluate_or_test_stage(args)
 
     case result do
       :ok ->
@@ -41,6 +43,28 @@ defmodule SymphonyElixir.CLI do
         BudgetCapture.close_run(:startup_error)
         IO.puts(:stderr, message)
         System.halt(1)
+    end
+  end
+
+  defp evaluate_or_test_stage(args) do
+    case SymphonyElixir.TestRun.stage() do
+      stage when stage in ["prepare", "probe", "cleanup"] ->
+        root = SymphonyElixir.RuntimePaths.workflow_dir()
+
+        with :ok <- Workflow.set_workflow_file_path(default_workflow_path()),
+             :ok <- SymphonyElixir.Projects.prepare(root, default_workflow_path()),
+             {:ok, result} <- SymphonyElixir.TestRun.execute(stage) do
+          IO.puts("Test run result=" <> Jason.encode!(result))
+          System.halt(0)
+        else
+          _ -> {:error, "Testlauf: gebundene Laufzeitoperation fehlgeschlagen; Laufjournal erhalten"}
+        end
+
+      stage when stage in [nil, "run"] ->
+        evaluate(args)
+
+      _ ->
+        {:error, "Ungültige Testlaufphase"}
     end
   end
 
@@ -93,7 +117,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [--yolo] [--budget-capture <public-run.json>]"
+    "Usage: symphony [--test-instance <name>] [--logs-root <path>] [--port <port>] [--yolo] [--budget-capture <public-run.json>]"
   end
 
   @spec runtime_deps() :: deps()
@@ -115,7 +139,10 @@ defmodule SymphonyElixir.CLI do
   defp load_project_env_files(_env_files_dir) do
     workflow = Workflow.workflow_file_path()
     root = System.get_env("SYMPHONY_ROOT_DIR") || SymphonyElixir.RuntimePaths.workflow_dir()
-    SymphonyElixir.Projects.prepare(root, workflow)
+
+    with :ok <- SymphonyElixir.Projects.prepare(root, workflow) do
+      SymphonyElixir.ServiceMutex.reserve_projects(SymphonyElixir.Projects.configured())
+    end
   end
 
   defp format_env_file_error({:invalid_env_file, path, line_number, reason}) do
@@ -235,8 +262,20 @@ defmodule SymphonyElixir.CLI do
 
       pid ->
         ref = Process.monitor(pid)
+        service_lock = Process.get({SymphonyElixir.ServiceMutex, :port})
+        project_lock = Process.get({SymphonyElixir.ServiceMutex, :scopes})
 
         receive do
+          {port, {:exit_status, _}} when port == service_lock or port == project_lock ->
+            Application.stop(:symphony_elixir)
+            BudgetCapture.close_run(:service_lock_lost)
+            System.halt(1)
+
+          :test_instance_invalid ->
+            Application.stop(:symphony_elixir)
+            BudgetCapture.close_run(:test_instance_invalid)
+            System.halt(1)
+
           {:DOWN, ^ref, :process, ^pid, reason} ->
             BudgetCapture.close_run(if(reason in [:normal, :shutdown], do: :supervisor_down, else: :supervisor_error))
 

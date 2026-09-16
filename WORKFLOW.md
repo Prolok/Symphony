@@ -259,6 +259,10 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   ausgeschlossen; private Envdateien sind kein Agentenzugriffspfad.
 - Eine gemeinsame Dienstinstanz pro Benutzer; ein konkurrierender Start endet
   mit „Symphony läuft bereits“. Manuelle Helfer sind keine zweiten Dienste.
+  `--test-instance <name>` erlaubt zusätzlich genau einen exklusiven Testbetrieb
+  auf den beiden verifizierten Dummy-Projekten mit disjunkten Projektbereichen,
+  eigenem Zustand/Port und gemeinsamen Issue-Leases/API-Grenzen; Einrichtung und
+  Pflichtbelege: [Isolierter Testbetrieb](docs/linear-app.md#isolierter-testbetrieb).
   `sym-codex` und `sym-watch` verlangen bei mehrdeutigen Kennungen
   `Projekt:Ticketkennung`.
 - Die interne Zustandskennung ist `symphony`. Abweichenden Altzustand nur gemäß
@@ -281,7 +285,8 @@ Der Dienst empfängt LinearRelay v1 je Workspace über einen gemeinsamen geschü
 Key und eine dauerhafte Consumer-ID. Die verifizierten lokalen `LINEAR_ASSIGNEE`-
 Werte bestimmen je Projekt die Ausführung, auch für `--yolo`, Retries und manuelle
 Helfer; ohne lokale Zuständigkeit bleiben Starts gesperrt. Pro Workspace/Assignee
-ist genau ein ausführender Rechner zu konfigurieren; keine globale Sperrgarantie.
+ist je Projektbereich genau ein ausführender Rechner zu konfigurieren;
+der explizite Testbetrieb verlangt disjunkte Bereiche. Keine globale Sperrgarantie.
 Reguläre Relay-Abrufe erfolgen standardmäßig alle fünf Sekunden. Kein automatischer
 Rechnerwechsel oder Linear-Ersatzpoll bei Relay-Störung. Frische kritische Prüfungen,
 lokale Leases und Pflichtgates bleiben erhalten. Einrichtung und gemeinsamer

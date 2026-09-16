@@ -16,7 +16,9 @@ defmodule SymphonyElixir.Projects do
          false <- roots == [],
          {:ok, contexts} <- load_contexts(roots, workflow, root_env, code_root),
          :ok <- validate_workspace_roots(contexts),
-         :ok <- Client.validate_workspace_bindings(contexts) do
+         :ok <- Client.validate_workspace_bindings(contexts),
+         :ok <- SymphonyElixir.TestInstance.validate_contexts(contexts),
+         {:ok, contexts} <- SymphonyElixir.TestRun.bind_contexts(contexts) do
       Application.put_env(:symphony_elixir, :project_contexts, contexts)
       Application.put_env(:symphony_elixir, :service_settings, hd(contexts).settings)
       :ok

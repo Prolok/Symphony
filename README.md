@@ -50,6 +50,10 @@ API-Seite verknüpft die Scope-, Status- und Assignee-Auswahl projektweise.
 Innerhalb eines Workspaces müssen alle Projekte dieselbe verifizierte App-Bindung
 und dieselben Client Credentials verwenden. Widersprüche stoppen den Start.
 Verschiedene Workspaces werden getrennt abgefragt.
+Für die zwei vereinbarten Dummy-Projekte erlaubt `--test-instance <name>` einen
+zusätzlichen isolierten Testdienst mit exklusiver Testreservierung und eigenem
+Port. Der auf einen Quellstand festgelegte Runner, Betreiberbelege und Cleanup
+stehen unter [Isolierter Testbetrieb](docs/linear-app.md#isolierter-testbetrieb).
 Worktree-Roots müssen je Projekt getrennt sein; gleiche oder ineinander liegende
 Pfade werden beim Start abgewiesen. `workspace.root: $SYMPHONY_PROJECT_WORKTREES_ROOT`
 liefert einen projektspezifischen Root. Gesamt-, Status- und SSH-Hostlimits gelten
@@ -110,7 +114,7 @@ Dependabot-CI; der verpflichtende Produkt-Smoke erfolgt im Symphony-Ablauf.
    entfernt, auch dieselbe Person per E-Mail und UUID. App-Identitäten und `me`
    sind nicht zulässig. Die verifizierte lokale Auswahl bestimmt die
    Ausführungszuständigkeit, auch unter `--yolo`. Pro Workspace/Assignee darf
-   genau ein ausführender Rechner konfiguriert sein; dies ist eine gemeinsame
+   je Projektbereich genau ein ausführender Rechner konfiguriert sein; dies ist eine gemeinsame
    Betriebsregel ohne verteilte Sperre oder automatisches Failover.
 
    Für den Standardworkflow zusätzlich `LINEAR_RELAY_URL` (HTTPS-Endpunkt)

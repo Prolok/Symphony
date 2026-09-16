@@ -1,20 +1,22 @@
 defmodule SymphonyElixir.ServiceMutex do
   @moduledoc "Acquires the same per-user OS mutex for direct escript starts."
 
-  @spec acquire() :: :ok | {:error, String.t()}
-  def acquire do
-    if System.get_env("SYMPHONY_SERVICE_OWNER_PID") == System.pid() do
+  @spec acquire(String.t() | nil) :: :ok | {:error, String.t()}
+  def acquire(name \\ nil) do
+    if System.get_env("SYMPHONY_SERVICE_OWNER_PID") == System.pid() and
+         (name == nil or System.get_env("SYMPHONY_SERVICE_LOCK_MODE") == name) do
       :ok
     else
       root = SymphonyElixir.Workflow.default_workflow_file_path() |> Path.dirname()
       python = System.find_executable("python3") || "python3"
+      args = if name, do: ["--test-instance", name], else: []
 
       port =
         Port.open({:spawn_executable, String.to_charlist(python)}, [
           :binary,
           :exit_status,
           :stderr_to_stdout,
-          args: [Path.join(root, "scripts/service-lock.py"), "hold"]
+          args: [Path.join(root, "scripts/service-lock.py"), "hold"] ++ args
         ])
 
       receive do
@@ -33,6 +35,45 @@ defmodule SymphonyElixir.ServiceMutex do
           Port.close(port)
           {:error, "Symphony-Dienstlock antwortet nicht"}
       end
+    end
+  end
+
+  @spec reserve_projects([SymphonyElixir.ProjectContext.t()]) :: :ok | {:error, String.t()}
+  def reserve_projects(contexts) do
+    scopes =
+      Enum.map(contexts, fn context ->
+        tracker = context.settings.tracker
+        {:ok, {kind, scope}} = SymphonyElixir.Config.linear_scope(tracker)
+        %{workspace: tracker.app["workspace_id"], kind: kind, scope: scope}
+      end)
+
+    root = SymphonyElixir.RuntimePaths.workflow_dir()
+
+    port =
+      Port.open({:spawn_executable, System.find_executable("python3") || "python3"}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        args: [Path.join(root, "scripts/service-scopes.py")]
+      ])
+
+    Port.command(port, Jason.encode!(scopes) <> "\n")
+
+    receive do
+      {^port, {:data, "locked\n"}} ->
+        Process.put({__MODULE__, :scopes}, port)
+        :ok
+
+      {^port, {:data, _message}} ->
+        if Port.info(port), do: Port.close(port)
+        {:error, "Projektbereich wird bereits ausgeführt oder kann nicht reserviert werden"}
+
+      {^port, {:exit_status, _}} ->
+        {:error, "Projektreservierung fehlgeschlagen"}
+    after
+      5_000 ->
+        if Port.info(port), do: Port.close(port)
+        {:error, "Projektreservierung antwortet nicht"}
     end
   end
 end

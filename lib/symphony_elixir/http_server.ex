@@ -85,7 +85,10 @@ defmodule SymphonyElixir.HttpServer do
   defp normalize_host(host), do: to_string(host)
 
   defp resolve_bind_port(_ip, 0), do: {:ok, 0}
-  defp resolve_bind_port(ip, port), do: find_available_port(ip, port)
+
+  defp resolve_bind_port(ip, port) do
+    if Config.test_instance(), do: {:ok, port}, else: find_available_port(ip, port)
+  end
 
   defp find_available_port(_ip, port) when port > @max_tcp_port do
     {:error, :no_available_port}

@@ -1,0 +1,198 @@
+"""Local runner protocol fixtures, explicitly not a Linear/Codex live acceptance."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+
+REPO = Path(__file__).resolve().parents[2]
+BOOT = r'''
+import importlib.machinery,importlib.util,json,os,signal,sys
+loader=importlib.machinery.SourceFileLoader('runner',sys.argv[1])
+spec=importlib.util.spec_from_loader('runner',loader)
+m=importlib.util.module_from_spec(spec);loader.exec_module(m)
+args=m.parser().parse_args(sys.argv[2:]);run=m.Run(args)
+capsule=json.loads(os.environ['FIXTURE_CAPSULE'])
+run.test.preflight=lambda *_: capsule
+run.test.normal_service_running=lambda: True
+run.test.process_started=lambda _: 'fixture-main'
+run.competition=lambda: None # Real competing processes are covered separately.
+run.result['evidence']='fixture'
+def interrupt(number,_):
+    signal.signal(number,signal.SIG_IGN)
+    raise m.RunFailure('signal_'+str(number))
+for number in (signal.SIGINT,signal.SIGTERM): signal.signal(number,interrupt)
+sys.exit(run.execute())
+'''
+SERVICE = r'''
+import http.server,json,os,pathlib,subprocess,sys,time
+capsule=json.loads(os.environ['FIXTURE_CAPSULE'])
+scenario=os.environ.get('FIXTURE_SCENARIO','success')
+stage=os.environ['SYMPHONY_TEST_RUN_STAGE']
+root=pathlib.Path(os.environ['SYMPHONY_TEST_RUN_PLAN']).parent
+fixtures=[dict(id=str(i),project=name,created=True,deleted=False,complete=True) for i,name in enumerate(capsule['manifest']['projects'],1)]
+if stage=='run':
+    worker=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    with (root/'children').open('a') as f:f.write(str(worker.pid)+'\n')
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self,*_): pass
+        def do_GET(self):
+            bindings=[dict(name=name,**value) for name,value in capsule['manifest']['projects'].items()]
+            data=dict(service=dict(pid=os.getpid(),source=capsule['source'],test_instance='dev',bindings=bindings),
+                      relay={entry['workspace_id']:dict(status='ready',consumer_id='fixture-'+entry['workspace_id']) for entry in bindings},
+                      running=[dict(issue_id=f['id'],session_id='fixture-session-'+f['id']) for f in fixtures])
+            if scenario=='not_ready': data['service']['source']={}
+            self.send_response(200);self.end_headers();self.wfile.write(json.dumps(data).encode())
+    http.server.HTTPServer(('127.0.0.1',int(sys.argv[-1])),Handler).serve_forever()
+elif stage=='prepare':
+    (root/'remote-fixtures.json').write_text(json.dumps(fixtures))
+    if scenario=='prepare_lost': sys.exit(1)
+else:
+    if stage=='cleanup':
+        if scenario=='cleanup_failed':sys.exit(1)
+        (root/'remote-fixtures.json').unlink(missing_ok=True)
+        fixtures=[dict(f,deleted=True) for f in fixtures]
+print('Test run result='+json.dumps(dict(fixtures=fixtures)),flush=True)
+'''
+
+
+class TestRunnerProtocol(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(dir=REPO / 'tmp')
+        self.root = Path(self.directory.name)
+        self.source = self.root / 'source'
+        self.source.mkdir()
+        (self.source / 'bin').mkdir()
+        for file in (self.source / 'symphony', self.source / 'bin/symphony'):
+            file.write_text('#!' + sys.executable + '\n' + SERVICE)
+            file.chmod(0o755)
+        self.git(self.source, 'init', '-qb', 'main')
+        self.git(self.source, 'add', '.')
+        self.git(self.source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture')
+        self.fakebin = self.root / 'tools'
+        self.fakebin.mkdir()
+        (self.fakebin / 'mise').write_text('#!/bin/sh\nshift\nshift\nexec "$@"\n')
+        (self.fakebin / 'mise').chmod(0o755)
+        self.collector = self.root / 'fixtures'
+        self.bindings = {}
+        for i, name in enumerate(('symphony-test', 'symphony-test-tilor'), 1):
+            project = self.collector / name
+            project.mkdir(parents=True)
+            (project / 'unrelated').write_text('preserve')
+            self.git(project, 'init', '-qb', 'main')
+            self.git(project, 'add', '.')
+            self.git(project, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture')
+            (project / 'local-edit').write_text('keep existing untracked work')
+            self.bindings[name] = dict(project_id='p' + str(i), workspace_id='w' + str(i))
+        self.manifest = self.root / 'manifest.json'
+        self.manifest.write_text(json.dumps(dict(project_root=str(self.collector))))
+        self.children = []
+        self.addCleanup(self.cleanup)
+
+    def cleanup(self):
+        for process in self.children:
+            if process.poll() is None:
+                process.terminate()
+            process.communicate(timeout=20)
+        self.directory.cleanup()
+
+    def git(self, root, *args):
+        return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.DEVNULL).decode().strip()
+
+    def start(self, scenario='success', checkout=None, mode='development', resume=False, cleanup=False):
+        checkout = checkout or self.source
+        spec = importlib.util.spec_from_file_location('test_instance', REPO / 'scripts/test-instance.py')
+        helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+        source = helper.source(checkout)
+        self.result_dir = self.root / ('results-' + scenario)
+        capsule = dict(source=source, name='dev', manifest=dict(projects=self.bindings,project_root=str(self.collector),
+                      main_instance=dict(pid=os.getpid(),started='fixture-main')))
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1',0)); port=listener.getsockname()[1]
+        args = ['--checkout',str(checkout),'--test-instance','dev','--manifest',str(self.manifest),'--run-id','fixture',
+                '--expected-sha',source['sha'],'--expected-source',source['source_sha256'],'--port',str(port),
+                '--result-dir',str(self.result_dir),'--timeout','2' if scenario=='not_ready' else '10','--source-mode',mode]
+        if resume:args+=['--resume']
+        if cleanup:args+=['--cleanup-only']
+        env=dict(os.environ,FIXTURE_CAPSULE=json.dumps(capsule),FIXTURE_SCENARIO="recovered" if cleanup else scenario,
+                 PATH=str(self.fakebin)+os.pathsep+os.environ['PATH'])
+        for key in ('SYMPHONY_SERVICE_GUARD_PID','SYMPHONY_SERVICE_OWNER_PID','SYMPHONY_PROJECT_CONTEXT'):
+            env.pop(key,None)
+        process=subprocess.Popen([sys.executable,'-c',BOOT,str(REPO/'scripts/test-instance-run'),*args],
+                                 env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+        self.children.append(process)
+        return process
+
+    def receipt(self, process):
+        output,error=process.communicate(timeout=25)
+        self.assertTrue((self.result_dir/'result.json').exists(),error.decode())
+        result=json.loads((self.result_dir/'result.json').read_text())
+        self.assertEqual(result['evidence'],'fixture')
+        self.assertTrue(result['originals_preserved'])
+        children=self.result_dir/'children'
+        if children.exists():
+            for pid in children.read_text().splitlines():
+                state=subprocess.run(['ps','-p',pid,'-o','stat='],capture_output=True).stdout.strip()
+                self.assertTrue(not state or state.startswith(b'Z'),(pid,state))
+        return result
+
+    def test_complete_development_run_and_independent_merged_checkout(self):
+        first=self.start()
+        result=self.receipt(first)
+        self.assertEqual(first.returncode,0,result)
+        self.assertEqual(result['status'],'passed')
+        self.assertTrue(result['cleanup'])
+        self.assertTrue(result['scenarios']['resume']['passed'])
+        independent=self.root/'independent'
+        remote=self.root/'remote.git'
+        subprocess.run(['git','clone','-q','--bare',str(self.source),str(remote)],check=True)
+        subprocess.run(['git','clone','-q',str(remote),str(independent)],check=True)
+        self.source.rename(self.root/'unavailable')
+        second=self.start('separate',independent,'merged')
+        next_result=self.receipt(second)
+        self.assertEqual(second.returncode,0,next_result)
+        self.assertEqual(next_result['source']['sha'],result['source']['sha'])
+        self.assertEqual(next_result['source']['source_sha256'],result['source']['source_sha256'])
+        self.assertEqual(next_result['source']['checkout'],str(independent))
+
+    def test_timeout_missing_readiness_and_partial_prepare_preserve_failure_and_cleanup(self):
+        for scenario in ('not_ready','prepare_lost','cleanup_failed'):
+            with self.subTest(scenario=scenario):
+                process=self.start(scenario)
+                result=self.receipt(process)
+                self.assertEqual(process.returncode,1,result)
+                self.assertEqual(result['status'],'failed')
+                self.assertEqual(result['cleanup'],scenario!='cleanup_failed')
+
+    def test_partial_cleanup_is_resumed_without_recreating_fixtures(self):
+        first=self.start('cleanup_failed')
+        failed=self.receipt(first)
+        self.assertFalse(failed['cleanup'])
+        self.assertTrue((self.result_dir/'remote-fixtures.json').exists())
+        second=self.start('cleanup_failed',resume=True,cleanup=True)
+        recovered=self.receipt(second)
+        self.assertTrue(recovered['cleanup'])
+        self.assertEqual(recovered['status'],'failed')
+        self.assertFalse((self.result_dir/'remote-fixtures.json').exists())
+        self.assertTrue(list(self.result_dir.glob('result-*.json')))
+
+    def test_signals_cleanup_own_descendants_and_preserve_receipts(self):
+        for number in (signal.SIGINT,signal.SIGTERM):
+            process=self.start('signal-'+str(number))
+            deadline=time.monotonic()+10
+            while not (self.result_dir/'children').exists() and time.monotonic()<deadline:time.sleep(.01)
+            self.assertTrue((self.result_dir/'children').exists())
+            process.send_signal(number)
+            result=self.receipt(process)
+            self.assertEqual(result['status'],'failed')
+            self.assertTrue(result['cleanup'])
+            self.assertIn('signal_',result['error'])
+
+
+if __name__=='__main__':unittest.main()

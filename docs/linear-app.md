@@ -38,7 +38,7 @@ UUIDs; Trimmen und Deduplizieren gelten für Polling, Dispatch und Reconciliatio
 `me` und App-Identitäten sind unzulässig. Je Workspace gibt es genau einen
 gemeinsamen Relay-Key für alle Projekte und Rechner. Empfangende Consumer sind
 unabhängig; die verifizierte lokale Assignee-Liste bestimmt die Ausführung.
-Je Workspace/Assignee darf genau ein Rechner ausführend konfiguriert sein.
+Je Workspace/Assignee/Projektbereich darf genau ein Rechner ausführend konfiguriert sein.
 Issue-Leases bleiben zusätzlich hostlokal.
 
 Im Symphony-Code-Root stehen `.env` und optional `.env.local` mit
@@ -126,9 +126,9 @@ konfigurierter, verifizierter Menschen ausführen. Ohne lokale Auswahl bleiben
 Starts gesperrt. Consumer-ID und Zustellstand hängen nicht von der Reihenfolge
 oder Schreibweise der Auswahl ab.
 
-Genau ein ausführender Rechner pro Workspace/Assignee ist gemeinsame
-Betriebsvoraussetzung: Dieselbe Person darf nicht gleichzeitig auf mehreren
-Symphony-Rechnern konfiguriert sein. Es gibt keine globale Erkennung, verteilte
+Genau ein ausführender Rechner pro Workspace/Assignee/Projektbereich ist gemeinsame
+Betriebsvoraussetzung. Der explizite Testbetrieb darf dieselbe Person ausschließlich
+in disjunkten Dummy-Projektbereichen ausführen. Es gibt keine globale Erkennung, verteilte
 Sperre oder automatisches Failover. Eine zusätzliche Beobachter-/Executorrolle
 über OWNERS entfällt. Andere Relay-Consumer bleiben davon unberührt.
 Diese Zuständigkeit gilt für Dispatch, Retry/Resume und manuelle Helfer.
@@ -324,7 +324,7 @@ Ursprungstickets. Ihre lokale Prüfung verlangt keine vorgezogene Host-/AWS-Abna
 
 Die interne Installationskennung ist konstant `symphony`.
 `LINEAR_APP_INSTALLATION_ID` wird nicht mehr als Benutzereinstellung ausgewertet.
-Zustand liegt unverändert unter `<Projekt>/.symphony/state`, Codex-Sessions unter
+Regulärer Zustand liegt unter `<Projekt>/.symphony/state`, Codex-Sessions unter
 `codex/symphony`, Kommentarjournale unter `comments`.
 
 Bei tatsächlich abweichendem vorhandenen Zustand:
@@ -348,7 +348,7 @@ Es gibt keine langfristige Mischversions- oder Altkonfigurationsmatrix.
 
 `./symphony` hält vor Build-/Link-/Dispatch-Nebenwirkungen einen nichtblockierenden
 OS-Lock pro Benutzer unter `~/.cache/symphony/service.lock`. Ein zweiter Start,
-auch aus einem anderen Checkout oder mit einem anderen Port, endet sofort mit
+auch aus einem anderen Checkout oder mit einem anderen Port, endet ohne expliziten Testmodus mit
 „Symphony läuft bereits“. Die Datei wird nicht gelöscht. Nach sauberem Ende oder
 Crash wird der OS-Lock freigegeben. Direkte escript-Starts verwenden denselben
 Lock; manuelle Codex-/Watch-Helfer sind kein zweiter Dienst.
@@ -360,6 +360,187 @@ Linear-/Codex-Smoke werden getrennt ausgewiesen. Für reale Prüfungen dient das
 bereits freigegebene Dummy-Projekt Symphony Test. Reguläre PreReview-, Review-,
 Test- und Merge-Schritte bleiben erhalten; Installationsupdates werden am
 geprüften gemeinsamen Checkout vorgenommen.
+
+## Isolierter Testbetrieb
+
+`--test-instance <name> --port <port>` ist der ausdrückliche Zusatzbetrieb für
+**Prolok/symphony-test** und **tilor/symphony-test-tilor**. Der normale Dienst bleibt
+laufen. Unterschiedliche Testnamen teilen eine exklusive Umgebung; der Lock gilt
+bereits vor Build und Discovery, beim Runner bis nach dem Cleanup. Shelllauncher,
+Ticket-Symlink und direkter Escript verwenden denselben Vertrag. Ein Teststart
+führt kein Autoupdate aus und richtet keine globalen Launcher ein.
+
+Testquellcode liegt außerhalb des Testsammelroots. Dieser enthält direkt genau
+die zwei Dummy-Projekte, aber keine eigene `.symphony` und keinen Symphony-Code.
+Discovery bleibt einstufig. Symlink-Aliase und überlappende Roots werden abgewiesen.
+Ein verpflichtendes öffentliches Manifest bindet echte Workspace-/Projekt-IDs;
+der gebundene App-Client verifiziert zusätzlich Organisation, Projektname und
+`slugId`. Teamweiter Scope, produktiver Consumer-Override, SSH-Worker und falsche
+Bindungen sperren den Start. Der feste `workspace.root` im Workflow muss weiterhin
+`$SYMPHONY_PROJECT_WORKTREES_ROOT` verwenden.
+
+| Zustand | Testbetrieb |
+| --- | --- |
+| Dienstreservierung | `~/.cache/symphony/test-environment.lock` plus `test-instances/<name>.lock` |
+| Projektzustand, Profile, Sessions, Kommentarjournale | `~/.local/state/symphony/test-environment/projects/<projekt>/` |
+| Relay-Identität, Cache und Empfang/Ack | `~/.local/state/symphony/test-environment/relay/` |
+| Laufjournal | `~/.local/state/symphony/test-environment/runs/<lauf-id>/fixtures.json` |
+| Dienstlog | `~/.local/state/symphony/test-environment/runs/<name>/log/symphony.log` |
+| Worktrees | `<manifest.workspace_root>/<projekt>/<issue>` |
+| Ergebnisdateien | ausdrücklich angegebenes `--result-dir` außerhalb der Quellen |
+
+Die Testumgebung behält pro Workspace eine selbst erzeugte Consumer-ID über
+Neustarts, Instanznamen und Quellcheckouts hinweg. Produktiven Relay-Zustand nicht
+kopieren. Die ursprünglichen Projektdateien bleiben die gebundene Credentialquelle;
+Token/Relay-Key gehen nur durch die vorhandenen vertrauenswürdigen Laufzeitwege.
+Kein HOME-/XDG-Umbiegen: Issue-Leases und API-Cooldowns bleiben hostweit gemeinsam.
+Zusätzlich reserviert jeder Dienst seine verifizierten Projektbereiche; disjunkte
+Projekte desselben Workspace dürfen parallel laufen, Team-Scopes sperren dessen
+Projektbereiche konservativ vollständig. Ein Verlust des Lockhalters beendet den
+betroffenen Dienst. Diese Sperren ersetzen keine verteilte Zuständigkeitsregel.
+
+### Betreiberbeleg und Einrichtung
+
+Vor jedem Live-Lauf muss der Betreiber den Hauptdienst nach dem bereits erfolgten
+Projektumzug kontrolliert neu gestartet haben. Der Beleg umfasst PID, Prozessstart,
+Quell-SHA und **alle tatsächlich geladenen** Projektbindungen einschließlich
+kanonischer Projekt-/Worktreeroots. Alte Aliase dürfen die Dummy-Projekte nicht
+wieder sichtbar machen. Bei einem älteren Hauptstand ist dessen Inventar separat
+zu prüfen; der neue Dashboard-Abschnitt `service` unterstützt künftige Belege.
+Eine freie Dienstsperre, ein alter Prozess oder ein überlappender/mehrdeutiger Scope
+wird abgewiesen. Während des Testdiensts werden Quellstand und Prozessbeleg erneut
+geprüft. Der Testprozess stoppt bei einer Abweichung ausschließlich sich selbst.
+
+Das Manifest ist eine lokale öffentliche JSON-Datei, enthält keine Secrets und
+wird vom Betreiber mit den frisch gebunden verifizierten IDs erstellt. Alle Pfade
+sind absolute kanonische Pfade; Platzhalter im folgenden Muster ersetzen:
+
+```json
+{
+  "project_root": "/ABS/QuantHub/SymphonyTest",
+  "workspace_root": "/ABS/QuantHub/SymphonyTest-worktrees",
+  "fixtures_idle": true,
+  "projects": {
+    "symphony-test": {
+      "workspace": "prolok", "workspace_id": "WORKSPACE-UUID-1",
+      "project_id": "PROJECT-UUID-1", "slug_id": "VERIFIED-SLUG-1"
+    },
+    "symphony-test-tilor": {
+      "workspace": "tilor", "workspace_id": "WORKSPACE-UUID-2",
+      "project_id": "PROJECT-UUID-2", "slug_id": "VERIFIED-SLUG-2"
+    }
+  },
+  "main_instance": {
+    "pid": 12345, "started": "EXACT-PS-LSTART", "sha": "FULL-MAIN-COMMIT-SHA",
+    "verified_at": 0,
+    "projects": [
+      {"workspace_id": "WORKSPACE-UUID-1", "project_id": "OTHER-PROJECT-UUID",
+       "root": "/ABS/QuantHub/Symphony", "workspace_root": "/ABS/QuantHub/Symphony-worktrees"}
+    ]
+  }
+}
+```
+
+`started` ist die getrimmte Ausgabe von `ps -p <pid> -o lstart=`;
+`verified_at` sind Unix-Sekunden der Prüfung, höchstens eine Stunde alt.
+`fixtures_idle: true` bestätigt keine fremden Worker, Retries oder manuell
+laufenden Helfer in beiden Dummy-Projekten. Bestehende lokale Änderungen und
+vorhandene Worktrees bleiben erhalten. Bei einem Haupt-Team-Scope ist statt
+`project_id` ein `team_key` anzugeben; ein solcher Scope in einem Dummy-Workspace
+ist unzulässig. Alle Inventareinträge aufführen, keine Auswahl nur der günstigen.
+
+In PRO-736 sind kontrollierter Hauptneustart/Inventar und reale Zugänge die
+Betreiberanteile O1/O2, vor Live-Prüfung in **Test (AI)** fällig. O3 liefert dort
+Runnerresultate beider Checkouts, begrenzten Abbruch samt Cleanup sowie getrennten
+Relay-Empfang/Ack und fortbestehenden produktiven Fortschritt. Der Worker prüft die
+Belege vor Merge. Fehlende fällige Belege führen gemäß Betreiberübergabevertrag
+nach BLOCKER; lokale Fixtures ersetzen sie nicht. Der Worker liest keine private
+Envdatei und startet, stoppt oder aktualisiert die Hauptinstallation nicht.
+
+### Aufrufvertrag für Entwicklung und PRO-734
+
+Den Quellstand zuerst vollständig vorbereiten. Die Quellkennung umfasst HEAD,
+Dateimodi, versionierte Dateien und nicht ignorierte Ergänzungen; ignorierte
+Zugangsdaten/Buildartefakte gehören nicht hinein. Ein Entwicklungsstand darf
+ungecommittet sein, muss aber während der Prüfung unverändert bleiben.
+
+```bash
+python3 /ABS/CHECKOUT/scripts/test-instance.py source /ABS/CHECKOUT
+/ABS/CHECKOUT/scripts/test-instance-run \
+  --checkout /ABS/CHECKOUT --test-instance development --run-id infra-001 \
+  --manifest /ABS/test-manifest.json --expected-sha FULL-SHA \
+  --expected-source SOURCE-SHA256 --port 4101 --timeout 180 \
+  --result-dir /ABS/test-results/infra-001 --source-mode development
+```
+
+Der Runner setzt `SYM_PROJECT_ROOT` ausschließlich für seine Kinder auf den
+Manifestroot. Er prüft und baut über den regulären Launcher; der Build bettet
+Quell-SHA und Quellkennung ein. Bereitschaft erfordert dieselben Angaben im
+**laufenden** Escript, richtige Projekt-IDs, dessen PID und betriebsbereiten Relay.
+Ein vorhandener belegter Port führt zum Fehler, nicht zu einem anderen Port.
+Die angegebene Frist umfasst Build, Zugangsprüfung und Szenarien; Cleanup erhält
+anschließend zusätzlich höchstens 60 Sekunden für die gebundene Trackeroperation.
+
+Für einen direkten Start nach regulärem Build dieselben Bindungen exportieren:
+`SYM_PROJECT_ROOT`, `SYMPHONY_TEST_MANIFEST`, `SYMPHONY_TEST_EXPECTED_SHA` und
+`SYMPHONY_TEST_EXPECTED_SOURCE`; anschließend
+`mise exec -- bin/symphony --test-instance development --port 4101`.
+`./symphony --test-instance development --port 4101` baut selbst.
+Ein lokaler `symphony-PRO-736`-Symlink auf diesen Launcher verhält sich gleich.
+Ein direkter Dienst ohne Runner ist auf beide Dummy-Projekte beschränkt; für
+begrenzte prüfbare Szenarien den Runner verwenden.
+
+Für spätere Schlussabnahme einen unabhängigen projektbezogenen Checkout unter
+dem konfigurierten Symphony-Workspace-Root vorbereiten, etwa
+`Symphony-worktrees/yolo-review/<lauf-id>`. Dort `origin/main` frisch holen,
+auf dessen vollständige SHA festlegen und denselben Runner mit
+`--source-mode merged` und neuer Laufkennung verwenden. Dieser Modus holt origin
+nochmals zu Laufbeginn und verlangt sauberen HEAD gleich `origin/main`; eine
+Abweichung stoppt, statt die Prüf-SHA zu ändern. Der ursprüngliche Ticketworktree
+wird nicht benötigt. Vor Merge kann ein unabhängiger Kandidatencheckout mit
+`development` geprüft werden; dies ist kein Nachweis eines schon gemergten Stands.
+Nie einen Abnahmecheckout unter `SymphonyTest/Symphony` anlegen.
+
+### Szenarien, Resultate und Wiederaufnahme
+
+Vor Ticketanlage prüft die gebundene Runtime für beide Projekte Linear-Identität,
+menschlichen Assignee, Schema, Relay-Bootstrap und Codex-App-Server-Handschlag.
+Je Projekt entsteht genau ein journalisiertes Ticket in `Todo (AI)`. Der reguläre
+Worker erzeugt dessen Workpad und verschiebt es nach `Planung (AI)`; die für diesen
+Lauf gebundene Startliste erlaubt ausschließlich diese zwei IDs und nur Todo.
+Erfolg verlangt beobachtete Session-IDs und beide bestätigten Workpads/Statuswechsel.
+Danach prüft ein Dienstneustart dieselben Test-Consumer-IDs. Konkurrenzstarts über
+Normal-/Test-/Ticketlauncher und Escript müssen mit „Symphony läuft bereits“ scheitern.
+Fachliche YOLO-Szenarien und `sym-yolo-review` entstehen erst in PRO-734.
+
+`result.json` enthält `evidence: live`, Quellstand/-modus, Projektbindungen,
+Zeitgrenze/-punkte, Szenarioresultate, Worker-/Sessionbezug, Test-Consumer-IDs,
+Ausgangsfingerprints der Dummy-Repositories, Cleanup- und Hauptprozessnachweis.
+`status: passed` plus Exit 0 verlangt vollständige Szenarien und Cleanup.
+Fehlende Bereitschaft, Timeout, Signal, ungültiger Quellstand und unbestätigtes
+Cleanup bleiben Fehler mit Exit 1. Synthetische Tests unter `test/` haben keinen
+Livebeleg; deren Ergebnis heißt ausdrücklich `fixture`. Providerpayloads, Tokens
+und Relay-Receipts gehören nicht in öffentliche Belege. Lokale Logs sind privat.
+
+Das dauerhaft vor Ticketanlage geschriebene Laufjournal enthält die gewählten UUIDs.
+Unklare Anlageantworten erzeugen keine erneute Anlage. `--resume` akzeptiert nur
+dieselbe Laufkennung, Instanz, Quelle und Ergebnisablage, bewahrt vorherige Resultate
+und verwendet bekannte Fixtures. Eine noch offene frühere Laufkennung sperrt neue
+Läufe und den freien Testdienst. Zum reinen Aufräumen denselben Aufruf mit
+`--resume --cleanup-only` ausführen: keine neuen Tickets/Worker, vorhandenes Escript
+mit passendem eingebettetem Quellbezug, auch nach Quelländerung oder Hauptdienstende.
+Die Wiederherstellung wird dokumentiert, aber nicht als bestandener Test ausgegeben.
+
+SIGINT/SIGTERM lösen kontrolliertes Cleanup aus; ein Guardian hält die Reservierung,
+bis eigene Nachkommen beendet sind, auch nach SIGKILL des Runners. Kernel-Locks
+werden freigegeben, Lockdateien niemals gelöscht. Nach SIGKILL bleiben Journal und
+letztes Fehlerresultat zur expliziten Wiederaufnahme erhalten. Ein neuer Run darf
+keine unklare alte Anlage verdecken. Cleanup prüft UUID, Titel, Beschreibung,
+Projekt, Team und Assignee vor Löschung. Nur saubere eigene Bootstrap-Worktrees
+auf der erwarteten Basis werden über die normalen Projekthooks entfernt; fremde
+Änderungen führen zu einem sichtbaren Fehler und bleiben erhalten. Ein unklarer
+Anlage-/Cleanupausgang erfordert Prüfung des vorhandenen Journals über die
+gebundene Runtime, kein blindes Löschen oder Umbenennen der Reservierung.
 
 ## Gemeinsame Wissensbasis ohne lokales Codex-Memory
 

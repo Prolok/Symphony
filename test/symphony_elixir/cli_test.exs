@@ -140,7 +140,7 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert {:error, message} = CLI.evaluate(["tmp/custom/WORKFLOW.md"], deps)
-    assert message == "Usage: symphony [--logs-root <path>] [--port <port>] [--yolo] [--budget-capture <public-run.json>]"
+    assert message == "Usage: symphony [--test-instance <name>] [--logs-root <path>] [--port <port>] [--yolo] [--budget-capture <public-run.json>]"
   end
 
   test "loads env files from .symphony under the invocation directory instead of the workflow directory" do

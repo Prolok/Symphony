@@ -450,11 +450,11 @@ defmodule SymphonyElixir.Config.Schema do
   defp bind_project_state(app) do
     case ProjectContext.env("SYMPHONY_LINEAR_ENV_DIR") do
       config_dir when is_binary(config_dir) and config_dir != "" ->
-        app |> Map.put("state_root", Path.join(config_dir, "state")) |> Map.put("env_dir", config_dir)
+        app |> Map.put("state_root", SymphonyElixir.TestInstance.project_state_root(config_dir)) |> Map.put("env_dir", config_dir)
 
       _ ->
         config_dir = SymphonyElixir.EnvFile.bound_config_dir()
-        app |> Map.put("state_root", Path.join(config_dir, "state")) |> Map.put("env_dir", config_dir)
+        app |> Map.put("state_root", SymphonyElixir.TestInstance.project_state_root(config_dir)) |> Map.put("env_dir", config_dir)
     end
   end
 

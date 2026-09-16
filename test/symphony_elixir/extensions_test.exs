@@ -923,6 +923,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     state_payload = json_response(conn, 200)
 
     assert state_payload == %{
+             "service" => SymphonyElixir.TestInstance.public_info() |> Jason.encode!() |> Jason.decode!(),
              "relay" => %{},
              "projects" => [],
              "generated_at" => state_payload["generated_at"],
@@ -1310,6 +1311,20 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{occupied_port + 1}/api/v1/state")
     assert response.status == 200
+  end
+
+  test "explicit test service fails on an occupied port without selecting another" do
+    {socket, port} = listen_with_free_successor!()
+    Application.put_env(:symphony_elixir, :test_instance, %{"name" => "fixture"})
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :test_instance)
+      :gen_tcp.close(socket)
+    end)
+
+    assert {:error, _} = start_supervised({HttpServer, host: "127.0.0.1", port: port})
+    assert HttpServer.bound_port() == nil
+    assert port_available?(port + 1)
   end
 
   defp start_test_endpoint(overrides) do

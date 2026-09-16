@@ -1,4 +1,8 @@
 import os
+import fcntl
+import importlib.util
+import json
+import time
 from pathlib import Path
 import subprocess
 import shutil
@@ -96,15 +100,53 @@ if sys.argv[1] == "escript.build":
             subprocess.run(["git", "-C", str(self.seed), *args], check=True)
         return subprocess.check_output(["git", "-C", str(self.seed), "rev-parse", "HEAD"])
 
-    def start(self, answer="", **overrides):
+    def start(self, answer="", flags=(), launcher=None, **overrides):
         env = {key: value for key, value in os.environ.items() if not key.startswith(("SYMPHONY_", "MIX_"))}
         env.update(HOME=str(self.home), CODEX_HOME=str(self.home / ".codex"),
                    PATH=str(self.tools) + os.pathsep + os.environ["PATH"], BUILD_TRACE=str(self.trace), **overrides)
-        result = subprocess.run([str(self.source / "scripts/mix-runtime"),
-                                 "start", str(self.source), "symphony"],
+        command = ([str(launcher)] if launcher else [str(self.source / "scripts/mix-runtime"), "start", str(self.source), "symphony"])
+        result = subprocess.run(command + list(flags),
                                 cwd=self.root, env=env, input=answer, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
         return result
+
+    def test_explicit_test_launcher_and_ticket_alias_build_pinned_source_without_update(self):
+        for name in ("service-lock.py", "test-instance.py", "test-processes.py"):
+            shutil.copy2(REPO / "scripts" / name, self.source / "scripts" / name)
+        spec = importlib.util.spec_from_file_location("test_instance", REPO / "scripts/test-instance.py")
+        helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
+        fixtures = self.root / "fixtures"
+        projects = {}
+        for i, (name, workspace) in enumerate(helper.PROJECTS.items(), 1):
+            (fixtures / name / ".symphony").mkdir(parents=True)
+            projects[name] = dict(workspace=workspace, workspace_id=str(i)*8+"-1111-1111-1111-111111111111",
+                                  project_id=str(i+2)*8+"-1111-1111-1111-111111111111", slug_id=name)
+        manifest = self.root / "manifest.json"
+        manifest.write_text(json.dumps(dict(project_root=str(fixtures), workspace_root=str(self.root / "worktrees"),
+                            fixtures_idle=True, projects=projects,
+                            main_instance=dict(pid=os.getpid(), started=helper.process_started(os.getpid()), sha="a"*40,
+                            verified_at=time.time(), projects=[dict(workspace_id="other",project_id="main",
+                            root=str(self.root/"main"),workspace_root=str(self.root/"main-worktrees"))]))))
+        revision=helper.source(self.source)
+        self.push_update()
+        lock_path=self.home/".cache/symphony/service.lock"
+        lock_path.parent.mkdir(parents=True)
+        alias=self.root/"symphony-PRO-736"
+        alias.symlink_to(self.source/"symphony")
+        with lock_path.open('a') as main_lock:
+            fcntl.flock(main_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            for launcher in (self.source/"symphony",alias):
+                result=self.start(flags=["--test-instance","dev","--port","4101"], launcher=launcher,
+                                  SYMPHONY_TEST_MANIFEST=str(manifest),SYM_PROJECT_ROOT=str(fixtures),
+                                  SYMPHONY_TEST_EXPECTED_SHA=revision['sha'],SYMPHONY_TEST_EXPECTED_SOURCE=revision['source_sha256'])
+                self.assertEqual(result.returncode,0,result.stdout)
+                self.assertNotIn('Update ausführen',result.stdout)
+                self.assertEqual(self.git('rev-parse','HEAD').decode().strip(),revision['sha'])
+                stamp=json.loads((self.source/'_build/symphony-source.json').read_text())
+                self.assertEqual(stamp,revision)
+                # Owner exit is followed by the guardian's short cleanup interval.
+                time.sleep(.2)
+        self.assertFalse((self.home/'.local/bin').exists())
 
     def test_accepted_update_persists_and_next_start_reuses_compiled_version(self):
         remote_head = self.push_update()

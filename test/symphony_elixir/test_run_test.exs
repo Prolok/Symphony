@@ -237,6 +237,39 @@ defmodule SymphonyElixir.TestRunTest do
     assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
   end
 
+  test "cleanup preserves foreign branches, detached heads and replaced repositories", ctx do
+    assert {:ok, journal} = TestRun.execute("prepare")
+    [fixture | _] = journal["fixtures"]
+    context = Enum.find(ctx.contexts, &(&1.name == fixture["project"]))
+    path = Path.join(context.settings.workspace.root, fixture["identifier"])
+    File.mkdir_p!(context.settings.workspace.root)
+    git!(context.root, ["worktree", "add", "-b", "symphony/" <> fixture["identifier"], path, "origin/main"])
+    git!(path, ["checkout", "-b", "foreign-work"])
+    marker = Path.join(ctx.root, "cleanup-hook-called")
+    context = put_in(context.settings.hooks.before_remove, "touch \"#{marker}\"")
+    Application.put_env(:symphony_elixir, :project_contexts, [context | Enum.reject(ctx.contexts, &(&1.id == context.id))])
+
+    assert {:error, :test_workspace_changed_or_cleanup_failed} = TestRun.execute("cleanup")
+    refute File.exists?(marker)
+    assert File.dir?(path)
+    assert String.trim(git!(path, ["branch", "--show-current"])) == "foreign-work"
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+
+    git!(path, ["checkout", "--detach"])
+    assert {:error, :test_workspace_changed_or_cleanup_failed} = TestRun.execute("cleanup")
+    refute File.exists?(marker)
+    assert File.dir?(path)
+
+    git!(context.root, ["worktree", "remove", path])
+    git!(context.root, ["clone", "--no-local", context.root, path])
+    git!(path, ["checkout", "-b", "symphony/" <> fixture["identifier"]])
+    assert String.trim(git!(path, ["rev-parse", "HEAD"])) == fixture["project_head"]
+    assert {:error, :test_workspace_changed_or_cleanup_failed} = TestRun.execute("cleanup")
+    refute File.exists?(marker)
+    assert File.dir?(path)
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+  end
+
   test "bootstrap journals the actual post-hook worktree base", ctx do
     assert {:ok, journal} = TestRun.execute("prepare")
     [fixture | _] = journal["fixtures"]
@@ -311,6 +344,31 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:error, :test_journal_identity_mismatch} = TestRun.execute("prepare")
     Application.delete_env(:symphony_elixir, :test_instance)
     assert {:error, :invalid_test_run} = TestRun.execute("cleanup")
+  end
+
+  test "an existing run cannot be adopted from another result directory or instance", ctx do
+    assert {:ok, journal} = TestRun.execute("prepare")
+    before = File.read!(journal_path(ctx.root))
+    alternate = Path.join(ctx.root, "other-results/plan.json")
+    :ok = DurableState.write(alternate, ctx.plan)
+    System.put_env("SYMPHONY_TEST_RUN_PLAN", alternate)
+
+    assert {:error, :test_journal_identity_mismatch} = TestRun.execute("prepare")
+    assert {:error, :test_environment_needs_cleanup} = TestRun.bind_contexts(ctx.contexts)
+    assert File.read!(journal_path(ctx.root)) == before
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 2
+
+    System.put_env("SYMPHONY_TEST_RUN_PLAN", ctx.plan_path)
+    :ok = DurableState.write(ctx.plan_path, Map.put(ctx.plan, "instance", "another"))
+    Application.put_env(:symphony_elixir, :test_instance, Map.put(ctx.instance, "name", "another"))
+    assert {:error, :test_journal_identity_mismatch} = TestRun.execute("cleanup")
+    assert {:error, :test_environment_needs_cleanup} = TestRun.bind_contexts(ctx.contexts)
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+
+    :ok = DurableState.write(ctx.plan_path, ctx.plan)
+    Application.put_env(:symphony_elixir, :test_instance, ctx.instance)
+    assert {:ok, ^journal} = TestRun.execute("prepare")
+    assert {:ok, _} = TestRun.execute("cleanup")
   end
 
   test "schema and transport failures stop before successful creation", ctx do

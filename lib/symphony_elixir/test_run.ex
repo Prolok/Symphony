@@ -2,7 +2,7 @@ defmodule SymphonyElixir.TestRun do
   @moduledoc "Bound runtime operations for the operator's limited bootstrap scenario."
 
   alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, ProjectContext, Projects, TestInstance, Workspace}
+  alias SymphonyElixir.{Config, PathSafety, ProjectContext, Projects, TestInstance, Workspace}
   alias SymphonyElixir.Linear.{Client, DurableState}
   alias SymphonyElixir.Relay.Session
 
@@ -56,7 +56,7 @@ defmodule SymphonyElixir.TestRun do
     if Config.test_instance() do
       active_run =
         case plan() do
-          {:ok, plan} -> plan["run_id"]
+          {:ok, plan} -> {plan["run_id"], plan_owner(plan)}
           _ -> nil
         end
 
@@ -69,8 +69,8 @@ defmodule SymphonyElixir.TestRun do
 
   defp check_pending_run(path, :ok, active_run) do
     case DurableState.read(path) do
-      {:ok, %{"run_id" => id, "fixtures" => fixtures}} when is_list(fixtures) ->
-        if id == active_run or Enum.all?(fixtures, &(&1["deleted"] == true)), do: {:cont, :ok}, else: {:halt, {:error, :test_environment_needs_cleanup}}
+      {:ok, %{"run_id" => id, "fixtures" => fixtures} = journal} when is_list(fixtures) ->
+        if {id, journal["owner"]} == active_run or Enum.all?(fixtures, &(&1["deleted"] == true)), do: {:cont, :ok}, else: {:halt, {:error, :test_environment_needs_cleanup}}
 
       _ ->
         {:halt, {:error, :test_environment_journal_corrupt}}
@@ -119,13 +119,16 @@ defmodule SymphonyElixir.TestRun do
     id = plan["run_id"]
     source = plan["source"]
     binding = binding_identity(contexts)
+    owner = plan_owner(plan)
 
     case DurableState.read(journal_path(plan)) do
-      {:error, :enoent} -> {:ok, %{"run_id" => plan["run_id"], "source" => plan["source"], "binding" => binding, "fixtures" => []}}
-      {:ok, %{"run_id" => ^id, "source" => ^source, "binding" => ^binding} = journal} -> {:ok, journal}
+      {:error, :enoent} -> {:ok, %{"run_id" => plan["run_id"], "source" => plan["source"], "binding" => binding, "owner" => owner, "fixtures" => []}}
+      {:ok, %{"run_id" => ^id, "source" => ^source, "binding" => ^binding, "owner" => ^owner} = journal} -> {:ok, journal}
       _ -> {:error, :test_journal_identity_mismatch}
     end
   end
+
+  defp plan_owner(plan), do: %{"instance" => plan["instance"], "plan_path" => Path.expand(Config.test_run_plan())}
 
   defp binding_identity(contexts) do
     Map.new(contexts, fn context ->
@@ -298,7 +301,7 @@ defmodule SymphonyElixir.TestRun do
   defp remove_workspace(context, identifier, fixture, plan) do
     path = Path.join(context.settings.workspace.root, identifier)
 
-    with :ok <- remove_existing_workspace(path, identifier, fixture, plan),
+    with :ok <- remove_existing_workspace(context, path, identifier, fixture, plan),
          {worktrees, 0} <- System.cmd("git", ["worktree", "list", "--porcelain"], cd: context.root),
          false <- String.contains?(worktrees, "worktree " <> path <> "\n"),
          {_, 1} <- System.cmd("git", ["show-ref", "--verify", "--quiet", "refs/heads/symphony/" <> identifier], cd: context.root) do
@@ -308,9 +311,10 @@ defmodule SymphonyElixir.TestRun do
     end
   end
 
-  defp remove_existing_workspace(path, identifier, fixture, plan) do
+  defp remove_existing_workspace(context, path, identifier, fixture, plan) do
     if File.exists?(path) do
       with true <- fixture["created"] == true and fixture["identifier"] == identifier,
+           :ok <- verify_workspace_identity(context, path, identifier),
            {"", 0} <- System.cmd("git", ["status", "--porcelain"], cd: path, env: Config.without_linear_secret([]), stderr_to_stdout: true),
            {head, 0} <- System.cmd("git", ["rev-parse", "HEAD"], cd: path, env: Config.without_linear_secret([])),
            {:ok, expected} <- workspace_head(plan, fixture, path),
@@ -322,6 +326,21 @@ defmodule SymphonyElixir.TestRun do
       end
     else
       :ok
+    end
+  end
+
+  defp verify_workspace_identity(context, path, identifier) do
+    expected = "refs/heads/symphony/" <> identifier <> "\n"
+    options = [env: Config.without_linear_secret([]), stderr_to_stdout: true]
+
+    with {^expected, 0} <- System.cmd("git", ["symbolic-ref", "--quiet", "HEAD"], [cd: path] ++ options),
+         {workspace_git, 0} <- System.cmd("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], [cd: path] ++ options),
+         {project_git, 0} <- System.cmd("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], [cd: context.root] ++ options),
+         {:ok, common} <- PathSafety.canonicalize(String.trim(project_git)),
+         {:ok, ^common} <- PathSafety.canonicalize(String.trim(workspace_git)) do
+      :ok
+    else
+      _ -> {:error, :test_workspace_identity_changed}
     end
   end
 

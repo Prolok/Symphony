@@ -570,10 +570,15 @@ Die Wiederherstellung wird dokumentiert, aber nicht als bestandener Test ausgege
 SIGINT/SIGTERM lösen kontrolliertes Cleanup aus; ein Guardian hält die Reservierung,
 bis eigene Nachkommen beendet sind, auch nach SIGKILL des Runners. Kernel-Locks
 werden freigegeben, Lockdateien niemals gelöscht. Nach SIGKILL bleiben Journal und
-letztes Fehlerresultat zur expliziten Wiederaufnahme erhalten. Ein neuer Run darf
+letztes Fehlerresultat zur expliziten Wiederaufnahme erhalten. Das Fixture-Journal
+bindet die Laufkennung zusätzlich an Instanz und absoluten Planpfad der Ergebnisablage;
+eine neue Ergebnisablage oder Instanz darf bestehende Fixtures nicht übernehmen.
+Fehlende oder abweichende Journalbindungen werden abgewiesen. Ein neuer Run darf
 keine unklare alte Anlage verdecken. Cleanup prüft UUID, Titel, Beschreibung,
 Projekt, Team und Assignee vor Löschung. Nur saubere eigene Bootstrap-Worktrees
-auf der erwarteten Basis werden über die normalen Projekthooks entfernt; fremde
+auf der erwarteten Basis, dem erwarteten `symphony/<Kennung>`-Branch und im
+Git-common-root des gebundenen Projekts werden über die normalen Projekthooks entfernt.
+Diese Identitätsprüfungen erfolgen vor jedem Entfernungshook; fremde
 Änderungen führen zu einem sichtbaren Fehler und bleiben erhalten. Ein unklarer
 Worktree-Basisstand wird abgewiesen; die tatsächliche Basis nach dem Erstellungshook
 wird vor Workerarbeit je Fixture dauerhaft erfasst. Auch ohne Workspaceverzeichnis

@@ -374,8 +374,9 @@ Testquellcode liegt außerhalb des Testsammelroots. Dieser enthält direkt genau
 die zwei Dummy-Projekte, aber keine eigene `.symphony` und keinen Symphony-Code.
 Discovery bleibt einstufig. Symlink-Aliase und überlappende Roots werden abgewiesen.
 Ein verpflichtendes öffentliches Manifest bindet echte Workspace-/Projekt-IDs;
-der gebundene App-Client verifiziert zusätzlich Organisation, Projektname und
-`slugId`. Teamweiter Scope, produktiver Consumer-Override, SSH-Worker und falsche
+der gebundene App-Client verifiziert zusätzlich Organisation, Projektname,
+`slugId` und die vollständige Teamzuordnung. Teamweiter Scope der Testinstanz,
+produktiver Consumer-Override, SSH-Worker und falsche
 Bindungen sperren den Start. Der feste `workspace.root` im Workflow muss weiterhin
 `$SYMPHONY_PROJECT_WORKTREES_ROOT` verwenden.
 
@@ -394,9 +395,20 @@ Neustarts, Instanznamen und Quellcheckouts hinweg. Produktiven Relay-Zustand nic
 kopieren. Die ursprünglichen Projektdateien bleiben die gebundene Credentialquelle;
 Token/Relay-Key gehen nur durch die vorhandenen vertrauenswürdigen Laufzeitwege.
 Kein HOME-/XDG-Umbiegen: Issue-Leases und API-Cooldowns bleiben hostweit gemeinsam.
-Zusätzlich reserviert jeder Dienst seine verifizierten Projektbereiche; disjunkte
-Projekte desselben Workspace dürfen parallel laufen, Team-Scopes sperren dessen
-Projektbereiche konservativ vollständig. Ein Verlust des Lockhalters beendet den
+Zusätzlich liest jeder Dienst vor der Projektreservierung seine Bindungen frisch
+über den gebundenen App-Client: eindeutige Projekt-ID zum konfigurierten Slug samt
+vollständiger Team-ID/Key-Menge beziehungsweise eindeutige Team-ID zum Team-Key.
+Fehlende, mehrdeutige oder unvollständig geladene Antworten sperren den Start;
+GraphQL-Teilfehler und eine weitere Ergebnisseite gelten nicht als Nachweis.
+Die begrenzte Abfrage umfasst höchstens 100 Teams je Projekt einschließlich
+archivierter Teams. Projekt-IDs werden exklusiv, ihre Teams gemeinsam reserviert;
+ein Team-Scope reserviert sein Team exklusiv. So dürfen verschiedene Projekte
+desselben Teams sowie ein QAI-Team-Scope und ein ausschließlich PRO zugeordnetes
+Dummy-Projekt parallel laufen. Ein Projekt mit mehreren Teams überschneidet sich
+mit jedem dieser Team-Scopes. ID und Key werden beide gesperrt; alte Workspace-
+und Projektslug-Locks bleiben kompatibel. Ein alter Dienst mit workspaceweiter
+Teamreservierung bleibt konservativ sperrend und wird vom Testlauf nicht geändert.
+Ein Verlust des Lockhalters beendet den
 betroffenen Dienst. Diese Sperren ersetzen keine verteilte Zuständigkeitsregel.
 
 ### Betreiberbeleg und Einrichtung
@@ -423,11 +435,13 @@ sind absolute kanonische Pfade; Platzhalter im folgenden Muster ersetzen:
   "projects": {
     "symphony-test": {
       "workspace": "prolok", "workspace_id": "WORKSPACE-UUID-1",
-      "project_id": "PROJECT-UUID-1", "slug_id": "VERIFIED-SLUG-1"
+      "project_id": "PROJECT-UUID-1", "slug_id": "VERIFIED-SLUG-1",
+      "teams": [{"id": "TEAM-UUID-PRO", "key": "PRO"}], "verified_at": 0
     },
     "symphony-test-tilor": {
       "workspace": "tilor", "workspace_id": "WORKSPACE-UUID-2",
-      "project_id": "PROJECT-UUID-2", "slug_id": "VERIFIED-SLUG-2"
+      "project_id": "PROJECT-UUID-2", "slug_id": "VERIFIED-SLUG-2",
+      "teams": [{"id": "TEAM-UUID-PRI", "key": "PRI"}], "verified_at": 0
     }
   },
   "main_instance": {
@@ -435,19 +449,34 @@ sind absolute kanonische Pfade; Platzhalter im folgenden Muster ersetzen:
     "verified_at": 0,
     "projects": [
       {"workspace_id": "WORKSPACE-UUID-1", "project_id": "OTHER-PROJECT-UUID",
-       "root": "/ABS/QuantHub/Symphony", "workspace_root": "/ABS/QuantHub/Symphony-worktrees"}
+       "root": "/ABS/QuantHub/Symphony", "workspace_root": "/ABS/QuantHub/Symphony-worktrees"},
+      {"workspace_id": "WORKSPACE-UUID-1", "team_id": "TEAM-UUID-QAI", "team_key": "QAI",
+       "root": "/ABS/QuantHub/QuantAI", "workspace_root": "/ABS/QuantHub/QuantAI-worktrees"}
     ]
   }
 }
 ```
 
 `started` ist die getrimmte Ausgabe von `ps -p <pid> -o lstart=`;
-`verified_at` sind Unix-Sekunden der Prüfung, höchstens eine Stunde alt.
+`verified_at` sind Unix-Sekunden der jeweiligen gebundenen Prüfung, höchstens eine
+Stunde alt und nicht zukünftig; dies gilt für den Hauptbeleg und beide Dummy-Projekte.
+`projects.<name>.slug_id` ist die authentifiziert gelesene kanonische API-`slugId`.
+Die Projektkonfiguration darf wie im Normalbetrieb den vollständigen Projektslug
+oder diese ID verwenden; der Vergleich nutzt die zentrale Scope-Normalisierung.
+`projects.<name>.teams` enthält alle authentifiziert gelesenen Projektteams mit
+ID und Key, keine manuelle Auswahl. Leere, doppelte oder fehlende Teamzuordnungen
+sperren den Start. Die Runtime liest sie erneut und verlangt Übereinstimmung mit
+dem Manifest, auch unmittelbar vor der Lockreservierung. Änderung oder Ablauf
+des Manifests beendet den Testdienst; Cleanup eigener Fixtures bleibt möglich.
 `fixtures_idle: true` bestätigt keine fremden Worker, Retries oder manuell
 laufenden Helfer in beiden Dummy-Projekten. Bestehende lokale Änderungen und
-vorhandene Worktrees bleiben erhalten. Bei einem Haupt-Team-Scope ist statt
-`project_id` ein `team_key` anzugeben; ein solcher Scope in einem Dummy-Workspace
-ist unzulässig. Alle Inventareinträge aufführen, keine Auswahl nur der günstigen.
+vorhandene Worktrees bleiben erhalten. Bei einem Haupt-Team-Scope sind statt
+`project_id` die frisch authentifizierten `team_id` und `team_key` anzugeben.
+Ein solcher Scope im Dummy-Workspace ist nur zulässig, wenn weder ID noch Key
+zu einem der vollständigen Dummy-Projektteams gehören. Der Hauptbeleg muss
+Organisation, Team-ID und Team-Key aus derselben gebundenen Prüfung enthalten.
+Alle Inventareinträge aufführen, keine Auswahl nur der günstigen. Historische
+Manifeste ohne Teambelege müssen vor dem nächsten Lauf erneuert werden.
 
 In PRO-736 sind kontrollierter Hauptneustart/Inventar und reale Zugänge die
 Betreiberanteile O1/O2, vor Live-Prüfung in **Test (AI)** fällig. O3 liefert dort

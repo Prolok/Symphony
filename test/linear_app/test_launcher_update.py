@@ -120,7 +120,9 @@ if sys.argv[1] == "escript.build":
         for i, (name, workspace) in enumerate(helper.PROJECTS.items(), 1):
             (fixtures / name / ".symphony").mkdir(parents=True)
             projects[name] = dict(workspace=workspace, workspace_id=str(i)*8+"-1111-1111-1111-111111111111",
-                                  project_id=str(i+2)*8+"-1111-1111-1111-111111111111", slug_id=name)
+                                  project_id=str(i+2)*8+"-1111-1111-1111-111111111111", slug_id=name,
+                                  teams=[dict(id='team-' + workspace, key='PRO' if workspace == 'prolok' else 'PRI')],
+                                  verified_at=time.time())
         manifest = self.root / "manifest.json"
         manifest.write_text(json.dumps(dict(project_root=str(fixtures), workspace_root=str(self.root / "worktrees"),
                             fixtures_idle=True, projects=projects,

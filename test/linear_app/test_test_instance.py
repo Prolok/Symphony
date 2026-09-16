@@ -42,7 +42,9 @@ class TestInstancePreflightTest(unittest.TestCase):
             "project_root": str(self.fixtures), "workspace_root": str(self.root / "worktrees"), "fixtures_idle": True,
             "projects": {
                 name: {"workspace": workspace, "workspace_id": str(index) * 8 + "-1111-1111-1111-111111111111",
-                       "project_id": str(index + 2) * 8 + "-1111-1111-1111-111111111111", "slug_id": "slug-" + name}
+                       "project_id": str(index + 2) * 8 + "-1111-1111-1111-111111111111", "slug_id": "slug-" + name,
+                       "teams": [{'id': 'team-' + workspace, 'key': 'PRO' if workspace == 'prolok' else 'PRI'}],
+                       "verified_at": time.time()}
                 for index, (name, workspace) in enumerate(test_instance.PROJECTS.items(), 1)
             },
             "main_instance": {"pid": os.getpid(), "started": test_instance.process_started(os.getpid()),
@@ -83,6 +85,40 @@ class TestInstancePreflightTest(unittest.TestCase):
         self.env["SYMPHONY_TEST_EXPECTED_SOURCE"] = test_instance.source(self.source)["source_sha256"]
         self.assertTrue(self.check()["source"]["dirty"])
         (self.source / "new").write_text("addition")
+        with self.assertRaises(ValueError):
+            self.check()
+
+    def test_verified_disjoint_team_is_allowed_in_dummy_workspace(self):
+        fixture = self.manifest['projects']['symphony-test']
+        fixture['teams'] = [{'id': 'pro-id', 'key': 'PRO'}]
+        fixture['verified_at'] = time.time()
+        main = self.manifest['main_instance']['projects'][0]
+        main.update(workspace_id=fixture['workspace_id'], team_key='QAI', team_id='qai-id')
+        main.pop('project_id')
+        self.write_manifest()
+        self.assertEqual(self.check()['manifest'], self.manifest)
+
+    def test_team_overlap_and_incomplete_or_stale_membership_fail_closed(self):
+        fixture = self.manifest['projects']['symphony-test']
+        main = self.manifest['main_instance']['projects'][0]
+        main.update(workspace_id=fixture['workspace_id'], team_key='QAI', team_id='qai-id')
+        main.pop('project_id')
+        original = dict(fixture)
+        for change in ({'teams': []}, {'teams': None}, {'teams': [{'key': 'PRO'}]},
+                       {'teams': [{'id': 'p', 'key': 'PRO'}, {'id': 'p', 'key': 'OTHER'}]},
+                       {'teams': [{'id': 'p', 'key': 'PRO'}, {'id': 'other', 'key': 'PRO'}]},
+                       {'teams': [{'id': 'qai-id', 'key': 'QAI'}]},
+                       {'teams': original['teams'] + [{'id': 'qai-id', 'key': 'QAI'}]},
+                       {'verified_at': time.time() - 3601}, {'verified_at': time.time() + 600}):
+            fixture.clear()
+            fixture.update(original, **change)
+            self.write_manifest()
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.check()
+        fixture.clear()
+        fixture.update(original)
+        main.pop('team_id')
+        self.write_manifest()
         with self.assertRaises(ValueError):
             self.check()
 

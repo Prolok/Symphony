@@ -156,6 +156,10 @@ class TestRunnerProtocol(unittest.TestCase):
         remote=self.root/'remote.git'
         subprocess.run(['git','clone','-q','--bare',str(self.source),str(remote)],check=True)
         subprocess.run(['git','clone','-q',str(remote),str(independent)],check=True)
+        # Git applies the caller's umask; this fixture compares identical file
+        # modes as well as contents, even under a restrictive operator umask.
+        for path in ('symphony', 'bin/symphony'):
+            (independent/path).chmod((self.source/path).stat().st_mode & 0o777)
         self.source.rename(self.root/'unavailable')
         second=self.start('separate',independent,'merged')
         next_result=self.receipt(second)

@@ -90,9 +90,22 @@ def read_manifest(path, project_root):
             raise ValueError("Ungültige Dummy-Workspace-/Projektbindung")
         if not isinstance(binding["slug_id"], str) or not binding["slug_id"]:
             raise ValueError("Dummy-Projektslug fehlt")
+        verified_teams(binding)
     if len({b["workspace_id"] for b in bindings.values()}) != 2:
         raise ValueError("Die beiden Dummy-Workspaces müssen verschieden sein")
     return value
+
+
+def verified_teams(binding):
+    teams = binding.get('teams')
+    if (not isinstance(teams, list) or not teams
+            or any(not isinstance(t, dict) or not all(isinstance(t.get(k), str) and t[k].strip() == t[k] and t[k]
+                                                     for k in ('id', 'key')) for t in teams)):
+        raise ValueError('Vollständige verifizierte Projektteams fehlen')
+    ids, keys = {t['id'] for t in teams}, {t['key'] for t in teams}
+    if len(ids) != len(teams) or len(keys) != len(teams):
+        raise ValueError('Mehrdeutige Projektteams')
+    return ids, keys
 
 
 def process_started(pid):
@@ -125,15 +138,25 @@ def validate_main(manifest):
     if not isinstance(scopes, list) or not scopes:
         raise ValueError("Tatsächlich geladene Hauptprojektbindungen fehlen")
     expected = manifest["projects"].values()
+    for fixture in expected:
+        verified_teams(fixture)
+        if not 0 <= time.time() - fixture['verified_at'] <= 3600:
+            raise ValueError('Frischer Projekt-/Teambeleg erforderlich')
     for scope in scopes:
         if not scope.get("workspace_id") or bool(scope.get("project_id")) == bool(scope.get("team_key")):
             raise ValueError("Mehrdeutige Hauptprojektbindung")
+        if scope.get('team_key') and not all(isinstance(scope.get(k), str) and scope[k].strip() == scope[k] and scope[k]
+                                             for k in ('team_id', 'team_key')):
+            raise ValueError('Verifizierte Hauptteambindung fehlt')
         for reserved in (canonical(manifest["workspace_root"]), canonical(manifest["project_root"])):
             for occupied in (canonical(scope["root"]), canonical(scope["workspace_root"])):
                 if reserved.is_relative_to(occupied) or occupied.is_relative_to(reserved):
                     raise ValueError("Testpfade überlappen mit einem Hauptprojektbereich")
         for fixture in expected:
-            if scope["workspace_id"] == fixture["workspace_id"] and (scope.get("team_key") or scope["project_id"] == fixture["project_id"]):
+            ids, keys = verified_teams(fixture)
+            if scope["workspace_id"] == fixture["workspace_id"] and (
+                    scope.get('team_id') in ids or scope.get('team_key') in keys
+                    or scope.get('project_id') == fixture['project_id']):
                 raise ValueError("Hauptinstanz und Testfixtures überlappen")
 
 

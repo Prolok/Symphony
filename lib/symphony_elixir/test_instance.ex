@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.TestInstance do
   @moduledoc "Explicit, restart-bound isolation for the two operator-provisioned dummy projects."
 
-  alias SymphonyElixir.Linear.Client
-  alias SymphonyElixir.{PathSafety, ProjectContext, RuntimePaths}
+  alias SymphonyElixir.{Config, PathSafety, ProjectContext, RuntimePaths}
+  alias SymphonyElixir.Linear.{Client, ScopeBinding}
 
   @spec name([String.t()]) :: {:ok, String.t() | nil} | {:error, String.t()}
   def name(args) do
@@ -121,7 +121,7 @@ defmodule SymphonyElixir.TestInstance do
 
     with true <- tracker.auth_mode == "app" and tracker.kind == "linear",
          true <- tracker.app["workspace_id"] == expected["workspace_id"],
-         true <- tracker.project_slug == expected["slug_id"] and tracker.team_key == nil,
+         true <- Config.linear_scope(tracker) == {:ok, {:project, expected["slug_id"]}},
          true <- is_map(relay) and relay["consumer_id"] == nil,
          true <- relay["state_root"] == Path.join(state_root(), "relay"),
          true <- context.settings.workspace.root == context.env["SYMPHONY_PROJECT_WORKTREES_ROOT"],
@@ -131,6 +131,8 @@ defmodule SymphonyElixir.TestInstance do
          true <- response["errors"] in [nil, []],
          %{"project" => project, "viewer" => %{"organization" => workspace}} <- data,
          true <- project["id"] == expected["project_id"] and project["slugId"] == expected["slug_id"] and project["name"] == context.name,
+         {:ok, teams} <- ScopeBinding.complete_teams(project["teams"]),
+         true <- is_list(expected["teams"]) and Enum.sort(teams) == Enum.sort(expected["teams"]),
          true <- workspace["id"] == expected["workspace_id"] and String.downcase(workspace["urlKey"]) == expected["workspace"] do
       :ok
     else
@@ -157,6 +159,7 @@ defmodule SymphonyElixir.TestInstance do
             project_id: binding && binding["project_id"],
             project_slug: tracker.project_slug,
             team_key: tracker.team_key,
+            teams: binding && binding["teams"],
             workspace_root: context.settings.workspace.root,
             state_root: tracker.app["state_root"],
             relay_root: tracker.relay && tracker.relay["state_root"]
@@ -166,7 +169,7 @@ defmodule SymphonyElixir.TestInstance do
   end
 
   defp binding_query do
-    "query SymphonyTestBinding($id: String!) { project(id: $id) { id name slugId } viewer { organization { id urlKey } } }"
+    "query SymphonyTestBinding($id: String!) { project(id: $id) { id name slugId teams(first: 100, includeArchived: true) { nodes { id key } pageInfo { hasNextPage } } } viewer { organization { id urlKey } } }"
   end
 
   defp validate_paths(instance) do

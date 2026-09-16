@@ -159,7 +159,8 @@ defmodule SymphonyElixir.TestInstanceTest do
       "workspace_id" => "synthetic-workspace",
       "project_id" => "project-id",
       "slug_id" => "project",
-      "workspace" => "prolok"
+      "workspace" => "prolok",
+      "teams" => [%{"id" => "pro-id", "key" => "PRO"}]
     }
 
     instance = put_in(instance["manifest"]["projects"], %{"symphony-test" => expected})
@@ -174,13 +175,28 @@ defmodule SymphonyElixir.TestInstanceTest do
       put_in(context.settings.tracker.relay, %{"state_root" => Path.join(root, "state/relay"), "consumer_id" => nil})
 
     response = %{
-      "project" => %{"id" => "project-id", "name" => "symphony-test", "slugId" => "project"},
+      "project" => %{"id" => "project-id", "name" => "symphony-test", "slugId" => "project", "teams" => %{"nodes" => expected["teams"], "pageInfo" => %{"hasNextPage" => false}}},
       "viewer" => %{"organization" => %{"id" => "synthetic-workspace", "urlKey" => "prolok"}}
     }
 
     SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:ok, %{status: 200, body: %{"data" => response}}} end)
     assert :ok = TestInstance.validate_contexts([context])
     assert {:error, :unexpected_test_projects} = TestInstance.validate_contexts([])
+
+    for teams <- [
+          nil,
+          %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}},
+          %{"nodes" => expected["teams"], "pageInfo" => %{"hasNextPage" => true}},
+          %{"nodes" => [%{"id" => "qai-id", "key" => "QAI"}], "pageInfo" => %{"hasNextPage" => false}}
+        ] do
+      SymphonyElixir.TestSupport.stub_linear_client(fn _, _ ->
+        {:ok, %{status: 200, body: %{"data" => put_in(response["project"]["teams"], teams)}}}
+      end)
+
+      assert {:error, _} = TestInstance.validate_contexts([context])
+    end
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:ok, %{status: 200, body: %{"data" => response}}} end)
 
     for rejected <- [
           put_in(context.settings.tracker.project_slug, "productive"),
@@ -216,6 +232,65 @@ defmodule SymphonyElixir.TestInstanceTest do
     Application.put_env(:symphony_elixir, :project_contexts, [context])
     assert [%{project_id: "project-id", state_root: state}] = TestInstance.public_info().bindings
     assert state == context.settings.tracker.app["state_root"]
+  end
+
+  test "full dummy project slugs match canonical manifest and API bindings", %{root: root, instance: instance} do
+    for {name, slug, workspace, team} <- [
+          {"symphony-test", "7d8cc05658e6", "prolok", "PRO"},
+          {"symphony-test-tilor", "3933acc91a68", "tilor", "PRI"}
+        ] do
+      expected = %{
+        "workspace_id" => "synthetic-workspace",
+        "project_id" => "project-id",
+        "slug_id" => slug,
+        "workspace" => workspace,
+        "teams" => [%{"id" => "team-id", "key" => team}]
+      }
+
+      instance = put_in(instance["manifest"]["projects"], %{name => expected})
+      Application.put_env(:symphony_elixir, :test_instance, instance)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_project_slug: name <> "-" <> slug,
+        workspace_root: "$SYMPHONY_PROJECT_WORKTREES_ROOT"
+      )
+
+      project = Path.join(root, "fixtures/" <> name)
+      File.mkdir_p!(Path.join(project, ".symphony"))
+      File.write!(Path.join(project, ".symphony/.env"), "LINEAR_ASSIGNEE=dev@example.com\n")
+      assert {:ok, context} = ProjectContext.load(project, Workflow.workflow_file_path(), %{})
+
+      context =
+        put_in(context.settings.tracker.relay, %{"state_root" => Path.join(root, "state/relay"), "consumer_id" => nil})
+
+      response = %{
+        "project" => %{
+          "id" => expected["project_id"],
+          "name" => name,
+          "slugId" => slug,
+          "teams" => %{"nodes" => expected["teams"], "pageInfo" => %{"hasNextPage" => false}}
+        },
+        "viewer" => %{"organization" => %{"id" => expected["workspace_id"], "urlKey" => workspace}}
+      }
+
+      SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:ok, %{status: 200, body: %{"data" => response}}} end)
+      assert :ok = TestInstance.validate_contexts([context])
+      assert :ok = TestInstance.validate_contexts([put_in(context.settings.tracker.project_slug, slug)])
+
+      for rejected <- [
+            put_in(context.settings.tracker.project_slug, name <> "-ffffffffffff"),
+            put_in(context.settings.tracker.team_key, team),
+            put_in(context.settings.tracker.relay["consumer_id"], "production")
+          ] do
+        assert {:error, _} = TestInstance.validate_contexts([rejected])
+      end
+
+      SymphonyElixir.TestSupport.stub_linear_client(fn _, _ ->
+        {:ok, %{status: 200, body: %{"data" => put_in(response["project"]["slugId"], "ffffffffffff")}}}
+      end)
+
+      assert {:error, {:test_project_binding_rejected, ^name}} = TestInstance.validate_contexts([context])
+    end
   end
 
   test "guard reports changed source or process evidence to its own CLI owner", %{root: root, instance: instance} do
@@ -267,6 +342,29 @@ defmodule SymphonyElixir.TestInstanceTest do
     File.mkdir_p!(Path.join(project, ".symphony"))
     File.write!(Path.join(project, ".symphony/.env"), "LINEAR_ASSIGNEE=dev@example.com\n")
     {:ok, context} = ProjectContext.load(project, Workflow.workflow_file_path(), %{})
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ ->
+      {:ok,
+       %{
+         status: 200,
+         body: %{
+           "data" => %{
+             "viewer" => %{"organization" => %{"id" => context.settings.tracker.app["workspace_id"]}},
+             "projects" => %{
+               "nodes" => [
+                 %{
+                   "id" => "project-id",
+                   "slugId" => context.settings.tracker.project_slug,
+                   "teams" => %{"nodes" => [%{"id" => "pro-id", "key" => "PRO"}], "pageInfo" => %{"hasNextPage" => false}}
+                 }
+               ],
+               "pageInfo" => %{"hasNextPage" => false}
+             }
+           }
+         }
+       }}
+    end)
+
     System.put_env("PATH", bin)
     assert :ok = ServiceMutex.reserve_projects([context])
     port = Process.get({ServiceMutex, :scopes})
@@ -276,6 +374,8 @@ defmodule SymphonyElixir.TestInstanceTest do
     assert {:error, "Projektreservierung fehlgeschlagen"} = ServiceMutex.reserve_projects([context])
     File.write!(shim, "#!/bin/sh\nread line\nexec /bin/sleep 6\n")
     assert {:error, "Projektreservierung antwortet nicht"} = ServiceMutex.reserve_projects([context])
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:error, :offline} end)
+    assert {:error, "Projekt-/Teambindung konnte nicht frisch und vollständig verifiziert werden"} = ServiceMutex.reserve_projects([context])
   end
 
   defp snapshot(root) do

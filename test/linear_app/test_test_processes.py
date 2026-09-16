@@ -68,22 +68,23 @@ class TestProcessIsolation(unittest.TestCase):
         return self.spawn('service-scopes.py', 'scopes', json.dumps(scope))
 
     def test_disjoint_projects_share_workspace_while_project_and_team_overlap_fail(self):
-        first = self.scopes([dict(workspace='w', kind='project', scope='a')])
+        teams = [{'id': 'pro-id', 'key': 'PRO'}]
+        first = self.scopes([dict(workspace='w', kind='project', scope='a', project_id='a-id', teams=teams)])
         self.assertEqual(first.stdout.readline(), b'locked\n')
-        second = self.scopes([dict(workspace='w', kind='project', scope='b')])
+        second = self.scopes([dict(workspace='w', kind='project', scope='b', project_id='b-id', teams=teams)])
         self.assertEqual(second.stdout.readline(), b'locked\n')
         for kind, scope in [('project', 'a'), ('team', 'PRO')]:
-            rejected = self.scopes([dict(workspace='w', kind=kind, scope=scope)])
+            rejected = self.scopes([dict(workspace='w', kind=kind, scope=scope, project_id='a-id', teams=teams)])
             rejected.communicate(timeout=5)
             self.assertNotEqual(rejected.returncode, 0)
         first.kill(); first.communicate(timeout=5)
         second.communicate(input=b'x', timeout=5)
-        broad = self.scopes([dict(workspace='w', kind='team', scope='PRO')])
+        broad = self.scopes([dict(workspace='w', kind='team', scope='PRO', teams=teams)])
         self.assertEqual(broad.stdout.readline(), b'locked\n')
-        blocked = self.scopes([dict(workspace='w', kind='project', scope='new')])
+        blocked = self.scopes([dict(workspace='w', kind='project', scope='new', project_id='new-id', teams=teams)])
         blocked.communicate(timeout=5)
         self.assertNotEqual(blocked.returncode, 0)
-        other = self.scopes([dict(workspace='other', kind='team', scope='PRO')])
+        other = self.scopes([dict(workspace='other', kind='team', scope='PRO', teams=teams)])
         self.assertEqual(other.stdout.readline(), b'locked\n')
 
     def test_normal_and_test_are_parallel_but_environment_is_exclusive_across_names(self):
@@ -102,6 +103,28 @@ class TestProcessIsolation(unittest.TestCase):
         self.assertTrue(wait_for(lambda: (self.root / 'resumed').exists()))
         restarted.communicate(input=b'x', timeout=5)
         self.assertIsNone(main.poll())
+
+    def test_verified_qai_team_and_pro_project_can_reserve_concurrently(self):
+        main = self.scopes([dict(workspace='w', kind='team', scope='QAI', teams=[{'id': 'qai-id', 'key': 'QAI'}])])
+        self.assertEqual(main.stdout.readline(), b'locked\n')
+        test = self.scopes([dict(workspace='w', kind='project', scope='dummy', project_id='dummy-id', teams=[{'id': 'pro-id', 'key': 'PRO'}])])
+        self.assertEqual(test.stdout.readline(), b'locked\n')
+        for scope in [
+            dict(workspace='w', kind='project', scope='multi', project_id='multi-id',
+                 teams=[{'id': 'pro-id', 'key': 'PRO'}, {'id': 'qai-id', 'key': 'QAI'}]),
+            dict(workspace='w', kind='team', scope='QAI', teams=[{'id': 'qai-id', 'key': 'QAI'}]),
+            dict(workspace='w', kind='project', scope='renamed-dummy', project_id='dummy-id', teams=[{'id': 'pro-id', 'key': 'PRO'}]),
+            dict(workspace='w', kind='project', scope='unknown', project_id='unknown'),
+            dict(workspace='w', kind='project', scope='unknown', project_id='unknown', teams=[]),
+        ]:
+            with self.subTest(scope=scope):
+                rejected = self.scopes([scope])
+                rejected.communicate(timeout=5)
+                self.assertNotEqual(rejected.returncode, 0)
+        main.kill()
+        main.communicate(timeout=5)
+        resumed = self.scopes([dict(workspace='w', kind='team', scope='QAI', teams=[{'id': 'qai-id', 'key': 'QAI'}])])
+        self.assertEqual(resumed.stdout.readline(), b'locked\n')
 
     def available(self, name):
         import fcntl

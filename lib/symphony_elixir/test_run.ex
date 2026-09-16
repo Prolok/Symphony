@@ -9,6 +9,28 @@ defmodule SymphonyElixir.TestRun do
   @spec stage() :: String.t() | nil
   def stage, do: Config.test_run_stage()
 
+  @spec start_allowed?(map()) :: boolean()
+  def start_allowed?(issue), do: stage() != "run" or issue.state == "Todo (AI)"
+
+  @spec record_workspace(Path.t(), map(), boolean()) :: :ok | {:error, term()}
+  def record_workspace(path, issue, created?) do
+    if stage() == "run" and created? do
+      with {:ok, plan} <- plan(),
+           {:ok, journal} <- journal(plan),
+           %{"created" => true} = fixture <- Enum.find(journal["fixtures"], &(&1["id"] == issue.issue_id)),
+           true <- fixture["identifier"] == issue.issue_identifier,
+           {head, 0} <- System.cmd("git", ["rev-parse", "HEAD"], cd: path, env: Config.without_linear_secret([])) do
+        # Each fixture owns a separate receipt: simultaneous workers and the
+        # probe process must never overwrite one another's journal updates.
+        DurableState.write(workspace_receipt_path(plan, fixture), %{"path" => path, "head" => String.trim(head), "source" => plan["source"]})
+      else
+        _ -> {:error, :test_workspace_base_unconfirmed}
+      end
+    else
+      :ok
+    end
+  end
+
   @spec execute(String.t()) :: {:ok, map()} | {:error, term()}
   def execute(stage) when stage in ["prepare", "probe", "cleanup"] do
     with %{} = instance <- Config.test_instance(),
@@ -72,11 +94,10 @@ defmodule SymphonyElixir.TestRun do
   defp bind_fixture(context, journal) do
     fixture = Enum.find(journal["fixtures"], &(&1["project"] == context.name))
     settings = context.settings
-    tracker = %{settings.tracker | active_states: ["Todo (AI)"], app: Map.put(settings.tracker.app, "allowed_issue_ids", [fixture["id"]])}
-    # Only the normal Todo bootstrap is exercised. Its phase transition makes
-    # the ticket ineligible for another worker in this bounded scenario.
-    config = put_in(context.workflow.config, ["tracker", "active_states"], ["Todo (AI)"])
-    config = put_in(config, ["tracker", "app", "allowed_issue_ids"], [fixture["id"]])
+    tracker = %{settings.tracker | app: Map.put(settings.tracker.app, "allowed_issue_ids", [fixture["id"]])}
+    # Keep reconciliation active through the bootstrap's phase transition.
+    # start_allowed?/1 independently excludes a subsequent planning worker.
+    config = put_in(context.workflow.config, ["tracker", "app", "allowed_issue_ids"], [fixture["id"]])
     workflow = %{context.workflow | config: config}
     %{context | settings: %{settings | tracker: tracker}, workflow: workflow, code_root: nil}
   end
@@ -232,7 +253,7 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp inspect_observed("cleanup", nil, context, %{"created" => true} = fixture, plan, journal) do
-    with :ok <- remove_workspace(context, fixture["identifier"], fixture) do
+    with :ok <- remove_workspace(context, fixture["identifier"], fixture, plan) do
       save_fixture(plan, journal, Map.put(fixture, "deleted", true))
     end
   end
@@ -263,7 +284,7 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp inspect_owned("cleanup", issue, context, fixture, plan, journal) do
-    with :ok <- remove_workspace(context, issue["identifier"], fixture),
+    with :ok <- remove_workspace(context, issue["identifier"], fixture, plan),
          {:ok, journal} <- save_fixture(plan, journal, Map.merge(fixture, %{"created" => true, "identifier" => issue["identifier"]})),
          {:ok, data} <- query("mutation DeleteTestFixture($id: String!) { issueDelete(id: $id) { success } }", %{id: fixture["id"]}),
          true <- data["issueDelete"]["success"] == true do
@@ -274,24 +295,45 @@ defmodule SymphonyElixir.TestRun do
     end
   end
 
-  defp remove_workspace(context, identifier, fixture) do
+  defp remove_workspace(context, identifier, fixture, plan) do
     path = Path.join(context.settings.workspace.root, identifier)
 
+    with :ok <- remove_existing_workspace(path, identifier, fixture, plan),
+         {worktrees, 0} <- System.cmd("git", ["worktree", "list", "--porcelain"], cd: context.root),
+         false <- String.contains?(worktrees, "worktree " <> path <> "\n"),
+         {_, 1} <- System.cmd("git", ["show-ref", "--verify", "--quiet", "refs/heads/symphony/" <> identifier], cd: context.root) do
+      :ok
+    else
+      _ -> {:error, :test_workspace_changed_or_cleanup_failed}
+    end
+  end
+
+  defp remove_existing_workspace(path, identifier, fixture, plan) do
     if File.exists?(path) do
       with true <- fixture["created"] == true and fixture["identifier"] == identifier,
            {"", 0} <- System.cmd("git", ["status", "--porcelain"], cd: path, env: Config.without_linear_secret([]), stderr_to_stdout: true),
            {head, 0} <- System.cmd("git", ["rev-parse", "HEAD"], cd: path, env: Config.without_linear_secret([])),
-           true <- String.trim(head) == fixture["project_head"],
-           {:ok, _} <- Workspace.remove(path),
-           {worktrees, 0} <- System.cmd("git", ["worktree", "list", "--porcelain"], cd: context.root),
-           false <- String.contains?(worktrees, "worktree " <> path <> "\n"),
-           {_, 1} <- System.cmd("git", ["show-ref", "--verify", "--quiet", "refs/heads/symphony/" <> identifier], cd: context.root) do
+           {:ok, expected} <- workspace_head(plan, fixture, path),
+           true <- String.trim(head) == expected,
+           {:ok, _} <- Workspace.remove(path) do
         :ok
       else
         _ -> {:error, :test_workspace_changed_or_cleanup_failed}
       end
     else
       :ok
+    end
+  end
+
+  defp workspace_receipt_path(plan, fixture), do: Path.join([Path.dirname(journal_path(plan)), "workspaces", fixture["id"] <> ".json"])
+
+  defp workspace_head(plan, fixture, path) do
+    source = plan["source"]
+
+    case DurableState.read(workspace_receipt_path(plan, fixture)) do
+      {:ok, %{"path" => ^path, "source" => ^source, "head" => head}} -> {:ok, head}
+      {:error, :enoent} -> {:ok, fixture["project_head"]}
+      _ -> {:error, :test_workspace_base_unconfirmed}
     end
   end
 

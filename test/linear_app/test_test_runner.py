@@ -1,5 +1,6 @@
 """Local runner protocol fixtures, explicitly not a Linear/Codex live acceptance."""
 import importlib.util
+import importlib.machinery
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 BOOT = r'''
@@ -129,12 +131,13 @@ class TestRunnerProtocol(unittest.TestCase):
         self.children.append(process)
         return process
 
-    def receipt(self, process):
+    def receipt(self, process, originals=True):
         output,error=process.communicate(timeout=25)
         self.assertTrue((self.result_dir/'result.json').exists(),error.decode())
         result=json.loads((self.result_dir/'result.json').read_text())
         self.assertEqual(result['evidence'],'fixture')
-        self.assertTrue(result['originals_preserved'])
+        if originals:
+            self.assertTrue(result['originals_preserved'])
         children=self.result_dir/'children'
         if children.exists():
             for pid in children.read_text().splitlines():
@@ -193,6 +196,47 @@ class TestRunnerProtocol(unittest.TestCase):
             self.assertEqual(result['status'],'failed')
             self.assertTrue(result['cleanup'])
             self.assertIn('signal_',result['error'])
+
+    def test_resume_preserves_previous_evidence_when_preflight_fails(self):
+        loader = importlib.machinery.SourceFileLoader('runner_resume', str(REPO / 'scripts/test-instance-run'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        runner = importlib.util.module_from_spec(spec)
+        loader.exec_module(runner)
+        results = self.root / 'resume-results'
+        results.mkdir()
+        previous = dict(status='failed', sessions={'one': 'session-1'}, scenarios={'readiness': True},
+                        original_projects={'one': dict(checkout=str(self.source))})
+        (results / 'result.json').write_text(json.dumps(previous))
+        args = runner.parser().parse_args([
+            '--checkout', str(self.source), '--test-instance', 'dev', '--manifest', str(self.manifest),
+            '--run-id', 'fixture', '--expected-sha', 'a' * 40, '--expected-source', 'b' * 64,
+            '--port', '4101', '--result-dir', str(results), '--resume'])
+        run = runner.Run(args)
+        with mock.patch.object(run.test, 'preflight', side_effect=ValueError('source changed')):
+            self.assertEqual(run.execute(), 1)
+        archives = list(results.glob('result-*.json'))
+        self.assertEqual(len(archives), 1)
+        self.assertEqual(json.loads(archives[0].read_text()), previous)
+
+    def test_merged_fetch_obeys_run_timeout_and_reaps_its_process(self):
+        slow_git = self.fakebin / 'git'
+        real_git = subprocess.check_output(['which', 'git']).decode().strip()
+        slow_git.write_text('#!' + sys.executable + '\n' +
+                            "import os,sys,time,pathlib\n" +
+                            "if 'fetch' in sys.argv:\n" +
+                            " pathlib.Path(os.environ['FETCH_PID_FILE']).write_text(str(os.getpid()))\n time.sleep(120)\n" +
+                            "os.execv(" + repr(real_git) + ",[" + repr(real_git) + ",*sys.argv[1:]])\n")
+        slow_git.chmod(0o755)
+        marker = self.root / 'fetch-pid'
+        with mock.patch.dict(os.environ, FETCH_PID_FILE=str(marker)):
+            process = self.start('not_ready', mode='merged')
+        result = self.receipt(process, originals=False)
+        self.assertEqual(process.returncode, 1, result)
+        self.assertEqual(result['error'], 'fetch_timeout')
+        self.assertLess(result['finished_at'] - result['started_at'], 8)
+        self.assertTrue(marker.exists())
+        state = subprocess.run(['ps', '-p', marker.read_text(), '-o', 'stat='], capture_output=True).stdout.strip()
+        self.assertTrue(not state or state.startswith(b'Z'), state)
 
 
 if __name__=='__main__':unittest.main()

@@ -480,6 +480,9 @@ Quell-SHA und Quellkennung ein. Bereitschaft erfordert dieselben Angaben im
 Ein vorhandener belegter Port führt zum Fehler, nicht zu einem anderen Port.
 Die angegebene Frist umfasst Build, Zugangsprüfung und Szenarien; Cleanup erhält
 anschließend zusätzlich höchstens 60 Sekunden für die gebundene Trackeroperation.
+Auch der Fetch im Modus `merged` unterliegt dieser Frist; bei Timeout werden seine
+eigenen Transportprozesse beendet. Reguläre Mix-/Make-Builds erzeugen denselben
+aktuellen Quellstempel wie der Launcher.
 
 Für einen direkten Start nach regulärem Build dieselben Bindungen exportieren:
 `SYM_PROJECT_ROOT`, `SYMPHONY_TEST_MANIFEST`, `SYMPHONY_TEST_EXPECTED_SHA` und
@@ -508,6 +511,8 @@ menschlichen Assignee, Schema, Relay-Bootstrap und Codex-App-Server-Handschlag.
 Je Projekt entsteht genau ein journalisiertes Ticket in `Todo (AI)`. Der reguläre
 Worker erzeugt dessen Workpad und verschiebt es nach `Planung (AI)`; die für diesen
 Lauf gebundene Startliste erlaubt ausschließlich diese zwei IDs und nur Todo.
+Bereits laufende Bootstrap-Worker dürfen den Statuswechsel nach Planung abschließen;
+die Startbegrenzung verhindert anschließend einen neuen Planungsworker.
 Erfolg verlangt beobachtete Session-IDs und beide bestätigten Workpads/Statuswechsel.
 Danach prüft ein Dienstneustart dieselben Test-Consumer-IDs. Konkurrenzstarts über
 Normal-/Test-/Ticketlauncher und Escript müssen mit „Symphony läuft bereits“ scheitern.
@@ -525,8 +530,10 @@ und Relay-Receipts gehören nicht in öffentliche Belege. Lokale Logs sind priva
 Das dauerhaft vor Ticketanlage geschriebene Laufjournal enthält die gewählten UUIDs.
 Unklare Anlageantworten erzeugen keine erneute Anlage. `--resume` akzeptiert nur
 dieselbe Laufkennung, Instanz, Quelle und Ergebnisablage, bewahrt vorherige Resultate
-und verwendet bekannte Fixtures. Eine noch offene frühere Laufkennung sperrt neue
-Läufe und den freien Testdienst. Zum reinen Aufräumen denselben Aufruf mit
+und verwendet bekannte Fixtures. Vor dem Preflight einer Wiederaufnahme wird das
+vorherige Resultat archiviert, auch wenn inzwischen Quelle oder Hauptdienst abweichen.
+Eine noch offene frühere Laufkennung sperrt neue Läufe und den freien Testdienst.
+Zum reinen Aufräumen denselben Aufruf mit
 `--resume --cleanup-only` ausführen: keine neuen Tickets/Worker, vorhandenes Escript
 mit passendem eingebettetem Quellbezug, auch nach Quelländerung oder Hauptdienstende.
 Die Wiederherstellung wird dokumentiert, aber nicht als bestandener Test ausgegeben.
@@ -539,7 +546,10 @@ keine unklare alte Anlage verdecken. Cleanup prüft UUID, Titel, Beschreibung,
 Projekt, Team und Assignee vor Löschung. Nur saubere eigene Bootstrap-Worktrees
 auf der erwarteten Basis werden über die normalen Projekthooks entfernt; fremde
 Änderungen führen zu einem sichtbaren Fehler und bleiben erhalten. Ein unklarer
-Anlage-/Cleanupausgang erfordert Prüfung des vorhandenen Journals über die
+Worktree-Basisstand wird abgewiesen; die tatsächliche Basis nach dem Erstellungshook
+wird vor Workerarbeit je Fixture dauerhaft erfasst. Auch ohne Workspaceverzeichnis
+müssen dessen Git-Registrierung und Branch entfernt sein, bevor Cleanup Erfolg meldet.
+Ein unklarer Anlage-/Cleanupausgang erfordert Prüfung des vorhandenen Journals über die
 gebundene Runtime, kein blindes Löschen oder Umbenennen der Reservierung.
 
 ## Gemeinsame Wissensbasis ohne lokales Codex-Memory

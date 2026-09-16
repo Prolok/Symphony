@@ -182,28 +182,45 @@ class Run:
                 raise RunFailure("concurrent_start_not_rejected")
         self.result["scenarios"]["exclusive_access"] = {"passed": True, "entrypoints": ["normal", "test", "ticket", "escript"]}
 
+    def fetch(self):
+        child = subprocess.Popen(["git", "-C", str(self.args.checkout), "fetch", "origin"],
+                                 env=dict(self.env, GIT_TERMINAL_PROMPT="0"), start_new_session=True,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.children.append(child)
+        try:
+            child.communicate(timeout=self.remaining())
+        except subprocess.TimeoutExpired as error:
+            # Keep the leader alive until stop_children inventories and reaps
+            # its entire process group, including a stalled SSH transport.
+            raise RunFailure("fetch_timeout") from error
+        if child.returncode:
+            raise RunFailure("fetch_failed")
+
     def execute(self):
         prepared = False
         originals = {}
         capsule = None
+        # Archive before any fallible preflight. If archival itself fails, do
+        # not enter the finally block that writes the next result.json.
+        if self.args.resume and self.result_path.exists():
+            previous = json.loads(self.result_path.read_text())
+            originals = previous.get("original_projects", {})
+            history = self.args.result_dir / ("result-" + str(time.time_ns()) + ".json")
+            atomic(history, previous)
+            self.result["original_projects"] = originals
         try:
             self.env["SYM_PROJECT_ROOT"] = json.loads(self.args.manifest.read_text())["project_root"]
             if self.args.cleanup_only:
                 self.env["SYMPHONY_TEST_RUN_STAGE"] = "cleanup"
             capsule = self.test.preflight(self.args.test_instance, self.args.checkout, self.env)
             if self.args.source_mode == "merged" and not self.args.cleanup_only:
-                self.test.git(self.args.checkout, "fetch", "origin")
+                self.fetch()
                 remote = self.test.git(self.args.checkout, "rev-parse", "origin/main").decode().strip()
                 if capsule["source"]["dirty"] or remote != capsule["source"]["sha"]:
                     raise RunFailure("merged_source_mismatch")
             self.result.update(source=capsule["source"], source_mode=self.args.source_mode,
                                projects=capsule["manifest"]["projects"])
-            originals = {name: self.test.source(Path(capsule["manifest"]["project_root"]) / name) for name in capsule["manifest"]["projects"]}
-            if self.args.resume and self.result_path.exists():
-                previous = json.loads(self.result_path.read_text())
-                originals = previous.get("original_projects", originals)
-                history = self.args.result_dir / ("result-" + str(time.time_ns()) + ".json")
-                atomic(history, previous)
+            originals = originals or {name: self.test.source(Path(capsule["manifest"]["project_root"]) / name) for name in capsule["manifest"]["projects"]}
             self.result["original_projects"] = originals
             if self.plan_path.exists():
                 existing = json.loads(self.plan_path.read_text())

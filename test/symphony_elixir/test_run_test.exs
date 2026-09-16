@@ -156,10 +156,10 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:ok, bound} = TestRun.bind_contexts(ctx.contexts)
 
     for context <- bound do
-      assert context.settings.tracker.active_states == ["Todo (AI)"]
+      assert "Planung (AI)" in context.settings.tracker.active_states
       assert [id] = context.settings.tracker.app["allowed_issue_ids"]
       assert Enum.any?(prepared["fixtures"], &(&1["id"] == id and &1["project"] == context.name))
-      assert context.workflow.config["tracker"]["active_states"] == ["Todo (AI)"]
+      assert "Planung (AI)" in context.workflow.config["tracker"]["active_states"]
     end
 
     assert {:ok, pending} = TestRun.execute("probe")
@@ -183,6 +183,97 @@ defmodule SymphonyElixir.TestRunTest do
     Agent.update(ctx.source_agent, &%{&1 | failure: nil})
     assert {:ok, restored} = TestRun.execute("cleanup")
     assert [%{"deleted" => true}] = restored["fixtures"]
+  end
+
+  test "bootstrap may finish after its status transition without starting planning", ctx do
+    assert {:ok, prepared} = TestRun.execute("prepare")
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+    assert {:ok, [context | _]} = TestRun.bind_contexts(ctx.contexts)
+    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    fixture = Enum.find(prepared["fixtures"], &(&1["project"] == context.name))
+
+    issue = %Issue{
+      id: fixture["id"],
+      identifier: fixture["identifier"],
+      title: fixture["title"],
+      state: "Todo (AI)",
+      assigned_to_worker: true,
+      assignee_id: @human
+    }
+
+    worker =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    on_exit(fn -> Process.exit(worker, :kill) end)
+
+    ProjectContext.with_context(context, fn ->
+      state = %Orchestrator.State{external_poll: true}
+      assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+      changed = %{issue | state: "Planung (AI)"}
+      refute Orchestrator.should_dispatch_issue_for_test(changed, state)
+      state = %{state | running: %{issue.id => %{pid: worker, ref: nil, identifier: issue.identifier, issue: issue, run_mode: :regular, started_at: DateTime.utc_now()}}}
+      kept = Orchestrator.reconcile_issue_states_for_test([changed], state)
+      assert Map.has_key?(kept.running, issue.id)
+      assert Process.alive?(worker)
+    end)
+  end
+
+  test "cleanup retries keep reporting leftover branches after a failed removal hook", ctx do
+    assert {:ok, journal} = TestRun.execute("prepare")
+    [fixture | _] = journal["fixtures"]
+    context = Enum.find(ctx.contexts, &(&1.name == fixture["project"]))
+    path = Path.join(context.settings.workspace.root, fixture["identifier"])
+    File.mkdir_p!(context.settings.workspace.root)
+    git!(context.root, ["worktree", "add", "-b", "symphony/" <> fixture["identifier"], path, "origin/main"])
+    context = put_in(context.settings.hooks.before_remove, "exit 1")
+    Application.put_env(:symphony_elixir, :project_contexts, [context | Enum.reject(ctx.contexts, &(&1.id == context.id))])
+    assert {:error, :test_workspace_changed_or_cleanup_failed} = TestRun.execute("cleanup")
+    refute File.exists?(path)
+    assert {:error, :test_workspace_changed_or_cleanup_failed} = TestRun.execute("cleanup")
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+  end
+
+  test "bootstrap journals the actual post-hook worktree base", ctx do
+    assert {:ok, journal} = TestRun.execute("prepare")
+    [fixture | _] = journal["fixtures"]
+    context = Enum.find(ctx.contexts, &(&1.name == fixture["project"]))
+    advanced = git!(context.root, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-m", "Advanced remote"]) |> String.trim()
+
+    hook = """
+    set -eu
+    workspace="$PWD"
+    rmdir "$workspace"
+    git -C "$SYMPHONY_PROJECT_ROOT" update-ref refs/remotes/origin/main #{advanced}
+    git -C "$SYMPHONY_PROJECT_ROOT" worktree add -b symphony/#{fixture["identifier"]} "$workspace" origin/main
+    """
+
+    context = put_in(context.settings.hooks.after_create, hook)
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, path} = Workspace.create_for_issue(%{id: fixture["id"], identifier: fixture["identifier"]})
+      assert String.trim(git!(path, ["rev-parse", "HEAD"])) == advanced
+      foreign = %{issue_id: "foreign", issue_identifier: "PRO-0"}
+      assert {:error, :test_workspace_base_unconfirmed} = TestRun.record_workspace(path, foreign, true)
+    end)
+
+    receipt_path = Path.join([Path.dirname(journal_path(ctx.root)), "workspaces", fixture["id"] <> ".json"])
+    assert {:ok, receipt} = DurableState.read(receipt_path)
+    assert receipt["head"] == advanced
+    File.write!(receipt_path, "corrupt")
+    assert {:error, :test_workspace_changed_or_cleanup_failed} = TestRun.execute("cleanup")
+    :ok = DurableState.write(receipt_path, receipt)
+
+    context =
+      put_in(context.settings.hooks.before_remove, "git -C \"$SYMPHONY_PROJECT_ROOT\" worktree remove \"$PWD\" && git -C \"$SYMPHONY_PROJECT_ROOT\" branch -D symphony/#{fixture["identifier"]}")
+
+    Application.put_env(:symphony_elixir, :project_contexts, [context | Enum.reject(ctx.contexts, &(&1.id == context.id))])
+    assert {:ok, cleaned} = TestRun.execute("cleanup")
+    assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
   end
 
   test "unconfirmed absence, changed fields and modified worktrees remain visible", ctx do

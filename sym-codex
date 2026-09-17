@@ -122,7 +122,14 @@ sym_codex_run_mix() {
   shift
 
   [[ -x "$mix_runtime" ]] || sym_codex_die "Mix-Preflight fehlt oder ist nicht ausführbar: $mix_runtime"
-  "$mix_runtime" mix "$source_repo" "$@"
+  # Every run returns machine-readable context on stdout. Route runtime logs
+  # before evaluating any lookup, including project selection and prompt setup.
+  "$mix_runtime" mix "$source_repo" "$1" --eval '
+    {:ok, handler} = :logger.get_handler_config(:default)
+    :ok = :logger.remove_handler(:default)
+    config = handler |> Map.drop([:id, :module]) |> Map.put(:level, :info) |> put_in([:config, :type], :standard_error)
+    :ok = :logger.add_handler(:default, handler.module, config)
+  ' "${@:2}"
 }
 
 sym_codex_prepare_mix() {
@@ -318,8 +325,9 @@ sym_codex_parse_manual_prompt_context() {
   runtime_entries="$("${SYMPHONY_PYTHON:-python3}" -c '
 import json,sys
 data=json.loads(sys.argv[1])
-allowed={"SYMPHONY_LINEAR_AUTH_MODE","SYMPHONY_LINEAR_CLIENT_SECRET_ENV","SYMPHONY_RELAY_KEY_ENV","SYMPHONY_LINEAR_BINDING_HASH","SYMPHONY_CODEX_STATE_ROOT","SYMPHONY_RUN_ID","SYMPHONY_PHASE"}
-assert set(data) == allowed and data["SYMPHONY_LINEAR_AUTH_MODE"] == "app"
+required={"SYMPHONY_LINEAR_AUTH_MODE","SYMPHONY_LINEAR_CLIENT_SECRET_ENV","SYMPHONY_RELAY_KEY_ENV","SYMPHONY_LINEAR_BINDING_HASH","SYMPHONY_CODEX_STATE_ROOT","SYMPHONY_RUN_ID","SYMPHONY_PHASE"}
+allowed=required | {"SYMPHONY_PROJECT_CONTEXT"}
+assert required <= set(data) <= allowed and data["SYMPHONY_LINEAR_AUTH_MODE"] == "app"
 for key,value in data.items():
     assert isinstance(value,str) and "\n" not in value and "\r" not in value
     print(key+"="+value)
@@ -476,7 +484,7 @@ sym_codex_expand_path() {
       printf '%s\n' "$HOME"
       ;;
     "~/"*)
-      printf '%s\n' "$HOME/${raw_path#~/}"
+      printf '%s\n' "$HOME/${raw_path#"~/"}"
       ;;
     /*)
       printf '%s\n' "$raw_path"
@@ -761,6 +769,7 @@ sym_codex_run() {
     sym_codex_finish 1
   fi
 
+  sym_codex_load_launch_env "$source_repo"
   if (( ! observer_mode )); then
     prompt_context="$(sym_codex_build_manual_prompt "$source_repo" "$workflow_file" "$interactive_workflow_file" "$dialog_workflow_file" "$project_root" "$issue_identifier" "$workspace")" ||
       sym_codex_die "cannot build prompt for $issue_identifier"
@@ -769,7 +778,6 @@ sym_codex_run() {
     workflow_step="$SYM_CODEX_WORKFLOW_STEP"
   fi
 
-  sym_codex_load_launch_env "$source_repo"
   if (( observer_mode )) && [[ -z "${SYMPHONY_LINEAR_AUTH_MODE:-}" ]]; then
     # A directly invoked observer must derive app mode from its workflow too.
     prompt_context="$(

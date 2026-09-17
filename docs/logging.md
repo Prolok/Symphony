@@ -36,14 +36,9 @@ so the file is written below `<path>/log/symphony.log`. The handler keeps five
 files of up to 10 MiB each and removes the default console handler after disk
 logging is configured.
 
-Der explizite Testbetrieb bindet das Dienstlog fest an
-`~/.local/state/symphony/test-environment/runs/<name>/log/symphony.log`;
-`--logs-root` ist dort unzulässig. `/api/v1/state.service` nennt PID, eingebettete
-Quell-SHA/-kennung und geladene Projekt-/Zustandsbindungen. Der Test-Runner sichert
-separat `result.json` mit Laufkennung, `evidence`, Szenarien, Issue-/Sessionbezug
-und Cleanup. Seine privaten Prozesslogs bleiben in `--result-dir`; öffentliche
-Belege enthalten weder Providerpayloads noch Relay-Receipts oder Zugangsdaten.
-Aufruf und Ergebnisvertrag: [Isolierter Testbetrieb](linear-app.md#isolierter-testbetrieb).
+`sym-codex` gibt Laufzeitlogs seiner Mix-Helfer ab Stufe `info` auf stderr aus;
+Debugmeldungen bleiben ausgeblendet. stdout enthält ausschließlich den
+maschinenlesbaren Projekt-, Workflow- oder Promptkontext.
 
 ## Scope Guidance
 

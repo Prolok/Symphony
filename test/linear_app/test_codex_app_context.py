@@ -207,6 +207,36 @@ class AppContextTest(unittest.TestCase):
             context.profile_home(self.release, state, self.original, self.project)
         self.assertEqual(retained.read_text(), "retained")
 
+    def test_project_home_preserves_codex_model_notice_counters_on_restart(self):
+        state = self.root / "state"
+        home = context.profile_home(self.release, state, self.original, self.project)
+        config = home / "config.toml"
+        original = config.read_text()
+        updated = original + '\n[tui.model_availability_nux]\ngpt-6-astra = 1\n'
+        config.write_text(updated)
+        retained = state / "sessions/retained.jsonl"
+        retained.write_text("retained")
+
+        self.assertEqual(context.profile_home(self.release, state, self.original, self.project), home)
+        self.assertEqual(config.read_text(), updated)
+        self.assertEqual(retained.read_text(), "retained")
+
+        for changed in (
+            updated + '\n[mcp_servers.foreign]\ncommand="foreign"\n',
+            updated.replace('apps = false', 'apps = true'),
+            updated.replace('apps = false', 'apps = 0'),
+            updated.replace('apps = false', 'apps = 2026-09-17'),
+            original + '\n[tui]\nunknown = true\n',
+            original + '\n[tui]\nmodel_availability_nux = "invalid"\n',
+            updated.replace('gpt-6-astra = 1', 'gpt-6-astra = true'),
+        ):
+            with self.subTest(config=changed):
+                config.write_text(changed)
+                with self.assertRaisesRegex(RuntimeError, "changed project configuration"):
+                    context.profile_home(self.release, state, self.original, self.project)
+                self.assertEqual(config.read_text(), changed)
+                self.assertEqual(retained.read_text(), "retained")
+
     def test_launch_overrides_disable_extra_mcp_and_plugins_in_effective_home(self):
         base = context.prepare(self.release, self.original, [], self.project)
         home = context.profile_home(self.release, self.root / "state", self.original, self.project)

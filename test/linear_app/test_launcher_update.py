@@ -44,7 +44,7 @@ class LauncherUpdateTest(GitFixture):
         self.trace = self.root / "builds"
         for name in ("symphony", "autoupdate", "scripts/mix-runtime", "scripts/codex-app-context.py"):
             shutil.copy2(REPO / name, self.source / name)
-        (self.source / ".gitignore").write_text("_build/\ndeps/\nbin/\n.symphony/\n.env.local\n")
+        (self.source / ".gitignore").write_text("_build/\ndeps/\nbin/\n.symphony/\n.env.local\n__pycache__/\n")
         (self.source / "mise.toml").write_text('[tools]\nerlang = "28"\nelixir = "1.19.5-otp-28"\n')
         self.write_tool("mise", '''#!/bin/bash
 case "$1" in

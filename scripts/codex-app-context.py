@@ -86,7 +86,7 @@ def profile_home(checkout, state, original_home, project):
     with (profiles / ".prepare.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         prepare(checkout, original_home, roots, project, target=target)
-        if (target / "config.toml").is_symlink() or (target / "config.toml").read_text() != project_config(project):
+        if (target / "config.toml").is_symlink() or not project_config_matches(target / "config.toml", project):
             raise RuntimeError("changed project configuration")
         captured = [{"source": str(skill), "path": str(target / "repository-skills" / name)} for name, skill in selected.items()]
         if json.loads((target / "skills.json").read_text()) != captured:
@@ -100,6 +100,24 @@ def profile_home(checkout, state, original_home, project):
             (target / "auth.json").symlink_to(auth.resolve())
         bind_sessions(target, state)
     return target
+
+
+def project_config_matches(path, project):
+    import tomllib
+    actual = tomllib.loads(path.read_text())
+    # Codex persists these UI counters after showing a model notice. They do
+    # not change the trusted project, integrations, or execution configuration.
+    tui = actual.pop("tui", {})
+    if not isinstance(tui, dict) or set(tui) - {"model_availability_nux"}:
+        return False
+    notices = tui.get("model_availability_nux", {})
+    if not isinstance(notices, dict) or not all(type(count) is int and count >= 0 for count in notices.values()):
+        return False
+    expected = tomllib.loads(project_config(project))
+    try:
+        return json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
+    except TypeError:
+        return False
 
 
 def project_config(project_dir):

@@ -6,6 +6,54 @@ defmodule SymCodexScriptTest do
   @mix_runtime_source Path.expand("../scripts/mix-runtime", __DIR__)
   @interactive_workflow_source Path.expand("../WORKFLOW_INTERACTIVE.md", __DIR__)
 
+  test "workspace paths expand a literal home prefix exactly once" do
+    definitions = File.read!(@script_source) |> String.replace_suffix("sym_codex_run \"$@\"\n", "")
+    command = definitions <> "\nsym_codex_expand_path \"$1\" \"$2\""
+
+    for {path, expected} <- [
+          {"~/QuantHub/Symphony-worktrees", Path.join(System.user_home!(), "QuantHub/Symphony-worktrees")},
+          {"~", System.user_home!()},
+          {"worktrees", "/project/worktrees"},
+          {"/worktrees", "/worktrees"}
+        ] do
+      assert {output, 0} = System.cmd("bash", ["-c", command, "sym-codex-path-test", "/project", path])
+      assert String.trim(output) == expected
+    end
+  end
+
+  test "Mix helpers hide debug logs and keep other diagnostics on stderr" do
+    directory = Path.join(System.tmp_dir!(), "sym-codex-logging-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    # Source the real helper definitions without launching a session, then use
+    # the actual Mix/OTP logger so stream contamination cannot hide in a stub.
+    definitions = File.read!(@script_source) |> String.replace_suffix("sym_codex_run \"$@\"\n", "")
+    helper = Path.join(directory, "helper")
+    stderr = Path.join(directory, "stderr")
+    File.write!(helper, definitions)
+
+    expression = """
+    require Logger
+    Logger.debug("project lookup diagnostic")
+    Logger.info("project lookup information")
+    Logger.warning("project lookup warning")
+    Logger.error("project lookup error")
+    IO.write(~s({"identifier":"PRO-756"}))
+    Logger.flush()
+    """
+
+    command = ~S(source "$1"; sym_codex_run_mix "$2" run --no-compile --no-start -e "$3" 2>"$4")
+    {output, status} = System.cmd("bash", ["-c", command, "sym-codex-log-test", helper, Path.dirname(@script_source), expression, stderr])
+
+    assert status == 0, File.read!(stderr)
+    assert Jason.decode!(output) == %{"identifier" => "PRO-756"}
+    refute File.read!(stderr) =~ "project lookup diagnostic"
+    assert File.read!(stderr) =~ "project lookup information"
+    assert File.read!(stderr) =~ "project lookup warning"
+    assert File.read!(stderr) =~ "project lookup error"
+  end
+
   test "sym-codex reaches codex when invoked directly from the script repository" do
     %{repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
 
@@ -29,6 +77,8 @@ defmodule SymCodexScriptTest do
     print('bound-app=' + os.environ['SYMPHONY_LINEAR_BINDING_HASH'])
     print('state=' + os.environ['SYMPHONY_CODEX_STATE_ROOT'])
     print('relay-reference=' + os.environ['SYMPHONY_RELAY_KEY_ENV'])
+    print('project-context=' + os.environ.get('SYMPHONY_PROJECT_CONTEXT', 'absent'))
+    print('model=' + os.environ.get('SYM_CODEX_MODEL', 'absent'))
     """)
 
     runtime = %{
@@ -54,7 +104,25 @@ defmodule SymCodexScriptTest do
     assert output =~ "relay-reference=CUSTOM_RELAY_SECRET"
     refute output =~ "codex-stub"
 
-    for invalid <- [Map.delete(runtime, "SYMPHONY_RELAY_KEY_ENV"), Map.put(runtime, "UNEXPECTED_FIELD", "value")] do
+    File.write!(Path.join(worktree, ".env"), "SYM_CODEX_MODEL=manual-project-model\n")
+    bound_runtime = Map.put(runtime, "SYMPHONY_PROJECT_CONTEXT", "encoded-project-snapshot")
+    bound_prompt = "SYM_CODEX_CONTEXT_V3\n#{Jason.encode!(bound_runtime)}\nIn Arbeit (AI)\n\nSYM_CODEX_PROMPT_V1\nTest"
+
+    assert {output, 0} =
+             run_script(Path.join(worktree, "sym-codex"), bin_dir, [],
+               cd: worktree,
+               env: [{"SYMPHONY_TEST_MANUAL_PROMPT_OUTPUT", bound_prompt}]
+             )
+
+    assert output =~ "project-context=encoded-project-snapshot"
+    assert output =~ "model=manual-project-model"
+
+    for invalid <- [
+          Map.delete(runtime, "SYMPHONY_RELAY_KEY_ENV"),
+          Map.put(runtime, "UNEXPECTED_FIELD", "value"),
+          Map.put(runtime, "SYMPHONY_PROJECT_CONTEXT", 123),
+          Map.put(runtime, "SYMPHONY_PROJECT_CONTEXT", "invalid\ncontext")
+        ] do
       invalid_prompt = "SYM_CODEX_CONTEXT_V3\n#{Jason.encode!(invalid)}\nIn Arbeit (AI)\n\nSYM_CODEX_PROMPT_V1\nTest"
       {output, status} = run_script(Path.join(worktree, "sym-codex"), bin_dir, [], cd: worktree, env: [{"SYMPHONY_TEST_MANUAL_PROMPT_OUTPUT", invalid_prompt}])
       assert status != 0
@@ -955,6 +1023,9 @@ defmodule SymCodexScriptTest do
 
       while [ "$#" -gt 0 ]; do
         case "$1" in
+          --eval)
+            shift 2
+            ;;
           --no-start|--no-compile)
             shift
             ;;

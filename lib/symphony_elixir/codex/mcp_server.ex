@@ -7,6 +7,7 @@ defmodule SymphonyElixir.Codex.MCPServer do
   alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.Codex.LinearGraphqlTool
   alias SymphonyElixir.Codex.MergeTool
+  alias SymphonyElixir.Codex.TestTool
   alias SymphonyElixir.{EnvFile, Workflow}
 
   @protocol_version "2025-06-18"
@@ -154,6 +155,11 @@ defmodule SymphonyElixir.Codex.MCPServer do
 
   def handle_request(%{"id" => id}, _opts), do: jsonrpc_error(id, -32_600, "Invalid Request")
   def handle_request(_request, _opts), do: jsonrpc_error(nil, -32_600, "Invalid Request")
+
+  defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)
+       when name in ["symphony_test", "symphony_linear.symphony_test"] do
+    jsonrpc_result(id, TestTool.mcp_call(arguments, opts))
+  end
 
   defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)
        when name in ["symphony_merge", "symphony_linear.symphony_merge"] do

@@ -180,7 +180,7 @@ Zusätzliche Review-Hinweise:
 ## Zweck und Grundregeln
 
 1. Dies ist eine unbeaufsichtigte Orchestrierungssitzung. Frage niemals einen Menschen nach Folgeaktionen.
-2. Stoppe bei einem echten Zugriffsblocker oder einer fälligen, extern zu erfüllenden Betreiberpflicht frühzeitig. Halte den konkreten Grund im Workpad fest und verschiebe das Issue gemäß Workflow.
+2. Stoppe bei einem echten Zugriffsblocker oder einer fälligen, ausschließlich extern erfüllbaren Betreiberpflicht, sobald kein zulässiger autonomer Fortsetzungsweg bleibt. Halte den konkreten Grund im Workpad fest und verschiebe das Issue gemäß Workflow.
 3. Die Abschlussnachricht darf nur abgeschlossene Aktionen und Blocker enthalten. Füge keine "next steps for user" hinzu.
 
 - Arbeite nur in der bereitgestellten Repository-Kopie. Berühre keinen anderen Pfad.
@@ -200,6 +200,28 @@ Zusätzliche Review-Hinweise:
 
 ## Voraussetzungen und globale Kontrakte
 
+### Autonome Entscheidungen und Linear-Texte
+
+Kleine, reversible Fach- und Implementierungsentscheidungen im Auftrag selbst
+entscheiden; relevante Annahmen kurz begründen. Nur wesentliche, aus Anforderungen,
+Konventionen und bestätigten Entscheidungen nicht auflösbare Fragen zu Produktziel,
+Leistungsumfang oder strategischem Verhalten nach `Planung` geben. Technische
+Details und kleine Verhaltensvarianten allein rechtfertigen keinen Rücksprung.
+Behebbare Test-, Build-, Lint-, Coverage- und Integrationsfehler in der aktuellen
+Phase reproduzieren, korrigieren und passend erneut prüfen. Die Merge→Test-Regel
+für Dateiänderungen bleibt erhalten. `BLOCKER` nur ohne zulässigen autonomen
+Fortsetzungsweg: notwendiger Zugang fehlt, echte externe Freigabe steht aus oder
+Diagnose und geeignete Lösungsversuche belegen ein autonom unlösbares Hindernis.
+Fehlerzahl, Aufwand und `agent.max_turns` allein reichen nicht. Vor Eskalation
+Hindernis/Entscheidung, Versuche, Grenze der Autonomie und Fortsetzungsbedingung
+knapp festhalten. Temporäre Fehler nach `symphony-linear` begrenzt behandeln.
+
+Für alle agentenseitigen Linear-Texte: Ergebnis oder offene Entscheidung zuerst,
+nur notwendige Begründung, Validierung und Fortsetzungsbedingung. Aktuellen Plan,
+offene Pflichten und jüngsten Übergabestand pflegen; überholte Details verdichten,
+Logs referenzieren. Pflichtnachweise, Quellen, Acks, Skips und auswertbare
+Überschriften/Checklisten erhalten; Details im Skill `symphony-workpad`.
+
 ### Phasenpflichten und Betreiberübergaben
 
 Jeden Pflichtnachweis in Planung/Workpad mit Aktion, Verantwortlichem
@@ -209,16 +231,22 @@ vereinbarte Abnahmen nicht still verschieben. Vor Merge müssen sämtliche dafü
 erforderlichen Belege vorliegen. Fehlende materielle Entscheidungen nach `Planung`
 zurückgeben; eine bekannte Betreiberzuständigkeit ist keine neue Produktfrage.
 
-Fehlt ein fälliger Betreiberbeleg, erlaubten Worker-Anteil erledigen und im einen
-Workpad Aktion, Rolle, Quell-/Paketstand, bestandene lokale Prüfungen, fehlende
+Fehlt ein fälliger Betreiberbeleg, zunächst erlaubte Diagnose, Nacharbeit und
+verfügbare gebundene Testausführung erledigen. Nur wenn danach kein zulässiger
+autonomer Fortsetzungsweg bleibt, im einen Workpad Aktion, Rolle, Quell-/Paketstand, bestandene lokale Prüfungen, fehlende
 externe Belege und Fortsetzungsphase übergeben; nach `BLOCKER` wechseln und den
 Turn beenden. Das gilt auch für externe Testvoraussetzungen. Kein erfundener
 Authfehler, keine fremden Checkouts oder Betriebsumstellung durch den Worker.
 Bei Wiederaufnahme vor weiterer Phasenarbeit Beleg, Geltungsbereich und Stand
 abgleichen: Statusschieben allein ist keine Abnahme. Ohne passenden neuen Beleg
+bleibt das Gate offen; negative Befunde erlauben Nacharbeit im Scope und erneute Prüfung. Nur ohne zulässigen autonomen Weg
 dieselbe Übergabe erhalten und nach `BLOCKER` zurückgeben; keinen unerfüllbaren
 Betreiberauftrag oder zusätzlichen Review allein wegen Wartezeit neu starten.
 Details und synthetische Fälle: [Betreiberpflichten und Wiederaufnahme](docs/linear-app.md#betreiberpflichten-und-wiederaufnahme).
+Isolierte Entwicklungstests nach Betreiberbereitstellung über `symphony_test`
+aufrufen; `worker.test_executor_socket` bindet den lokalen Executor. Er nimmt nur
+Quell-/Laufkennung und feste Operationen an. Einrichtung und Ergebnisvertrag:
+[Gebundener Testaufruf](docs/linear-app.md#gebundener-testaufruf).
 
 ### Start- und Laufzeitvertrag
 
@@ -296,8 +324,9 @@ Versionswechsel: [LinearRelay](docs/linear-app.md#linearrelay-empfang-zuständig
 
 Im App-Modus ausschließlich das injizierte `linear_graphql` oder das gebundene
 `symphony_linear`-MCP nutzen. Bei Transportausfall den anderen gebundenen Pfad
-verwenden. Scheitern beide, sichtbar stoppen; Kommentar/Status nur über einen
-funktionierenden erlaubten Pfad schreiben und Speicherung nur nach Bestätigung
+verwenden und temporäre Fehler gemäß `symphony-linear` begrenzt wiederholen.
+Bleiben beide ohne zulässige Recovery ausgefallen, sichtbar stoppen;
+Kommentar/Status nur über einen funktionierenden erlaubten Pfad schreiben und Speicherung nur nach Bestätigung
 behaupten. Keine privaten Envdateien, persönlichen Tokenfallbacks oder Umgehung
 der Secret-Abschirmung; `scripts/linear-app` ist ein geschütztes Betreiberwerkzeug,
 kein Modell-Shell-Ersatz.
@@ -406,16 +435,16 @@ bleiben wirksam; ein Review-Skip ersetzt keinen Betreiberbeleg.
 | `Umsetzungsticket erstellt` | Nein | Abschlussstatus für ein Ursprungsticket nach erfolgreicher bestätigter Umsetzungsticket-Erstellung aus `Todo (Dialog-AI)`; keine weitere Automatisierung. | - |
 | `Todo (AI)` | Ja | In der Warteschlange; vor aktiver Arbeit sofort nach `Planung (AI)` verschieben. | `Planung (AI)` |
 | `Planung (AI)` | Ja | Ticketbeschreibung und Workpad-Planung vorbereiten und entscheiden, ob vollständig autonome Umsetzung möglich ist. | `In Arbeit (AI)` |
-| `Planung` | Nein | Manueller Klärungs- und Planschärfungspunkt, wenn offene Verständnis-, Umsetzungs- oder Produktverhaltensfragen festgestellt wurden. | Warten auf menschliches Verschieben |
+| `Planung` | Nein | Manueller Klärungs- und Planschärfungspunkt für wesentliche, aus dem Kontext nicht auflösbare Produktziel-, Umfangs- oder Strategieentscheidungen. | Warten auf menschliches Verschieben |
 | `In Arbeit` | Ja (Bootstrap) | Manueller Benutzer-In-Arbeit-Bootstrap: Symphony erstellt nur Workspace/Worktree inkl. `after_create`-Hook, startet kein Codex und ändert den Status nicht. | Warten auf menschliches Verschieben |
-| `In Arbeit (AI)` | Ja | Vor der Umsetzung `symphony-pull` ausführen; danach den vorbereiteten Plan umsetzen. Nicht-funktionale Plananpassungen begründet im Workpad pflegen; produktverhaltensrelevanten Klärungsbedarf nach `Planung` zurückgeben. | `PreReview (AI)` |
+| `In Arbeit (AI)` | Ja | Vor der Umsetzung `symphony-pull` ausführen; danach den vorbereiteten Plan umsetzen. Anpassungen im Auftrag begründet im Workpad pflegen; nur wesentlichen unauflösbaren Produktklärungsbedarf nach `Planung` zurückgeben. | `PreReview (AI)` |
 | `PreReview (AI)` | Ja | `symphony-prereview` ausführen. | `Freigabe Implementierung` |
 | `Freigabe Implementierung` | Nein | Manueller Review- und Commit-Schritt nach PreReview; ohne Skip-Label keine weitere automatische Aktion bis zum nächsten menschlichen Statuswechsel. | Warten auf menschliches Verschieben |
 | `Review (AI)` | Ja | Vor `symphony-review` `symphony-pull` ausführen; beim ersten Eintritt offene Workspace-Änderungen einmalig mit einem issue-bezogenen Autocommit sichern. Abschlussstatus nach Review-Ergebnis sowie `--yolo` oder `Skip "Freigabe Review"`. | `Freigabe Review` |
 | `Freigabe Review` | Nein | Manueller Freigabepunkt der reviewten Version vor dem Test-/Merge-Zyklus; ohne Skip-Label keine weitere automatische Aktion. | Warten auf menschliches Verschieben |
 | `Test (AI)` | Ja | Branch vor den Tests per `symphony-pull` auf den späteren PR-Merge-Stand synchronisieren und danach `symphony-test` ausführen. | `Merge (AI)` |
 | `Merge (AI)` | Ja | Merge-Ablauf mit `symphony-land` ausführen; automatische Commits sind hier zulässig. Wenn Pull, Konfliktlösung oder andere Merge-Dateiänderungen neue Änderungen erzeugen oder übernehmen, nach `Test (AI)` zurückspringen. Wenn `Requires Manual Review` ohne gültiges GitHub-Approval blockiert oder der aktuelle Linear-Labelstand nicht verifizierbar ist, nach `BLOCKER` verschieben. | `Review`; bei Merge-Dateiänderungen `Test (AI)`; bei fehlendem gültigem Manual-Review-Approval oder nicht verifizierbarem Labelstand `BLOCKER` |
-| `BLOCKER` | Nein | Kritische Abweichung oder externer Blocker; keine weitere automatische Aktion, bis ein Mensch das Problem löst und das Ticket weiter verschiebt. | Warten auf menschliches Verschieben |
+| `BLOCKER` | Nein | Hindernis ohne zulässigen autonomen Fortsetzungsweg; keine weitere automatische Aktion, bis ein Mensch das Problem löst und das Ticket weiter verschiebt. | Warten auf menschliches Verschieben |
 | `Abbruch (AI)` | Ja | Laufende Arbeit sofort abbrechen und Cleanup ausführen. | `Abgebrochen` |
 | `Review` | Nein | Terminaler Übergabestatus nach dem Merge; keine weitere automatische Aktion, manuelles Verschieben nach `Fertig` bleibt beim Benutzer. | - |
 | `Fertig` | Nein | Terminaler Status; keine weitere Aktion erforderlich. | - |
@@ -520,7 +549,7 @@ offenen Klärungsbedarf so dokumentieren, dass der Benutzer den Plan im Status
 4. Erstelle in diesem Status die initiale inhaltliche Planung. Spätere automatische Schritte dürfen `### Plan` und `### Validierung` bei Bedarf anpassen, wenn neue Erkenntnisse aus der Umsetzung das erforderlich machen; solche Änderungen müssen im Workpad nachvollziehbar begründet werden.
 5. Entscheide am Ende dieses Status selbst, ob die Planung für eine vollständig autonome Umsetzung ausreicht.
    - Wenn ja, markiere die Planungs-Checklistenpunkte als erledigt, halte die Umsetzungsübergabe im Workpad fest, verschiebe das Issue nach `In Arbeit (AI)` und beende den Turn.
-   - Wenn mehrere plausible Varianten die Funktionalität, das Verhalten oder eine Produktausgabe verändern würden und das Ticket keine klare Entscheidung enthält, wähle nicht still selbst.
+   - Kleine reversible Varianten im Scope autonom wählen und kurz begründen. Nur wesentliche, aus dem Kontext nicht auflösbare Produktziel-, Umfangs- oder Strategieentscheidungen als Klärungsbedarf übergeben.
    - Wenn nein, arbeite die vom System empfohlenen Lösungsvorschläge zunächst in `### Plan` und `### Validierung` ein, damit der Plan bei Zustimmung des Benutzers direkt ausführbar ist.
    - Lege anschließend in Linear einen separaten Kommentar an, der die offenen Verständnis- oder Umsetzungsfragen beschreibt, pro Frage einen empfohlenen Lösungsvorschlag nennt und deutlich macht, welche Planannahmen bereits eingearbeitet wurden.
    - Markiere die Planungs-Checklistenpunkte als erledigt, dokumentiere die offenen Punkte als Unklarheiten, verschiebe das Issue nach `Planung` und beende den Turn.
@@ -540,7 +569,7 @@ offenen Klärungsbedarf so dokumentieren, dass der Benutzer den Plan im Status
 
 Umsetzung auf Basis des vorbereiteten Plans, lokale Validierung und ungecommittete
 Übergabe nach `PreReview (AI)` oder Rückgabe nach `Planung`, wenn während der
-Umsetzung eine produkt-/verhaltensrelevante Entscheidung offen bleibt.
+Umsetzung eine wesentliche, aus dem Kontext nicht auflösbare Produktentscheidung offen bleibt.
 
 ### Voraussetzungen
 
@@ -552,8 +581,8 @@ Umsetzung eine produkt-/verhaltensrelevante Entscheidung offen bleibt.
 1. Öffne den vorhandenen `## Symphony Workpad`-Kommentar und behandle ihn gemäß dem globalen Skill `symphony-workpad` als aktive Ausführungs-Checkliste.
 2. Führe anschließend den Skill `symphony-pull` aus, solange der Branch noch keine ungecommitten Arbeitsänderungen aus dieser Phase enthält.
 3. Verwende `### Plan` und `### Validierung` aus der vorherigen `Planung (AI)`-Phase als Arbeitsgrundlage für die Ausführung.
-4. Wenn neue Erkenntnisse aus der Umsetzung eine nicht-funktionale Anpassung von `### Plan` oder `### Validierung` erforderlich machen, aktualisiere diese Abschnitte im bestehenden Workpad, dokumentiere den Grund knapp in `### Verlauf` und erhalte verpflichtende ticketseitige Validierungsvorgaben aus `Validation`, `Test Plan` oder `Testing`.
-   - Wenn die neue Erkenntnis eine offene Entscheidung über Funktionalität, Verhalten oder eine Produktausgabe erzeugt, stoppe die Umsetzung, dokumentiere die Frage mit empfohlenem Lösungsvorschlag im Workpad und in einem separaten Linear-Kommentar, aktualisiere `### Plan`/`### Validierung` nur als vorgeschlagene Variante und verschiebe das Issue nach `Planung`.
+4. Wenn neue Erkenntnisse aus der Umsetzung eine Anpassung innerhalb des Auftrags an `### Plan` oder `### Validierung` erforderlich machen, aktualisiere diese Abschnitte im bestehenden Workpad, dokumentiere den Grund knapp in `### Verlauf` und erhalte verpflichtende ticketseitige Validierungsvorgaben aus `Validation`, `Test Plan` oder `Testing`.
+   - Nur wenn eine wesentliche, aus dem Kontext nicht auflösbare Entscheidung über Produktziel, Leistungsumfang oder strategisches Verhalten bleibt, stoppe die Umsetzung, dokumentiere die Frage mit empfohlenem Lösungsvorschlag im Workpad und in einem separaten Linear-Kommentar, aktualisiere `### Plan`/`### Validierung` nur als vorgeschlagene Variante und verschiebe das Issue nach `Planung`.
 5. Erfasse vor der Implementierung ein konkretes Reproduktionssignal im Abschnitt `### Verlauf`.
 6. Implementiere entlang der vorhandenen Plan-Checkliste und aktualisiere den Workpad-Kommentar nach jedem wesentlichen Meilenstein.
 7. Führe die für den Scope erforderlichen Validierungen/Tests aus.
@@ -562,7 +591,7 @@ Umsetzung eine produkt-/verhaltensrelevante Entscheidung offen bleibt.
    - Du darfst temporäre lokale Proof-Änderungen machen, um Annahmen zu validieren, wenn das die Sicherheit erhöht.
    - Nimm jede temporäre Proof-Änderung vor der Übergabe nach `PreReview (AI)` wieder zurück.
    - Dokumentiere diese temporären Proof-Schritte und Ergebnisse in `### Validierung` und/oder `### Verlauf`.
-8. Wenn die Ausführung neue Erkenntnisse hervorbringt, prüfe, ob der Plan oder die geplante Validierung angepasst werden müssen. Passe sie bei Bedarf im Workpad an; wenn die Erkenntnis den Ticket-Scope unklar macht, über den geplanten Scope hinausgeht oder eine offene Entscheidung über Produktverhalten erzeugt, erfinde keinen neuen Scope und gib das Issue mit empfohlenem Lösungsvorschlag nach `Planung` zurück.
+8. Wenn die Ausführung neue Erkenntnisse hervorbringt, prüfe, ob der Plan oder die geplante Validierung angepasst werden müssen. Passe sie bei Bedarf im Workpad an; wenn eine wesentliche, aus dem Kontext nicht auflösbare Produktziel-, Umfangs- oder Strategiefrage verbleibt, erfinde keinen neuen Scope und gib das Issue mit empfohlenem Lösungsvorschlag nach `Planung` zurück.
 9. Führe nach dem vorgeschalteten `symphony-pull` keine weiteren automatischen Commits aus. Der Arbeitsstand aus der eigentlichen Umsetzung muss für `PreReview (AI)` und den anschließenden manuellen Schritt `Freigabe Implementierung` bewusst ungecommittet bleiben.
 10. Aktualisiere den Workpad-Kommentar mit dem finalen Checklistenstatus und den Validierungsnotizen.
    - Markiere abgeschlossene Punkte in Plan-/Validierungs-Checklisten als erledigt.
@@ -578,7 +607,7 @@ Umsetzung eine produkt-/verhaltensrelevante Entscheidung offen bleibt.
 
 - Der reguläre Abschluss dieser Phase ist `PreReview (AI)`, nicht direkt `Freigabe Implementierung`.
 - Erst nach erfüllten Abschlussbedingungen nach `PreReview (AI)` verschieben und den Turn beenden.
-  - Wenn Schritt 4 oder 8 wegen offener Funktionalitäts-, Verhaltens- oder Produktausgabe-Entscheidung greift, ist stattdessen `Planung` der zulässige Abschluss dieser Phase.
+  - Wenn Schritt 4 oder 8 wegen wesentlicher, aus dem Kontext nicht auflösbarer Produktentscheidung greift, ist stattdessen `Planung` der zulässige Abschluss dieser Phase.
   - Ein direkter Übergang von `In Arbeit (AI)` nach `BLOCKER` ist bei fälliger Betreiberübergabe oder über den blocked-access escape hatch zulässig.
   - Ausnahme: Wenn du gemäß blocked-access escape hatch durch fehlende erforderliche Tools/Auth blockiert bist, verschiebe nach `BLOCKER` und füge den Blocker-Hinweis sowie explizite Entblockungsaktionen hinzu.
 - Vor dem Wechsel nach `PreReview (AI)` müssen alle folgenden Bedingungen erfüllt sein:
@@ -714,7 +743,7 @@ Den Branch vor dem Test per Rebase gegen `origin/main` synchronisieren,
 ## Ablauf für `Planung`
 
 Manueller Planschärfungspunkt nach offenen Fragen aus `Planung (AI)` oder nach
-produkt-/verhaltensrelevantem Klärungsbedarf aus `In Arbeit (AI)`. Weder coden
+wesentlichem, aus dem Kontext nicht auflösbarem Produktklärungsbedarf aus `In Arbeit (AI)`. Weder coden
 noch Ticket-Inhalt ändern, kein Polling. Weiterarbeit beginnt erst nach externem
 Statuswechsel in einen AI-Status.
 
@@ -947,7 +976,7 @@ der globale Skill `symphony-workpad` die maßgebliche Quelle.
 Für Ticketbeschreibung, inhaltliche Planung und geplante Validierung ist
 der globale Skill `symphony-planning` die maßgebliche Quelle.
 
-- Automatische inhaltliche Änderungen an `Plan` und geplanter `Validierung` sind zulässig, wenn neue Erkenntnisse aus der Umsetzung sie erforderlich machen. Dokumentiere solche Änderungen im Workpad und erhalte verpflichtende ticketseitige Validierungsvorgaben. Wenn die Änderung Funktionalität, Verhalten oder eine Produktausgabe anders festlegen würde, dokumentiere sie nur als empfohlenen Lösungsvorschlag und verschiebe nach `Planung`.
+- Automatische inhaltliche Änderungen an `Plan` und geplanter `Validierung` sind zulässig, wenn neue Erkenntnisse aus der Umsetzung sie erforderlich machen. Dokumentiere solche Änderungen im Workpad und erhalte verpflichtende ticketseitige Validierungsvorgaben. Nur bei wesentlichen, aus dem Kontext nicht auflösbaren Produktziel-, Umfangs- oder Strategieentscheidungen dokumentiere sie nur als empfohlenen Lösungsvorschlag und verschiebe nach `Planung`.
 - Interaktive Sitzungen dürfen auf Benutzeranweisung später erneut in die Planung eingreifen.
 
 ## Leitplanken und Verbote

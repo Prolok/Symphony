@@ -61,6 +61,7 @@ defmodule SymphonyElixir.Linear.CommentMutations do
   rescue
     _ -> {:error, :invalid_comment_mutation}
   catch
+    {:linear_text_compaction_required, _, _} = reason -> {:error, reason}
     :invalid_comment_mutation -> {:error, :invalid_comment_mutation}
   end
 
@@ -132,6 +133,9 @@ defmodule SymphonyElixir.Linear.CommentMutations do
     arguments = Map.new(field.arguments, &{&1.name, value(&1.value, variables)})
     input = Map.fetch!(arguments, "input")
     validate_input(name, input)
+
+    validate_text(input)
+
     previous = Enum.find(receipts, &(&1["field"] == (field.alias || name)))
     id = comment_id(name, input, arguments, previous)
     if not is_binary(id) or id == "", do: throw(:invalid_comment_mutation)
@@ -156,6 +160,15 @@ defmodule SymphonyElixir.Linear.CommentMutations do
   end
 
   defp rewrite_node(node, _variables, receipts), do: {node, receipts}
+
+  defp validate_text(input) do
+    Enum.each(~w(body bodyData quotedText), fn key ->
+      case SymphonyElixir.LinearText.validate(input[key]) do
+        :ok -> :ok
+        {:error, reason} -> throw(reason)
+      end
+    end)
+  end
 
   defp validate_input("commentUpdate", input) do
     if not Enum.all?(Map.keys(input), &(&1 in @update_fields)), do: throw(:invalid_comment_mutation)

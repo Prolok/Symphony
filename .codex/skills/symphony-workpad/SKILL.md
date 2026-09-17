@@ -95,10 +95,13 @@ widersprüchlich war.
   Fortsetzungsphase. Als ausstehende Betreiberaktion kennzeichnen; fehlende
   Testumgebung nicht als Review-/Linear-Authfehler ausgeben.
 - Vor Wiederaufnahme Belegquelle, Ergebnis, Geltungsbereich und relevanten Stand
-  abgleichen. Statusschieben allein ist keine Abnahme. Ohne passenden neuen Beleg
-  Übergabe erhalten, keinen unerfüllbaren Auftrag oder Review wegen Wartezeit
-  neu starten. Relevante Änderungen entwerten betroffene Belege, reine Wartezeit
-  nicht. Negative Abnahme bleibt offen; Details und Fälle stehen in
+  abgleichen. Negative Befunde im Scope autonom korrigieren und erneut prüfen;
+  fehlender positiver Nachweis sperrt den Gateabschluss, nicht die Nacharbeit.
+  Statusschieben allein ist keine Abnahme. Ohne passenden neuen Beleg
+  das Gate offen halten; nur ohne zulässigen autonomen Fortsetzungsweg die
+  Betreiberübergabe erhalten. Keinen unerfüllbaren Auftrag oder Review allein
+  wegen Wartezeit neu starten. Relevante Änderungen entwerten betroffene Belege,
+  reine Wartezeit nicht. Negative Abnahme bleibt offen; Details und Fälle stehen in
   `docs/linear-app.md`, Abschnitt „Betreiberpflichten und Wiederaufnahme“.
 - Autorisierten technischen Review-Skip als `bewusst übersprungen` mit
   Entscheidungsquelle und Geltungsbereich dokumentieren. Historische Reviewpunkte
@@ -147,3 +150,27 @@ Ein eigener Löschungs-Quellschlüssel nach vorheriger Zustellung/Bestätigung
 benötigt ein eigenes Ergebnis; das frühere Ergebnis bleibt erhalten.
 Keine zusätzlichen Empfangskommentare. Technische Review-Subagenten erhalten
 weiterhin keinen ungefilterten Kommentar-/Workpad-Kontext.
+
+## Schreibvertrag für alle Linear-Texte
+
+- Ergebnis/offene Entscheidung zuerst, danach nur notwendige Begründung,
+  aussagekräftige Validierung und gegebenenfalls Fortsetzungsbedingung.
+  Kurze Absätze oder Stichpunkte, keine Ticketwiederholung, Debug-Erzählung,
+  duplizierten Betreiberanleitungen oder zusätzliche Zusammenfassung.
+- Workpad als aktuellen Arbeitsstand pflegen: Plan, offene Pflichten,
+  relevante Entscheidungen, jüngster Handoff. Überholte Versuche und alte
+  Übergaben durch ihren noch relevanten Befund und einen Belegverweis ersetzen.
+- Arbeitsziel höchstens 20.000 Zeichen. Vor jedem Update einschließlich neuer
+  Acks Größe prüfen; spätestens bei 80.000 UTF-16-Einheiten semantisch verdichten.
+  Der gemeinsame Schreibpfad weist größere Texte vor HTTP/Journal zurück;
+  das ist ein korrigierbarer Schreibfehler, kein BLOCKER. Er verändert nichts.
+  Anschließend dieselbe Kommentar-ID aktualisieren und offene Acks erneut
+  bestätigen. Kein Abschneiden, Löschen von Pflichten oder zweites Workpad.
+- Pflichtnachweise, offene Anforderungen, Einschränkungen, Quellen-/Standbezug,
+  bewusste Skips und vollständige Ack-Einträge mit Quelle/Ergebnis/Begründung/
+  Ersatzbezug bewahren. Maschinelle Überschriften, Checklisten und Fälligkeits-
+  suffixe unverändert auswertbar halten. Alte Logs separat referenzieren.
+- Vor Speicherung die verdichtete Fassung gegen diese Pflichten prüfen.
+  Erforderliche Nach-Fix-Kommentare bleiben bestehen, enthalten aber jeweils
+  nur Befund, Fix oder begründete Nichteinordnung und gezielten Nachweis.
+  Beispiele und Szenarien: `docs/linear-app.md`, „Knappe Linear-Texte“.

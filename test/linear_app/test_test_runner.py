@@ -107,7 +107,7 @@ class TestRunnerProtocol(unittest.TestCase):
     def git(self, root, *args):
         return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.DEVNULL).decode().strip()
 
-    def start(self, scenario='success', checkout=None, mode='development', resume=False, cleanup=False):
+    def start(self, scenario='success', checkout=None, mode='development', resume=False, cleanup=False, probe=False):
         checkout = checkout or self.source
         spec = importlib.util.spec_from_file_location('test_instance', REPO / 'scripts/test-instance.py')
         helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
@@ -120,6 +120,7 @@ class TestRunnerProtocol(unittest.TestCase):
         args = ['--checkout',str(checkout),'--test-instance','dev','--manifest',str(self.manifest),'--run-id','fixture',
                 '--expected-sha',source['sha'],'--expected-source',source['source_sha256'],'--port',str(port),
                 '--result-dir',str(self.result_dir),'--timeout','2' if scenario=='not_ready' else '10','--source-mode',mode]
+        if probe:args+=['--scenario','failure-probe']
         if resume:args+=['--resume']
         if cleanup:args+=['--cleanup-only']
         env=dict(os.environ,FIXTURE_CAPSULE=json.dumps(capsule),FIXTURE_SCENARIO="recovered" if cleanup else scenario,
@@ -144,6 +145,22 @@ class TestRunnerProtocol(unittest.TestCase):
                 state=subprocess.run(['ps','-p',pid,'-o','stat='],capture_output=True).stdout.strip()
                 self.assertTrue(not state or state.startswith(b'Z'),(pid,state))
         return result
+
+    def test_intentional_probe_cleans_fixtures_before_corrected_source_retest(self):
+        failed = self.start(scenario='negative-probe', probe=True)
+        result = self.receipt(failed)
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(result['error'], 'intentional_failure_probe')
+        self.assertTrue(result['cleanup'])
+        self.assertTrue(result['main_preserved'])
+        self.assertTrue(result['originals_preserved'])
+        self.assertFalse((self.result_dir/'remote-fixtures.json').exists())
+        (self.source/'corrected-source').write_text('correction after negative integration result')
+        passed = self.start(scenario='corrected-probe')
+        corrected = self.receipt(passed)
+        self.assertEqual(passed.returncode, 0)
+        self.assertNotEqual(result['source']['source_sha256'], corrected['source']['source_sha256'])
+        self.assertTrue(corrected['cleanup'])
 
     def test_complete_development_run_and_independent_merged_checkout(self):
         first=self.start()

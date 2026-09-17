@@ -88,7 +88,7 @@ defmodule SymphonyElixir.Workpad do
       String.trim(body) == "" -> {:error, :empty_workpad_body}
       not comment_matches?(body) -> {:error, :workpad_marker_missing}
       placeholder_body?(body) -> {:error, :placeholder_workpad_body}
-      true -> :ok
+      true -> SymphonyElixir.LinearText.validate(body)
     end
   end
 

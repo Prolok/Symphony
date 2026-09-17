@@ -135,13 +135,15 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:ssh_hosts, {:array, :string}, default: [])
       field(:max_concurrent_agents_per_host, :integer)
+      field(:test_executor_socket, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host], empty_values: [])
+      |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host, :test_executor_socket], empty_values: [])
       |> validate_number(:max_concurrent_agents_per_host, greater_than: 0)
+      |> validate_format(:test_executor_socket, ~r/\A\/[^\r\n\x00]+\z/)
     end
   end
 

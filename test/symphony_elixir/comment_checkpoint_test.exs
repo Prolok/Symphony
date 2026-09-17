@@ -52,6 +52,30 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert_received :status_mutation
   end
 
+  test "oversized acknowledgement remains pending until the same workpad is condensed", %{issue: issue} do
+    establish(issue)
+    human("human", "Pflicht V5 bleibt offen")
+    assert {:ok, %{"inputs" => [%{"key" => key}]}} = CommentCheckpoint.checkpoint(issue)
+    original = workpad_body()
+    oversized = original <> "\n### Verlauf\n" <> String.duplicate("Historische Diagnose.\n", 4_000)
+    # Simulate a large preexisting remote workpad, without passing our new write guard.
+    comments = Process.get(:comments)
+    {id, workpad} = Enum.find(comments, fn {_, value} -> value["body"] == original end)
+    Process.put(:comments, Map.put(comments, id, Map.put(workpad, "body", oversized)))
+    assert {:error, _} = CommentCheckpoint.acknowledge(issue, [result(key)])
+    assert workpad_body() == oversized
+    assert {:ok, %{"inputs" => pending}} = CommentCheckpoint.checkpoint(issue)
+    assert Enum.any?(pending, &(&1["key"] == key))
+
+    compact = original <> "\n### Verlauf\n- Aktueller Stand: V5 offen, historische Logs referenziert.\n"
+    :ok = Workpad.update_tracker_workpad(issue.id, compact)
+    results = Enum.map(pending, &result(&1["key"], "übernommen", "Pflicht erhalten; historischer Verlauf verdichtet"))
+    assert {:ok, %{"inputs" => []}} = CommentCheckpoint.acknowledge(issue, results)
+    assert workpad_body() =~ key
+    assert Map.has_key?(Process.get(:comments), id)
+    assert workpad_body() =~ "V5 offen"
+  end
+
   test "workpad acknowledgement records source version, survives retries and never acknowledges the successor edit", %{issue: issue} do
     establish(issue)
     first = human("human", "erste Fassung")

@@ -356,8 +356,8 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "der lokale Branchname und die dazugehörige PR bleiben maßgeblich."
     assert prompt =~ "Wenn der Pull/Rebase einen Konflikt nicht autonom auflösen kann"
     assert prompt =~ "verschiebe nach `BLOCKER`"
-    assert prompt =~ "produktverhaltensrelevanten Klärungsbedarf nach `Planung` zurückgeben"
-    assert prompt =~ "Wenn mehrere plausible Varianten die Funktionalität, das Verhalten oder eine Produktausgabe verändern würden"
+    assert prompt =~ "nur wesentlichen unauflösbaren Produktklärungsbedarf nach `Planung` zurückgeben"
+    assert prompt =~ "Kleine reversible Varianten im Scope autonom wählen und kurz begründen."
     assert prompt =~ "gib das Issue mit empfohlenem Lösungsvorschlag nach `Planung` zurück"
     assert prompt =~ "Wenn Symphony mit `--yolo` gestartet wird"
     assert prompt =~ "die Hauptmaske zeigt"
@@ -7612,7 +7612,7 @@ defmodule SymphonyElixir.CoreTest do
              ~r/(This is an unattended orchestration session\.|Dies ist eine unbeaufsichtigte Orchestrierungssitzung\.)/
 
     assert prompt =~
-             "Stoppe bei einem echten Zugriffsblocker oder einer fälligen, extern zu erfüllenden Betreiberpflicht"
+             "Stoppe bei einem echten Zugriffsblocker oder einer fälligen, ausschließlich extern erfüllbaren Betreiberpflicht"
 
     assert prompt =~ ~r/(Local system time for this turn|Lokale Systemzeit für diesen Turn):/
     assert prompt =~ ~r/(local system time|lokale Systemzeit)/
@@ -7633,7 +7633,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "`gh pr merge`"
     assert prompt =~ "`<Issue-Key> Test (AI) Autocommit`"
     assert prompt =~ "`<Issue-Key> Merge (AI) Autocommit`"
-    assert prompt =~ "produktverhaltensrelevanten Klärungsbedarf nach `Planung` zurückgeben"
+    assert prompt =~ "nur wesentlichen unauflösbaren Produktklärungsbedarf nach `Planung` zurückgeben"
     assert prompt =~ "Nutze das Workpad in diesem Status nur als Quelle für Fortschritts- und Review-Protokollierung."
 
     assert prompt =~

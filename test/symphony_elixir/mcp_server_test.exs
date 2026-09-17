@@ -150,7 +150,8 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
                }
              },
              %{"name" => "symphony_comments"},
-             %{"name" => "symphony_merge"}
+             %{"name" => "symphony_merge"},
+             %{"name" => "symphony_test"}
            ] = get_in(response, ["result", "tools"])
 
     assert description =~ "Linear"

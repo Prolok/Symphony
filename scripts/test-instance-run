@@ -54,6 +54,7 @@ def parser():
     result.add_argument("--timeout", type=float, default=180)
     result.add_argument("--resume", action="store_true")
     result.add_argument("--cleanup-only", action="store_true", help="Nur eigenes Journal aufräumen; verlangt --resume")
+    result.add_argument("--scenario", choices=("bootstrap", "failure-probe"), default="bootstrap")
     return result
 
 
@@ -65,7 +66,7 @@ class Run:
         self.children = []
         self.known = {}
         self.service = None
-        self.result = {"evidence": "live", "run_id": args.run_id, "status": "failed", "scenarios": {}, "cleanup": False}
+        self.result = {"evidence": "live", "run_id": args.run_id, "scenario": args.scenario, "status": "failed", "scenarios": {}, "cleanup": False}
         self.result_path = args.result_dir / "result.json"
         self.plan_path = args.result_dir / "plan.json"
         self.deadline = time.monotonic() + args.timeout
@@ -224,11 +225,12 @@ class Run:
             self.result["original_projects"] = originals
             if self.plan_path.exists():
                 existing = json.loads(self.plan_path.read_text())
-                if not self.args.resume or existing["source"] != capsule["source"] or existing["run_id"] != self.args.run_id:
+                if (not self.args.resume or existing["source"] != capsule["source"] or existing["run_id"] != self.args.run_id
+                        or existing.get("scenario", "bootstrap") != self.args.scenario):
                     raise RunFailure("run_already_exists_or_changed")
             else:
                 atomic(self.plan_path, {"evidence": "live", "instance": self.args.test_instance,
-                                        "run_id": self.args.run_id, "source": capsule["source"]})
+                                        "run_id": self.args.run_id, "source": capsule["source"], "scenario": self.args.scenario})
             self.save()
             prepared = True  # Intent may be durable even when prepare loses its response.
             if self.args.cleanup_only:
@@ -236,6 +238,8 @@ class Run:
                 return 1  # Cleanup in finally is a recovery receipt, never a test pass.
             fixtures = self.invoke("prepare")["fixtures"]
             self.result["fixtures"] = fixtures
+            if self.args.scenario == "failure-probe":
+                raise RunFailure("intentional_failure_probe")
             self.competition()
             self.service = self.start("run")
             sessions = {}
@@ -331,6 +335,7 @@ def main():
     if args.resume:
         plan = json.loads((args.result_dir / "plan.json").read_text())
         if (plan.get("run_id") != args.run_id or plan.get("instance") != args.test_instance
+                or plan.get("scenario", "bootstrap") != args.scenario
                 or plan.get("source", {}).get("sha") != args.expected_sha
                 or plan.get("source", {}).get("source_sha256") != args.expected_source
                 or plan.get("source", {}).get("checkout") != str(args.checkout)):

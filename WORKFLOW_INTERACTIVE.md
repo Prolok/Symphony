@@ -46,6 +46,16 @@ nicht erneut bestätigen lassen.
 
 Sobald der Benutzer die gewünschte Aufgabe benannt hat:
 
+- Kleine reversible Entscheidungen im autorisierten Auftrag selbst treffen und
+  relevante Annahmen kurz begründen. Nur wesentliche, aus dem Kontext nicht
+  auflösbare Produktziel-, Umfangs- oder Strategiefragen zur Klärung vorlegen.
+- Behebbare Test-/Build-/Integrationsfehler reproduzieren, korrigieren und erneut
+  prüfen; fehlender positiver Beleg sperrt das Gate, nicht zulässige Nacharbeit.
+  Echte externe Freigaben und Scopegrenzen bleiben erhalten. Technische Nacharbeit
+  nicht als erledigt ausgeben; Statuswechsel nur im benannten Benutzerauftrag.
+- Für alle Linear-Texte den gemeinsamen Schreibvertrag aus `symphony-workpad`
+  verwenden: Ergebnis zuerst, aktuelle Pflichten statt wiederholter Historie.
+
 - Verwende fuer Ticketplanung, Plan-Qualitaet und die inhaltliche Pflege von `Plan` und `Validierung` den Skill `symphony-planning`.
 - Verwende fuer Aufbau und Pflege des Symphony Workpads den Skill `symphony-workpad`.
 - Verwende fuer Linear-Lese- und Schreibzugriffe weiterhin den Skill `symphony-linear`.

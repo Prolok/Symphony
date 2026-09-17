@@ -89,6 +89,9 @@ defmodule SymphonyElixir.Config do
   @spec test_instance() :: map() | nil
   def test_instance, do: SymphonyElixir.TestInstance.current()
 
+  @spec test_executor_socket() :: Path.t() | nil
+  def test_executor_socket, do: settings!().worker.test_executor_socket
+
   @spec test_run_stage() :: String.t() | nil
   def test_run_stage, do: if(test_instance(), do: System.get_env("SYMPHONY_TEST_RUN_STAGE"))
 

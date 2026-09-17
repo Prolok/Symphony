@@ -160,3 +160,20 @@ Löschbeleg. Keinen alternativen Mutationspfad zur Umgehung benutzen. Kommentare
 an manuellen Gates aktivieren keine Arbeit und erteilen keine Freigaben.
 Für den bestehenden Land-Aktionsweg `symphony_merge` verwenden; Shell-`gh pr merge`
 ersetzt den gebundenen frischen Kommentarcheck nicht.
+
+## Begrenzte Recovery
+
+Timeout, Verbindungsabbruch, HTTP 503 und Rate-Limits sind keine Authdiagnose.
+Vorhandene Cooldown-/Retry-/Journalmechanismen nutzen. Ohne Serverfrist höchstens
+zwei weitere Versuche nach 2 und 5 Sekunden; bei Rate-Limit die gemeldete Frist
+abwarten, keinen parallelen Transport zur Umgehung starten. Vor jedem Versuch
+Fehlersignal und Fortschritt prüfen; erfolgreiche Teilschritte behalten.
+Nach ausgeschöpfter Folge Ursache diagnostizieren und einen anderen zulässigen
+Lösungsweg prüfen. Keine unveränderte Endlosschleife, kein BLOCKER allein wegen
+Fehlerzahl oder Aufwand; Eskalationsschwelle aus dem Workflow anwenden.
+
+Unklare Mutationsantworten zuerst über Journal und gemeldete IDs abgleichen;
+keine blinde Neuanlage oder pauschale Wiederholung von Mutationen. Nur vom
+Abgleich nachgewiesen nicht ausgeführte Aktionen erneut senden. Definitive
+401/403 ohne Rate-Limit bleiben echte Zugriffsfehler. Alle Linear-Texte folgen
+dem Schreibvertrag in `symphony-workpad`; Größenfehler durch Verdichtung beheben.

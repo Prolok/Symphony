@@ -6,10 +6,14 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   alias SymphonyElixir.Codex.CommentTool
   alias SymphonyElixir.Codex.LinearGraphqlTool
   alias SymphonyElixir.Codex.MergeTool
+  alias SymphonyElixir.Codex.TestTool
 
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case LinearGraphqlTool.canonical_tool_name(tool) || tool do
+      name when name in ["symphony_test", "symphony_linear.symphony_test"] ->
+        TestTool.execute(arguments, opts)
+
       name when name in ["symphony_merge", "symphony_linear.symphony_merge"] ->
         MergeTool.execute(arguments, opts)
 
@@ -31,7 +35,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   @spec tool_specs() :: [map()]
   def tool_specs do
-    [LinearGraphqlTool.tool_spec(), CommentTool.tool_spec(), MergeTool.tool_spec()]
+    [LinearGraphqlTool.tool_spec(), CommentTool.tool_spec(), MergeTool.tool_spec(), TestTool.tool_spec()]
   end
 
   defp failure_response(payload) do

@@ -308,6 +308,8 @@ class ManagedExecutorTest(unittest.TestCase):
                        dict(self.config, result_root=str(self.root / 'public'))]:
             if config['result_root'].endswith('public'):
                 Path(config['result_root']).mkdir(mode=0o755)
+                # mkdir applies the host umask; this fixture must actually be public.
+                Path(config['result_root']).chmod(0o755)
             with self.assertRaises(ValueError):
                 self.module.ManagedExecutor(config, self.jobs.append)
         outside = self.root / 'outside'

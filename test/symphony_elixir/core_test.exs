@@ -7,22 +7,7 @@ defmodule SymphonyElixir.CoreTest do
   alias SymphonyElixir.Workpad
 
   setup_all do
-    # The application also schedules polls when its initial poll is disabled.
-    # Keep it away from this module's global Memory fixtures until all per-test
-    # cleanup has finished; individual tests start their own orchestrators.
-    application_orchestrator = Process.whereis(Orchestrator)
-
-    if is_pid(application_orchestrator) do
-      stop_orchestrator_and_workers(application_orchestrator, fn _pid ->
-        Supervisor.terminate_child(SymphonyElixir.Supervisor, Orchestrator)
-      end)
-
-      on_exit(fn ->
-        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, Orchestrator)
-      end)
-    end
-
-    {:ok, application_orchestrator: application_orchestrator}
+    SymphonyElixir.TestSupport.isolate_application_orchestrator()
   end
 
   setup do
@@ -6156,25 +6141,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  defp stop_orchestrator_and_workers(pid, stop_fun \\ &GenServer.stop(&1, :normal, 1_000)) when is_pid(pid) do
-    if Process.alive?(pid) do
-      # Freeze dispatch before taking the worker snapshot. Stop the orchestrator
-      # first so worker exits cannot schedule retries or launch replacement work.
-      :ok = :sys.suspend(pid)
-      running = orchestrator_state(pid).running
-      :ok = stop_fun.(pid)
-
-      Enum.each(running, fn
-        {_issue_id, %{pid: worker_pid}} when is_pid(worker_pid) ->
-          ref = Process.monitor(worker_pid)
-          Process.exit(worker_pid, :kill)
-          assert_receive {:DOWN, ^ref, :process, ^worker_pid, _reason}, 1_000
-
-        _entry ->
-          :ok
-      end)
-    end
-  end
+  defp stop_orchestrator_and_workers(pid), do: SymphonyElixir.TestSupport.stop_orchestrator_and_workers(pid)
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
   defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)

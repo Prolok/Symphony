@@ -568,6 +568,30 @@ defmodule SymphonyElixir.TestRunTest do
     assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
   end
 
+  test "resolved routine context still rejects foreign people, app assignees and project scopes", ctx do
+    {context, config, request} = routine_context(ctx)
+    startup = %{context | assignee_ids: nil}
+    owner = Agent.get(ctx.source_agent, & &1.issues[request["issue_id"]])
+    job = routine_job(config, request)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+
+    for invalid <- [
+          put_in(owner["assignee"]["id"], "another-person"),
+          put_in(owner["assignee"]["app"], true),
+          put_in(owner["project"]["slugId"], "another-project")
+        ] do
+      Agent.update(ctx.source_agent, &put_in(&1.issues[request["issue_id"]], invalid))
+      assert RoutineTest.run(job, [startup], config, runtime, self())["error"] == "test_owner_mismatch"
+      refute File.exists?(Path.join(job["directory"], "plan.json"))
+    end
+
+    Agent.update(ctx.source_agent, &put_in(&1.issues[request["issue_id"]], owner))
+    foreign_workspace = put_in(startup.settings.tracker.app["workspace_id"], "another-workspace")
+    result = RoutineTest.run(job, [foreign_workspace], config, runtime, self())
+    assert result["error"] == "routine_test_project_binding_rejected"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+  end
+
   test "routine authorization and cleanup recovery reject mismatched owners and plans", ctx do
     {context, config, request} = routine_context(ctx)
     job = routine_job(config, request)

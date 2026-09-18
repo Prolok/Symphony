@@ -56,9 +56,9 @@ esac
 ''')
         for tool in ("codex", "erl", "escript", "elixir"):
             self.write_tool(tool, "#!/bin/bash\nexit 0\n")
-        self.write_tool("make", '#!/bin/bash\necho "gate $PWD" >> "$BUILD_TRACE"\nexit "${GATE_STATUS:-0}"\n')
+        self.write_tool("make", '#!/bin/bash\necho "gate $PWD" >> "$BUILD_TRACE"\nexit 99\n')
         self.write_tool("mix", '''#!/usr/bin/env python3
-import os, pathlib, sys
+import os, pathlib, signal, sys
 root = pathlib.Path.cwd()
 compiled = root / "_build/dev/compiled"
 if sys.argv[1] == "deps.loadpaths":
@@ -66,6 +66,14 @@ if sys.argv[1] == "deps.loadpaths":
 if sys.argv[1] == "deps.get":
     (root / "deps").mkdir(exist_ok=True)
 if sys.argv[1] == "compile":
+    if os.environ.get("EXPECTED_TOOLCHAIN") and os.environ.get("BUILD_TOOLCHAIN") != os.environ["EXPECTED_TOOLCHAIN"]:
+        sys.exit(91)
+    with open(os.environ["BUILD_TRACE"], "a") as trace:
+        trace.write("build-attempt " + str(root) + "\\n")
+    if os.environ.get("BUILD_STATUS"):
+        sys.exit(int(os.environ["BUILD_STATUS"]))
+    if os.environ.get("BUILD_INTERRUPT"):
+        os.kill(os.getpid(), signal.SIGTERM)
     contents = (root / "WORKFLOW.md").read_text()
     if not compiled.exists() or compiled.read_text() != contents:
         with open(os.environ["BUILD_TRACE"], "a") as trace:
@@ -73,6 +81,8 @@ if sys.argv[1] == "compile":
         compiled.parent.mkdir(parents=True, exist_ok=True)
         compiled.write_text(contents)
 if sys.argv[1] == "escript.build":
+    if os.environ.get("ESCRIPT_STATUS"):
+        sys.exit(int(os.environ["ESCRIPT_STATUS"]))
     with open(os.environ["BUILD_TRACE"], "a") as trace:
         trace.write("escript " + str(root) + "\\n")
     binary = root / "bin/symphony"
@@ -159,7 +169,9 @@ if sys.argv[1] == "escript.build":
         second = self.start()
         self.assertEqual(second.returncode, 0, second.stdout)
         self.assertNotIn("Update ausführen", second.stdout)
-        self.assertEqual(self.trace.read_text(), builds)
+        self.assertEqual(self.trace.read_text().count("compile "), builds.count("compile "))
+        self.assertEqual(self.trace.read_text().count("escript "), builds.count("escript "))
+        self.assertNotIn("gate ", self.trace.read_text())
 
     def test_declined_update_reuses_checkout_and_build_without_runtime_copies(self):
         first = self.start()
@@ -170,24 +182,54 @@ if sys.argv[1] == "escript.build":
         second = self.start("Nein\n")
         self.assertEqual(second.returncode, 0, second.stdout)
         self.assertEqual(self.git("rev-parse", "HEAD"), old_head)
-        self.assertEqual(self.trace.read_text(), builds)
+        self.assertEqual(self.trace.read_text().count("compile "), builds.count("compile "))
+        self.assertEqual(self.trace.read_text().count("escript "), builds.count("escript "))
+        self.assertNotIn("gate ", self.trace.read_text())
         for result in (first, second):
             self.assertEqual(Path(result.stdout.split("launched=")[1].strip()), self.source)
         self.assertFalse((self.source / ".symphony/installations").exists())
         self.assertEqual((self.source / "_build/dev/compiled").read_text(), "old contents\n")
 
-    def test_failed_update_gate_blocks_launch_and_is_retried_on_next_start(self):
+    def test_failed_update_build_blocks_launch_and_is_retried_on_next_start(self):
         remote_head = self.push_update()
         for answer in ("Ja\n", ""):
-            result = self.start(answer, GATE_STATUS="9")
+            result = self.start(answer, BUILD_STATUS="9")
             self.assertEqual(result.returncode, 9, result.stdout)
             self.assertNotIn("launched=", result.stdout)
             self.assertEqual(self.git("rev-parse", "HEAD"), remote_head)
         result = self.start()
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("launched=", result.stdout)
-        self.assertEqual(self.trace.read_text().count("gate "), 3)
+        self.assertEqual(self.trace.read_text().count("build-attempt "), 4)
+        self.assertNotIn("gate ", self.trace.read_text())
         self.assertEqual(self.trace.read_text().count("compile "), 1)
+
+    def test_interrupted_update_or_failed_packaging_keeps_pending_until_build_succeeds(self):
+        self.push_update()
+        pending = self.source / '.git/symphony-update.pending'
+        for answer, failure in (("Ja\n", dict(BUILD_INTERRUPT="1")), ("", dict(ESCRIPT_STATUS="8"))):
+            result = self.start(answer, **failure)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertNotIn('launched=', result.stdout)
+            self.assertTrue(pending.exists())
+        result = self.start()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(pending.exists())
+        self.assertEqual(self.trace.read_text().count('compile '), 1)
+        self.assertEqual(self.trace.read_text().count('escript '), 1)
+        self.assertNotIn('gate ', self.trace.read_text())
+
+    def test_update_activates_the_new_toolchain_before_building(self):
+        mise = self.tools / 'mise'
+        mise.write_text(mise.read_text().replace('env) exit 0 ;;', '''env) python3 -c 'import sys,tomllib; print("export BUILD_TOOLCHAIN=" + tomllib.load(open(sys.argv[1], "rb"))["tools"]["elixir"])' "$3/mise.toml" ;;
+'''))
+        (self.seed / 'mise.toml').write_text('[tools]\nerlang = "28"\nelixir = "new-fixture-runtime"\n')
+        self.push_update()
+        result = self.start('Ja\n', EXPECTED_TOOLCHAIN='new-fixture-runtime')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(self.trace.read_text().count('compile '), 1)
+        self.assertEqual(self.trace.read_text().count('escript '), 1)
+        self.assertNotIn('gate ', self.trace.read_text())
 
     def test_changed_modules_and_missing_binary_rebuild_the_escript(self):
         result = self.start()

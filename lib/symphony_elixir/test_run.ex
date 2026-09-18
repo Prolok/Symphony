@@ -81,7 +81,7 @@ defmodule SymphonyElixir.TestRun do
     if stage() == "run" do
       with {:ok, plan} <- plan(),
            {:ok, journal} <- journal(plan, contexts),
-           true <- length(journal["fixtures"]) == 2 and Enum.all?(journal["fixtures"], &(&1["created"] and not &1["deleted"])) do
+           true <- prepared_fixtures?(journal["fixtures"], contexts) do
         {:ok, Enum.map(contexts, &bind_fixture(&1, journal))}
       else
         _ -> {:error, :test_fixtures_not_prepared}
@@ -90,6 +90,18 @@ defmodule SymphonyElixir.TestRun do
       {:ok, contexts}
     end
   end
+
+  defp prepared_fixtures?(fixtures, contexts) when is_list(fixtures) and contexts != [] do
+    names = Enum.map(contexts, & &1.name) |> Enum.sort()
+    expected = Config.test_instance()["manifest"]["projects"] |> Map.keys() |> Enum.sort()
+
+    names == expected and Enum.all?(fixtures, &is_map/1) and
+      Enum.sort(Enum.map(fixtures, & &1["project"])) == names and
+      length(Enum.uniq_by(fixtures, & &1["id"])) == length(fixtures) and
+      Enum.all?(fixtures, &(is_binary(&1["id"]) and &1["id"] != "" and &1["created"] == true and &1["deleted"] == false))
+  end
+
+  defp prepared_fixtures?(_, _), do: false
 
   defp bind_fixture(context, journal) do
     fixture = Enum.find(journal["fixtures"], &(&1["project"] == context.name))

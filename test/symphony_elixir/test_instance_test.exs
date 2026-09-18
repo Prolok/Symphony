@@ -236,8 +236,7 @@ defmodule SymphonyElixir.TestInstanceTest do
 
   test "full dummy project slugs match canonical manifest and API bindings", %{root: root, instance: instance} do
     for {name, slug, workspace, team} <- [
-          {"symphony-test", "7d8cc05658e6", "prolok", "PRO"},
-          {"symphony-test-tilor", "3933acc91a68", "tilor", "PRI"}
+          {"symphony-test", "7d8cc05658e6", "prolok", "PRO"}
         ] do
       expected = %{
         "workspace_id" => "synthetic-workspace",

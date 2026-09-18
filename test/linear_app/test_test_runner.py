@@ -41,6 +41,7 @@ stage=os.environ['SYMPHONY_TEST_RUN_STAGE']
 root=pathlib.Path(os.environ['SYMPHONY_TEST_RUN_PLAN']).parent
 if scenario=='compile_failed': sys.exit(1) # No compiled runtime or fixture intent.
 fixtures=[dict(id=str(i),project=name,created=True,deleted=False,complete=True) for i,name in enumerate(capsule['manifest']['projects'],1)]
+if scenario=='duplicate_fixtures': fixtures *= 2
 if stage=='run':
     worker=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     with (root/'children').open('a') as f:f.write(str(worker.pid)+'\n')
@@ -52,6 +53,8 @@ if stage=='run':
                       relay={entry['workspace_id']:dict(status='ready',consumer_id='fixture-'+entry['workspace_id']) for entry in bindings},
                       running=[dict(issue_id=f['id'],session_id='fixture-session-'+f['id']) for f in fixtures])
             if scenario=='not_ready': data['service']['source']={}
+            if scenario=='missing_session': data['running']=[]
+            if scenario=='duplicate_session': data['running'] *= 2
             self.send_response(200);self.end_headers();self.wfile.write(json.dumps(data).encode())
     http.server.HTTPServer(('127.0.0.1',int(sys.argv[-1])),Handler).serve_forever()
 elif stage=='prepare':
@@ -86,7 +89,7 @@ class TestRunnerProtocol(unittest.TestCase):
         (self.fakebin / 'mise').chmod(0o755)
         self.collector = self.root / 'fixtures'
         self.bindings = {}
-        for i, name in enumerate(('symphony-test', 'symphony-test-tilor'), 1):
+        for i, name in enumerate(('symphony-test',), 1):
             project = self.collector / name
             project.mkdir(parents=True)
             (project / 'unrelated').write_text('preserve')
@@ -124,7 +127,7 @@ class TestRunnerProtocol(unittest.TestCase):
             listener.bind(('127.0.0.1',0)); port=listener.getsockname()[1]
         args = ['--checkout',str(checkout),'--test-instance','dev','--manifest',str(self.manifest),'--run-id','fixture',
                 '--expected-sha',source['sha'],'--expected-source',source['source_sha256'],'--port',str(port),
-                '--result-dir',str(self.result_dir),'--timeout','2' if scenario=='not_ready' else '10','--source-mode',mode]
+                '--result-dir',str(self.result_dir),'--timeout','2' if scenario in ('not_ready', 'missing_session') else '10','--source-mode',mode]
         if probe:args+=['--scenario','failure-probe']
         if resume:args+=['--resume']
         if cleanup:args+=['--cleanup-only']
@@ -166,6 +169,42 @@ class TestRunnerProtocol(unittest.TestCase):
         self.assertEqual(passed.returncode, 0)
         self.assertNotEqual(result['source']['source_sha256'], corrected['source']['source_sha256'])
         self.assertTrue(corrected['cleanup'])
+
+    def test_fixture_and_session_assignments_are_complete_nonempty_and_unique(self):
+        loader = importlib.machinery.SourceFileLoader('runner_mapping', str(REPO / 'scripts/test-instance-run'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        runner = importlib.util.module_from_spec(spec)
+        loader.exec_module(runner)
+        run = object.__new__(runner.Run)
+        fixture = dict(id='one', project='symphony-test', created=True, deleted=False)
+        self.assertEqual(run.fixture_ids([fixture], self.bindings), {'one': 'symphony-test'})
+        for fixtures in ([], [fixture, fixture], [dict(fixture, id='')], [dict(fixture, project='unknown')],
+                         [dict(fixture, created=False)], [dict(fixture, deleted=True)]):
+            with self.subTest(fixtures=fixtures), self.assertRaises(runner.RunFailure):
+                run.fixture_ids(fixtures, self.bindings)
+        with self.assertRaises(runner.RunFailure):
+            run.fixture_ids([], {})
+        sessions = {}
+        run.collect_sessions([dict(issue_id='one', session_id=None)], {'one': 'symphony-test'}, sessions)
+        self.assertEqual(sessions, {})
+        entry = dict(issue_id='one', session_id='session')
+        run.collect_sessions([entry], {'one': 'symphony-test'}, sessions)
+        self.assertEqual(sessions, {'one': 'session'})
+        for running in ([entry, entry], [dict(entry, issue_id='foreign')], [dict(entry, session_id=' ')],
+                        [entry, dict(entry, issue_id='two')]):
+            with self.subTest(running=running), self.assertRaises(runner.RunFailure):
+                run.collect_sessions(running, {'one': 'synthetic-a', 'two': 'synthetic-b'}, {})
+
+    def test_invalid_or_missing_assignments_never_pass_and_still_clean_up(self):
+        for scenario, error in (('duplicate_fixtures', 'invalid_fixture_mapping'),
+                                ('duplicate_session', 'invalid_session_mapping'), ('missing_session', 'timeout')):
+            with self.subTest(scenario=scenario):
+                process = self.start(scenario)
+                result = self.receipt(process)
+                self.assertEqual(process.returncode, 1)
+                self.assertEqual(result['status'], 'failed')
+                self.assertEqual(result['error'], error)
+                self.assertTrue(result['cleanup'])
 
     def test_compile_failure_without_fixture_intent_allows_corrected_retest(self):
         failed = self.start(scenario='compile_failed')

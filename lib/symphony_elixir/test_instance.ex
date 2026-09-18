@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.TestInstance do
-  @moduledoc "Explicit, restart-bound isolation for the two operator-provisioned dummy projects."
+  @moduledoc "Explicit, restart-bound isolation for the operator-provisioned dummy project."
 
   alias SymphonyElixir.{Config, PathSafety, ProjectContext, RuntimePaths}
   alias SymphonyElixir.Linear.{Client, ScopeBinding}
@@ -101,7 +101,7 @@ defmodule SymphonyElixir.TestInstance do
   defp validate_test_contexts(instance, contexts) do
     expected = instance["manifest"]["projects"]
 
-    if Enum.sort(Enum.map(contexts, & &1.name)) == Enum.sort(Map.keys(expected)) do
+    if map_size(expected) > 0 and Enum.sort(Enum.map(contexts, & &1.name)) == Enum.sort(Map.keys(expected)) do
       {:ok, _} = Application.ensure_all_started(:req)
 
       Enum.reduce_while(contexts, :ok, &validate_test_context(&1, &2, expected))
@@ -177,7 +177,7 @@ defmodule SymphonyElixir.TestInstance do
     root = manifest["project_root"]
     workspaces = manifest["workspace_root"]
     code = instance["source"]["checkout"]
-    forbidden = [code, root, Path.join(root, "symphony-test"), Path.join(root, "symphony-test-tilor")]
+    forbidden = [code, root] ++ Enum.map(Map.keys(manifest["projects"]), &Path.join(root, &1))
 
     with true <- is_binary(workspaces) and Path.type(workspaces) == :absolute,
          {:ok, ^workspaces} <- PathSafety.canonicalize(workspaces),

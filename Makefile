@@ -1,9 +1,9 @@
-.PHONY: help all setup deps build fmt fmt-check lint test python-check python-tests coverage ci dialyzer e2e
+.PHONY: help all check setup deps build fmt fmt-check lint test python-check python-tests coverage ci dialyzer e2e
 
 MIX ?= ./scripts/mix-gate
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
+	@echo "Targets: check, all, setup, deps, build, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
 
 setup:
 	$(MIX) setup
@@ -43,11 +43,14 @@ dialyzer:
 e2e:
 	SYMPHONY_RUN_LIVE_E2E=1 $(MIX) test test/symphony_elixir/live_e2e_test.exs
 
-ci: python-check
+check:
 	$(MAKE) setup
 	$(MAKE) build
 	$(MAKE) fmt-check
 	$(MAKE) lint
+
+ci: python-check
+	$(MAKE) check
 	$(MAKE) python-tests
 	$(MAKE) coverage
 	$(MAKE) dialyzer

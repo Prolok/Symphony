@@ -219,7 +219,7 @@ er wird nicht zur Authentifizierung ausgewertet. Token und Secret bleiben aus
 Logs, Prompts, Codex-Umgebung und Sessionartefakten heraus. Direkte HTTP-Redirects sind für den App-Client deaktiviert.
 
 Symphony und seine Hilfsprogramme laufen direkt aus dem ursprünglichen Checkout.
-Bestätigte Updates führen dort `git pull --ff-only` und `make all` aus; normale
+Bestätigte Updates führen dort `git pull --ff-only` und den Build über `scripts/mix-runtime` ohne Tests aus; normale
 Starts verwenden den inkrementellen Build und das vorhandene Escript weiter.
 Es entstehen keine Laufzeitkopien oder Root-Konfigurationsdateien unter
 `.symphony/installations`. Die Projektliste aus `SYM_PROJECT_ROOT` wird beim Start
@@ -403,14 +403,14 @@ geprüften gemeinsamen Checkout vorgenommen.
 ## Isolierter Testbetrieb
 
 `--test-instance <name> --port <port>` ist der ausdrückliche Zusatzbetrieb für
-**Prolok/symphony-test** und **tilor/symphony-test-tilor**. Der normale Dienst bleibt
+**Prolok/symphony-test**. Der normale Dienst bleibt
 laufen. Unterschiedliche Testnamen teilen eine exklusive Umgebung; der Lock gilt
 bereits vor Build und Discovery, beim Runner bis nach dem Cleanup. Shelllauncher,
 Ticket-Symlink und direkter Escript verwenden denselben Vertrag. Ein Teststart
 führt kein Autoupdate aus und richtet keine globalen Launcher ein.
 
 Testquellcode liegt außerhalb des Testsammelroots. Dieser enthält direkt genau
-die zwei Dummy-Projekte, aber keine eigene `.symphony` und keinen Symphony-Code.
+das freigegebene Dummy-Projekt, aber keine eigene `.symphony` und keinen Symphony-Code.
 Discovery bleibt einstufig. Symlink-Aliase und überlappende Roots werden abgewiesen.
 Ein verpflichtendes öffentliches Manifest bindet echte Workspace-/Projekt-IDs;
 der gebundene App-Client verifiziert zusätzlich Organisation, Projektname,
@@ -476,11 +476,6 @@ sind absolute kanonische Pfade; Platzhalter im folgenden Muster ersetzen:
       "workspace": "prolok", "workspace_id": "WORKSPACE-UUID-1",
       "project_id": "PROJECT-UUID-1", "slug_id": "VERIFIED-SLUG-1",
       "teams": [{"id": "TEAM-UUID-PRO", "key": "PRO"}], "verified_at": 0
-    },
-    "symphony-test-tilor": {
-      "workspace": "tilor", "workspace_id": "WORKSPACE-UUID-2",
-      "project_id": "PROJECT-UUID-2", "slug_id": "VERIFIED-SLUG-2",
-      "teams": [{"id": "TEAM-UUID-PRI", "key": "PRI"}], "verified_at": 0
     }
   },
   "main_instance": {
@@ -498,7 +493,7 @@ sind absolute kanonische Pfade; Platzhalter im folgenden Muster ersetzen:
 
 `started` ist die getrimmte Ausgabe von `ps -p <pid> -o lstart=`;
 `verified_at` sind Unix-Sekunden der jeweiligen gebundenen Prüfung, höchstens eine
-Stunde alt und nicht zukünftig; dies gilt für den Hauptbeleg und beide Dummy-Projekte.
+Stunde alt und nicht zukünftig; dies gilt für den Hauptbeleg und das Dummy-Projekt.
 `projects.<name>.slug_id` ist die authentifiziert gelesene kanonische API-`slugId`.
 Die Projektkonfiguration darf wie im Normalbetrieb den vollständigen Projektslug
 oder diese ID verwenden; der Vergleich nutzt die zentrale Scope-Normalisierung.
@@ -508,7 +503,7 @@ sperren den Start. Die Runtime liest sie erneut und verlangt Übereinstimmung mi
 dem Manifest, auch unmittelbar vor der Lockreservierung. Änderung oder Ablauf
 des Manifests beendet den Testdienst; Cleanup eigener Fixtures bleibt möglich.
 `fixtures_idle: true` bestätigt keine fremden Worker, Retries oder manuell
-laufenden Helfer in beiden Dummy-Projekten. Bestehende lokale Änderungen und
+laufenden Helfer im Dummy-Projekt. Bestehende lokale Änderungen und
 vorhandene Worktrees bleiben erhalten. Bei einem Haupt-Team-Scope sind statt
 `project_id` die frisch authentifizierten `team_id` und `team_key` anzugeben.
 Ein solcher Scope im Dummy-Workspace ist nur zulässig, wenn weder ID noch Key
@@ -516,6 +511,9 @@ zu einem der vollständigen Dummy-Projektteams gehören. Der Hauptbeleg muss
 Organisation, Team-ID und Team-Key aus derselben gebundenen Prüfung enthalten.
 Alle Inventareinträge aufführen, keine Auswahl nur der günstigen. Historische
 Manifeste ohne Teambelege müssen vor dem nächsten Lauf erneuert werden.
+Vor Änderungen an der Projektmenge alte Läufe mit ihrem gebundenen Runner und
+Manifest bereinigen. Offene alte Journale bleiben sperrend; die neue Bindung
+übernimmt oder löscht keine früheren Fixtures.
 
 In PRO-736 sind kontrollierter Hauptneustart/Inventar und reale Zugänge die
 Betreiberanteile O1/O2, vor Live-Prüfung in **Test (AI)** fällig. O3 liefert dort
@@ -558,7 +556,7 @@ Für einen direkten Start nach regulärem Build dieselben Bindungen exportieren:
 `mise exec -- bin/symphony --test-instance development --port 4101`.
 `./symphony --test-instance development --port 4101` baut selbst.
 Ein lokaler `symphony-PRO-736`-Symlink auf diesen Launcher verhält sich gleich.
-Ein direkter Dienst ohne Runner ist auf beide Dummy-Projekte beschränkt; für
+Ein direkter Dienst ohne Runner ist auf das Dummy-Projekt beschränkt; für
 begrenzte prüfbare Szenarien den Runner verwenden.
 
 Für spätere Schlussabnahme einen unabhängigen projektbezogenen Checkout unter
@@ -604,7 +602,7 @@ freigegebenen Issue und kanonischen Worktree bereitzustellen:
 Der Ergebnisroot liegt außerhalb des Quellworktrees. Manifest, Zugang und
 Hauptinventar bleiben im Executor; Workerargumente können sie nicht ersetzen.
 Die Konfiguration bleibt für bestehende Läufe unverändert. Vor neuen Läufen
-prüft der vorhandene Runner beide vereinbarten Dummy-Projekte frisch über die
+prüft der vorhandene Runner das vereinbarte Dummy-Projekt frisch über die
 gebundenen Zugänge, einschließlich vollständiger Teams, Hauptbeleg, Sperren,
 Quellstempel und fremder offener Fixturejournale. Die exklusive Reservierung gilt
 bereits vor Build/Ticketanlage. Bestehende Bereitstellungs- und Belegfälligkeiten
@@ -651,14 +649,15 @@ Freigaben oder autonom unlösbare Hindernisse begründen die Betreiberübergabe.
 
 ### Szenarien, Resultate und Wiederaufnahme
 
-Vor Ticketanlage prüft die gebundene Runtime für beide Projekte Linear-Identität,
+Vor Ticketanlage prüft die gebundene Runtime für das Projekt Linear-Identität,
 menschlichen Assignee, Schema, Relay-Bootstrap und Codex-App-Server-Handschlag.
 Je Projekt entsteht genau ein journalisiertes Ticket in `Todo (AI)`. Der reguläre
 Worker erzeugt dessen Workpad und verschiebt es nach `Planung (AI)`; die für diesen
-Lauf gebundene Startliste erlaubt ausschließlich diese zwei IDs und nur Todo.
+Lauf gebundene Startliste erlaubt ausschließlich die vollständig journalisierten Fixture-IDs und nur Todo.
 Bereits laufende Bootstrap-Worker dürfen den Statuswechsel nach Planung abschließen;
 die Startbegrenzung verhindert anschließend einen neuen Planungsworker.
-Erfolg verlangt beobachtete Session-IDs und beide bestätigten Workpads/Statuswechsel.
+Erfolg verlangt eine vollständige, eindeutige Zuordnung der Fixtures und
+beobachteten Session-IDs sowie bestätigte Workpads/Statuswechsel.
 Danach prüft ein Dienstneustart dieselben Test-Consumer-IDs. Konkurrenzstarts über
 Normal-/Test-/Ticketlauncher und Escript müssen mit „Symphony läuft bereits“ scheitern.
 Fachliche YOLO-Szenarien und `sym-yolo-review` entstehen erst in PRO-734.
@@ -874,7 +873,7 @@ Prozesse auf demselben Rechner, keine Budgets zwischen mehreren Rechnern.
 Budgetdiagnosen enthalten nur erlaubte Zahlenheader und gültiges `Retry-After`,
 einschließlich `X-Complexity`; erfolgreiche Antworten sind im Debug-Log sichtbar.
 
-Die erhaltene Vorher-Referenz `linear_budget_test.exs` vergleicht 3.600 simulierte Sekunden
+Die historische Vorher-Referenz aus PRO-715/PRO-716 verglich 3.600 simulierte Sekunden
 mit 5-Sekunden-Arbeitstakt, einer Seite je Abfrage und unveränderten Kommentaren,
 ohne Workeraktionen. Kaltstart und Token/Identity/Candidates/Status/Signal/Seiten
 werden getrennt gezählt; dies ist keine Live-Lastmessung:
@@ -886,9 +885,12 @@ werden getrennt gezählt; dies ist keine Live-Lastmessung:
 | Drei aktive Projekte, ein Workspace | 18.720 | 3.312 |
 | Drei aktive Projekte, zwei Workspaces | 20.160 | 4.032 |
 
-Die Relay-Regression `relay_budget_test.exs` wiederholt dieselben 3.600 Sekunden
-mit 5-Sekunden-Takt: In allen vier Szenarien ergeben sich warm **0 Linear-HTTP/h**
-vor dem fälligen Sicherheitsabgleich. Kaltstart, Reconcile und Aktionen werden
+Die damalige Relay-Regression über dieselben 3.600 Sekunden ergab in allen vier
+Szenarien warm **0 Linear-HTTP/h** vor dem fälligen Sicherheitsabgleich.
+Die aktuellen `linear_budget_test.exs` und `relay_budget_test.exs` prüfen stattdessen
+je Szenario 60 Ticks (fünf simulierte Minuten) sowie Kommentar- und Reconcilefristen
+gezielt an ihren Grenzen; ein echter 5-Sekunden-Timer bleibt abgedeckt. Diese
+Kurztests sind keine neue Stunden- oder Livemessung. Kaltstart, Reconcile und Aktionen werden
 separat erfasst (eine Snapshotseite pro Workspace; ein vollständiger unveränderter
 Kommentarcheck benötigt in dieser Fixture drei Requests).
 Weitere Relay-Regressionen messen getrennt Kaltstart, warme Leerticks, gebündelte
@@ -983,7 +985,7 @@ Inventar zurücknehmen; Patches ändern keine privaten Konfigurationen.
 #### Öffentliche Parameter und gemeinsame Last
 
 Vor **beiden** Läufen dieselbe öffentliche `workload.json` fixieren und hashen.
-Ein gemeinsamer Zwei-Workspace-Lauf mit sieben Phasen genügt; es gibt keine
+Ein gemeinsamer Lauf mit sieben Phasen genügt; es gibt keine
 Pflicht, jede Profilkombination separat gleich lang zu wiederholen. Sämtliche
 relevanten Pfade, tatsächlichen Aktionen und zusätzlichen App-Prozesse müssen
 vollständig gezählt sein. Fehlende Pfade bleiben offen.
@@ -991,7 +993,7 @@ vollständig gezählt sein. Fehlende Pfade bleiben offen.
 | Parameter | Festlegung |
 | --- | --- |
 | Workspace-/Projektbindung | verifizierte Workspace-UUIDs, Projekt-Slug-IDs und isolierte Projektroots; keine erfundenen IDs |
-| Schreib-/Arbeitsziele | ausschließlich Prolok/symphony-test (`PRO-718`, `87b14c07-bd4c-4f1a-908a-b1ae99ea027a`) und tilor/symphony-test-tilor (`PRI-110`, `6ef9d62f-49e1-4a70-a7cd-de8b743bc2dd`); IDs vor Verwendung prüfen |
+| Schreib-/Arbeitsziele | ausschließlich Prolok/symphony-test; aktuelle IDs vor Verwendung gebunden verifizieren |
 | Startbegrenzung | vorhandenes `tracker.app.allowed_issue_ids` auf Dummy-UUIDs, für zusätzlich lesende Projekte `[]`; keine produktiven Tickets aktivieren |
 | Assignee/U1 | verifizierte menschliche UUIDs/E-Mails, stabile Consumer-ID und gemeinsame Owner-Zuordnung; keine Assigneeänderung |
 | Öffentliche Appfelder | `LINEAR_APP_CLIENT_ID`, `LINEAR_APP_WORKSPACE_ID`, `LINEAR_APP_USER_ID`, `LINEAR_PROJECT_SLUG`, `LINEAR_ASSIGNEE` |
@@ -1002,7 +1004,7 @@ vollständig gezählt sein. Fehlende Pfade bleiben offen.
 | Last | identische Aktivierung/Arbeitsaufträge, Burst mit fünf Kommentaränderungen je Dummy innerhalb eines Polltakts, natürliche Reconcile-Zeitpunkte, begrenzte Relay-Netzwerkstörung samt Rücknahme, explizite Kommentar-/Aktionscheckpoints und Anzahl eigener App-Aktionen |
 
 Zusätzliche reale Projekte nur lesend einbeziehen. Drei gleichzeitig aktive
-Projekte bleiben mit zwei freigegebenen Dummy-Projekten synthetisch. Zeitpunkte,
+Projekte und mehrere aktive Workspaces bleiben mit dem einen freigegebenen Dummy-Projekt synthetisch. Zeitpunkte,
 Dauer und netzwerkspezifische Störungs-/Restoreaktion vorab im Lastplan bestimmen;
 kein HTTP-/Providerstub im Live-Lauf. Die Baseline durchläuft dieselben Fenster
 und Aktionen ohne Relayverkehr. Natürlichen Reconcile abwarten, keine internen
@@ -1026,7 +1028,7 @@ sein. Hash-Platzhalter durch tatsächlich berechnete Werte ersetzen:
     "source_sha256": "<SHA256 des jeweiligen Quellenarchivs>",
     "instrumentation_sha256": "<SHA256 des gemeinsamen Messpatches>",
     "workload_sha256": "<SHA256 der identischen workload.json>",
-    "workspace_ids": ["<verifizierte UUID Prolok>", "<verifizierte UUID tilor>"]
+    "workspace_ids": ["<verifizierte UUID Prolok>"]
   },
   "phases": [
     {"name": "cold_start", "duration_ms": 60000},
@@ -1224,11 +1226,9 @@ und ein zusätzlicher Baseline-Transportfehler liefern keine Complexity; deren
 unbekannter Verbrauch wird nicht ergänzt. Endpointheader bleiben unbekannt.
 Außerhalb der Fenster entfallen je 6 HTTP/8 Complexity auf die Vorbereitung;
 der reine Nachlauf zählt 266→405 HTTP/15.413→17.619 Complexity.
-Die Rohzeitstempel korrigieren eine Aussage der Operatorzusammenfassung:
-Feature-tilor startet erst um 13:43:58 CEST, nach dem Aktivfenster und knapp nach
-allen festen Fenstern; seine spätere Aktivität ist vollständig separat erfasst.
-Beide Dummys wurden im Aktivfenster gleich beauftragt, Prolok führte in beiden
-Varianten reguläre Werkzeuge aus. B1 verlangt keinen identischen KI-Fortschritt.
+Details der damaligen Projektbindungen und Zeitfenster stehen ausschließlich im
+historischen Messbeleg PRO-716. Sie sind keine Vorgabe für die aktuelle Testumgebung.
+B1 verlangt keinen identischen KI-Fortschritt.
 Die Pflichtmessung ist damit fachlich belegt; daraus folgt keine garantierte
 Einsparung pro Arbeitseinheit. Alte unvollständige Captures/Attestationen bleiben
 unverändert. Die gemeinsame Mehrrechnerabnahme und alle PO-/Review-/Test-/Merge-Gates

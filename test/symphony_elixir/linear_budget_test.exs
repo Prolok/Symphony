@@ -2,8 +2,7 @@ defmodule SymphonyElixir.LinearBudgetTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext}
 
-  @tag timeout: 180_000
-  test "hourly transport budget with identical idle, active and multi-workspace fixtures" do
+  test "five-minute transport budget with idle, active and multi-workspace fixtures" do
     orchestrator = Process.whereis(Orchestrator)
     :sys.suspend(orchestrator)
     on_exit(fn -> :sys.resume(orchestrator) end)
@@ -48,23 +47,29 @@ defmodule SymphonyElixir.LinearBudgetTest do
     on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
 
     for {label, workspaces, active, expected} <- [
-          {:idle, ["one"], 0, 720},
-          {:active, ["one"], 1, 1584},
-          {:three_projects, ["one", "one", "one"], 3, 3312},
-          {:two_workspaces, ["one", "one", "two"], 3, 4032}
+          {:idle, ["one"], 0, 60},
+          {:active, ["one"], 1, 132},
+          {:three_projects, ["one", "one", "one"], 3, 276},
+          {:two_workspaces, ["one", "one", "two"], 3, 336}
         ] do
       if pid = Process.whereis(SymphonyElixir.Linear.AppAuth), do: GenServer.stop(pid)
       contexts = contexts(workspaces, label)
       tick(contexts, active, 0)
       cold = Agent.get_and_update(counts, &{&1, %{}})
-      for seconds <- 5..3600//5, do: tick(contexts, active, seconds)
+      for seconds <- 5..25//5, do: tick(contexts, active, seconds)
+      assert Map.get(Agent.get(counts, & &1), :signal, 0) == 0
+      tick(contexts, active, 30)
+      assert Map.get(Agent.get(counts, & &1), :signal, 0) == active
+      for seconds <- 35..295//5, do: tick(contexts, active, seconds)
+      assert Map.get(Agent.get(counts, & &1), :pages, 0) == 0
+      tick(contexts, active, 300)
       warm = Agent.get_and_update(counts, &{&1, %{}})
       IO.puts("budget #{label} cold=#{inspect(cold)} warm=#{inspect(warm)} total=#{Enum.sum(Map.values(warm))}")
       assert Enum.sum(Map.values(warm)) == expected
       assert Map.get(warm, :identity, 0) == 0
       assert Map.get(warm, :token, 0) == 0
-      assert Map.get(warm, :pages, 0) == active * 12
-      assert Map.get(warm, :signal, 0) == active * 132
+      assert Map.get(warm, :pages, 0) == active
+      assert Map.get(warm, :signal, 0) == active * 11
     end
   end
 

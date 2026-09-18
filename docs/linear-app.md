@@ -633,6 +633,11 @@ Aktivierung durch den Betreiber, keinen Zugriffsfehler. Worker ändern keine
 fremden Checkouts oder laufenden Dienste. Eine gültige Einrichtung braucht keine
 erneute Betreiberbestätigung pro Routinelauf.
 
+Die aufrufende Issue-Bindung wird bei Start und Cleanup gegen den aktuellen
+Projektkontext des regulären Pollers geprüft, einschließlich seiner verifizierten
+menschlichen Assignees. Fehlende Zuständigkeit oder ein nicht erreichbarer Poller
+sperren den Lauf; der unaufgelöste Startkontext ersetzt diese Prüfung nicht.
+
 Start/Ergebnis/Cancel/Cleanup verwenden dieselbe Issue-, Worktree-, Quell- und
 Laufbindung. Der Executor persistiert die Absicht vor dem Start und startet eine
 bestehende Absicht nie doppelt. Nach unklarer Antwort dieselbe Kennung mit `result`

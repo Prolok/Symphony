@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.RoutineTest do
   @moduledoc "Runs journaled dummy fixtures through the existing service and project workers."
-  alias SymphonyElixir.{CommentCheckpoint, Config, Orchestrator, PathSafety, ProjectContext, Projects}
+  alias SymphonyElixir.{CommentCheckpoint, Config, Orchestrator, PathSafety, ProjectContext, ProjectPoller, Projects}
   alias SymphonyElixir.Linear.{CommentMutations, DurableState, WriteContext}
   alias SymphonyElixir.{RuntimePaths, TestExecutor, TestRun}
 
@@ -30,9 +30,20 @@ defmodule SymphonyElixir.RoutineTest do
     matches = Enum.filter(contexts, &(Path.join(&1.settings.workspace.root, request["identifier"]) == request["checkout"]))
 
     case matches do
-      [context] -> ProjectContext.with_context(context, fn -> authorize_context(request) end)
+      [context] -> authorize_current_context(context, request)
       _ -> {:error, :test_owner_mismatch}
     end
+  end
+
+  defp authorize_current_context(context, request) do
+    with %ProjectContext{} = current <- ProjectPoller.context(context),
+         true <- Path.join(current.settings.workspace.root, request["identifier"]) == request["checkout"] do
+      ProjectContext.with_context(current, fn -> authorize_context(request) end)
+    else
+      _ -> {:error, :test_owner_mismatch}
+    end
+  catch
+    :exit, _ -> {:error, :runtime_unavailable}
   end
 
   defp authorize_context(request) do
@@ -270,6 +281,7 @@ defmodule SymphonyElixir.RoutineTest do
             ],
        do: Atom.to_string(reason)
 
+  defp error_code(:comment_issue_outside_active_scope), do: "test_owner_mismatch"
   defp error_code({:linear_api_status, _, %{classification: "auth"}}), do: "linear_access_denied"
   defp error_code({:linear_api_status, _, %{classification: "rate_limited"}}), do: "linear_rate_limited"
   defp error_code({:linear_api_request, reason}) when reason in [:linear_app_identity_denied, :linear_app_credentials_denied], do: "linear_access_denied"

@@ -530,6 +530,44 @@ defmodule SymphonyElixir.TestRunTest do
     assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
   end
 
+  test "routine caller authorization uses resolved polling context instead of startup context", ctx do
+    {context, config, request} = routine_context(ctx)
+    startup = %{context | assignee_ids: nil}
+    job = routine_job(config, request)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+
+    result = RoutineTest.run(job, [startup], config, runtime, self())
+    assert result["status"] == "passed", inspect(result)
+    assert result["cleanup"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+
+    recovery = RoutineTest.run(%{job | "cleanup" => true}, [startup], config, %{}, self())
+    assert recovery["status"] == "failed"
+    assert recovery["cleanup"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+
+    :sys.replace_state(SymphonyElixir.ProjectPoller, &Keyword.put(&1, :context, %{context | assignee_ids: []}))
+    denied = routine_job(config, %{request | "run_id" => "revoked-owner"})
+    result = RoutineTest.run(denied, [context], config, runtime, self())
+    assert result["status"] == "failed"
+    assert result["error"] == "test_owner_mismatch"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+  end
+
+  test "routine caller authorization fails closed for missing, moved or unavailable polling context", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+
+    for current <- [%{context | id: "removed"}, put_in(context.settings.workspace.root, ctx.root)] do
+      :sys.replace_state(SymphonyElixir.ProjectPoller, &Keyword.put(&1, :context, current))
+      assert RoutineTest.run(job, [context], config, %{}, self())["error"] == "test_owner_mismatch"
+    end
+
+    :ok = stop_supervised(RuntimeFixture)
+    assert RoutineTest.run(job, [context], config, %{}, self())["error"] == "runtime_unavailable"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+  end
+
   test "routine authorization and cleanup recovery reject mismatched owners and plans", ctx do
     {context, config, request} = routine_context(ctx)
     job = routine_job(config, request)
@@ -1004,7 +1042,7 @@ defmodule SymphonyElixir.TestRunTest do
     }
 
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
-    relay = start_supervised!({RuntimeFixture, name: SymphonyElixir.ProjectPoller, source: ctx.source_agent})
+    relay = start_supervised!({RuntimeFixture, name: SymphonyElixir.ProjectPoller, source: ctx.source_agent, context: context})
 
     complete = fn -> complete(ctx.source_agent) end
     fixture_opts = [name: SymphonyElixir.Projects.server(context), source: ctx.source_agent, complete: complete]
@@ -1192,6 +1230,11 @@ defmodule SymphonyElixir.RoutineRuntimeFixture do
   def init(opts), do: {:ok, opts}
   @impl true
   def handle_call({:relay_issues, _, []}, _from, opts), do: {:reply, {:ok, []}, opts}
+
+  def handle_call({:context, id}, _from, opts) do
+    context = Keyword.fetch!(opts, :context)
+    {:reply, if(context.id == id, do: context), opts}
+  end
 
   def handle_call({:stop_test_fixture, _}, _from, opts) do
     case Keyword.get(opts, :stop_result, :ok) do

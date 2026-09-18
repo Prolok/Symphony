@@ -20,6 +20,14 @@ defmodule SymphonyElixir.LogFile do
     Path.join(logs_root, @default_log_relative_path)
   end
 
+  @spec configure_startup_console() :: :ok
+  def configure_startup_console do
+    case :logger.set_handler_config(:default, :level, :info) do
+      :ok -> :ok
+      {:error, {:not_found, :default}} -> :ok
+    end
+  end
+
   @spec configure() :: :ok
   def configure do
     log_file = Application.get_env(:symphony_elixir, :log_file, default_log_file())

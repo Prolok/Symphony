@@ -36,6 +36,10 @@ so the file is written below `<path>/log/symphony.log`. The handler keeps five
 files of up to 10 MiB each and removes the default console handler after disk
 logging is configured.
 
+Beim Dienststart zeigt die Konsole bereits vor Discovery und Authentifizierung
+nur Meldungen ab Stufe `info`. Das gilt auch für die Testlaufphasen. Der Filter
+ändert weder das primäre Logger-Level noch die Debugdiagnose im späteren Dateilog.
+
 `sym-codex` gibt Laufzeitlogs seiner Mix-Helfer ab Stufe `info` auf stderr aus;
 Debugmeldungen bleiben ausgeblendet. stdout enthält ausschließlich den
 maschinenlesbaren Projekt-, Workflow- oder Promptkontext.

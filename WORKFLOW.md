@@ -243,9 +243,11 @@ bleibt das Gate offen; negative Befunde erlauben Nacharbeit im Scope und erneute
 dieselbe Übergabe erhalten und nach `BLOCKER` zurückgeben; keinen unerfüllbaren
 Betreiberauftrag oder zusätzlichen Review allein wegen Wartezeit neu starten.
 Details und synthetische Fälle: [Betreiberpflichten und Wiederaufnahme](docs/linear-app.md#betreiberpflichten-und-wiederaufnahme).
-Isolierte Entwicklungstests nach Betreiberbereitstellung über `symphony_test`
-aufrufen; `worker.test_executor_socket` bindet den lokalen Executor. Er nimmt nur
-Quell-/Laufkennung und feste Operationen an. Einrichtung und Ergebnisvertrag:
+Freigegebene Routinetests nach einmaliger Einrichtung über `symphony_test`
+aufrufen; `worker.test_executor` verwaltet den lokalen Executor an
+`worker.test_executor_socket` im regulären Dienst. Keine zusätzliche Bestätigung
+pro Lauf; Quell-/Laufbindung, echte externe Freigaben und Pflichtgates bleiben
+wirksam. Einrichtung, optionaler Zusatztestbetrieb und Ergebnisvertrag:
 [Gebundener Testaufruf](docs/linear-app.md#gebundener-testaufruf).
 
 ### Start- und Laufzeitvertrag
@@ -839,6 +841,7 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
 - Symphony klärt nach dem Workerabschluss den Ticketzustand frisch und führt bei
   terminalem Status den bestehenden Workspace-Cleanup aus. Offene Statusklärung
   bleibt im Retry; laufende Merge-Abschlussprüfungen behalten den Workspace.
+  Reservierte Routine-Testworktrees bereinigt ausschließlich der gebundene Testlauf.
 - Ein normal beendeter Hauptturn alleine belegt keinen abgeschlossenen Merge.
   Falls das Issue nach einem sauber beendeten `Merge (AI)`-Turn noch in
   `Merge (AI)` steht, darf Symphony nur mit eindeutiger Workpad-`Merge-Evidenz`

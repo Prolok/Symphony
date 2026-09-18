@@ -1,10 +1,12 @@
 defmodule SymphonyElixir.TestRunTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.Linear.DurableState
-  alias SymphonyElixir.{ProjectContext, TestRun}
+  alias SymphonyElixir.Codex.{MCPServer, TestTool}
+  alias SymphonyElixir.Linear.{DurableState, WriteContext}
+  alias SymphonyElixir.{ProjectContext, RoutineTest, TestRun}
   alias SymphonyElixir.Relay.Store
   alias SymphonyElixir.RelayFixture, as: RelayServer
+  alias SymphonyElixir.RoutineRuntimeFixture, as: RuntimeFixture
 
   @human "11111111-1111-4111-8111-111111111111"
 
@@ -487,6 +489,808 @@ defmodule SymphonyElixir.TestRunTest do
     assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
   end
 
+  test "managed executor drives the existing fixture lifecycle through one regular runtime", ctx do
+    {context, config, request} = routine_context(ctx)
+    parent = self()
+
+    runner = fn job, contexts, settings, _runtime, owner ->
+      source = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      result = SymphonyElixir.RoutineTest.run(job, contexts, settings, source, owner)
+      send(parent, {:routine_result, result})
+      Map.put(result, "evidence", "fixture")
+    end
+
+    start_supervised!({SymphonyElixir.TestExecutor, contexts: [context], name: __MODULE__.Executor, runner: runner})
+    assert {:ok, %{"running" => true}} = TestTool.request(context.settings.worker.test_executor_socket, request)
+    assert_receive {:routine_result, result}, 10_000
+    assert result["status"] == "passed", inspect(result)
+    assert result["cleanup"]
+    assert result["originals_preserved"]
+    assert map_size(result["sessions"]) == 1
+    assert [%{"deleted" => true, "complete" => true}] = result["fixtures"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+    assert Application.get_env(:symphony_elixir, :project_contexts) == ctx.contexts
+    assert config["result_root"] != context.settings.workspace.root
+  end
+
+  test "routine runtime mismatch and access failures precede fixture creation", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    result = SymphonyElixir.RoutineTest.run(job, [context], config, %{}, self())
+    assert result["error"] == "runtime_source_mismatch", inspect(result)
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    Agent.update(ctx.source_agent, &%{&1 | failure: :transport})
+    result = SymphonyElixir.RoutineTest.run(job, [context], config, %{}, self())
+    assert result["status"] == "failed"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    Agent.update(ctx.source_agent, &%{&1 | failure: :auth})
+    result = SymphonyElixir.RoutineTest.run(job, [context], config, %{}, self())
+    assert result["error"] == "linear_access_denied"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+  end
+
+  test "managed early owner failure recovers the old run before permitting another start", ctx do
+    {context, config, request} = routine_context(ctx)
+    startup = %{context | assignee_ids: nil}
+    parent = self()
+
+    runner = fn job, contexts, settings, _runtime, owner ->
+      source = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      source = if job["cleanup"], do: %{}, else: source
+      result = RoutineTest.run(job, contexts, settings, source, owner)
+      send(parent, {:early_result, result})
+      Map.put(result, "evidence", "fixture")
+    end
+
+    :sys.replace_state(SymphonyElixir.ProjectPoller, &Keyword.put(&1, :context, startup))
+    start_supervised!({SymphonyElixir.TestExecutor, contexts: [startup], name: __MODULE__.Executor, runner: runner})
+    socket = context.settings.worker.test_executor_socket
+    assert {:ok, _} = TestTool.request(socket, request)
+    assert_receive {:early_result, %{"status" => "failed", "cleanup" => false}}, 5_000
+    await_routine_result(socket, request)
+    directory = Path.join([config["result_root"], request["issue_id"], request["run_id"]])
+    for file <- ~w(plan.json control.json fixtures.json), do: refute(File.exists?(Path.join(directory, file)))
+    next = %{request | "run_id" => "after-early-cleanup"}
+    assert {:error, {:test_executor_rejected, "test_environment_needs_cleanup"}} = TestTool.request(socket, next)
+
+    :sys.replace_state(SymphonyElixir.ProjectPoller, &Keyword.put(&1, :context, context))
+    assert {:ok, _} = TestTool.request(socket, %{request | "operation" => "cleanup"})
+    assert_receive {:early_result, recovered}, 5_000
+    assert recovered["status"] == "failed"
+    assert recovered["cleanup"]
+    assert recovered["fixtures"] == []
+    assert recovered["source"]["sha"] == request["head_sha"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    await_routine_result(socket, request)
+    cleanup_request = %{request | "operation" => "cleanup"}
+    assert {:ok, %{"status" => "failed", "cleanup" => true}} = TestTool.request(socket, cleanup_request)
+    assert {:ok, _} = TestTool.request(socket, next)
+    assert_receive {:early_result, %{"status" => "passed", "cleanup" => true}}, 5_000
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+  end
+
+  test "early routine recovery preserves damaged or foreign fixture journals", ctx do
+    {context, config, request} = routine_context(ctx)
+
+    for kind <- ["corrupt", "foreign"] do
+      job = routine_job(config, %{request | "run_id" => "early-" <> kind})
+      recovery = %{job | "cleanup" => true}
+      assert RoutineTest.run(recovery, [context], config, %{}, self())["cleanup"]
+      {:ok, plan} = DurableState.read(Path.join(job["directory"], "plan.json"))
+      {:ok, journal} = TestRun.routine_journal(context, plan, job["directory"])
+      foreign = Jason.encode!(Map.put(journal, "source", %{"sha" => "foreign"}))
+      bytes = if kind == "corrupt", do: "invalid", else: foreign
+      path = Path.join(job["directory"], "fixtures.json")
+      File.write!(path, bytes)
+      result = RoutineTest.run(recovery, [context], config, %{}, self())
+      refute result["cleanup"]
+      assert result["status"] == "failed"
+      assert File.read!(path) == bytes
+    end
+
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+  end
+
+  defp await_routine_result(socket, request, attempts \\ 100) do
+    assert attempts > 0
+    assert {:ok, result} = TestTool.request(socket, %{request | "operation" => "result"})
+
+    if result["running"] do
+      Process.sleep(20)
+      await_routine_result(socket, request, attempts - 1)
+    end
+  end
+
+  test "routine caller authorization uses resolved polling context instead of startup context", ctx do
+    {context, config, request} = routine_context(ctx)
+    startup = %{context | assignee_ids: nil}
+    job = routine_job(config, request)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+
+    result = RoutineTest.run(job, [startup], config, runtime, self())
+    assert result["status"] == "passed", inspect(result)
+    assert result["cleanup"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+
+    recovery = RoutineTest.run(%{job | "cleanup" => true}, [startup], config, %{}, self())
+    assert recovery["status"] == "failed"
+    assert recovery["cleanup"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+
+    :sys.replace_state(SymphonyElixir.ProjectPoller, &Keyword.put(&1, :context, %{context | assignee_ids: []}))
+    denied = routine_job(config, %{request | "run_id" => "revoked-owner"})
+    result = RoutineTest.run(denied, [context], config, runtime, self())
+    assert result["status"] == "failed"
+    assert result["error"] == "test_owner_mismatch"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+  end
+
+  test "routine caller authorization fails closed for missing, moved or unavailable polling context", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+
+    for current <- [%{context | id: "removed"}, put_in(context.settings.workspace.root, ctx.root)] do
+      :sys.replace_state(SymphonyElixir.ProjectPoller, &Keyword.put(&1, :context, current))
+      assert RoutineTest.run(job, [context], config, %{}, self())["error"] == "test_owner_mismatch"
+    end
+
+    :ok = stop_supervised(RuntimeFixture)
+    assert RoutineTest.run(job, [context], config, %{}, self())["error"] == "runtime_unavailable"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+  end
+
+  test "resolved routine context still rejects foreign people, app assignees and project scopes", ctx do
+    {context, config, request} = routine_context(ctx)
+    startup = %{context | assignee_ids: nil}
+    owner = Agent.get(ctx.source_agent, & &1.issues[request["issue_id"]])
+    job = routine_job(config, request)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+
+    for invalid <- [
+          put_in(owner["assignee"]["id"], "another-person"),
+          put_in(owner["assignee"]["app"], true),
+          put_in(owner["project"]["slugId"], "another-project")
+        ] do
+      Agent.update(ctx.source_agent, &put_in(&1.issues[request["issue_id"]], invalid))
+      assert RoutineTest.run(job, [startup], config, runtime, self())["error"] == "test_owner_mismatch"
+      refute File.exists?(Path.join(job["directory"], "plan.json"))
+    end
+
+    Agent.update(ctx.source_agent, &put_in(&1.issues[request["issue_id"]], owner))
+    foreign_workspace = put_in(startup.settings.tracker.app["workspace_id"], "another-workspace")
+    result = RoutineTest.run(job, [foreign_workspace], config, runtime, self())
+    assert result["error"] == "routine_test_project_binding_rejected"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+  end
+
+  test "routine authorization and cleanup recovery reject mismatched owners and plans", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    assert RoutineTest.run(job, [], config, runtime, self())["error"] == "test_owner_mismatch"
+    malformed = %{context | settings: nil}
+    assert RoutineTest.run(job, [malformed], config, runtime, self())["error"] == "preflight_or_runtime_failed"
+    Agent.update(ctx.source_agent, &put_in(&1.issues[request["issue_id"]]["identifier"], "PRO-999"))
+    assert RoutineTest.run(job, [context], config, runtime, self())["error"] == "test_owner_mismatch"
+    Agent.update(ctx.source_agent, &put_in(&1.issues[request["issue_id"]]["identifier"], request["identifier"]))
+    recovery = %{job | "cleanup" => true}
+    result = RoutineTest.run(recovery, [context], config, runtime, self())
+    assert result["status"] == "failed"
+    assert result["cleanup"]
+    :ok = DurableState.write(Path.join(job["directory"], "plan.json"), %{"source" => "foreign"})
+    assert RoutineTest.run(recovery, [context], config, runtime, self())["error"] == "test_plan_identity_mismatch"
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+  end
+
+  for {name, response, expected} <- [
+        {"HTTP auth", {:ok, %{status: 403, body: %{"errors" => [%{"message" => "denied"}]}}}, "linear_access_denied"},
+        {"HTTP rate limit", {:ok, %{status: 429, body: %{"errors" => [%{"message" => "limited"}]}}}, "linear_rate_limited"},
+        {"app cooldown", {:error, {:linear_app_rate_limited, %{retry_after_ms: 1_000}}}, "linear_rate_limited"}
+      ] do
+    @tag binding_response: response, expected_error: expected
+    test "routine target preflight distinguishes #{name} without creating fixtures", ctx do
+      {context, config, request} = routine_context(ctx)
+      request_fun = Application.fetch_env!(:symphony_elixir, :linear_client_request_fun)
+
+      Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+        if (payload["query"] || payload[:query]) =~ "SymphonyRoutineBinding", do: ctx.binding_response, else: request_fun.(payload, headers)
+      end)
+
+      result = RoutineTest.run(routine_job(config, request), [context], config, %{}, self())
+      assert result["error"] == ctx.expected_error, inspect(result)
+      assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    end
+  end
+
+  test "runtime failures and damaged journals retain failed results for recovery", ctx do
+    {context, config, request} = routine_context(ctx)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    job = routine_job(config, request)
+    result = RoutineTest.run(job, [context], %{config | "timeout" => "invalid"}, runtime, self())
+    assert result["error"] == "preflight_or_runtime_failed"
+    assert result["cleanup"]
+  end
+
+  for failure <- [:bad_snapshot, :probe_exit, :corrupt_journal, :stop_rejected, :stopped_runtime] do
+    @tag runtime_failure: failure
+    test "routine #{failure} preserves failure and records cleanup availability", ctx do
+      {context, config, request} = routine_context(ctx)
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      failure = ctx.runtime_failure
+      job = routine_job(config, %{request | "run_id" => Atom.to_string(failure)})
+      server = SymphonyElixir.Projects.server(context)
+
+      stop_result =
+        case failure do
+          :stop_rejected -> {:error, :worker_busy}
+          :stopped_runtime -> :exit
+          _ -> :ok
+        end
+
+      :sys.replace_state(server, fn opts ->
+        opts
+        |> Keyword.put(:stop_result, stop_result)
+        |> Keyword.put(:snapshot_transform, fn snapshot ->
+          if failure == :probe_exit, do: exit(:probe_failed)
+          if failure == :corrupt_journal, do: File.write!(Path.join(job["directory"], "fixtures.json"), "corrupt")
+          if failure == :bad_snapshot, do: :unavailable, else: snapshot
+        end)
+      end)
+
+      result = RoutineTest.run(job, [context], config, runtime, self())
+      assert result["status"] == "failed", inspect({failure, result})
+      if failure in [:corrupt_journal, :stop_rejected, :stopped_runtime], do: refute(result["cleanup"])
+    end
+  end
+
+  test "cancel during the polling interval stops the waiting run", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    parent = self()
+
+    :sys.replace_state(SymphonyElixir.Projects.server(context), fn opts ->
+      opts
+      |> Keyword.put(:complete, fn -> :ok end)
+      |> Keyword.put(:snapshot_transform, fn snapshot ->
+        send(parent, :probe_observed)
+        snapshot
+      end)
+    end)
+
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    task = Task.async(fn -> RoutineTest.run(job, [context], config, runtime, self()) end)
+    assert_receive :probe_observed, 2_000
+    Process.send_after(task.pid, :cancel_test, 100)
+    result = Task.await(task, 2_000)
+    assert result["error"] == "cancelled"
+    assert result["cleanup"]
+  end
+
+  test "unavailable probe supervisor fails the run and still cleans its fixtures", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    supervisor = Process.whereis(SymphonyElixir.TaskSupervisor)
+    Process.unregister(SymphonyElixir.TaskSupervisor)
+
+    try do
+      result = RoutineTest.run(job, [context], config, runtime, self())
+      assert result["error"] == "runtime_unavailable"
+      assert result["cleanup"]
+    after
+      Process.register(supervisor, SymphonyElixir.TaskSupervisor)
+    end
+  end
+
+  test "completed sessions remain observable after workers leave the live snapshot", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+
+    :sys.replace_state(SymphonyElixir.Projects.server(context), fn opts ->
+      Keyword.put(opts, :snapshot_transform, fn snapshot ->
+        ProjectContext.with_context(context, fn ->
+          Enum.each(snapshot.running, &RoutineTest.record_session(&1.issue_id, &1.session_id))
+        end)
+
+        %{running: []}
+      end)
+    end)
+
+    result = RoutineTest.run(job, [context], config, runtime, self())
+    assert result["status"] == "passed"
+    assert map_size(result["sessions"]) == 1
+    assert result["cleanup"]
+  end
+
+  test "routine worktree receipts record only the created owned worktree", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    plan = %{"instance" => "routine", "run_id" => request["run_id"], "scenario" => "bootstrap", "source" => ctx.plan["source"]}
+    DurableState.write(Path.join(job["directory"], "plan.json"), plan)
+    assert {:ok, %{"fixtures" => [fixture]}} = TestRun.with_routine(context, plan, job["directory"], "prepare", fn -> TestRun.execute("prepare") end)
+    path = Path.join(context.settings.workspace.root, fixture["identifier"])
+    git!(context.root, ["worktree", "add", "-qb", "symphony/" <> fixture["identifier"], path])
+    issue = %{issue_id: fixture["id"], issue_identifier: fixture["identifier"]}
+
+    ProjectContext.with_context(context, fn ->
+      assert :ok = RoutineTest.record_workspace(path, issue, true)
+      foreign = %{issue | issue_id: "foreign"}
+      assert {:error, :test_workspace_base_unconfirmed} = RoutineTest.record_workspace(path, foreign, true)
+    end)
+
+    assert {:ok, receipt} = DurableState.read(Path.join([job["directory"], "workspaces", fixture["id"] <> ".json"]))
+    assert receipt["path"] == path
+    assert receipt["source"] == plan["source"]
+  end
+
+  test "unreadable source evidence cannot report originals as preserved", ctx do
+    {context, config, request} = routine_context(ctx)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    bin = Path.join(ctx.root, "source-failure-bin")
+    File.mkdir_p!(bin)
+    previous = System.fetch_env!("PATH")
+    on_exit(fn -> System.put_env("PATH", previous) end)
+
+    for {id, script} <- [{"malformed", "printf 'invalid-json'"}, {"unavailable", "exit 1"}] do
+      File.write!(Path.join(bin, "python3"), "#!/bin/sh\n" <> script <> "\n")
+      File.chmod!(Path.join(bin, "python3"), 0o755)
+      System.put_env("PATH", bin <> ":" <> previous)
+      job = routine_job(config, %{request | "run_id" => id, "scenario" => "failure-probe"})
+      result = RoutineTest.run(job, [context], config, runtime, self())
+      assert result["status"] == "failed"
+      refute result["originals_preserved"]
+    end
+  end
+
+  test "workflow probe requires actual merged PR and preserves the merge receipt through cleanup", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, %{request | "scenario" => "workflow"})
+    plan = %{"instance" => "routine", "run_id" => request["run_id"], "scenario" => "workflow", "source" => ctx.plan["source"]}
+
+    stage = fn operation ->
+      TestRun.with_routine(context, plan, job["directory"], operation, fn -> TestRun.execute(operation) end)
+    end
+
+    assert {:ok, journal} = stage.("prepare")
+    [fixture] = journal["fixtures"]
+    assert fixture["description"] =~ "regulären Workflow"
+    complete(ctx.source_agent)
+    assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
+
+    Agent.update(ctx.source_agent, fn state ->
+      state = put_in(state.issues[fixture["id"]]["state"]["name"], "Review")
+      update_in(state.comments[fixture["id"]], fn [comment] -> [%{comment | "body" => "## Symphony Workpad\nMerge-Evidenz: fixture"}] end)
+    end)
+
+    git!(context.root, ["remote", "add", "origin", "https://github.com/Prolok/symphony-test.git"])
+    bin = Path.join(ctx.root, "fake-gh")
+    File.mkdir_p!(bin)
+    response = Path.join(bin, "response.json")
+    File.write!(response, "[]")
+    File.write!(Path.join(bin, "gh"), "#!/bin/sh\ncat '#{response}'\n")
+    File.chmod!(Path.join(bin, "gh"), 0o755)
+    previous = System.fetch_env!("PATH")
+    System.put_env("PATH", bin <> ":" <> previous)
+    on_exit(fn -> System.put_env("PATH", previous) end)
+    assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
+    sha = String.duplicate("c", 40)
+    url = "https://github.com/Prolok/symphony-test/pull/1"
+    File.write!(response, Jason.encode!([%{"state" => "MERGED", "mergeCommit" => %{"oid" => sha}, "headRefOid" => sha, "url" => url}]))
+    assert {:ok, %{"fixtures" => [%{"complete" => true, "merge" => merge}]}} = stage.("probe")
+    assert merge == %{"state" => "MERGED", "commit" => sha, "head" => sha, "url" => url}
+    assert {:ok, %{"fixtures" => [%{"deleted" => true, "merge" => ^merge}]}} = stage.("cleanup")
+  end
+
+  test "routine cancellation timeout failure and recovery clean only their fixtures", ctx do
+    {context, config, request} = routine_context(ctx)
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+
+    for {id, scenario, timeout, cancel} <- [{"failure", "failure-probe", 30, false}, {"cancel", "bootstrap", 30, true}, {"timeout", "bootstrap", 0, false}] do
+      request = %{request | "run_id" => id, "scenario" => scenario}
+      job = routine_job(config, request)
+      if cancel, do: send(self(), :cancel_test)
+      result = SymphonyElixir.RoutineTest.run(job, [context], %{config | "timeout" => timeout}, runtime, self())
+      assert result["status"] == "failed", inspect(result)
+      assert result["cleanup"], inspect(result)
+      assert result["error"] in ["intentional_failure_probe", "cancelled", "timeout"]
+      recovery = SymphonyElixir.RoutineTest.run(%{job | "cleanup" => true}, [context], config, runtime, self())
+      assert recovery["status"] == "failed"
+      assert recovery["cleanup"], inspect(recovery)
+    end
+
+    assert Agent.get(ctx.source_agent, &map_size(&1.issues)) == 1
+  end
+
+  test "cancel arriving inside the successful final probe cannot pass", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    caller = self()
+
+    :sys.replace_state(SymphonyElixir.Projects.server(context), fn opts ->
+      Keyword.put(opts, :complete, fn ->
+        complete(ctx.source_agent)
+        count = Process.get(:probe_count, 0) + 1
+        Process.put(:probe_count, count)
+        if count == 2, do: send(caller, :cancel_test)
+      end)
+    end)
+
+    runtime = Map.take(request, ~w(head_sha source_sha256)) |> Map.put("sha", request["head_sha"])
+    result = SymphonyElixir.RoutineTest.run(job, [context], config, runtime, self())
+    assert result["status"] == "failed"
+    assert result["error"] == "cancelled"
+    assert result["cleanup"]
+  end
+
+  test "own planning descriptions remain bound through lost responses while external edits block cleanup", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, %{request | "scenario" => "workflow"})
+    plan = %{"instance" => "routine", "run_id" => request["run_id"], "scenario" => "workflow", "source" => ctx.plan["source"]}
+    :ok = DurableState.write(Path.join(job["directory"], "plan.json"), plan)
+    :ok = DurableState.write(Path.join(job["directory"], "control.json"), %{"active" => true})
+
+    stage = fn operation ->
+      TestRun.with_routine(context, plan, job["directory"], operation, fn -> TestRun.execute(operation) end)
+    end
+
+    assert {:ok, %{"fixtures" => [fixture]}} = stage.("prepare")
+    Agent.update(ctx.source_agent, &put_in(&1.issues[fixture["id"]]["state"]["name"], "Planung (AI)"))
+
+    for failure <- [nil, :lost_description] do
+      description = "## Zusammenfassung\n\nGeplanter Lauf #{inspect(failure)}\n\n---\n\n" <> fixture["description"]
+      Agent.update(ctx.source_agent, &%{&1 | failure: failure})
+
+      result =
+        ProjectContext.with_context(context, fn ->
+          WriteContext.with_context(%{issue_id: fixture["id"], phase: "Planung (AI)", run_id: "planning-run"}, fn ->
+            Client.graphql("mutation OwnFixtureDescription($id: String!, $description: String!) { changed: issueUpdate(id: $id, input: {description: $description}) { success } }", %{
+              id: fixture["id"],
+              description: description
+            })
+          end)
+        end)
+
+      if failure, do: assert(match?({:error, _}, result)), else: assert(match?({:ok, _}, result))
+      Agent.update(ctx.source_agent, &%{&1 | failure: nil})
+      assert {:ok, _} = stage.("probe")
+    end
+
+    # The fallback MCP helper has no service process context or executor ETS.
+    previous_settings = Application.get_env(:symphony_elixir, :service_settings)
+    Application.put_env(:symphony_elixir, :service_settings, context.settings)
+    System.put_env("SYMPHONY_PROJECT_ROOT", context.root)
+    System.put_env("SYMPHONY_ISSUE_ID", fixture["id"])
+    System.put_env("SYMPHONY_PHASE", "Planung (AI)")
+
+    try do
+      result =
+        MCPServer.handle_request(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "tools/call",
+          "params" => %{
+            "name" => "linear_graphql",
+            "arguments" => %{
+              "query" => "mutation OwnFixtureDescription($id: String!, $description: String!) { changed: issueUpdate(id: $id, input: {description: $description}) { success } }",
+              "variables" => %{"id" => fixture["id"], "description" => "MCP planning description"}
+            }
+          }
+        })
+
+      refute result["result"]["isError"], inspect(result)
+      assert {:ok, _} = stage.("probe")
+    after
+      if previous_settings,
+        do: Application.put_env(:symphony_elixir, :service_settings, previous_settings),
+        else: Application.delete_env(:symphony_elixir, :service_settings)
+
+      for key <- ~w(SYMPHONY_PROJECT_ROOT SYMPHONY_ISSUE_ID SYMPHONY_PHASE), do: System.delete_env(key)
+    end
+
+    receipt_path = Path.join([job["directory"], "descriptions", fixture["id"] <> ".json"])
+    assert {:ok, receipt} = DurableState.read(receipt_path)
+    assert receipt["source"] == plan["source"]
+    assert receipt["writer"]["phase"] == "Planung (AI)"
+    DurableState.write(receipt_path, %{receipt | "source" => %{}})
+    assert {:error, :test_fixture_changed_externally} = stage.("probe")
+    File.write!(receipt_path, "corrupt")
+    assert {:error, :test_fixture_changed_externally} = stage.("probe")
+    DurableState.write(receipt_path, receipt)
+
+    TestRun.with_routine(context, plan, job["directory"], "probe", fn ->
+      assert {:error, :test_description_update_unbound} = TestRun.record_description_intent(fixture["id"], nil, %{})
+      Agent.update(ctx.source_agent, &%{&1 | failure: :transport})
+      assert {:error, _} = TestRun.record_description_intent(fixture["id"], "unconfirmed", %{"phase" => "Planung (AI)"})
+      Agent.update(ctx.source_agent, &%{&1 | failure: nil})
+    end)
+
+    ProjectContext.with_context(context, fn ->
+      assert {:error, :invalid_graphql_document} = RoutineTest.prepare_description_updates(%{"query" => "mutation {"})
+
+      assert {:error, :duplicate_fixture_description_update} =
+               RoutineTest.prepare_description_updates(%{
+                 "query" => "mutation { a: issueUpdate(id: \"same\", input: {description: \"one\"}) { success } b: issueUpdate(id: \"same\", input: {description: \"two\"}) { success } }"
+               })
+
+      assert :ok = RoutineTest.prepare_description_updates(%{"query" => "mutation { issueUpdate(id: \"foreign\", input: {description: \"foreign\"}) { success } }"})
+    end)
+
+    rejected =
+      ProjectContext.with_context(context, fn ->
+        WriteContext.with_context(%{issue_id: fixture["id"], phase: "In Arbeit (AI)"}, fn ->
+          Client.graphql("mutation OwnFixtureDescription($id: String!, $description: String!) { changed: issueUpdate(id: $id, input: {description: $description}) { success } }", %{
+            id: fixture["id"],
+            description: "not allowed"
+          })
+        end)
+      end)
+
+    assert {:error, :test_description_update_unbound} = rejected
+
+    own = Agent.get(ctx.source_agent, & &1.issues[fixture["id"]]["description"])
+    Agent.update(ctx.source_agent, &put_in(&1.issues[fixture["id"]]["description"], "external edit"))
+    assert {:error, :test_fixture_changed_externally} = stage.("cleanup")
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+    Agent.update(ctx.source_agent, &put_in(&1.issues[fixture["id"]]["description"], own))
+    assert {:ok, %{"fixtures" => [%{"deleted" => true}]}} = stage.("cleanup")
+  end
+
+  test "a transient probe transport failure recovers without recreating fixtures", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    inject_probe_responses(ctx, [{:error, :offline}, :pass])
+
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    result = RoutineTest.run(job, [context], config, runtime, self())
+    assert result["status"] == "passed", inspect(result)
+    assert result["cleanup"]
+    assert map_size(result["sessions"]) == 1
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+  end
+
+  test "temporary HTTP probe failures recover after both bounded delays", ctx do
+    {context, config, request} = routine_context(ctx)
+    inject_probe_responses(ctx, [http_probe_error(503), http_probe_error(504), :pass])
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    result = RoutineTest.run(routine_job(config, request), [context], config, runtime, self())
+    assert result["status"] == "passed", inspect(result)
+    assert result["cleanup"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+  end
+
+  test "managed exhausted probe retries expose their cause and keep failure after cleanup", ctx do
+    {context, _config, request} = routine_context(ctx)
+    inject_probe_responses(ctx, [{:error, :offline}])
+    parent = self()
+
+    runner = fn job, contexts, settings, _runtime, owner ->
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      result = RoutineTest.run(job, contexts, settings, runtime, owner)
+      send(parent, {:retried_result, result})
+      Map.put(result, "evidence", "fixture")
+    end
+
+    start_supervised!({SymphonyElixir.TestExecutor, contexts: [context], name: __MODULE__.Executor, runner: runner})
+    socket = context.settings.worker.test_executor_socket
+    assert {:ok, _} = TestTool.request(socket, request)
+    assert_receive {:retried_result, result}, 12_000
+    assert result["status"] == "failed"
+    assert result["error"] == "linear_temporarily_unavailable"
+    assert result["cleanup"]
+    assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 3
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+    await_routine_result(socket, request)
+    assert {:ok, %{"status" => "failed", "cleanup" => true, "failure" => "linear_temporarily_unavailable"}} = TestTool.request(socket, %{request | "operation" => "cleanup"})
+    assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 3
+  end
+
+  for {status, expected} <- [{401, "linear_access_denied"}, {403, "linear_access_denied"}, {429, "linear_rate_limited"}, {400, "preflight_or_runtime_failed"}] do
+    @tag probe_http_status: status, expected_error: expected
+    test "probe HTTP #{status} fails without retries", ctx do
+      {context, config, request} = routine_context(ctx)
+      inject_probe_responses(ctx, [http_probe_error(ctx.probe_http_status)])
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      result = RoutineTest.run(routine_job(config, request), [context], config, runtime, self())
+      assert result["status"] == "failed"
+      assert result["error"] == ctx.expected_error
+      assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 1
+      assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    end
+  end
+
+  test "a GraphQL validation failure on HTTP 503 is never retried", ctx do
+    {context, config, request} = routine_context(ctx)
+    response = {:ok, %{status: 503, body: %{"errors" => [%{"message" => "invalid", "extensions" => %{"code" => "BAD_USER_INPUT"}}]}}}
+    inject_probe_responses(ctx, [response])
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    result = RoutineTest.run(routine_job(config, request), [context], config, runtime, self())
+    assert result["status"] == "failed"
+    assert result["error"] == "preflight_or_runtime_failed"
+    assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 1
+    assert result["cleanup"]
+  end
+
+  for outcome <- ["cancelled", "timeout"] do
+    @tag retry_outcome: outcome
+    test "#{outcome} interrupts probe backoff before another request", ctx do
+      {context, config, request} = routine_context(ctx)
+      inject_probe_responses(ctx, [{:error, :offline}])
+      timeout = if ctx.retry_outcome == "timeout", do: 1, else: 30
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      job = routine_job(config, request)
+      task = Task.async(fn -> RoutineTest.run(job, [context], %{config | "timeout" => timeout}, runtime, self()) end)
+      assert_receive {:probe_attempt, 1, probe}, 2_000
+      if ctx.retry_outcome == "cancelled", do: Process.send_after(task.pid, :cancel_test, 100)
+      assert {:ok, result} = Task.yield(task, 1_500)
+      assert result["status"] == "failed"
+      assert result["error"] == ctx.retry_outcome
+      assert result["cleanup"]
+      refute Process.alive?(probe)
+      assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 1
+      assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+    end
+  end
+
+  defp http_probe_error(status), do: {:ok, %{status: status, body: "fixture failure"}}
+
+  defp inject_probe_responses(ctx, responses) do
+    request_fun = Application.fetch_env!(:symphony_elixir, :linear_client_request_fun)
+    parent = self()
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+      if TestRun.stage() == "probe" and (payload["query"] || payload[:query]) =~ "query TestFixture(" do
+        attempt = next_probe_attempt(ctx.source_agent)
+
+        send(parent, {:probe_attempt, attempt, self()})
+
+        probe_response(Enum.at(responses, attempt - 1, List.last(responses)), request_fun, payload, headers)
+      else
+        request_fun.(payload, headers)
+      end
+    end)
+  end
+
+  defp probe_response(:pass, request_fun, payload, headers), do: request_fun.(payload, headers)
+  defp probe_response(response, _request_fun, _payload, _headers), do: response
+
+  defp next_probe_attempt(source) do
+    Agent.get_and_update(source, fn state ->
+      attempt = Map.get(state, :probe_attempts, 0) + 1
+      {attempt, Map.put(state, :probe_attempts, attempt)}
+    end)
+  end
+
+  test "a slow final probe is bounded by the remaining deadline", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+
+    :sys.replace_state(SymphonyElixir.Projects.server(context), fn opts ->
+      Keyword.put(opts, :complete, fn ->
+        complete(ctx.source_agent)
+        count = Process.get(:probe_count, 0) + 1
+        Process.put(:probe_count, count)
+        if count == 2, do: Process.sleep(1_200)
+      end)
+    end)
+
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    result = SymphonyElixir.RoutineTest.run(job, [context], %{config | "timeout" => 1}, runtime, self())
+    assert result["status"] == "failed"
+    assert result["error"] == "timeout"
+    assert result["cleanup"]
+  end
+
+  test "blocked probe calls are stopped on cancel or timeout before cleanup", ctx do
+    {context, config, request} = routine_context(ctx)
+    parent = self()
+    request_fun = Application.fetch_env!(:symphony_elixir, :linear_client_request_fun)
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+      if TestRun.stage() == "probe" and (payload["query"] || payload[:query]) =~ "query TestFixture(" do
+        send(parent, {:blocked_probe, self()})
+        receive do: (:release_probe -> :ok)
+      end
+
+      request_fun.(payload, headers)
+    end)
+
+    for {run_id, timeout, expected} <- [{"blocked-cancel", 30, "cancelled"}, {"blocked-timeout", 1, "timeout"}, {"blocked-crash", 30, "runtime_unavailable"}] do
+      job = routine_job(config, %{request | "run_id" => run_id})
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      task = Task.async(fn -> SymphonyElixir.RoutineTest.run(job, [context], %{config | "timeout" => timeout}, runtime, self()) end)
+      assert_receive {:blocked_probe, probe}, 2_000
+      if expected == "cancelled", do: send(task.pid, :cancel_test)
+      if expected == "runtime_unavailable", do: Process.exit(probe, :kill)
+      assert {:ok, result} = Task.yield(task, 2_500)
+      refute Process.alive?(probe)
+      assert result["status"] == "failed"
+      assert result["error"] == expected
+      assert result["cleanup"]
+    end
+  end
+
+  defp routine_job(config, request) do
+    directory = Path.join([config["result_root"], request["issue_id"], request["run_id"]])
+    File.mkdir_p!(directory)
+    %{"request" => Map.delete(request, "operation"), "directory" => directory, "cleanup" => false}
+  end
+
+  defp routine_context(ctx) do
+    [context] = ctx.contexts
+    Application.delete_env(:symphony_elixir, :test_instance)
+    config = ctx.instance["manifest"]["projects"][context.name]
+
+    config =
+      Map.merge(config, %{"teams" => [%{"id" => "team", "key" => "PRO"}], "scenarios" => ["bootstrap", "workflow", "failure-probe"], "timeout" => 30, "result_root" => Path.join(ctx.root, "managed")})
+
+    socket_root = Path.join(File.cwd!(), "tmp/rt-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(socket_root) end)
+    context = put_in(context.settings.worker.test_executor, config)
+    context = put_in(context.settings.worker.test_executor_socket, Path.join(socket_root, "e.sock"))
+    context = %{context | test_instance: nil}
+    workspace = Path.join(context.settings.workspace.root, "PRO-769")
+    git!(context.root, ["worktree", "add", "-qb", "symphony/PRO-769", workspace])
+    {json, 0} = System.cmd("python3", ["scripts/test-instance.py", "source", workspace])
+    source = Jason.decode!(json)
+    id = "33333333-3333-4333-8333-333333333333"
+
+    owner = %{
+      "id" => id,
+      "identifier" => "PRO-769",
+      "title" => "Caller",
+      "state" => %{"name" => "Test (AI)"},
+      "project" => %{"id" => "symphony-test", "slugId" => "symphony-test"},
+      "assignee" => %{"id" => @human, "app" => false},
+      "team" => %{"id" => "team", "key" => "PRO"},
+      "labels" => page([]),
+      "relations" => page([]),
+      "inverseRelations" => page([])
+    }
+
+    Agent.update(ctx.source_agent, &put_in(&1.issues[id], owner))
+
+    request = %{
+      "operation" => "start",
+      "run_id" => "routine-live-fixture",
+      "scenario" => "bootstrap",
+      "head_sha" => source["sha"],
+      "source_sha256" => source["source_sha256"],
+      "issue_id" => id,
+      "identifier" => "PRO-769",
+      "checkout" => workspace
+    }
+
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    relay_opts = [name: SymphonyElixir.ProjectPoller, source: ctx.source_agent, context: context]
+    relay = start_supervised!({RuntimeFixture, relay_opts})
+
+    complete = fn -> complete(ctx.source_agent) end
+    fixture_opts = [name: SymphonyElixir.Projects.server(context), source: ctx.source_agent, complete: complete]
+
+    start_supervised!(
+      Supervisor.child_spec({RuntimeFixture, fixture_opts},
+        id: :fixture_project
+      )
+    )
+
+    assert Process.alive?(relay)
+
+    ProjectContext.with_context(context, fn ->
+      WriteContext.with_context(%{issue_id: id}, fn ->
+        assert {:ok, _} = SymphonyElixir.CommentCheckpoint.bound_issue(id)
+      end)
+    end)
+
+    assert :ok = SymphonyElixir.TestExecutor.verify_target(context, config)
+    {context, config, request}
+  end
+
   defp journal_path(root), do: Path.join(root, "test-state/runs/fixture-run/fixtures.json")
 
   defp count_calls(source, name),
@@ -494,7 +1298,10 @@ defmodule SymphonyElixir.TestRunTest do
 
   defp complete(source) do
     Agent.update(source, fn state ->
-      issues = Map.new(state.issues, fn {id, issue} -> {id, put_in(issue["state"]["name"], "Planung (AI)")} end)
+      issues =
+        Map.new(state.issues, fn {id, issue} ->
+          {id, if(issue["title"] == "Caller", do: issue, else: put_in(issue["state"]["name"], "Planung (AI)"))}
+        end)
 
       comments =
         Map.new(issues, fn {id, _} ->
@@ -519,8 +1326,35 @@ defmodule SymphonyElixir.TestRunTest do
     case state.failure do
       :malformed -> {{:ok, %{status: 200, body: %{}}}, state}
       :transport -> {{:error, :offline}, state}
+      :auth -> {{:ok, %{status: 403, body: %{"errors" => [%{"message" => "denied"}]}}}, state}
       :graphql_errors -> {{:ok, %{status: 200, body: %{"errors" => [%{"message" => "fixture failure"}]}}}, state}
-      _ -> respond_query(query, variables, state)
+      _ -> respond_routine_query(query, variables, state)
+    end
+  end
+
+  defp respond_routine_query(query, variables, state) do
+    cond do
+      query =~ "OwnFixtureDescription" ->
+        updated = put_in(state.issues[variables["id"]]["description"], variables["description"])
+
+        if state.failure == :lost_description,
+          do: {{:error, :lost_response}, updated},
+          else: answer(%{"changed" => %{"success" => true}}, updated)
+
+      query =~ "SymphonyRoutineBinding" ->
+        answer(
+          %{
+            "project" => %{"id" => "symphony-test", "name" => "symphony-test", "slugId" => "symphony-test", "teams" => page([%{"id" => "team", "key" => "PRO"}])},
+            "viewer" => %{"organization" => %{"id" => "synthetic-workspace", "urlKey" => "prolok"}}
+          },
+          state
+        )
+
+      query =~ "SymphonyLinearIssuesById" ->
+        answer(%{"issues" => page(Enum.map(variables["ids"], &state.issues[&1]))}, state)
+
+      true ->
+        respond_query(query, variables, state)
     end
   end
 
@@ -610,5 +1444,40 @@ defmodule SymphonyElixir.TestRunTest do
     {output, status} = System.cmd("git", args, cd: root, stderr_to_stdout: true)
     assert status == 0, output
     output
+  end
+end
+
+defmodule SymphonyElixir.RoutineRuntimeFixture do
+  @moduledoc false
+  use GenServer
+
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: Keyword.fetch!(opts, :name))
+  @impl true
+  def init(opts), do: {:ok, opts}
+  @impl true
+  def handle_call({:relay_issues, _, []}, _from, opts), do: {:reply, {:ok, []}, opts}
+
+  def handle_call({:context, id}, _from, opts) do
+    context = Keyword.fetch!(opts, :context)
+    {:reply, if(context.id == id, do: context), opts}
+  end
+
+  def handle_call({:stop_test_fixture, _}, _from, opts) do
+    case Keyword.get(opts, :stop_result, :ok) do
+      :exit -> {:stop, :fixture_stop_failed, opts}
+      result -> {:reply, result, opts}
+    end
+  end
+
+  def handle_call(:snapshot, _from, opts) do
+    Keyword.fetch!(opts, :complete).()
+
+    running =
+      Agent.get(Keyword.fetch!(opts, :source), fn state ->
+        for {id, issue} <- state.issues, issue["title"] != "Caller", do: %{issue_id: id, session_id: "fixture-session-" <> id}
+      end)
+
+    snapshot = Keyword.get(opts, :snapshot_transform, &Function.identity/1).(%{running: running})
+    {:reply, snapshot, opts}
   end
 end

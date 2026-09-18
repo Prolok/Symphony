@@ -54,7 +54,7 @@ defmodule SymphonyElixir.CLI do
         root = SymphonyElixir.RuntimePaths.workflow_dir()
 
         with :ok <- Workflow.set_workflow_file_path(default_workflow_path()),
-             :ok <- SymphonyElixir.Projects.prepare(root, default_workflow_path()),
+             :ok <- prepare_projects(root, default_workflow_path()),
              {:ok, result} <- SymphonyElixir.TestRun.execute(stage) do
           IO.puts("Test run result=" <> Jason.encode!(result))
           System.halt(0)
@@ -142,8 +142,17 @@ defmodule SymphonyElixir.CLI do
     workflow = Workflow.workflow_file_path()
     root = System.get_env("SYMPHONY_ROOT_DIR") || SymphonyElixir.RuntimePaths.workflow_dir()
 
-    with :ok <- SymphonyElixir.Projects.prepare(root, workflow) do
+    with :ok <- prepare_projects(root, workflow) do
       SymphonyElixir.ServiceMutex.reserve_projects(SymphonyElixir.Projects.configured())
+    end
+  end
+
+  defp prepare_projects(root, workflow) do
+    # Escript does not start the application tree. Discovery can authenticate
+    # the managed executor before Symphony's own supervisor may safely start.
+    case Application.ensure_all_started(:req) do
+      {:ok, _} -> SymphonyElixir.Projects.prepare(root, workflow)
+      {:error, reason} -> {:error, {:http_runtime_start_failed, reason}}
     end
   end
 

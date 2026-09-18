@@ -597,7 +597,8 @@ defmodule SymphonyElixir.Linear.Client do
         Application.get_env(:symphony_elixir, :linear_client_request_fun, &post_graphql_request/2)
       )
 
-    with :ok <- CommentActionGuard.check(payload) do
+    with :ok <- CommentActionGuard.check(payload),
+         :ok <- SymphonyElixir.RoutineTest.prepare_description_updates(payload) do
       graphql_response(authenticated_request(payload, request_fun), payload)
     end
   end

@@ -171,7 +171,8 @@ defmodule SymphonyElixir.ProjectContext do
     keys = [:auth_mode, :app, :relay, :assignee, :endpoint, :kind, :project_slug, :team_key]
 
     if Map.take(updated.settings.tracker, keys) == Map.take(context.settings.tracker, keys) and
-         updated.settings.workspace.root == context.settings.workspace.root,
+         updated.settings.workspace.root == context.settings.workspace.root and
+         Map.take(updated.settings.worker, [:test_executor, :test_executor_socket]) == Map.take(context.settings.worker, [:test_executor, :test_executor_socket]),
        do: %{updated | assignee_ids: context.assignee_ids},
        else: keep_context(context, :project_binding_change_requires_restart)
   end

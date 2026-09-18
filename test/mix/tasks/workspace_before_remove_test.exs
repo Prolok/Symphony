@@ -1954,11 +1954,11 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
           fi
 
           if [ "$1" = "-C" ] && [ "$2" = "#{wrong_workspace}" ] && [ "$3" = "branch" ] && [ "$4" = "--show-current" ]; then
-            printf 'tilo_dev\\n'
+            printf 'unrelated-feature\\n'
             exit 0
           fi
 
-          if [ "$1" = "-C" ] && [ "$2" = "#{source_repo}" ] && [ "$3" = "push" ] && [ "$4" = "origin" ] && [ "$5" = "--delete" ] && [ "$6" = "tilo_dev" ]; then
+          if [ "$1" = "-C" ] && [ "$2" = "#{source_repo}" ] && [ "$3" = "push" ] && [ "$4" = "origin" ] && [ "$5" = "--delete" ] && [ "$6" = "unrelated-feature" ]; then
             exit 0
           fi
 
@@ -1981,7 +1981,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
           log = File.read!(log_path)
           assert log =~ "git -C #{source_repo} worktree list --porcelain"
           refute log =~ "git -C #{wrong_workspace} branch --show-current"
-          refute log =~ "push origin --delete tilo_dev"
+          refute log =~ "push origin --delete unrelated-feature"
           refute log =~ "worktree remove --force #{wrong_workspace}"
         end
       )

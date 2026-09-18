@@ -305,7 +305,7 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       running_entry ->
-        {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update, issue_id)
 
         state =
           state
@@ -1804,7 +1804,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
 
   defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier, worker_host)
+    # The reserved routine project is cleaned only by TestRun's identity,
+    # source and cleanliness checks, including before executor recovery.
+    unless SymphonyElixir.RoutineTest.manages_project?() do
+      Workspace.remove_issue_workspaces(identifier, worker_host)
+    end
   end
 
   defp cleanup_issue_workspace(_identifier, _worker_host), do: :ok
@@ -1942,7 +1946,7 @@ defmodule SymphonyElixir.Orchestrator do
             |> normalize_review_subagent_ids()
         }
 
-        {updated_tracking_entry, token_delta} = integrate_codex_update(tracking_entry, update)
+        {updated_tracking_entry, token_delta} = integrate_codex_update(tracking_entry, update, issue_id)
 
         updated_retry_entry =
           retry_entry
@@ -2492,6 +2496,15 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
+  def handle_call({:stop_test_fixture, id}, _from, state) do
+    if SymphonyElixir.RoutineTest.owns?(id) do
+      state = terminate_running_issue(state, id, false)
+      {:reply, :ok, %{state | retry_attempts: Map.delete(state.retry_attempts, id)}}
+    else
+      {:reply, {:error, :test_fixture_not_owned}, state}
+    end
+  end
+
   def handle_call(:request_refresh, _from, state) do
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
@@ -2507,7 +2520,7 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
-  defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
+  defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update, issue_id) do
     running_entry = align_codex_token_checkpoint(running_entry, update)
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
@@ -2556,6 +2569,7 @@ defmodule SymphonyElixir.Orchestrator do
     )
 
     session_id = session_id_for_update(existing_session_id, update)
+    if session_id != existing_session_id, do: SymphonyElixir.RoutineTest.record_session(issue_id, session_id)
     next_event_sequence = Map.get(running_entry, :codex_event_sequence, 0) + 1
     summarized_update = summarize_codex_update(update, session_id, next_event_sequence)
 

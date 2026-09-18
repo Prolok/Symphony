@@ -37,9 +37,10 @@ defmodule SymphonyElixir.Codex.TestToolTest do
           end
         ]
 
-        for name <- ["symphony_test", "symphony_linear.symphony_test"] do
-          assert DynamicTool.execute(name, args(), opts)["success"]
-          reply = MCPServer.handle_request(%{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/call", "params" => %{"name" => name, "arguments" => args()}}, opts)
+        for name <- ["symphony_test", "symphony_linear.symphony_test"], scenario <- ["bootstrap", "workflow", "failure-probe"] do
+          args = Map.put(args(), "scenario", scenario)
+          assert DynamicTool.execute(name, args, opts)["success"]
+          reply = MCPServer.handle_request(%{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/call", "params" => %{"name" => name, "arguments" => args}}, opts)
           refute reply["result"]["isError"]
         end
 

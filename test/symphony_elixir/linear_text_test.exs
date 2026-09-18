@@ -36,7 +36,7 @@ defmodule SymphonyElixir.LinearTextTest do
     - [x] Fix auf Quelle `abc1234` umgesetzt.
 
     ### Validierung
-    - [ ] Betreiber/Pai bestätigt Paket A; fällig: Merge (AI)
+    - [ ] Betreiber bestätigt Paket A; fällig: Merge (AI)
 
     ### Review
     - [x] Keine Findings; technischer Review abgeschlossen.

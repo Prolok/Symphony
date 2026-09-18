@@ -183,3 +183,137 @@ while True:time.sleep(.02)
         self.assertEqual(reply['status'], 'failed')
         self.assertNotIn('private', json.dumps(reply))
         self.assertIn('private operator diagnostic', (directory / 'executor.log').read_text())
+
+
+class ManagedExecutorTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(dir=REPO / 'tmp')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.project = self.root / 'project'
+        self.project.mkdir()
+        for args in [('init', '-q'), ('-c', 'user.name=Fixture', '-c', 'user.email=fixture@invalid', 'commit', '--allow-empty', '-qm', 'base')]:
+            subprocess.run(['git', '-C', str(self.project), *args], check=True, capture_output=True)
+        self.checkout = self.root / 'worktrees/PRO-769'
+        subprocess.run(['git', '-C', str(self.project), 'worktree', 'add', '-qb', 'symphony/PRO-769', str(self.checkout)], check=True, capture_output=True)
+        self.module = load(REPO / 'scripts/test-executor.py')
+        self.config = dict(result_root=str(self.root / 'results'), manifest=str(self.root / 'binding.json'),
+                           socket=str(self.root / 'socket/test.sock'), timeout=10, scenarios=['bootstrap', 'workflow', 'failure-probe'],
+                           runtime_binding={'project_id': 'dummy'}, sources=[dict(root=str(self.project), workspace_root=str(self.checkout.parent))])
+        self.jobs = []
+        self.executor = self.module.ManagedExecutor(self.config, self.jobs.append)
+        self.addCleanup(self.executor.close)
+        source = self.module.helper().source(self.checkout)
+        self.request = dict(operation='start', run_id='run-1', scenario='bootstrap', head_sha=source['sha'], source_sha256=source['source_sha256'],
+                            issue_id='11111111-1111-4111-8111-111111111111', identifier='PRO-769', checkout=str(self.checkout))
+
+    def completion(self, job, passed=True, cleanup=True):
+        request = job['request']
+        return dict(key=job['key'], cleanup=job['cleanup'], result=dict(evidence='fixture', run_id=request['run_id'],
+                    source=dict(checkout=request['checkout'], sha=request['head_sha'], source_sha256=request['source_sha256']),
+                    status='passed' if passed else 'failed', cleanup=cleanup, main_preserved=True, originals_preserved=True))
+
+    def test_automatic_binding_replay_and_completed_result(self):
+        self.assertTrue(self.executor.handle(self.request)['running'])
+        self.assertEqual(len(self.jobs), 1)
+        self.assertTrue(self.executor.handle(self.request)['running'])
+        self.assertEqual(len(self.jobs), 1)
+        self.executor.complete(self.completion(self.jobs[0]))
+        result = self.executor.handle(dict(self.request, operation='result'))
+        self.assertEqual(result['status'], 'passed')
+        self.assertEqual(result['evidence'], 'fixture')
+        self.executor.close()
+        restarted = self.module.ManagedExecutor(self.config, self.jobs.append)
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.handle(self.request), result)
+        self.assertEqual(len(self.jobs), 1)
+
+    def test_crash_requires_cleanup_and_never_restarts_intent(self):
+        self.executor.handle(self.request)
+        self.executor.close()
+        restarted = self.module.ManagedExecutor(self.config, self.jobs.append)
+        self.addCleanup(restarted.close)
+        self.assertEqual(restarted.handle(self.request)['status'], 'failed')
+        self.assertEqual(len(self.jobs), 1)
+        self.assertEqual(restarted.handle(dict(self.request, run_id='run-2'))['error'], 'test_environment_needs_cleanup')
+        self.assertTrue(restarted.handle(dict(self.request, operation='cleanup'))['running'])
+        self.assertTrue(self.jobs[-1]['cleanup'])
+        restarted.complete(self.completion(self.jobs[-1], passed=True))
+        result = restarted.handle(dict(self.request, operation='result'))
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(result['cleanup'])
+        self.assertTrue(restarted.handle(dict(self.request, run_id='run-2'))['running'])
+
+    def test_binding_changes_foreign_worktrees_and_disabled_scenarios_fail_closed(self):
+        for bad in [dict(self.request, checkout=str(self.project)), dict(self.request, issue_id='../escape'),
+                    dict(self.request, scenario='shell'), dict(self.request, run_id='../escape')]:
+            self.assertIn('error', self.executor.handle(bad))
+        subprocess.run(['git', '-C', str(self.checkout), 'checkout', '-qb', 'foreign-feature'], check=True, capture_output=True)
+        self.assertIn('error', self.executor.handle(self.request))
+        self.assertEqual(self.jobs, [])
+        subprocess.run(['git', '-C', str(self.checkout), 'checkout', '-q', 'symphony/PRO-769'], check=True, capture_output=True)
+        self.executor.handle(self.request)
+        self.executor.complete(self.completion(self.jobs[-1]))
+        changed = self.module.ManagedExecutor(dict(self.config, runtime_binding={'project_id': 'foreign'}), self.jobs.append)
+        self.addCleanup(changed.close)
+        self.assertIn('error', changed.handle(self.request))
+
+    def test_cancel_and_global_exclusivity_across_issues(self):
+        self.executor.handle(self.request)
+        other = dict(self.request, issue_id='22222222-2222-4222-8222-222222222222')
+        self.assertEqual(self.executor.handle(other)['error'], 'test_environment_needs_cleanup')
+        self.executor.handle(dict(self.request, operation='cancel'))
+        self.assertTrue((Path(self.jobs[0]['directory']) / 'cancel.json').exists())
+        self.executor.complete(self.completion(self.jobs[0], passed=False))
+        self.assertTrue(self.executor.handle(other)['running'])
+        self.assertEqual(len(self.jobs), 2)
+
+    def test_real_managed_socket_starts_once_and_exits_on_service_eof(self):
+        child = subprocess.Popen([sys.executable, str(REPO / 'scripts/test-executor.py'), '--managed'],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 env=dict(os.environ, SYMPHONY_LINEAR_SECRET_ACCESS='allowed'), text=True)
+        self.addCleanup(lambda: child.kill() if child.poll() is None else None)
+        child.stdin.write(json.dumps(self.config) + '\n')
+        child.stdin.flush()
+        self.assertEqual(json.loads(child.stdout.readline()), {'event': 'ready'})
+        self.assertEqual(Path(self.config['socket']).stat().st_mode & 0o777, 0o600)
+        def request(value):
+            with socket.socket(socket.AF_UNIX) as client:
+                client.settimeout(5)
+                client.connect(self.config['socket'])
+                client.sendall(json.dumps(value).encode() + b'\n')
+                return json.loads(client.makefile().readline())
+        self.assertTrue(request(self.request)['running'])
+        job = json.loads(child.stdout.readline())
+        self.assertEqual(job['event'], 'run')
+        self.assertTrue(request(self.request)['running'])
+        child.stdin.write(json.dumps(self.completion(job)) + '\n')
+        child.stdin.flush()
+        deadline = time.monotonic() + 5
+        result = request(dict(self.request, operation='result'))
+        while result['running'] and time.monotonic() < deadline:
+            time.sleep(.02)
+            result = request(dict(self.request, operation='result'))
+        self.assertEqual(result['status'], 'passed')
+        child.stdin.close()
+        child.wait(timeout=5)
+        self.assertEqual(child.returncode, 0, child.stderr.read())
+        self.assertFalse(Path(self.config['socket']).exists())
+        child.stdout.close()
+        child.stderr.close()
+
+    def test_symlink_and_public_result_root_rejected_before_any_run(self):
+        for config in [dict(self.config, result_root=str(self.checkout / 'results')),
+                       dict(self.config, socket=str(self.checkout / 'socket/test.sock')),
+                       dict(self.config, result_root=str(self.root / 'public'))]:
+            if config['result_root'].endswith('public'):
+                Path(config['result_root']).mkdir(mode=0o755)
+                # mkdir applies the host umask; this fixture must actually be public.
+                Path(config['result_root']).chmod(0o755)
+            with self.assertRaises(ValueError):
+                self.module.ManagedExecutor(config, self.jobs.append)
+        outside = self.root / 'outside'
+        outside.mkdir()
+        (Path(self.config['result_root']) / self.request['issue_id']).symlink_to(outside)
+        self.assertIn('error', self.executor.handle(self.request))
+        self.assertEqual(list(outside.iterdir()), [])

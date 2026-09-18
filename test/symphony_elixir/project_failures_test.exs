@@ -334,6 +334,10 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     assert ProjectContext.refresh(stale_binding) == stale_binding
     stale_root = put_in(context.settings.workspace.root, Path.join(root, "another-worktree-root"))
     assert ProjectContext.refresh(stale_root) == stale_root
+    stale_socket = put_in(context.settings.worker.test_executor_socket, Path.join(root, "executor.sock"))
+    assert ProjectContext.refresh(stale_socket) == stale_socket
+    stale_executor = put_in(context.settings.worker.test_executor, %{"result_root" => Path.join(root, "results")})
+    assert ProjectContext.refresh(stale_executor) == stale_executor
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
     File.rm!(context.workflow_path)
     assert ProjectContext.refresh(reloaded) == reloaded

@@ -605,6 +605,9 @@ Dienstbenutzer mit Modus 0700, Socket/Dateien haben Modus 0600. Der Socketpfad m
 für macOS/Linux kürzer als 104 Bytes sein. Symlink-Aliase werden abgewiesen.
 Die Einrichtung ist neustartgebunden. Beim normalen `./symphony`-Start werden
 Workspace, Projekt, vollständige Teamliste und App-Bindung frisch geprüft.
+Der CLI-Kaltstart startet dafür die HTTP-Laufzeit vor der Projektprüfung, auch
+für gebundene Prepare-/Probe-/Cleanup-Aufrufe; der Symphony-Supervisor startet
+erst nach erfolgreicher Prüfung.
 Der Supervisor startet den vorhandenen Executor aus der vertrauenswürdigen
 Installation, wartet auf Socketbereitschaft und beendet ihn mit dem Dienst.
 Kein separater Executorstart und keine Konfigurationsdatei je Ticket sind nötig.

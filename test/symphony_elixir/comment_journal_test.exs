@@ -88,6 +88,25 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert {:ok, _, []} = CommentMutations.prepare(%{"query" => "query A { viewer { id } } query B { viewer { id } }", "operationName" => "A"})
   end
 
+  test "fixture description extraction honors fragments, aliases, defaults and skipped writes" do
+    payload = %{
+      "query" => """
+      mutation Write($input: IssueUpdateInput!, $skip: Boolean! = true) {
+        ...Own
+        ignored: issueUpdate(id: "other", input: {description: "foreign"}) @skip(if: $skip) { success }
+      }
+      fragment Own on Mutation {
+        ... on Mutation { changed: issueUpdate(id: "fixture", input: $input) { success } }
+      }
+      """,
+      "variables" => %{"input" => %{"description" => "planned", "title" => "preserved"}}
+    }
+
+    assert {:ok, [%{"id" => "fixture", "description" => "planned"}]} = CommentMutations.description_updates(payload)
+    assert {:ok, []} = CommentMutations.description_updates(%{"query" => "query { issue(id: \"fixture\") { description } }"})
+    assert {:error, _} = CommentMutations.description_updates(%{"query" => "mutation {"})
+  end
+
   test "omitted optional input fields stay absent while null and defaults remain explicit" do
     query = "mutation($body: String, $quote: String = \"default\") { commentUpdate(id: \"old\", input: {body: $body, quotedText: $quote}) { success } }"
     assert {:ok, prepared, [receipt]} = CommentMutations.prepare(%{"query" => query})

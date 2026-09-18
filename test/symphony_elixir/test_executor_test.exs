@@ -151,6 +151,35 @@ defmodule SymphonyElixir.TestExecutorTest do
     refute File.exists?(ctx.config["result_root"])
   end
 
+  test "terminal reconciliation and startup preserve reserved worktrees before executor recovery", ctx do
+    context = put_in(ctx.context.settings.tracker.kind, "memory").context
+    context = put_in(context.settings.tracker.terminal_states, ["Review"])
+    issue = %Issue{id: ctx.request["issue_id"], identifier: "PRO-769", state: "Review"}
+    file = Path.join(ctx.request["checkout"], "external.txt")
+    File.write!(file, "external change")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :run_terminal_workspace_cleanup_on_start, true)
+    on_exit(fn -> Application.put_env(:symphony_elixir, :run_terminal_workspace_cleanup_on_start, false) end)
+
+    # Startup cleanup runs before the executor/ETS table exists, including
+    # when its journal is damaged or an interrupted fixture is terminal.
+    start_supervised!({Orchestrator, context: context, name: __MODULE__.Cleanup, initial_poll?: false})
+    assert File.read!(file) == "external change"
+
+    worker = spawn(fn -> receive do: (:stop -> :ok) end)
+
+    state = %Orchestrator.State{
+      running: %{issue.id => %{pid: worker, ref: nil, identifier: issue.identifier, issue: issue, started_at: DateTime.utc_now()}},
+      claimed: MapSet.new([issue.id]),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    next = ProjectContext.with_context(context, fn -> Orchestrator.reconcile_issue_states_for_test([issue], state) end)
+    refute Map.has_key?(next.running, issue.id)
+    refute Process.alive?(worker)
+    assert File.read!(file) == "external change"
+  end
+
   test "routine dispatch only releases its own active fixture and restart suspends it", ctx do
     directory = Path.join([ctx.config["result_root"], ctx.request["issue_id"], "routine-1"])
     issue = %Issue{id: "fixture", identifier: "PRO-1", state: "Todo (AI)"}

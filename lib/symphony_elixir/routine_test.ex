@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.RoutineTest do
   @moduledoc "Runs journaled dummy fixtures through the existing service and project workers."
   alias SymphonyElixir.{CommentCheckpoint, Config, Orchestrator, PathSafety, ProjectContext, Projects}
-  alias SymphonyElixir.Linear.{DurableState, WriteContext}
-  alias SymphonyElixir.{TestExecutor, TestRun}
+  alias SymphonyElixir.Linear.{CommentMutations, DurableState, WriteContext}
+  alias SymphonyElixir.{RuntimePaths, TestExecutor, TestRun}
 
   @phases ["In Arbeit (AI)", "PreReview (AI)", "Review (AI)", "Test (AI)"]
 
@@ -143,20 +143,58 @@ defmodule SymphonyElixir.RoutineTest do
   end
 
   defp probe_fixture(job, target, plan, deadline, sessions) do
+    task = Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn -> probe_snapshot(job, target, plan) end)
+
+    result =
+      try do
+        await_probe(task, job["directory"], deadline)
+      after
+        Task.shutdown(task, :brutal_kill)
+      end
+
+    with {:ok, {journal, snapshot}} <- result do
+      inspect_probe(job, target, plan, deadline, sessions, journal, snapshot)
+    end
+  end
+
+  defp probe_snapshot(job, target, plan) do
     with {:ok, journal} <- stage(target, plan, job["directory"], "probe"),
          snapshot when is_map(snapshot) <- Orchestrator.snapshot(Projects.server(target), 5_000) do
-      ids = Enum.map(journal["fixtures"], & &1["id"])
-      sessions = live_sessions(snapshot.running, ids, sessions)
-      sessions = recorded_sessions(job["directory"], ids, sessions)
-
-      if Enum.all?(journal["fixtures"], &(&1["complete"] == true)) and map_size(sessions) == length(ids) do
-        {:ok, sessions}
-      else
-        wait_fixture(job, target, plan, deadline, sessions)
-      end
+      {:ok, {journal, snapshot}}
     else
       {:error, _} = error -> error
       _ -> {:error, :runtime_unavailable}
+    end
+  end
+
+  defp await_probe(task, directory, deadline) do
+    with :ok <- continue_run(directory, deadline) do
+      result = Task.yield(task, min(50, max(0, deadline - System.monotonic_time(:millisecond))))
+      probe_reply(result, task, directory, deadline)
+    end
+  end
+
+  defp probe_reply({:ok, result}, _task, directory, deadline), do: with(:ok <- continue_run(directory, deadline), do: result)
+  defp probe_reply({:exit, _}, _task, _directory, _deadline), do: {:error, :runtime_unavailable}
+  defp probe_reply(nil, task, directory, deadline), do: await_probe(task, directory, deadline)
+
+  defp continue_run(directory, deadline) do
+    cond do
+      cancelled?(directory) -> {:error, :cancelled}
+      System.monotonic_time(:millisecond) >= deadline -> {:error, :timeout}
+      true -> :ok
+    end
+  end
+
+  defp inspect_probe(job, target, plan, deadline, sessions, journal, snapshot) do
+    ids = Enum.map(journal["fixtures"], & &1["id"])
+    sessions = live_sessions(snapshot.running, ids, sessions)
+    sessions = recorded_sessions(job["directory"], ids, sessions)
+
+    if Enum.all?(journal["fixtures"], &(&1["complete"] == true)) and map_size(sessions) == length(ids) do
+      with :ok <- continue_run(job["directory"], deadline), do: {:ok, sessions}
+    else
+      wait_fixture(job, target, plan, deadline, sessions)
     end
   end
 
@@ -243,9 +281,12 @@ defmodule SymphonyElixir.RoutineTest do
 
   defp control(directory, active), do: DurableState.write(Path.join(directory, "control.json"), %{"active" => active})
 
-  defp target? do
+  @spec manages_project?() :: boolean()
+  def manages_project? do
     Config.test_executor() != nil and match?(%ProjectContext{name: "symphony-test"}, ProjectContext.current())
   end
+
+  defp target?, do: manages_project?()
 
   defp fixture(id) do
     root = Config.test_executor()["result_root"]
@@ -265,6 +306,67 @@ defmodule SymphonyElixir.RoutineTest do
 
   @spec owns?(String.t()) :: boolean()
   def owns?(id), do: target?() and fixture(id) != nil
+
+  @spec prepare_description_updates(map()) :: :ok | {:error, term()}
+  def prepare_description_updates(payload) do
+    if Config.test_executor() do
+      context = ProjectContext.current() || helper_context()
+      ProjectContext.with_context(context, fn -> prepare_bound_descriptions(payload) end)
+    else
+      :ok
+    end
+  end
+
+  defp helper_context do
+    root = ProjectContext.env("SYMPHONY_PROJECT_ROOT") || RuntimePaths.project_root()
+    %ProjectContext{id: root, root: root, name: Path.basename(root), settings: Config.settings!()}
+  end
+
+  defp prepare_bound_descriptions(payload) do
+    if target?(), do: collect_description_updates(payload), else: :ok
+  end
+
+  defp collect_description_updates(payload) do
+    with {:ok, updates} <- CommentMutations.description_updates(payload),
+         true <- Enum.uniq_by(updates, & &1["id"]) == updates do
+      Enum.reduce_while(updates, :ok, &record_description_update/2)
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :duplicate_fixture_description_update}
+    end
+  end
+
+  defp record_description_update(update, :ok) do
+    case record_description_update(update) do
+      :ok -> {:cont, :ok}
+      error -> {:halt, error}
+    end
+  end
+
+  defp record_description_update(update) do
+    writer = WriteContext.current()
+    id = update["id"]
+
+    case fixture(writer["issue_id"]) do
+      {directory, %{"id" => fixture_id, "identifier" => identifier}} when id in [fixture_id, identifier] ->
+        persist_description(directory, fixture_id, update["description"], writer)
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp persist_description(directory, fixture_id, description, writer) do
+    with true <- writer["phase"] in ["Todo (AI)", "Planung (AI)"],
+         {:ok, %{"active" => true}} <- DurableState.read(Path.join(directory, "control.json")),
+         {:ok, plan} <- DurableState.read(Path.join(directory, "plan.json")) do
+      TestRun.with_routine(ProjectContext.current(), plan, directory, "probe", fn ->
+        TestRun.record_description_intent(fixture_id, description, writer)
+      end)
+    else
+      _ -> {:error, :test_description_update_unbound}
+    end
+  end
 
   @spec start_allowed?(map()) :: boolean()
   def start_allowed?(issue) do

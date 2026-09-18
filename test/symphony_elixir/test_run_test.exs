@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.TestRunTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.Codex.TestTool
+  alias SymphonyElixir.Codex.{MCPServer, TestTool}
   alias SymphonyElixir.Linear.{DurableState, WriteContext}
   alias SymphonyElixir.{ProjectContext, TestRun}
   alias SymphonyElixir.Relay.Store
@@ -589,6 +589,168 @@ defmodule SymphonyElixir.TestRunTest do
     assert Agent.get(ctx.source_agent, &map_size(&1.issues)) == 1
   end
 
+  test "cancel arriving inside the successful final probe cannot pass", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    caller = self()
+
+    :sys.replace_state(SymphonyElixir.Projects.server(context), fn opts ->
+      Keyword.put(opts, :complete, fn ->
+        complete(ctx.source_agent)
+        count = Process.get(:probe_count, 0) + 1
+        Process.put(:probe_count, count)
+        if count == 2, do: send(caller, :cancel_test)
+      end)
+    end)
+
+    runtime = Map.take(request, ~w(head_sha source_sha256)) |> Map.put("sha", request["head_sha"])
+    result = SymphonyElixir.RoutineTest.run(job, [context], config, runtime, self())
+    assert result["status"] == "failed"
+    assert result["error"] == "cancelled"
+    assert result["cleanup"]
+  end
+
+  test "own planning descriptions remain bound through lost responses while external edits block cleanup", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, %{request | "scenario" => "workflow"})
+    plan = %{"instance" => "routine", "run_id" => request["run_id"], "scenario" => "workflow", "source" => ctx.plan["source"]}
+    :ok = DurableState.write(Path.join(job["directory"], "plan.json"), plan)
+    :ok = DurableState.write(Path.join(job["directory"], "control.json"), %{"active" => true})
+
+    stage = fn operation ->
+      TestRun.with_routine(context, plan, job["directory"], operation, fn -> TestRun.execute(operation) end)
+    end
+
+    assert {:ok, %{"fixtures" => [fixture]}} = stage.("prepare")
+    Agent.update(ctx.source_agent, &put_in(&1.issues[fixture["id"]]["state"]["name"], "Planung (AI)"))
+
+    for failure <- [nil, :lost_description] do
+      description = "## Zusammenfassung\n\nGeplanter Lauf #{inspect(failure)}\n\n---\n\n" <> fixture["description"]
+      Agent.update(ctx.source_agent, &%{&1 | failure: failure})
+
+      result =
+        ProjectContext.with_context(context, fn ->
+          WriteContext.with_context(%{issue_id: fixture["id"], phase: "Planung (AI)", run_id: "planning-run"}, fn ->
+            Client.graphql("mutation OwnFixtureDescription($id: String!, $description: String!) { changed: issueUpdate(id: $id, input: {description: $description}) { success } }", %{
+              id: fixture["id"],
+              description: description
+            })
+          end)
+        end)
+
+      if failure, do: assert(match?({:error, _}, result)), else: assert(match?({:ok, _}, result))
+      Agent.update(ctx.source_agent, &%{&1 | failure: nil})
+      assert {:ok, _} = stage.("probe")
+    end
+
+    # The fallback MCP helper has no service process context or executor ETS.
+    previous_settings = Application.get_env(:symphony_elixir, :service_settings)
+    Application.put_env(:symphony_elixir, :service_settings, context.settings)
+    System.put_env("SYMPHONY_PROJECT_ROOT", context.root)
+    System.put_env("SYMPHONY_ISSUE_ID", fixture["id"])
+    System.put_env("SYMPHONY_PHASE", "Planung (AI)")
+
+    try do
+      result =
+        MCPServer.handle_request(%{
+          "jsonrpc" => "2.0",
+          "id" => 1,
+          "method" => "tools/call",
+          "params" => %{
+            "name" => "linear_graphql",
+            "arguments" => %{
+              "query" => "mutation OwnFixtureDescription($id: String!, $description: String!) { changed: issueUpdate(id: $id, input: {description: $description}) { success } }",
+              "variables" => %{"id" => fixture["id"], "description" => "MCP planning description"}
+            }
+          }
+        })
+
+      refute result["result"]["isError"], inspect(result)
+      assert {:ok, _} = stage.("probe")
+    after
+      if previous_settings,
+        do: Application.put_env(:symphony_elixir, :service_settings, previous_settings),
+        else: Application.delete_env(:symphony_elixir, :service_settings)
+
+      for key <- ~w(SYMPHONY_PROJECT_ROOT SYMPHONY_ISSUE_ID SYMPHONY_PHASE), do: System.delete_env(key)
+    end
+
+    receipt_path = Path.join([job["directory"], "descriptions", fixture["id"] <> ".json"])
+    assert {:ok, receipt} = DurableState.read(receipt_path)
+    assert receipt["source"] == plan["source"]
+    assert receipt["writer"]["phase"] == "Planung (AI)"
+    DurableState.write(receipt_path, %{receipt | "source" => %{}})
+    assert {:error, :test_fixture_changed_externally} = stage.("probe")
+    DurableState.write(receipt_path, receipt)
+
+    rejected =
+      ProjectContext.with_context(context, fn ->
+        WriteContext.with_context(%{issue_id: fixture["id"], phase: "In Arbeit (AI)"}, fn ->
+          Client.graphql("mutation OwnFixtureDescription($id: String!, $description: String!) { changed: issueUpdate(id: $id, input: {description: $description}) { success } }", %{
+            id: fixture["id"],
+            description: "not allowed"
+          })
+        end)
+      end)
+
+    assert {:error, :test_description_update_unbound} = rejected
+
+    own = Agent.get(ctx.source_agent, & &1.issues[fixture["id"]]["description"])
+    Agent.update(ctx.source_agent, &put_in(&1.issues[fixture["id"]]["description"], "external edit"))
+    assert {:error, :test_fixture_changed_externally} = stage.("cleanup")
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+    Agent.update(ctx.source_agent, &put_in(&1.issues[fixture["id"]]["description"], own))
+    assert {:ok, %{"fixtures" => [%{"deleted" => true}]}} = stage.("cleanup")
+  end
+
+  test "a slow final probe is bounded by the remaining deadline", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+
+    :sys.replace_state(SymphonyElixir.Projects.server(context), fn opts ->
+      Keyword.put(opts, :complete, fn ->
+        complete(ctx.source_agent)
+        count = Process.get(:probe_count, 0) + 1
+        Process.put(:probe_count, count)
+        if count == 2, do: Process.sleep(1_200)
+      end)
+    end)
+
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    result = SymphonyElixir.RoutineTest.run(job, [context], %{config | "timeout" => 1}, runtime, self())
+    assert result["status"] == "failed"
+    assert result["error"] == "timeout"
+    assert result["cleanup"]
+  end
+
+  test "blocked probe calls are stopped on cancel or timeout before cleanup", ctx do
+    {context, config, request} = routine_context(ctx)
+    parent = self()
+    request_fun = Application.fetch_env!(:symphony_elixir, :linear_client_request_fun)
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+      if TestRun.stage() == "probe" and (payload["query"] || payload[:query]) =~ "query TestFixture(" do
+        send(parent, {:blocked_probe, self()})
+        receive do: (:release_probe -> :ok)
+      end
+
+      request_fun.(payload, headers)
+    end)
+
+    for {run_id, timeout} <- [{"blocked-cancel", 30}, {"blocked-timeout", 1}] do
+      job = routine_job(config, %{request | "run_id" => run_id})
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      task = Task.async(fn -> SymphonyElixir.RoutineTest.run(job, [context], %{config | "timeout" => timeout}, runtime, self()) end)
+      assert_receive {:blocked_probe, probe}, 2_000
+      if timeout == 30, do: send(task.pid, :cancel_test)
+      assert {:ok, result} = Task.yield(task, 2_500)
+      refute Process.alive?(probe)
+      assert result["status"] == "failed"
+      assert result["error"] == if(timeout == 30, do: "cancelled", else: "timeout")
+      assert result["cleanup"]
+    end
+  end
+
   defp routine_job(config, request) do
     directory = Path.join([config["result_root"], request["issue_id"], request["run_id"]])
     File.mkdir_p!(directory)
@@ -707,6 +869,13 @@ defmodule SymphonyElixir.TestRunTest do
 
   defp respond_routine_query(query, variables, state) do
     cond do
+      query =~ "OwnFixtureDescription" ->
+        updated = put_in(state.issues[variables["id"]]["description"], variables["description"])
+
+        if state.failure == :lost_description,
+          do: {{:error, :lost_response}, updated},
+          else: answer(%{"changed" => %{"success" => true}}, updated)
+
       query =~ "SymphonyRoutineBinding" ->
         answer(
           %{

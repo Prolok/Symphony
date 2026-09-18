@@ -638,7 +638,16 @@ unterbrochene Läufe bleiben fehlgeschlagen und verlangen `cleanup`, bevor ein
 neuer Lauf zulässig ist. Ein verlorener Socketprozess wird durch den Supervisor
 begrenzt neu gestartet. Offene/fremde/beschädigte Journale sperren Neuanlagen.
 Cancel/Timeout sperren weitere Fixturestarts, stoppen nur eigene Worker und nutzen
-den bestehenden prüfenden Cleanup. Änderungen von außen bleiben erhalten und
+den bestehenden prüfenden Cleanup. Probeabfragen sind an die verbleibende Laufzeit
+gebunden; Cancel und Frist werden vor Übernahme eines Erfolgs erneut geprüft.
+Im reservierten Dummy-Projekt überlässt auch der reguläre Terminal-/Startup-Cleanup
+die Worktrees diesem prüfenden Cleanup, unabhängig vom Executor-Startzustand.
+Im Szenario `workflow` wird zulässige Beschreibungspflege durch den gebundenen
+Todo-/Planungsworker vor der Mutation mit Quelle, Fixture, Phase und altem/neuem
+Text journalisiert.
+Beide Tooltransporte verwenden diesen Beleg; eine verlorene Antwort erfordert
+keine Wiederholung der Mutation. Abweichende Beschreibungen bleiben gesperrt.
+Änderungen von außen bleiben erhalten und
 werden als unbestätigter Cleanup sichtbar. Ergebnisbelege enthalten Lauf/Quelle,
 Dienst-PID/Buildstand, Fixture-/Sessionbezug und den Bereinigungszustand; synthetische
 Tests sind ausdrücklich `fixture`, niemals Liveabnahmen. Cleanup macht FAILED

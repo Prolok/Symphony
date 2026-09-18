@@ -841,6 +841,7 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
 - Symphony klärt nach dem Workerabschluss den Ticketzustand frisch und führt bei
   terminalem Status den bestehenden Workspace-Cleanup aus. Offene Statusklärung
   bleibt im Retry; laufende Merge-Abschlussprüfungen behalten den Workspace.
+  Reservierte Routine-Testworktrees bereinigt ausschließlich der gebundene Testlauf.
 - Ein normal beendeter Hauptturn alleine belegt keinen abgeschlossenen Merge.
   Falls das Issue nach einem sauber beendeten `Merge (AI)`-Turn noch in
   `Merge (AI)` steht, darf Symphony nur mit eindeutiger Workpad-`Merge-Evidenz`

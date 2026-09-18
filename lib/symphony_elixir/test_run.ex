@@ -321,12 +321,7 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp inspect_observed(stage, issue, context, fixture, plan, journal) when is_map(issue) do
-    owned =
-      issue["id"] == fixture["id"] and issue["title"] == fixture["title"] and issue["description"] == fixture["description"] and
-        get_in(issue, ["project", "id"]) == fixture["project_id"] and get_in(issue, ["team", "id"]) == fixture["team_id"] and
-        get_in(issue, ["assignee", "id"]) == fixture["assignee_id"]
-
-    if owned do
+    if owned_fixture?(issue, fixture, plan) do
       inspect_owned(stage, issue, context, fixture, plan, journal)
     else
       {:error, :test_fixture_changed_externally}
@@ -334,6 +329,62 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp inspect_observed(_, _, _, _, _, _), do: {:error, :test_fixture_missing}
+
+  defp owned_fixture?(issue, fixture, plan) do
+    issue["id"] == fixture["id"] and issue["title"] == fixture["title"] and description_matches?(issue["description"], fixture, plan) and
+      get_in(issue, ["project", "id"]) == fixture["project_id"] and get_in(issue, ["team", "id"]) == fixture["team_id"] and
+      get_in(issue, ["assignee", "id"]) == fixture["assignee_id"]
+  end
+
+  defp description_matches?(description, fixture, plan) do
+    if routine() && plan["scenario"] == "workflow" do
+      case DurableState.read(description_receipt_path(plan, fixture)) do
+        {:ok, receipt} ->
+          bound_description?(receipt, fixture, plan) and description in [receipt["previous"], receipt["description"]]
+
+        {:error, :enoent} ->
+          description == fixture["description"]
+
+        _ ->
+          false
+      end
+    else
+      description == fixture["description"]
+    end
+  end
+
+  defp bound_description?(receipt, fixture, plan) do
+    receipt["source"] == plan["source"] and receipt["fixture_id"] == fixture["id"] and
+      get_in(receipt, ["writer", "issue_id"]) == fixture["id"] and
+      get_in(receipt, ["writer", "phase"]) in ["Todo (AI)", "Planung (AI)"]
+  end
+
+  @doc false
+  @spec record_description_intent(String.t(), String.t(), map()) :: :ok | {:error, term()}
+  def record_description_intent(id, description, writer) do
+    with true <- routine() != nil and is_binary(description),
+         {:ok, %{"scenario" => "workflow"} = plan} <- plan(),
+         {:ok, journal} <- journal(plan),
+         %{} = fixture <- Enum.find(journal["fixtures"], &(&1["id"] == id and &1["deleted"] == false)),
+         {:ok, %{"issue" => issue}} <-
+           query("query TestFixture($id: String!) { issue(id: $id) { id identifier title description project { id } team { id } assignee { id } state { name } } }", %{id: id}),
+         true <- is_map(issue) and owned_fixture?(issue, fixture, plan) and get_in(issue, ["state", "name"]) == writer["phase"] do
+      # Intent precedes HTTP: an uncertain reply can be reconciled against
+      # exactly the authorized old/new values without replaying the mutation.
+      DurableState.write(description_receipt_path(plan, fixture), %{
+        "source" => plan["source"],
+        "fixture_id" => id,
+        "previous" => issue["description"],
+        "description" => description,
+        "writer" => Map.take(writer, ~w(issue_id phase run_id session_id tool_call_id))
+      })
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :test_description_update_unbound}
+    end
+  end
+
+  defp description_receipt_path(plan, fixture), do: Path.join([Path.dirname(journal_path(plan)), "descriptions", fixture["id"] <> ".json"])
 
   defp fixture_description(%{"scenario" => "workflow"} = plan) do
     "Freigegebener Symphony-Routinetest #{plan["run_id"]}. Erstelle ausschließlich test-runs/#{plan["run_id"]}.txt mit dem Inhalt #{plan["run_id"]}. Führe den regulären Workflow einschließlich aller konfigurierten Qualitäts-, Freigabe- und Merge-Gates aus. Keine Änderungen an anderen Dateien oder Produktprojekten. Erfolg ist die gemergte PR mit Merge-Evidenz im Workpad und Status Review. Testdatei als nachvollziehbaren Testbeleg erhalten."

@@ -1804,7 +1804,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)
 
   defp cleanup_issue_workspace(identifier, worker_host) when is_binary(identifier) do
-    Workspace.remove_issue_workspaces(identifier, worker_host)
+    # The reserved routine project is cleaned only by TestRun's identity,
+    # source and cleanliness checks, including before executor recovery.
+    unless SymphonyElixir.RoutineTest.manages_project?() do
+      Workspace.remove_issue_workspaces(identifier, worker_host)
+    end
   end
 
   defp cleanup_issue_workspace(_identifier, _worker_host), do: :ok

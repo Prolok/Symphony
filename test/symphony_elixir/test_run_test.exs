@@ -530,6 +530,79 @@ defmodule SymphonyElixir.TestRunTest do
     assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
   end
 
+  test "managed early owner failure recovers the old run before permitting another start", ctx do
+    {context, config, request} = routine_context(ctx)
+    startup = %{context | assignee_ids: nil}
+    parent = self()
+
+    runner = fn job, contexts, settings, _runtime, owner ->
+      source = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      source = if job["cleanup"], do: %{}, else: source
+      result = RoutineTest.run(job, contexts, settings, source, owner)
+      send(parent, {:early_result, result})
+      Map.put(result, "evidence", "fixture")
+    end
+
+    :sys.replace_state(SymphonyElixir.ProjectPoller, &Keyword.put(&1, :context, startup))
+    start_supervised!({SymphonyElixir.TestExecutor, contexts: [startup], name: __MODULE__.Executor, runner: runner})
+    socket = context.settings.worker.test_executor_socket
+    assert {:ok, _} = TestTool.request(socket, request)
+    assert_receive {:early_result, %{"status" => "failed", "cleanup" => false}}, 5_000
+    await_routine_result(socket, request)
+    directory = Path.join([config["result_root"], request["issue_id"], request["run_id"]])
+    for file <- ~w(plan.json control.json fixtures.json), do: refute(File.exists?(Path.join(directory, file)))
+    next = %{request | "run_id" => "after-early-cleanup"}
+    assert {:error, {:test_executor_rejected, "test_environment_needs_cleanup"}} = TestTool.request(socket, next)
+
+    :sys.replace_state(SymphonyElixir.ProjectPoller, &Keyword.put(&1, :context, context))
+    assert {:ok, _} = TestTool.request(socket, %{request | "operation" => "cleanup"})
+    assert_receive {:early_result, recovered}, 5_000
+    assert recovered["status"] == "failed"
+    assert recovered["cleanup"]
+    assert recovered["fixtures"] == []
+    assert recovered["source"]["sha"] == request["head_sha"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    await_routine_result(socket, request)
+    cleanup_request = %{request | "operation" => "cleanup"}
+    assert {:ok, %{"status" => "failed", "cleanup" => true}} = TestTool.request(socket, cleanup_request)
+    assert {:ok, _} = TestTool.request(socket, next)
+    assert_receive {:early_result, %{"status" => "passed", "cleanup" => true}}, 5_000
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+  end
+
+  test "early routine recovery preserves damaged or foreign fixture journals", ctx do
+    {context, config, request} = routine_context(ctx)
+
+    for kind <- ["corrupt", "foreign"] do
+      job = routine_job(config, %{request | "run_id" => "early-" <> kind})
+      recovery = %{job | "cleanup" => true}
+      assert RoutineTest.run(recovery, [context], config, %{}, self())["cleanup"]
+      {:ok, plan} = DurableState.read(Path.join(job["directory"], "plan.json"))
+      {:ok, journal} = TestRun.routine_journal(context, plan, job["directory"])
+      foreign = Jason.encode!(Map.put(journal, "source", %{"sha" => "foreign"}))
+      bytes = if kind == "corrupt", do: "invalid", else: foreign
+      path = Path.join(job["directory"], "fixtures.json")
+      File.write!(path, bytes)
+      result = RoutineTest.run(recovery, [context], config, %{}, self())
+      refute result["cleanup"]
+      assert result["status"] == "failed"
+      assert File.read!(path) == bytes
+    end
+
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+  end
+
+  defp await_routine_result(socket, request, attempts \\ 100) do
+    assert attempts > 0
+    assert {:ok, result} = TestTool.request(socket, %{request | "operation" => "result"})
+
+    if result["running"] do
+      Process.sleep(20)
+      await_routine_result(socket, request, attempts - 1)
+    end
+  end
+
   test "routine caller authorization uses resolved polling context instead of startup context", ctx do
     {context, config, request} = routine_context(ctx)
     startup = %{context | assignee_ids: nil}

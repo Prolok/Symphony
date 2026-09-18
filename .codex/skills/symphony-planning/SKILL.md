@@ -43,8 +43,14 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
 
 - Plan und Validierung vor der Umsetzung kritisch prüfen und schärfen.
 - Keine unscharfen Sammelpunkte als Hauptschritte.
-- Offene Entscheidungen zu Funktionalität, Verhalten oder Produktausgaben nicht
-  still treffen; mit empfohlenem Lösungsvorschlag als Klärungsbedarf festhalten.
+- Kleine reversible Fach- und Implementierungsentscheidungen im Auftrag autonom
+  treffen; Anforderungen, Konventionen und bestätigte Entscheidungen ausschöpfen.
+  Relevante Annahmen kurz begründen. Technische Details und kleine
+  Verhaltensvarianten allein verlangen keine manuelle Planung.
+- Nur wesentliche, aus dem Kontext nicht auflösbare Entscheidungen über
+  Produktziel, Leistungsumfang oder strategisches Verhalten nach `Planung`
+  übergeben: Entscheidung, Empfehlung, bisherige Klärungsversuche, Grenze der
+  Autonomie und genaue Fortsetzungsbedingung knapp nennen.
 - Am Ende von `Planung (AI)` entscheiden, ob autonome Umsetzung möglich ist.
   Wenn nicht, müssen offene Fragen und empfohlene Lösungen direkt entscheidbar
   sein.
@@ -57,6 +63,8 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
 - Verpflichtende Ticketvorgaben nicht eigenmächtig entfernen oder abschwächen.
   Spätere belegte menschliche Gateentscheidungen gemäß `symphony-workpad`
   übernehmen; überholte Beschreibungs-/Workpad-Defaults widerrufen sie nicht.
-- Bei unklarem oder erweitertem Scope keine Anforderungen erfinden; betrifft die
-  neue Erkenntnis Funktionalität, Verhalten oder Produktausgaben, als
-  Klärungsbedarf mit empfohlenem Lösungsvorschlag behandeln.
+- Keinen Scope erfinden oder erweitern. Die gleiche Wesentlichkeitsschwelle gilt
+  für spätere Plananpassungen; behebbare Fehler lösen Nacharbeit in der aktuellen
+  Phase aus. Fehlender positiver Beleg sperrt das Gate, nicht die Fehlerkorrektur.
+- Planungs-/Klärungstexte gemäß Schreibvertrag in `symphony-workpad` verdichten;
+  Originalbeschreibungen bei vorgeschriebener Archivierung unverändert erhalten.

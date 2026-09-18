@@ -15,7 +15,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 BOOT = r'''
-import importlib.machinery,importlib.util,json,os,signal,sys
+import importlib.machinery,importlib.util,json,os,pathlib,signal,sys
 loader=importlib.machinery.SourceFileLoader('runner',sys.argv[1])
 spec=importlib.util.spec_from_loader('runner',loader)
 m=importlib.util.module_from_spec(spec);loader.exec_module(m)
@@ -24,6 +24,7 @@ capsule=json.loads(os.environ['FIXTURE_CAPSULE'])
 run.test.preflight=lambda *_: capsule
 run.test.normal_service_running=lambda: True
 run.test.process_started=lambda _: 'fixture-main'
+run.fixture_journal_path=lambda: pathlib.Path(args.result_dir)/'fixtures.json'
 run.competition=lambda: None # Real competing processes are covered separately.
 run.result['evidence']='fixture'
 def interrupt(number,_):
@@ -38,6 +39,7 @@ capsule=json.loads(os.environ['FIXTURE_CAPSULE'])
 scenario=os.environ.get('FIXTURE_SCENARIO','success')
 stage=os.environ['SYMPHONY_TEST_RUN_STAGE']
 root=pathlib.Path(os.environ['SYMPHONY_TEST_RUN_PLAN']).parent
+if scenario=='compile_failed': sys.exit(1) # No compiled runtime or fixture intent.
 fixtures=[dict(id=str(i),project=name,created=True,deleted=False,complete=True) for i,name in enumerate(capsule['manifest']['projects'],1)]
 if stage=='run':
     worker=subprocess.Popen([sys.executable,'-c','import time;time.sleep(120)'],start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -53,6 +55,7 @@ if stage=='run':
             self.send_response(200);self.end_headers();self.wfile.write(json.dumps(data).encode())
     http.server.HTTPServer(('127.0.0.1',int(sys.argv[-1])),Handler).serve_forever()
 elif stage=='prepare':
+    (root/'fixtures.json').write_text(json.dumps(dict(fixtures=fixtures)))
     (root/'remote-fixtures.json').write_text(json.dumps(fixtures))
     if scenario=='prepare_lost': sys.exit(1)
 else:
@@ -107,12 +110,14 @@ class TestRunnerProtocol(unittest.TestCase):
     def git(self, root, *args):
         return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.DEVNULL).decode().strip()
 
-    def start(self, scenario='success', checkout=None, mode='development', resume=False, cleanup=False):
+    def start(self, scenario='success', checkout=None, mode='development', resume=False, cleanup=False, probe=False):
         checkout = checkout or self.source
         spec = importlib.util.spec_from_file_location('test_instance', REPO / 'scripts/test-instance.py')
         helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
         source = helper.source(checkout)
         self.result_dir = self.root / ('results-' + scenario)
+        if cleanup and resume:
+            source = json.loads((self.result_dir/'plan.json').read_text())['source']
         capsule = dict(source=source, name='dev', manifest=dict(projects=self.bindings,project_root=str(self.collector),
                       main_instance=dict(pid=os.getpid(),started='fixture-main')))
         with socket.socket() as listener:
@@ -120,6 +125,7 @@ class TestRunnerProtocol(unittest.TestCase):
         args = ['--checkout',str(checkout),'--test-instance','dev','--manifest',str(self.manifest),'--run-id','fixture',
                 '--expected-sha',source['sha'],'--expected-source',source['source_sha256'],'--port',str(port),
                 '--result-dir',str(self.result_dir),'--timeout','2' if scenario=='not_ready' else '10','--source-mode',mode]
+        if probe:args+=['--scenario','failure-probe']
         if resume:args+=['--resume']
         if cleanup:args+=['--cleanup-only']
         env=dict(os.environ,FIXTURE_CAPSULE=json.dumps(capsule),FIXTURE_SCENARIO="recovered" if cleanup else scenario,
@@ -144,6 +150,69 @@ class TestRunnerProtocol(unittest.TestCase):
                 state=subprocess.run(['ps','-p',pid,'-o','stat='],capture_output=True).stdout.strip()
                 self.assertTrue(not state or state.startswith(b'Z'),(pid,state))
         return result
+
+    def test_intentional_probe_cleans_fixtures_before_corrected_source_retest(self):
+        failed = self.start(scenario='negative-probe', probe=True)
+        result = self.receipt(failed)
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(result['error'], 'intentional_failure_probe')
+        self.assertTrue(result['cleanup'])
+        self.assertTrue(result['main_preserved'])
+        self.assertTrue(result['originals_preserved'])
+        self.assertFalse((self.result_dir/'remote-fixtures.json').exists())
+        (self.source/'corrected-source').write_text('correction after negative integration result')
+        passed = self.start(scenario='corrected-probe')
+        corrected = self.receipt(passed)
+        self.assertEqual(passed.returncode, 0)
+        self.assertNotEqual(result['source']['source_sha256'], corrected['source']['source_sha256'])
+        self.assertTrue(corrected['cleanup'])
+
+    def test_compile_failure_without_fixture_intent_allows_corrected_retest(self):
+        failed = self.start(scenario='compile_failed')
+        result = self.receipt(failed)
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(result['error'], 'prepare_failed')
+        self.assertTrue((self.result_dir/'plan.json').exists())
+        self.assertFalse((self.result_dir/'fixtures.json').exists())
+        self.assertTrue(result['cleanup'])
+        self.assertEqual(result['cleanup_scope'], 'no_fixture_intent')
+        self.assertEqual(result['status'], 'failed')
+        # Recover an older receipt after an executor restart, even when the
+        # original broken source/build is no longer available.
+        result['cleanup'] = False
+        (self.result_dir/'result.json').write_text(json.dumps(result))
+        (self.source/'bin/symphony').unlink()
+        (self.source/'corrected-source').write_text('compile error fixed')
+        recovered = self.receipt(self.start(scenario='compile_failed', resume=True, cleanup=True))
+        self.assertTrue(recovered['cleanup'])
+        self.assertEqual(recovered['source'], result['source'])
+        self.assertEqual(recovered['status'], 'failed')
+        (self.source/'bin/symphony').write_bytes((self.source/'symphony').read_bytes())
+        (self.source/'bin/symphony').chmod(0o755)
+        corrected = self.start(scenario='corrected-build')
+        self.assertEqual(self.receipt(corrected)['status'], 'passed')
+
+    def test_existing_or_uncertain_fixture_journal_still_requires_runtime_cleanup(self):
+        loader = importlib.machinery.SourceFileLoader('runner_journal', str(REPO / 'scripts/test-instance-run'))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        runner = importlib.util.module_from_spec(spec)
+        loader.exec_module(runner)
+        args = runner.parser().parse_args([
+            '--checkout', str(self.source), '--test-instance', 'dev', '--manifest', str(self.manifest),
+            '--run-id', 'fixture', '--expected-sha', 'a' * 40, '--expected-source', 'b' * 64,
+            '--port', '4101', '--result-dir', str(self.root/'results')])
+        run = runner.Run(args)
+        journal = self.root/'fixtures.json'
+        run.fixture_journal_path = lambda: journal
+        for contents in ('broken JSON', '{}', '{"fixtures": []}'):
+            journal.write_text(contents)
+            self.assertFalse(run.confirm_no_fixture_intent())
+            self.assertFalse(run.result['cleanup'])
+        journal.unlink()
+        journal.symlink_to(self.root/'missing-journal')
+        self.assertFalse(run.confirm_no_fixture_intent())
+        with mock.patch.object(run.test, 'canonical', side_effect=PermissionError):
+            self.assertFalse(run.confirm_no_fixture_intent())
 
     def test_complete_development_run_and_independent_merged_checkout(self):
         first=self.start()

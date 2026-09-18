@@ -19,7 +19,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                "name" => "linear_graphql"
              },
              %{"name" => "symphony_comments"},
-             %{"name" => "symphony_merge"}
+             %{"name" => "symphony_merge"},
+             %{"name" => "symphony_test"}
            ] = DynamicTool.tool_specs()
 
     assert description =~ "Linear"
@@ -33,7 +34,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql", "symphony_comments", "symphony_merge"]
+               "supportedTools" => ["linear_graphql", "symphony_comments", "symphony_merge", "symphony_test"]
              }
            }
 

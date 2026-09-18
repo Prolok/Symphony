@@ -160,7 +160,7 @@ defmodule SymphonyElixir.RetryRefreshTest do
     end
   end
 
-  for failure <- [:api, :rate_limit] do
+  for failure <- [:api, :unavailable, :rate_limit] do
     test "#{failure} during completion refresh retains the retry until recovery" do
       {context, issue, workspace, state} = completion_fixture(:stale)
       settings = context.settings
@@ -179,7 +179,7 @@ defmodule SymphonyElixir.RetryRefreshTest do
         else
           assert query =~ "SymphonyLinearIssuesById"
           send(parent, :completion_api_read)
-          {:error, :timeout}
+          if unquote(failure) == :unavailable, do: {:ok, %{status: 503, body: %{}}}, else: {:error, :timeout}
         end
       end)
 
@@ -207,7 +207,7 @@ defmodule SymphonyElixir.RetryRefreshTest do
             assert retained.due_at_ms >= System.monotonic_time(:millisecond) + 3_590_000
             refute_received :completion_api_read
           else
-            assert retained.error =~ "linear_app_request_unavailable"
+            assert retained.error =~ if(unquote(failure) == :unavailable, do: "503", else: "linear_app_request_unavailable")
             assert_received :completion_api_read
           end
 

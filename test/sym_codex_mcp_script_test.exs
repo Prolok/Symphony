@@ -1,5 +1,5 @@
 defmodule SymCodexMcpScriptTest do
-  alias SymphonyElixir.Codex.{CommentTool, MergeTool}
+  alias SymphonyElixir.Codex.{CommentTool, MergeTool, TestTool}
   use ExUnit.Case
 
   @script_path Path.expand("../sym-codex-mcp", __DIR__)
@@ -134,9 +134,10 @@ defmodule SymCodexMcpScriptTest do
              }
            }
 
-    assert [linear_tool, comment_tool, merge_tool] = get_in(tools_list, ["result", "tools"])
+    assert [linear_tool, comment_tool, merge_tool, test_tool] = get_in(tools_list, ["result", "tools"])
     assert comment_tool == CommentTool.tool_spec()
     assert merge_tool == MergeTool.tool_spec()
+    assert test_tool == TestTool.tool_spec()
 
     assert [linear_tool] == [
              %{

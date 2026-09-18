@@ -29,9 +29,9 @@ Nur im Merge-Schritt des Workflows verwenden.
 Bei autorisiertem Direkteinstieg fehlende frühere Planungs-/PreReview-/Reviewhistorie
 nicht nachfordern; den bewussten Skip mit Quelle und Geltungsbereich gemäß
 `symphony-workpad` einordnen. Vor dem Merge sämtliche dafür fälligen Nachweise
-einschließlich Betreiberbelegen auf Ergebnis, Scope und Stand prüfen. Ohne neue
-passende Belege eine bestehende Betreiberübergabe erhalten und gemäß Workflow
-nach `BLOCKER` zurückgeben. Fehlt aktuelle lokale Test-Evidenz, nach `Test (AI)`
+einschließlich Betreiberbelegen auf Ergebnis, Scope und Stand prüfen. Ohne passende Belege bleibt das Gate offen. Zuerst zulässige Nacharbeit
+und gebundene Prüfwege nutzen; nur ohne autonomen Fortsetzungsweg eine bestehende
+Betreiberübergabe erhalten und gemäß Workflow nach `BLOCKER` zurückgeben. Fehlt aktuelle lokale Test-Evidenz, nach `Test (AI)`
 übergeben; ein Review-Skip ersetzt weder Tests noch das GitHub-Approval-Gate
 `Requires Manual Review`.
 
@@ -211,3 +211,11 @@ Der Watch-Helper allein erteilt weiterhin keine Merge-Freigabe. Exit `9` im
 gebundenen Pfad bedeutet fehlgeschlagenen Kommentarcheckpoint; Eingaben prüfen
 oder den Scan nach Erholung der API wiederholen. Das API-/Aktionszeitfenster ist
 nicht atomar; `--match-head-commit` bewahrt zusätzlich die bestehende Head-Bindung.
+
+## Nacharbeit und knappe Übergaben
+
+Negative Befunde im Scope zuerst autonom beheben; fehlender positiver Beleg
+sperrt das Gate, nicht zulässige Nacharbeit. Die bestehenden Wiederholungsregeln
+und Merge→Test bei Dateiänderungen bleiben erhalten. Entscheidungs-/Eskalations-
+schwelle gemäß Workflow, knappe Texte und Nach-Fix-Kommentare gemäß
+`symphony-workpad`; Fehlerzahl/Aufwand/max_turns allein begründen keinen BLOCKER.

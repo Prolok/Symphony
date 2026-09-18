@@ -131,3 +131,11 @@ nach `Freigabe Review` verschieben; mit `--yolo` oder `Skip "Freigabe Review"`
 direkt nach `Test (AI)` weitergeben. Bei jedem Statuswechsel den Turn sofort
 beenden. Bei `agent.max_turns` Abweichungen dokumentieren und ohne Statuswechsel
 stoppen; `agent.max_turns` ist kein normaler Phasenabschluss.
+
+## Nacharbeit und knappe Übergaben
+
+Negative Befunde im Scope zuerst autonom beheben; fehlender positiver Beleg
+sperrt das Gate, nicht zulässige Nacharbeit. Die bestehenden Wiederholungsregeln
+und Merge→Test bei Dateiänderungen bleiben erhalten. Entscheidungs-/Eskalations-
+schwelle gemäß Workflow, knappe Texte und Nach-Fix-Kommentare gemäß
+`symphony-workpad`; Fehlerzahl/Aufwand/max_turns allein begründen keinen BLOCKER.

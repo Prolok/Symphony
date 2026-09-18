@@ -305,7 +305,7 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       running_entry ->
-        {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update, issue_id)
 
         state =
           state
@@ -1946,7 +1946,7 @@ defmodule SymphonyElixir.Orchestrator do
             |> normalize_review_subagent_ids()
         }
 
-        {updated_tracking_entry, token_delta} = integrate_codex_update(tracking_entry, update)
+        {updated_tracking_entry, token_delta} = integrate_codex_update(tracking_entry, update, issue_id)
 
         updated_retry_entry =
           retry_entry
@@ -2520,7 +2520,7 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
-  defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
+  defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update, issue_id) do
     running_entry = align_codex_token_checkpoint(running_entry, update)
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
@@ -2569,7 +2569,7 @@ defmodule SymphonyElixir.Orchestrator do
     )
 
     session_id = session_id_for_update(existing_session_id, update)
-    if session_id != existing_session_id, do: SymphonyElixir.RoutineTest.record_session(running_entry.issue.id, session_id)
+    if session_id != existing_session_id, do: SymphonyElixir.RoutineTest.record_session(issue_id, session_id)
     next_event_sequence = Map.get(running_entry, :codex_event_sequence, 0) + 1
     summarized_update = summarize_codex_update(update, session_id, next_event_sequence)
 

@@ -20,12 +20,9 @@ defmodule SymphonyElixir.RoutineTest do
       execute(job, target, plan, config, result)
     else
       {:error, reason} -> Map.put(result, "error", error_code(reason))
-      _ -> result
     end
   rescue
     _ -> failed(job, "preflight_or_runtime_failed")
-  catch
-    :exit, _ -> failed(job, "runtime_unavailable")
   end
 
   defp authorize(job, contexts) do

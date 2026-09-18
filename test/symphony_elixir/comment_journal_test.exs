@@ -105,6 +105,10 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert {:ok, [%{"id" => "fixture", "description" => "planned"}]} = CommentMutations.description_updates(payload)
     assert {:ok, []} = CommentMutations.description_updates(%{"query" => "query { issue(id: \"fixture\") { description } }"})
     assert {:error, _} = CommentMutations.description_updates(%{"query" => "mutation {"})
+    assert {:error, :invalid_description_mutation} = CommentMutations.description_updates(%{payload | "variables" => 42})
+
+    assert {:error, :invalid_description_mutation} =
+             CommentMutations.description_updates(%{"query" => "mutation { ...Loop } fragment Loop on Mutation { ...Loop }"})
   end
 
   test "omitted optional input fields stay absent while null and defaults remain explicit" do

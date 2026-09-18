@@ -98,6 +98,30 @@ defmodule SymphonyElixir.TestExecutorTest do
     assert eventually(fn -> not File.exists?(socket) end)
   end
 
+  test "regular setup verifies workspace and complete target binding before executor startup", ctx do
+    context = put_in(ctx.context.settings.tracker.app["workspace_id"], ctx.config["workspace_id"]).context
+    context = put_in(context.settings.tracker.project_slug, ctx.config["slug_id"])
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> flunk("unexpected request") end)
+
+    response = %{
+      "project" => %{
+        "id" => ctx.config["project_id"],
+        "slugId" => ctx.config["slug_id"],
+        "name" => "symphony-test",
+        "teams" => %{"nodes" => ctx.config["teams"], "pageInfo" => %{"hasNextPage" => false}}
+      },
+      "viewer" => %{"id" => "synthetic-app", "app" => true, "organization" => %{"id" => ctx.config["workspace_id"], "urlKey" => "prolok"}}
+    }
+
+    request_fun = fn _, _ -> {:ok, %{status: 200, body: %{"data" => response}}} end
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, request_fun)
+    assert :ok = TestExecutor.validate_contexts([context])
+    wrong = put_in(context.settings.tracker.project_slug, "foreign")
+    assert {:error, :routine_test_project_binding_rejected} = TestExecutor.validate_contexts([wrong])
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn _, _ -> {:error, :offline} end)
+    assert {:error, _} = TestExecutor.validate_contexts([context])
+  end
+
   test "runtime loss preserves intent, suspends dispatch and allows cleanup without another start", ctx do
     parent = self()
 
@@ -151,6 +175,34 @@ defmodule SymphonyElixir.TestExecutorTest do
     refute File.exists?(ctx.config["result_root"])
   end
 
+  test "executor startup rejects early exit, invalid readiness and silent processes", ctx do
+    for {code, expected} <- [
+          {"import sys; sys.stdin.readline(); sys.exit(1)", :test_executor_start_failed},
+          {"import sys,time; sys.stdin.readline(); print('{}',flush=True); time.sleep(30)", :test_executor_not_ready},
+          {"import sys,time; sys.stdin.readline(); time.sleep(30)", :test_executor_not_ready}
+        ] do
+      command = [System.find_executable("python3"), "-c", code]
+      opts = [contexts: [ctx.context], name: __MODULE__.Executor, command: command]
+      assert {:error, {{:error, ^expected}, _}} = start_supervised({TestExecutor, opts})
+
+      refute File.exists?(ctx.context.settings.worker.test_executor_socket)
+    end
+  end
+
+  test "invalid events stop the executor and late task notifications cannot create results", ctx do
+    pid = start_supervised!({TestExecutor, contexts: [ctx.context], name: __MODULE__.Executor})
+    state = :sys.get_state(pid)
+    assert {:stop, :invalid_executor_event, ^state} = TestExecutor.handle_info({state.port, {:data, {:eol, "{}"}}}, state)
+    assert {:noreply, ^state} = TestExecutor.handle_info({make_ref(), %{"status" => "passed"}}, state)
+    assert {:noreply, ^state} = TestExecutor.handle_info({:DOWN, make_ref(), :process, self(), :normal}, state)
+    assert {:stop, :test_executor_exited, ^state} = TestExecutor.handle_info({:EXIT, state.port, :closed}, state)
+    refute File.exists?(Path.join(ctx.config["result_root"], "result.json"))
+
+    task = Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, fn -> exit(:fixture_failure) end)
+    assert :ok = TestExecutor.terminate(:shutdown, %{state | port: nil, tasks: %{task.ref => {task, %{}}}})
+    refute Process.alive?(task.pid)
+  end
+
   test "terminal reconciliation and startup preserve reserved worktrees before executor recovery", ctx do
     context = put_in(ctx.context.settings.tracker.kind, "memory").context
     context = put_in(context.settings.tracker.terminal_states, ["Review"])
@@ -198,6 +250,12 @@ defmodule SymphonyElixir.TestExecutorTest do
       assert RoutineTest.owns?(issue.id)
       :ok = RoutineTest.record_session(issue.id, "thread-turn")
       assert {:ok, %{"session_id" => "thread-turn"}} = DurableState.read(Path.join(directory, "sessions/fixture.json"))
+      retry_state = %Orchestrator.State{retry_attempts: %{issue.id => %{attempt: 1}}, codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}}
+      update = %{event: :session_started, session_id: "retry-thread-turn", thread_id: "retry-thread", timestamp: DateTime.utc_now()}
+      assert {:noreply, _} = Orchestrator.handle_info({:codex_worker_update, issue.id, update}, retry_state)
+      assert {:ok, %{"session_id" => "retry-thread-turn"}} = DurableState.read(Path.join(directory, "sessions/fixture.json"))
+      :ok = RoutineTest.record_session("foreign", "foreign-session")
+      refute File.exists?(Path.join(directory, "sessions/foreign.json"))
       :ets.delete(TestExecutor)
       refute RoutineTest.start_allowed?(issue)
       refute RoutineTest.owns?("foreign")

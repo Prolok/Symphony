@@ -634,6 +634,12 @@ Socketserver-Neustart; ein gestorbener Supervisor erzeugt keinen Testpass.
 und dessen gebautem Escript wieder auf. Historische Resultate archiviert der
 Runner vor Recovery. Ein Cleanupbeleg wertet FAILED niemals zu PASSED auf.
 Ohne angelegten Plan und ohne lebenden Lauf bestätigt Recovery nur „nicht gestartet“.
+Scheitert der Build vor der ersten Fixture-Anlage, gleicht der Runner nach
+Prozessende unter der exklusiven Reservierung das dauerhafte Fixturejournal ab.
+Nur dessen nachgewiesenes Fehlen bestätigt `cleanup_scope: no_fixture_intent`;
+der Lauf bleibt FAILED, eine korrigierte Quelle darf neu geprüft werden.
+Das gilt auch bei Cleanup-Wiederaufnahme ohne passenden Build. Vorhandene,
+beschädigte oder unlesbare Journale verlangen weiterhin Runtime-Abgleich.
 Neue Builds erst nach Bereinigung; falls ein Fehler die eigene Cleanup-Runtime
 selbst betrifft, bleibt der quellgebundene Betreiber-Recoveryvertrag erforderlich.
 

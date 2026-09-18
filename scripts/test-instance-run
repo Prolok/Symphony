@@ -197,6 +197,23 @@ class Run:
         if child.returncode:
             raise RunFailure("fetch_failed")
 
+    def fixture_journal_path(self):
+        return Path.home().resolve() / ".local/state/symphony/test-environment/runs" / self.args.run_id / "fixtures.json"
+
+    def confirm_no_fixture_intent(self):
+        # TestRun persists this journal before any fixture mutation. Only check
+        # while holding the environment reservation and after reaping children.
+        # Existing, corrupt, aliased or unreadable journals still require the
+        # original runtime's reconciliation; plan.json alone is not an intent.
+        try:
+            self.test.canonical(self.fixture_journal_path()).lstat()
+        except FileNotFoundError:
+            self.result.update(cleanup=True, fixtures=[], cleanup_scope="no_fixture_intent")
+            return True
+        except (OSError, ValueError):
+            pass
+        return False
+
     def execute(self):
         prepared = False
         originals = {}
@@ -210,6 +227,11 @@ class Run:
             atomic(history, previous)
             self.result["original_projects"] = originals
         try:
+            if self.args.cleanup_only:
+                plan = json.loads(self.plan_path.read_text())
+                if self.confirm_no_fixture_intent():
+                    self.result.update(source=plan["source"], source_mode=self.args.source_mode)
+                    return 1  # No runtime/build is needed when no mutation was attempted.
             self.env["SYM_PROJECT_ROOT"] = json.loads(self.args.manifest.read_text())["project_root"]
             if self.args.cleanup_only:
                 self.env["SYMPHONY_TEST_RUN_STAGE"] = "cleanup"
@@ -291,7 +313,9 @@ class Run:
                     self.result["cleanup"] = all(f["deleted"] for f in restored["fixtures"])
                     self.result["fixtures"] = restored["fixtures"]
                 except (RunFailure, ValueError, KeyError, OSError):
-                    self.result["cleanup_error"] = "cleanup_unconfirmed_journal_retained"
+                    self.stop_children()
+                    if not self.confirm_no_fixture_intent():
+                        self.result["cleanup_error"] = "cleanup_unconfirmed_journal_retained"
                 finally:
                     self.stop_children()
             if not self.result["cleanup"]:

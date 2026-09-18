@@ -648,6 +648,11 @@ begrenzt neu gestartet. Offene/fremde/beschädigte Journale sperren Neuanlagen.
 Cancel/Timeout sperren weitere Fixturestarts, stoppen nur eigene Worker und nutzen
 den bestehenden prüfenden Cleanup. Probeabfragen sind an die verbleibende Laufzeit
 gebunden; Cancel und Frist werden vor Übernahme eines Erfolgs erneut geprüft.
+Bei vorübergehend nicht erreichbarem Linear-Transport oder Identitätsdienst sowie
+HTTP 502/503/504 werden lesende Proben höchstens zweimal nach zwei und fünf Sekunden wiederholt;
+Cancel und Gesamtfrist gelten auch während der Pause. Danach bleibt der Lauf
+mit `linear_temporarily_unavailable` fehlgeschlagen. GraphQL-, Auth-, Scope-, Journal-
+und Rate-Limit-Fehler werden dadurch nicht erneut ausgeführt; Mutationen ebenfalls nicht.
 Im reservierten Dummy-Projekt überlässt auch der reguläre Terminal-/Startup-Cleanup
 die Worktrees diesem prüfenden Cleanup, unabhängig vom Executor-Startzustand.
 Im Szenario `workflow` wird zulässige Beschreibungspflege durch den gebundenen

@@ -1038,6 +1038,134 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:ok, %{"fixtures" => [%{"deleted" => true}]}} = stage.("cleanup")
   end
 
+  test "a transient probe transport failure recovers without recreating fixtures", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    inject_probe_responses(ctx, [{:error, :offline}, :pass])
+
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    result = RoutineTest.run(job, [context], config, runtime, self())
+    assert result["status"] == "passed", inspect(result)
+    assert result["cleanup"]
+    assert map_size(result["sessions"]) == 1
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+  end
+
+  test "temporary HTTP probe failures recover after both bounded delays", ctx do
+    {context, config, request} = routine_context(ctx)
+    inject_probe_responses(ctx, [http_probe_error(503), http_probe_error(504), :pass])
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    result = RoutineTest.run(routine_job(config, request), [context], config, runtime, self())
+    assert result["status"] == "passed", inspect(result)
+    assert result["cleanup"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+  end
+
+  test "managed exhausted probe retries expose their cause and keep failure after cleanup", ctx do
+    {context, _config, request} = routine_context(ctx)
+    inject_probe_responses(ctx, [{:error, :offline}])
+    parent = self()
+
+    runner = fn job, contexts, settings, _runtime, owner ->
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      result = RoutineTest.run(job, contexts, settings, runtime, owner)
+      send(parent, {:retried_result, result})
+      Map.put(result, "evidence", "fixture")
+    end
+
+    start_supervised!({SymphonyElixir.TestExecutor, contexts: [context], name: __MODULE__.Executor, runner: runner})
+    socket = context.settings.worker.test_executor_socket
+    assert {:ok, _} = TestTool.request(socket, request)
+    assert_receive {:retried_result, result}, 12_000
+    assert result["status"] == "failed"
+    assert result["error"] == "linear_temporarily_unavailable"
+    assert result["cleanup"]
+    assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 3
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+    await_routine_result(socket, request)
+    assert {:ok, %{"status" => "failed", "cleanup" => true, "failure" => "linear_temporarily_unavailable"}} = TestTool.request(socket, %{request | "operation" => "cleanup"})
+    assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 3
+  end
+
+  for {status, expected} <- [{401, "linear_access_denied"}, {403, "linear_access_denied"}, {429, "linear_rate_limited"}, {400, "preflight_or_runtime_failed"}] do
+    @tag probe_http_status: status, expected_error: expected
+    test "probe HTTP #{status} fails without retries", ctx do
+      {context, config, request} = routine_context(ctx)
+      inject_probe_responses(ctx, [http_probe_error(ctx.probe_http_status)])
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      result = RoutineTest.run(routine_job(config, request), [context], config, runtime, self())
+      assert result["status"] == "failed"
+      assert result["error"] == ctx.expected_error
+      assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 1
+      assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    end
+  end
+
+  test "a GraphQL validation failure on HTTP 503 is never retried", ctx do
+    {context, config, request} = routine_context(ctx)
+    response = {:ok, %{status: 503, body: %{"errors" => [%{"message" => "invalid", "extensions" => %{"code" => "BAD_USER_INPUT"}}]}}}
+    inject_probe_responses(ctx, [response])
+    runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    result = RoutineTest.run(routine_job(config, request), [context], config, runtime, self())
+    assert result["status"] == "failed"
+    assert result["error"] == "preflight_or_runtime_failed"
+    assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 1
+    assert result["cleanup"]
+  end
+
+  for outcome <- ["cancelled", "timeout"] do
+    @tag retry_outcome: outcome
+    test "#{outcome} interrupts probe backoff before another request", ctx do
+      {context, config, request} = routine_context(ctx)
+      inject_probe_responses(ctx, [{:error, :offline}])
+      timeout = if ctx.retry_outcome == "timeout", do: 1, else: 30
+      runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+      job = routine_job(config, request)
+      task = Task.async(fn -> RoutineTest.run(job, [context], %{config | "timeout" => timeout}, runtime, self()) end)
+      assert_receive {:probe_attempt, 1, probe}, 2_000
+      if ctx.retry_outcome == "cancelled", do: Process.send_after(task.pid, :cancel_test, 100)
+      assert {:ok, result} = Task.yield(task, 1_500)
+      assert result["status"] == "failed"
+      assert result["error"] == ctx.retry_outcome
+      assert result["cleanup"]
+      refute Process.alive?(probe)
+      assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 1
+      assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+    end
+  end
+
+  defp http_probe_error(status), do: {:ok, %{status: status, body: "fixture failure"}}
+
+  defp inject_probe_responses(ctx, responses) do
+    request_fun = Application.fetch_env!(:symphony_elixir, :linear_client_request_fun)
+    parent = self()
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+      if TestRun.stage() == "probe" and (payload["query"] || payload[:query]) =~ "query TestFixture(" do
+        attempt = next_probe_attempt(ctx.source_agent)
+
+        send(parent, {:probe_attempt, attempt, self()})
+
+        probe_response(Enum.at(responses, attempt - 1, List.last(responses)), request_fun, payload, headers)
+      else
+        request_fun.(payload, headers)
+      end
+    end)
+  end
+
+  defp probe_response(:pass, request_fun, payload, headers), do: request_fun.(payload, headers)
+  defp probe_response(response, _request_fun, _payload, _headers), do: response
+
+  defp next_probe_attempt(source) do
+    Agent.get_and_update(source, fn state ->
+      attempt = Map.get(state, :probe_attempts, 0) + 1
+      {attempt, Map.put(state, :probe_attempts, attempt)}
+    end)
+  end
+
   test "a slow final probe is bounded by the remaining deadline", ctx do
     {context, config, request} = routine_context(ctx)
     job = routine_job(config, request)

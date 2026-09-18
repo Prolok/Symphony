@@ -20,7 +20,7 @@ import sys
 import time
 import threading
 
-ERROR_CODES = {'linear_access_denied', 'linear_rate_limited', 'runtime_source_mismatch', 'test_owner_mismatch', 'test_plan_identity_mismatch',
+ERROR_CODES = {'linear_access_denied', 'linear_rate_limited', 'linear_temporarily_unavailable', 'runtime_source_mismatch', 'test_owner_mismatch', 'test_plan_identity_mismatch',
                'routine_test_project_binding_rejected', 'cancelled', 'cleanup_only', 'runtime_unavailable', 'runtime_task_failed',
                'intentional_failure_probe', 'preflight_or_runtime_failed', 'timeout', 'service_exited',
                'restart_exited', 'consumer_changed_on_restart', 'concurrent_start_not_rejected', 'merged_source_mismatch',

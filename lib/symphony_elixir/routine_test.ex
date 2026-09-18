@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.RoutineTest do
   @moduledoc "Runs journaled dummy fixtures through the existing service and project workers."
+  require Logger
   alias SymphonyElixir.{CommentCheckpoint, Config, Orchestrator, PathSafety, ProjectContext, ProjectPoller, Projects}
   alias SymphonyElixir.Linear.{CommentMutations, DurableState, WriteContext}
   alias SymphonyElixir.{RuntimePaths, TestExecutor, TestRun}
@@ -165,7 +166,32 @@ defmodule SymphonyElixir.RoutineTest do
     end
   end
 
-  defp probe_snapshot(job, target, plan) do
+  defp probe_snapshot(job, target, plan, delays \\ [2_000, 5_000]) do
+    case read_probe_snapshot(job, target, plan) do
+      {:error, reason} = error ->
+        case {error_code(reason), delays} do
+          {"linear_temporarily_unavailable", [delay | remaining]} ->
+            request = job["request"]
+
+            Logger.warning(
+              "Routine probe retrying issue_id=#{request["issue_id"]} issue_identifier=#{request["identifier"]} run_id=#{plan["run_id"]} reason=linear_temporarily_unavailable retry_after_ms=#{delay}"
+            )
+
+            # The owning task enforces cancellation and the overall deadline,
+            # including this delay. Only read-side probes are replayed.
+            Process.sleep(delay)
+            probe_snapshot(job, target, plan, remaining)
+
+          _ ->
+            error
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp read_probe_snapshot(job, target, plan) do
     with {:ok, journal} <- stage(target, plan, job["directory"], "probe"),
          snapshot when is_map(snapshot) <- Orchestrator.snapshot(Projects.server(target), 5_000) do
       {:ok, {journal, snapshot}}
@@ -286,6 +312,8 @@ defmodule SymphonyElixir.RoutineTest do
   defp error_code({:linear_api_status, _, %{classification: "rate_limited"}}), do: "linear_rate_limited"
   defp error_code({:linear_api_request, reason}) when reason in [:linear_app_identity_denied, :linear_app_credentials_denied], do: "linear_access_denied"
   defp error_code({:linear_api_request, {:linear_app_rate_limited, _}}), do: "linear_rate_limited"
+  defp error_code({:linear_api_request, reason}) when reason in [:linear_app_request_unavailable, :linear_app_identity_unavailable], do: "linear_temporarily_unavailable"
+  defp error_code({:linear_api_status, status, %{classification: "http"}}) when status in [502, 503, 504], do: "linear_temporarily_unavailable"
   defp error_code(_), do: "preflight_or_runtime_failed"
 
   defp control(directory, active), do: DurableState.write(Path.join(directory, "control.json"), %{"active" => active})

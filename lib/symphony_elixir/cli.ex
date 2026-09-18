@@ -32,6 +32,8 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
+    :ok = LogFile.configure_startup_console()
+
     result =
       with {:ok, name} <- SymphonyElixir.TestInstance.name(args), :ok <- SymphonyElixir.ServiceMutex.acquire(name), :ok <- SymphonyElixir.TestInstance.configure(args), do: evaluate_or_test_stage(args)
 

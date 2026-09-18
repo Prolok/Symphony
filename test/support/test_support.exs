@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.TestSupport do
   @workflow_prompt "Du arbeitest an einem Ticket dieses Repositorys."
   @repo_workflow_file Path.expand("../../WORKFLOW.md", __DIR__)
-  # A caller's app-specific Codex home must not change default-path fixtures.
-  @test_isolation_env_names ["CODEX_HOME", "LINEAR_PROJECT_SLUG", "LINEAR_TEAM_KEY", "SYMPHONY_LINEAR_SECRET_ACCESS"]
+  # A caller's Codex settings must not override fixture paths or fake commands.
+  @test_isolation_env_names ["CODEX_HOME", "SYMPHONY_CODEX_COMMAND", "LINEAR_PROJECT_SLUG", "LINEAR_TEAM_KEY", "SYMPHONY_LINEAR_SECRET_ACCESS"]
 
   # Script fixtures always use the system shell and system utilities. Python is
   # an explicit dependency, so pin only that executable from the host PATH.
@@ -215,6 +215,49 @@ defmodule SymphonyElixir.TestSupport do
       _ ->
         {:ok, _started} = Application.ensure_all_started(:symphony_elixir)
         :ok
+    end
+  end
+
+  def isolate_application_orchestrator do
+    import ExUnit.Assertions
+    alias SymphonyElixir.Orchestrator
+
+    # Disabling the initial poll still schedules later polls. Stop the default
+    # orchestrator before exposing global Memory fixtures, including its workers.
+    orchestrator = Process.whereis(Orchestrator)
+
+    if is_pid(orchestrator) do
+      stop_orchestrator_and_workers(orchestrator, fn _pid ->
+        Supervisor.terminate_child(SymphonyElixir.Supervisor, Orchestrator)
+      end)
+
+      ExUnit.Callbacks.on_exit(fn ->
+        assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, Orchestrator)
+      end)
+    end
+
+    {:ok, application_orchestrator: orchestrator}
+  end
+
+  def stop_orchestrator_and_workers(pid, stop_fun \\ &GenServer.stop(&1, :normal, 1_000)) when is_pid(pid) do
+    import ExUnit.Assertions
+
+    if Process.alive?(pid) do
+      # Freeze dispatch before taking the worker snapshot. Stop the orchestrator
+      # first so worker exits cannot schedule retries or launch replacement work.
+      :ok = :sys.suspend(pid)
+      running = :sys.get_state(pid, 15_000).running
+      :ok = stop_fun.(pid)
+
+      Enum.each(running, fn
+        {_issue_id, %{pid: worker_pid}} when is_pid(worker_pid) ->
+          ref = Process.monitor(worker_pid)
+          Process.exit(worker_pid, :kill)
+          assert_receive {:DOWN, ^ref, :process, ^worker_pid, _reason}, 1_000
+
+        _entry ->
+          :ok
+      end)
     end
   end
 

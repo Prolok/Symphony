@@ -4,6 +4,10 @@ defmodule SymphonyElixir.DialogTest do
   alias SymphonyElixir.Codex.ScriptSupport
   alias SymphonyElixir.Dialog
 
+  setup_all do
+    SymphonyElixir.TestSupport.isolate_application_orchestrator()
+  end
+
   test "dialog helper builds first prompts, resumes user comments, and ignores completed answers" do
     dialog_workflow_path = write_dialog_workflow!("dialog={{ issue.identifier }} active={{ runtime.active_repo_root }} workflow={{ runtime.workflow_file }}")
 

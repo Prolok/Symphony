@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.TestRun do
-  @moduledoc "Bound runtime operations for the operator's limited bootstrap scenario."
+  @moduledoc "Bound fixture operations shared by managed routines and explicit isolated tests."
 
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, PathSafety, ProjectContext, Projects, TestInstance, Workspace}
@@ -7,10 +7,44 @@ defmodule SymphonyElixir.TestRun do
   alias SymphonyElixir.Relay.Session
 
   @spec stage() :: String.t() | nil
-  def stage, do: Config.test_run_stage()
+  def stage, do: if(routine(), do: routine().stage, else: Config.test_run_stage())
 
   @spec start_allowed?(map()) :: boolean()
-  def start_allowed?(issue), do: stage() != "run" or issue.state == "Todo (AI)"
+  def start_allowed?(issue) do
+    SymphonyElixir.RoutineTest.start_allowed?(issue) and (stage() != "run" or issue.state == "Todo (AI)")
+  end
+
+  @doc false
+  @spec with_routine(ProjectContext.t(), map(), Path.t(), String.t(), (-> result)) :: result when result: var
+  def with_routine(context, plan, directory, stage, callback) do
+    previous = routine()
+    Process.put({__MODULE__, :routine}, %{context: context, plan: plan, directory: directory, stage: stage})
+
+    try do
+      ProjectContext.with_context(context, callback)
+    after
+      Process.put({__MODULE__, :routine}, previous)
+    end
+  end
+
+  defp routine, do: Process.get({__MODULE__, :routine})
+
+  @doc false
+  @spec routine_journal(ProjectContext.t(), map(), Path.t()) :: {:ok, map()} | {:error, term()}
+  def routine_journal(context, plan, directory) do
+    with_routine(context, plan, directory, "probe", fn -> journal(plan) end)
+  end
+
+  defp contexts, do: if(routine(), do: [routine().context], else: Projects.configured())
+
+  defp instance do
+    if routine() do
+      context = routine().context
+      %{"name" => "routine", "source" => routine().plan["source"], "manifest" => %{"projects" => %{context.name => Config.test_executor()}}}
+    else
+      Config.test_instance()
+    end
+  end
 
   @spec record_workspace(Path.t(), map(), boolean()) :: :ok | {:error, term()}
   def record_workspace(path, issue, created?) do
@@ -27,13 +61,13 @@ defmodule SymphonyElixir.TestRun do
         _ -> {:error, :test_workspace_base_unconfirmed}
       end
     else
-      :ok
+      SymphonyElixir.RoutineTest.record_workspace(path, issue, created?)
     end
   end
 
   @spec execute(String.t()) :: {:ok, map()} | {:error, term()}
   def execute(stage) when stage in ["prepare", "probe", "cleanup"] do
-    with %{} = instance <- Config.test_instance(),
+    with %{} = instance <- instance(),
          {:ok, plan} <- plan(),
          true <- plan["source"] == instance["source"],
          {:ok, journal} <- journal(plan),
@@ -53,7 +87,7 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp environment_available do
-    if Config.test_instance() do
+    if instance() do
       active_run =
         case plan() do
           {:ok, plan} -> {plan["run_id"], plan_owner(plan)}
@@ -93,7 +127,7 @@ defmodule SymphonyElixir.TestRun do
 
   defp prepared_fixtures?(fixtures, contexts) when is_list(fixtures) and contexts != [] do
     names = Enum.map(contexts, & &1.name) |> Enum.sort()
-    expected = Config.test_instance()["manifest"]["projects"] |> Map.keys() |> Enum.sort()
+    expected = instance()["manifest"]["projects"] |> Map.keys() |> Enum.sort()
 
     names == expected and Enum.all?(fixtures, &is_map/1) and
       Enum.sort(Enum.map(fixtures, & &1["project"])) == names and
@@ -115,19 +149,25 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp plan do
+    if routine(), do: {:ok, routine().plan}, else: instance_plan()
+  end
+
+  defp instance_plan do
     with path when is_binary(path) <- Config.test_run_plan(),
          {:ok, plan} <- DurableState.read(path),
          true <- plan["evidence"] == "live" and is_binary(plan["run_id"]) and Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9_-]{0,47}\z/, plan["run_id"]),
-         true <- plan["instance"] == Config.test_instance()["name"] do
+         true <- plan["instance"] == instance()["name"] do
       {:ok, plan}
     else
       _ -> {:error, :invalid_public_test_plan}
     end
   end
 
-  defp journal_path(plan), do: Path.join([SymphonyElixir.TestInstance.state_root(), "runs", plan["run_id"], "fixtures.json"])
+  defp journal_path(plan) do
+    if routine(), do: Path.join(routine().directory, "fixtures.json"), else: Path.join([SymphonyElixir.TestInstance.state_root(), "runs", plan["run_id"], "fixtures.json"])
+  end
 
-  defp journal(plan, contexts \\ Projects.configured()) do
+  defp journal(plan, contexts \\ contexts()) do
     id = plan["run_id"]
     source = plan["source"]
     binding = binding_identity(contexts)
@@ -140,7 +180,10 @@ defmodule SymphonyElixir.TestRun do
     end
   end
 
-  defp plan_owner(plan), do: %{"instance" => plan["instance"], "plan_path" => Path.expand(Config.test_run_plan())}
+  defp plan_owner(plan) do
+    path = if routine(), do: Path.join(routine().directory, "plan.json"), else: Path.expand(Config.test_run_plan())
+    %{"instance" => plan["instance"], "plan_path" => path}
+  end
 
   defp binding_identity(contexts) do
     Map.new(contexts, fn context ->
@@ -149,20 +192,20 @@ defmodule SymphonyElixir.TestRun do
          "root" => context.root,
          "workspace_root" => context.settings.workspace.root,
          "app" => Map.take(context.settings.tracker.app, ~w(workspace_id client_id user_id)),
-         "project" => Config.test_instance()["manifest"]["projects"][context.name]
+         "project" => instance()["manifest"]["projects"][context.name]
        }}
     end)
   end
 
   defp execute_stage("prepare", plan, journal) do
-    with :ok <- preflight_access(Projects.configured()) do
-      Enum.reduce_while(Projects.configured(), {:ok, journal}, &prepare_context(&1, &2, plan))
+    with :ok <- preflight_access(contexts()) do
+      Enum.reduce_while(contexts(), {:ok, journal}, &prepare_context(&1, &2, plan))
     end
   end
 
   defp execute_stage(stage, plan, journal) do
     Enum.reduce_while(journal["fixtures"], {:ok, journal}, fn fixture, {:ok, current} ->
-      context = Enum.find(Projects.configured(), &(&1.name == fixture["project"]))
+      context = Enum.find(contexts(), &(&1.name == fixture["project"]))
       result = ProjectContext.with_context(context, fn -> inspect_fixture(stage, context, fixture, plan, current) end)
       if match?({:ok, _}, result), do: {:cont, result}, else: {:halt, result}
     end)
@@ -174,7 +217,11 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp preflight_access(contexts) do
-    Enum.reduce_while(contexts, :ok, &preflight_context/2)
+    if routine() do
+      with {:ok, _} <- SymphonyElixir.ProjectPoller.relay_issues(hd(contexts), []), do: :ok
+    else
+      Enum.reduce_while(contexts, :ok, &preflight_context/2)
+    end
   end
 
   defp preflight_context(context, :ok) do
@@ -203,7 +250,7 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp create_fixture(context, plan, journal) do
-    binding = Config.test_instance()["manifest"]["projects"][context.name]
+    binding = instance()["manifest"]["projects"][context.name]
 
     with {:ok, [verified]} <- Client.resolve_relay_contexts([context]),
          [assignee | _] <- verified.assignee_ids,
@@ -222,7 +269,7 @@ defmodule SymphonyElixir.TestRun do
         "team_id" => team["id"],
         "assignee_id" => assignee,
         "title" => "Symphony-Test #{plan["run_id"]}: #{context.name}",
-        "description" => "Begrenzter Symphony-Infrastrukturtest #{plan["run_id"]}. Der reguläre Todo-Bootstrap mit Workpad und Übergabe nach Planung (AI) ist das Erfolgskriterium.",
+        "description" => fixture_description(plan),
         "project_head" => String.trim(head),
         "created" => false,
         "deleted" => false,
@@ -288,13 +335,22 @@ defmodule SymphonyElixir.TestRun do
 
   defp inspect_observed(_, _, _, _, _, _), do: {:error, :test_fixture_missing}
 
+  defp fixture_description(%{"scenario" => "workflow"} = plan) do
+    "Freigegebener Symphony-Routinetest #{plan["run_id"]}. Erstelle ausschließlich test-runs/#{plan["run_id"]}.txt mit dem Inhalt #{plan["run_id"]}. Führe den regulären Workflow einschließlich aller konfigurierten Qualitäts-, Freigabe- und Merge-Gates aus. Keine Änderungen an anderen Dateien oder Produktprojekten. Erfolg ist die gemergte PR mit Merge-Evidenz im Workpad und Status Review. Testdatei als nachvollziehbaren Testbeleg erhalten."
+  end
+
+  defp fixture_description(plan) do
+    "Begrenzter Symphony-Infrastrukturtest #{plan["run_id"]}. Der reguläre Todo-Bootstrap mit Workpad und Übergabe nach Planung (AI) ist das Erfolgskriterium."
+  end
+
   defp inspect_owned("probe", issue, _context, fixture, plan, journal) do
     with {:ok, comments} <- Client.fetch_issue_comments(fixture["id"]) do
-      complete =
-        get_in(issue, ["state", "name"]) == "Planung (AI)" and
-          Enum.any?(comments, &(&1.user_id == Config.settings!().tracker.app["user_id"] and SymphonyElixir.Workpad.comment_matches?(&1.body)))
+      workpad = Enum.find(comments, &(&1.user_id == Config.settings!().tracker.app["user_id"] and SymphonyElixir.Workpad.comment_matches?(&1.body)))
 
-      save_fixture(plan, journal, Map.put(fixture, "complete", complete))
+      merge = workflow_merge(plan, issue, workpad)
+      complete = if plan["scenario"] == "workflow", do: merge != nil, else: get_in(issue, ["state", "name"]) == "Planung (AI)" and workpad != nil
+
+      save_fixture(plan, journal, Map.merge(fixture, %{"complete" => complete, "observed_state" => get_in(issue, ["state", "name"]), "merge" => merge}))
     end
   end
 
@@ -309,6 +365,13 @@ defmodule SymphonyElixir.TestRun do
       _ -> {:error, :test_cleanup_unconfirmed}
     end
   end
+
+  defp workflow_merge(%{"scenario" => "workflow"}, issue, workpad) do
+    if get_in(issue, ["state", "name"]) in ["Review", "Fertig"] and workpad != nil and String.contains?(workpad.body, "Merge-Evidenz"),
+      do: SymphonyElixir.RoutineTest.merge_evidence(issue["identifier"])
+  end
+
+  defp workflow_merge(_, _, _), do: nil
 
   defp remove_workspace(context, identifier, fixture, plan) do
     path = Path.join(context.settings.workspace.root, identifier)
@@ -359,6 +422,14 @@ defmodule SymphonyElixir.TestRun do
   defp workspace_receipt_path(plan, fixture), do: Path.join([Path.dirname(journal_path(plan)), "workspaces", fixture["id"] <> ".json"])
 
   defp workspace_head(plan, fixture, path) do
+    if plan["scenario"] == "workflow" and fixture["complete"] == true and is_map(fixture["merge"]) do
+      {:ok, fixture["merge"]["head"]}
+    else
+      recorded_workspace_head(plan, fixture, path)
+    end
+  end
+
+  defp recorded_workspace_head(plan, fixture, path) do
     source = plan["source"]
 
     case DurableState.read(workspace_receipt_path(plan, fixture)) do

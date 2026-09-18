@@ -266,7 +266,7 @@ fehlenden Aktion, nicht pauschal „kein Authzugriff“. Eine Übergabe enthält
 
 | Feld | Sekretfreies synthetisches Beispiel |
 | --- | --- |
-| Aktion und Rolle | Betreiber/Pai stellt die erlaubte Docker-Testlaufzeit für Projekt `Beispiel` bereit und bestätigt die Testdatenbank-Erreichbarkeit. |
+| Aktion und Rolle | Betreiber stellt die erlaubte Docker-Testlaufzeit für Projekt `Beispiel` bereit und bestätigt die Testdatenbank-Erreichbarkeit. |
 | Quell-/Paketstand | Commit `1111111`; bei ungecommittiertem Stand zusätzlich eindeutiger Diff-/Paketbezug `Paket A`. |
 | Bestandene lokale Prüfungen | Format/Lint für `Paket A` bestanden; keine Aussage über noch ausstehende Datenbanktests. |
 | Fehlende externe Nachweise | Docker-Daemon erreichbar, bestehender repo-lokaler Testdatenbank-Start erfolgreich, Datenbank erreichbar; Bezug zu Projekt und Testumgebung. |
@@ -305,7 +305,7 @@ Runtime-Regressionen prüfen zusätzlich den tatsächlichen Workpad-/AgentRunner
 
 | Eingabe | Erwartete Einordnung und Fortsetzung |
 | --- | --- |
-| Betreiber/Pai bereits festgelegt, Abnahme erst in Merge fällig | Keine erneute Zuständigkeitsfrage; Aktion/Phase übernehmen, aktuelle lokale Phase abschließen, Nachweis offen lassen. |
+| Betreiber bereits festgelegt, Abnahme erst in Merge fällig | Keine erneute Zuständigkeitsfrage; Aktion/Phase übernehmen, aktuelle lokale Phase abschließen, Nachweis offen lassen. |
 | Lokale Tests für Paket A grün; Betreiberabnahme jetzt fällig, fehlt | Vollständige Übergabe für Paket A, ausstehende Betreiberaktion in BLOCKER; keine Abnahme behaupten. |
 | Manuell weitergeschoben, kein neuer Beleg und keine autonome Nacharbeit möglich | Übergabe erhalten, zurück nach BLOCKER; kein unveränderter Betreiberauftrag oder zusätzlicher Review. |
 | Positiver Beleg für Paket B oder anderes Projekt statt Paket A | Gate bleibt offen; erlaubte Nacharbeit/Prüfung fortsetzen, sonst fehlenden passenden Nachweis übergeben. |
@@ -576,12 +576,81 @@ Nie einen Abnahmecheckout unter `SymphonyTest/Symphony` anlegen.
 Er ist ausschließlich für einen gebundenen lokalen Worker in In Arbeit,
 PreReview, Review oder Test (jeweils AI) vorgesehen. SSH-Worker benötigen einen
 separat bereitgestellten Ausführungspfad; es gibt keinen stillen lokalen Ersatz.
-Die optionale Workflow-Einstellung `worker.test_executor_socket` enthält einen
-absoluten Unix-Socketpfad. Standard ist deaktiviert. Der Betreiber startet einmalig
+Die normale Einrichtung verwendet ausschließlich den gemeinsamen Prolok-Zugang.
+Das vorhandene Checkout `symphony-test` wird mit seiner `.symphony/.env` unter
+`SYM_PROJECT_ROOT` entdeckt, wie jedes andere Projekt. Dieselbe verifizierte
+Prolok-App, die lokalen menschlichen Assignees sowie vorhandene Codex-, GitHub-
+und Relay-Zugänge gelten auch hier. Keine persönliche Zuständigkeit, kein privater
+Workspace und kein zusätzlicher Assistenzdienst gehören zu diesem Vertrag.
+
+Einmalig in der vertrauenswürdigen Installation im Front-Matter von WORKFLOW.md
+freigeben (öffentliche IDs durch die tatsächliche Prolok-Bindung ersetzen):
+
+```yaml
+worker:
+  test_executor_socket: /ABS/private-test/test.sock
+  test_executor:
+    workspace_id: 11111111-1111-4111-8111-111111111111
+    project_id: 22222222-2222-4222-8222-222222222222
+    slug_id: symphony-test-slug
+    teams: [{id: 33333333-3333-4333-8333-333333333333, key: PRO}]
+    scenarios: [bootstrap, workflow, failure-probe]
+    timeout: 1800
+    result_root: /ABS/private-test/results
+```
+
+Ohne `test_executor` bleibt der verwaltete Weg deaktiviert. Socket und Ergebnisroot
+liegen außerhalb aller Quell- und Worktreeroots; ihre Verzeichnisse gehören dem
+Dienstbenutzer mit Modus 0700, Socket/Dateien haben Modus 0600. Der Socketpfad muss
+für macOS/Linux kürzer als 104 Bytes sein. Symlink-Aliase werden abgewiesen.
+Die Einrichtung ist neustartgebunden. Beim normalen `./symphony`-Start werden
+Workspace, Projekt, vollständige Teamliste und App-Bindung frisch geprüft.
+Der Supervisor startet den vorhandenen Executor aus der vertrauenswürdigen
+Installation, wartet auf Socketbereitschaft und beendet ihn mit dem Dienst.
+Kein separater Executorstart und keine Konfigurationsdatei je Ticket sind nötig.
+Worker mit gesperrtem Secretzugriff dürfen keine Bereitstellung ausführen.
+
+Die reguläre Dienstinstanz übernimmt die Test-Fixtures selbst. Das konfigurierte
+Dummy-Projekt ist für eigene freigegebene Routineläufe reserviert; andere Tickets
+dieses Projekts werden im Routinebetrieb nicht gestartet. Die normalen Leases,
+Kapazitätsgrenzen, Relay-Verbindung und Freigabe-/Merge-Gates bleiben wirksam.
+Für einen wartenden aufrufenden Worker und den Dummy-Worker muss genügend
+reguläre Agentenkapazität verfügbar sein. `workflow` erstellt ein begrenztes
+Änderungsticket für `test-runs/<run_id>.txt` und beobachtet den regulären Ablauf
+bis zur gemergten PR mit Workpad-Mergebeleg. Vorgesehene menschliche Gates werden
+nicht automatisch bestätigt oder mit neuen Skip-Labels umgangen. Bereits
+konfigurierte Freigaben bleiben maßgeblich. Der gemergte Dummy-Testbeleg bleibt
+im Testrepository; eigene Tickets und unveränderte Worktrees werden bereinigt.
+`bootstrap` prüft nur Todo→Planung, `failure-probe` den Fehler-/Cleanup-Pfad.
+Diese Teilprüfungen ersetzen keinen geforderten Test-/Merge-Nachweis.
+
+Ein Live-Lauf verlangt identischen HEAD/Quellhash von Kandidat und tatsächlich
+laufendem Build. `runtime_source_mismatch` benennt eine erforderliche kontrollierte
+Aktivierung durch den Betreiber, keinen Zugriffsfehler. Worker ändern keine
+fremden Checkouts oder laufenden Dienste. Eine gültige Einrichtung braucht keine
+erneute Betreiberbestätigung pro Routinelauf.
+
+Start/Ergebnis/Cancel/Cleanup verwenden dieselbe Issue-, Worktree-, Quell- und
+Laufbindung. Der Executor persistiert die Absicht vor dem Start und startet eine
+bestehende Absicht nie doppelt. Nach unklarer Antwort dieselbe Kennung mit `result`
+abgleichen. Bei Runtime-Neustart werden eigene Fixtures zunächst gesperrt;
+unterbrochene Läufe bleiben fehlgeschlagen und verlangen `cleanup`, bevor ein
+neuer Lauf zulässig ist. Ein verlorener Socketprozess wird durch den Supervisor
+begrenzt neu gestartet. Offene/fremde/beschädigte Journale sperren Neuanlagen.
+Cancel/Timeout sperren weitere Fixturestarts, stoppen nur eigene Worker und nutzen
+den bestehenden prüfenden Cleanup. Änderungen von außen bleiben erhalten und
+werden als unbestätigter Cleanup sichtbar. Ergebnisbelege enthalten Lauf/Quelle,
+Dienst-PID/Buildstand, Fixture-/Sessionbezug und den Bereinigungszustand; synthetische
+Tests sind ausdrücklich `fixture`, niemals Liveabnahmen. Cleanup macht FAILED
+niemals zu PASSED. Pflichtnachweise bleiben im jeweiligen Phasenvertrag fällig.
+
+Der explizite Zusatztestbetrieb mit `--test-instance` bleibt eine alternative,
+separat freizugebende Einrichtung unter den bestehenden Disjunktheitsregeln; er
+ist keine Voraussetzung des normalen Routinewegs. Für diesen bisherigen Weg
+kann `worker.test_executor_socket` weiterhin auf einen bewusst extern gestarteten
+Executor zeigen, ohne `worker.test_executor` zu setzen:
 `python3 /ABS/INSTALLATION/scripts/test-executor.py --config /ABS/executor.json
---socket /ABS/private-executor/test.sock` aus seinem erlaubten Betriebskontext.
-Das Socketverzeichnis gehört ihm und hat Modus 0700, der Socket Modus 0600.
-Ein Worker mit gesperrtem Secretzugriff darf diesen Betreiberstart nicht ausführen.
+--socket /ABS/private-executor/test.sock`.
 
 Öffentliche Executor-Konfiguration, vom Betreiber passend zu genau einem
 freigegebenen Issue und kanonischen Worktree bereitzustellen:
@@ -611,12 +680,12 @@ bleiben erhalten; der Worker erfindet keine zusätzliche Liveabnahme je Zwischen
 Jeder Aufruf enthält `operation`, `run_id`, `head_sha`, `source_sha256` und
 `scenario`. Die Quellkennung liefert `scripts/test-instance.py source <Workspace>`.
 Feste Operationen: `start`, `result`, `cancel`, `cleanup`; Szenarien: `bootstrap`
-oder `failure-probe` (absichtlicher Fehler nach Fixtureanlage, mit regulärem Cleanup).
+oder im verwalteten Weg `workflow`; `failure-probe` ist ein absichtlicher Fehler nach Fixtureanlage mit regulärem Cleanup.
 Keine Shellbefehle, Pfadargumente oder Envwerte. Issue/Workspace ergänzt das Tool
 aus seinem verifizierten Kontext und der Executor vergleicht seine Betreiberbindung.
 
-`start` persistiert zuerst die Laufabsicht und startet den bestehenden
-`test-instance-run`. Dieselbe Laufkennung mit identischen Bindungen liefert das
+Im expliziten Zusatztestbetrieb persistiert `start` zuerst die Laufabsicht und
+startet den bestehenden `test-instance-run`. Dieselbe Laufkennung mit identischen Bindungen liefert das
 bestehende Ergebnis, auch nach verlorener Antwort oder Executor-Neustart. Mit
 `result` abgleichen, keinen neuen Lauf für eine unklare Antwort anlegen. Eine
 geänderte Quelle verlangt einen neuen Lauf nach bestätigtem Cleanup des alten.
@@ -919,12 +988,13 @@ Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehe
 
 ### Ausführbare Operator-Messübergabe PRO-716
 
-Der geschützte Betreiberlauf verwendet ausschließlich **`symphony-PRO-716`**.
+Diese installationsspezifische historische Messübergabe ist kein gemeinsames
+Pflichtgate. Der geschützte Betreiberlauf verwendet ausschließlich **`symphony-PRO-716`**.
 Vor dem Wechsel alle laufenden Symphony-Jobs abschließen oder kontrolliert
 beenden, deren Worker/Leases prüfen und die alte Dienstinstanz beenden.
 Der bestehende hostweite Mutex und der auf den Ticketworktree zeigende Launcher
 bleiben unverändert. Symphony-/Insight-Hauptkonfigurationen bleiben unverändert.
-Pai richtet die isolierten Testprojektbindungen und deren Wiederherstellung ein;
+Der Betreiber richtet die isolierten Testprojektbindungen und deren Wiederherstellung ein;
 der Worker liefert nur Quellen und sekretfreie lokale Prüfnachweise.
 
 `--budget-capture /ABS/run.json` aktiviert den vorhandenen Recorder ausschließlich
@@ -953,25 +1023,25 @@ blockiert den Wechsel. Kein `reset`, kein `clean`, keine Hauptcheckoutänderung.
 Die beiden Patches wurden lokal in beide Richtungen geprüft.
 
 ```sh
-cd /Users/tr/QuantHub/Symphony-worktrees/PRO-716
+cd /ABS/Symphony-worktrees/PRO-716
 # Erst nach Ende aller Jobs und der alten Instanz: Feature -> Baseline.
 git apply --check --reverse /ABS/HANDOFF/feature.patch
 git apply --reverse /ABS/HANDOFF/feature.patch
 git apply --check /ABS/HANDOFF/instrumentation.patch
 git apply /ABS/HANDOFF/instrumentation.patch
-# Pai hat jetzt die isolierten Baseline-Testbindungen vorbereitet.
+# Der Betreiber hat jetzt die isolierten Baseline-Testbindungen vorbereitet.
 symphony-PRO-716 --budget-capture /ABS/MEASUREMENT/baseline.run.json
 ```
 
 Nach regulärem Ende der Baseline, gesicherten Belegen und freiem Mutex:
 
 ```sh
-cd /Users/tr/QuantHub/Symphony-worktrees/PRO-716
+cd /ABS/Symphony-worktrees/PRO-716
 git apply --check --reverse /ABS/HANDOFF/instrumentation.patch
 git apply --reverse /ABS/HANDOFF/instrumentation.patch
 git apply --check /ABS/HANDOFF/feature.patch
 git apply /ABS/HANDOFF/feature.patch
-# Pai stellt denselben isolierten Ausgangszustand und die Featurebindung her.
+# Der Betreiber stellt denselben isolierten Ausgangszustand und die Featurebindung her.
 symphony-PRO-716 --budget-capture /ABS/MEASUREMENT/feature.run.json
 ```
 
@@ -997,7 +1067,7 @@ vollständig gezählt sein. Fehlende Pfade bleiben offen.
 | Startbegrenzung | vorhandenes `tracker.app.allowed_issue_ids` auf Dummy-UUIDs, für zusätzlich lesende Projekte `[]`; keine produktiven Tickets aktivieren |
 | Assignee/U1 | verifizierte menschliche UUIDs/E-Mails, stabile Consumer-ID und gemeinsame Owner-Zuordnung; keine Assigneeänderung |
 | Öffentliche Appfelder | `LINEAR_APP_CLIENT_ID`, `LINEAR_APP_WORKSPACE_ID`, `LINEAR_APP_USER_ID`, `LINEAR_PROJECT_SLUG`, `LINEAR_ASSIGNEE` |
-| Secret-Referenznamen | je Projekt `LINEAR_APP_SECRET` und `LINEAR_RELAY_KEY`; Werte nur bei Pai, gleiche App-Credentials/Workspace-Key je Workspace |
+| Secret-Referenznamen | je Projekt `LINEAR_APP_SECRET` und `LINEAR_RELAY_KEY`; Werte nur beim Betreiber, gleiche App-Credentials/Workspace-Key je Workspace |
 | Relay | `LINEAR_RELAY_URL=https://5jald162lk.execute-api.eu-west-1.amazonaws.com`, `LINEAR_RELAY_CONSUMER_ID`, `LINEAR_RELAY_OWNERS`; Release `a29a853a8d06fd140aae1167f1f542b89addfec6` |
 | Laufparameter | gleiche Polltakte, Kapazitäten/Workerprofile; Reconcile-Intervall plus unveränderten Jitter und öffentliche Konfigurationshashes vorab festhalten |
 | Zustände/Restore | frische isolierte Ausgangszustände für beide Kaltstarts, danach Zustände über alle Phasen erhalten; Consumer-/Inbox-/Journal-/Cooldown-Satz, Konfiguration und ursprüngliche Dummy-Status-/Kommentarwerte sichern |
@@ -1152,7 +1222,7 @@ gegen EOF/Signalrennen, Fehlerexit und ausbleibendes EOF prüfen.
 
 #### Shutdown, Restore und Ergebnisübergabe
 
-Pai nimmt die vorbereitete Netzwerkstörung und Dummy-Teständerungen zurück:
+Der Betreiber nimmt die vorbereitete Netzwerkstörung und Dummy-Teständerungen zurück:
 ursprüngliche Statuswerte, ausschließlich eigene Kommentar-IDs/Preimages,
 unveränderte menschliche Assignees. Unklare Writes frisch abgleichen. Alle
 Testjobs abschließen/kontrolliert beenden, Ende der Worker/Leases prüfen, dann

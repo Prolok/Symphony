@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.Codex.TestTool do
-  @moduledoc "Bound, secret-free requests to an operator-provisioned isolated test executor."
+  @moduledoc "Bound, secret-free requests to a managed test executor."
 
   alias SymphonyElixir.{CommentCheckpoint, Config, PathSafety}
   alias SymphonyElixir.Linear.WriteContext
@@ -14,7 +14,7 @@ defmodule SymphonyElixir.Codex.TestTool do
     %{
       "name" => "symphony_test",
       "description" =>
-        "Run or inspect an isolated, source-bound development test after operator provisioning. Reuse run_id after an uncertain response; cleanup never upgrades a failed test. No credentials or arbitrary paths accepted.",
+        "Run or inspect an isolated, source-bound development test using the configured test executor. Reuse run_id after an uncertain response; cleanup never upgrades a failed test. No credentials or arbitrary paths accepted.",
       "inputSchema" => %{
         "type" => "object",
         "additionalProperties" => false,
@@ -24,7 +24,7 @@ defmodule SymphonyElixir.Codex.TestTool do
           "run_id" => %{"type" => "string", "pattern" => "^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$"},
           "head_sha" => %{"type" => "string", "pattern" => "^[0-9a-f]{40}$"},
           "source_sha256" => %{"type" => "string", "pattern" => "^[0-9a-f]{64}$"},
-          "scenario" => %{"type" => "string", "enum" => ["bootstrap", "failure-probe"]}
+          "scenario" => %{"type" => "string", "enum" => ["bootstrap", "workflow", "failure-probe"]}
         }
       }
     }
@@ -52,7 +52,7 @@ defmodule SymphonyElixir.Codex.TestTool do
 
   defp valid_arguments?(arguments) when is_map(arguments) do
     Enum.sort(Map.keys(arguments)) == Enum.sort(@fields) and
-      arguments["operation"] in @operations and arguments["scenario"] in ["bootstrap", "failure-probe"] and
+      arguments["operation"] in @operations and arguments["scenario"] in ["bootstrap", "workflow", "failure-probe"] and
       matches?(arguments["run_id"], ~r/\A[A-Za-z0-9][A-Za-z0-9_-]{0,47}\z/) and
       matches?(arguments["head_sha"], ~r/\A[0-9a-f]{40}\z/) and
       matches?(arguments["source_sha256"], ~r/\A[0-9a-f]{64}\z/)

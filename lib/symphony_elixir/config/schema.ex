@@ -136,14 +136,27 @@ defmodule SymphonyElixir.Config.Schema do
       field(:ssh_hosts, {:array, :string}, default: [])
       field(:max_concurrent_agents_per_host, :integer)
       field(:test_executor_socket, :string)
+      field(:test_executor, :map)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:ssh_hosts, :max_concurrent_agents_per_host, :test_executor_socket], empty_values: [])
+      |> cast(attrs, ~w(ssh_hosts max_concurrent_agents_per_host test_executor_socket test_executor)a, empty_values: [])
       |> validate_number(:max_concurrent_agents_per_host, greater_than: 0)
       |> validate_format(:test_executor_socket, ~r/\A\/[^\r\n\x00]+\z/)
+      |> validate_change(:test_executor, fn :test_executor, value ->
+        if SymphonyElixir.TestExecutor.valid_config?(value), do: [], else: [test_executor: "invalid routine test configuration"]
+      end)
+      |> then(fn changeset ->
+        require_executor_socket(changeset)
+      end)
+    end
+
+    defp require_executor_socket(changeset) do
+      if get_field(changeset, :test_executor),
+        do: validate_required(changeset, [:test_executor_socket]),
+        else: changeset
     end
   end
 

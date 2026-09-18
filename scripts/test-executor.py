@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operator-provisioned Unix socket for the existing isolated test runner.
+"""Service-managed Unix socket for the existing isolated test runner.
 
 The operator binds one issue/worktree and owns manifest, credentials and results.
 Workers can only submit fixed operations and source identities. A durable intent
@@ -18,8 +18,11 @@ import stat
 import subprocess
 import sys
 import time
+import threading
 
-ERROR_CODES = {'intentional_failure_probe', 'preflight_or_runtime_failed', 'timeout', 'service_exited',
+ERROR_CODES = {'linear_access_denied', 'linear_rate_limited', 'runtime_source_mismatch', 'test_owner_mismatch', 'test_plan_identity_mismatch',
+               'routine_test_project_binding_rejected', 'cancelled', 'cleanup_only', 'runtime_unavailable', 'runtime_task_failed',
+               'intentional_failure_probe', 'preflight_or_runtime_failed', 'timeout', 'service_exited',
                'restart_exited', 'consumer_changed_on_restart', 'concurrent_start_not_rejected', 'merged_source_mismatch',
                'run_already_exists_or_changed', 'foreign_ticket_launcher', 'fetch_failed', 'fetch_timeout'}
 ERROR_CODES.update(stage + suffix for stage in ('prepare', 'probe', 'cleanup') for suffix in ('_failed', '_timeout', '_missing_receipt'))
@@ -115,7 +118,7 @@ class Executor:
         if any(not isinstance(value, str) for value in request.values()):
             raise ValueError('invalid_request')
         if (request['operation'] not in ('start', 'result', 'cancel', 'cleanup')
-                or request['scenario'] not in ('bootstrap', 'failure-probe')
+                or request['scenario'] not in self.config.get('scenarios', ('bootstrap', 'failure-probe'))
                 or not NAME.fullmatch(request['run_id'])
                 or not re.fullmatch(r'[0-9a-f]{40}', request['head_sha'])
                 or not re.fullmatch(r'[0-9a-f]{64}', request['source_sha256'])):
@@ -206,8 +209,12 @@ class Executor:
                 'evidence': result.get('evidence') if result.get('evidence') in ('live', 'fixture') else 'none',
                 'main_preserved': source_matches and result.get('main_preserved') is True,
                 'originals_preserved': source_matches and result.get('originals_preserved') is True,
+                'runtime': result.get('runtime') if source_matches else None,
+                'sessions': result.get('sessions', {}) if source_matches else {},
+                'fixtures': [{key: value for key, value in fixture.items() if key in ('id', 'identifier', 'complete', 'deleted', 'observed_state', 'merge')}
+                             for fixture in result.get('fixtures', []) if isinstance(fixture, dict)] if source_matches else [],
                 'scenarios': {key: value.get('passed') is True for key, value in result.get('scenarios', {}).items()
-                              if key in ('readiness', 'bootstrap', 'resume', 'exclusive_access') and isinstance(value, dict)}}
+                              if key in ('readiness', 'bootstrap', 'workflow', 'resume', 'exclusive_access') and isinstance(value, dict)}}
 
 
 def supervise(directory, descriptor, cleanup=False):
@@ -277,7 +284,11 @@ def main():
     parser.add_argument('--supervise', type=Path)
     parser.add_argument('--lock-fd', type=int)
     parser.add_argument('--cleanup', action='store_true')
+    parser.add_argument('--managed', action='store_true')
     args = parser.parse_args()
+    if args.managed:
+        managed_main()
+        return
     if args.supervise is not None:
         supervise(args.supervise, args.lock_fd, args.cleanup)
         return
@@ -307,6 +318,158 @@ def main():
     finally:
         endpoint.unlink(missing_ok=True)
         os.close(descriptor)
+
+
+class ManagedExecutor:
+    """The regular service owns this process, configuration and runtime jobs.
+
+    The existing socket protocol stays worker-facing. Only the inherited stdin
+    can complete jobs; it is never exposed to a worker. EOF releases locks but
+    retains intents, so a crashed runtime cannot accidentally pass or restart.
+    """
+    def __init__(self, config, emit):
+        self.config, self.emit = config, emit
+        self.test = helper()
+        self.root = self.test.canonical(config['result_root'])
+        endpoint = self.test.canonical(config['socket'])
+        for source in config['sources']:
+            for field in ('root', 'workspace_root'):
+                path = self.test.canonical(source[field])
+                if self.root.is_relative_to(path) or path.is_relative_to(self.root):
+                    raise ValueError('results_must_be_outside_source')
+                if endpoint.is_relative_to(path) or path.is_relative_to(endpoint.parent):
+                    raise ValueError('socket_must_be_outside_source')
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if self.root.stat().st_uid != os.getuid() or self.root.stat().st_mode & 0o077:
+            raise ValueError('private_result_root_required')
+        self.mutex = threading.RLock()
+        self.active = {}
+
+    def binding(self, request):
+        if not isinstance(request, dict) or set(request) != FIELDS:
+            raise ValueError('invalid_request')
+        identifier = request['identifier']
+        if not isinstance(identifier, str) or not re.fullmatch(r'[A-Z][A-Z0-9]*-[0-9]+', identifier):
+            raise ValueError('invalid_issue')
+        checkout = self.test.canonical(request['checkout'])
+        sources = [source for source in self.config['sources']
+                   if checkout == Path(source['workspace_root']) / identifier]
+        if len(sources) != 1:
+            raise ValueError('unbound_workspace')
+        source = sources[0]
+        if request['operation'] == 'start':
+            if self.test.git(checkout, 'symbolic-ref', '--quiet', 'HEAD').decode().strip() != 'refs/heads/symphony/' + identifier:
+                raise ValueError('foreign_branch')
+            if (self.test.git(checkout, 'rev-parse', '--path-format=absolute', '--git-common-dir') !=
+                    self.test.git(source['root'], 'rev-parse', '--path-format=absolute', '--git-common-dir')):
+                raise ValueError('foreign_checkout')
+        if not isinstance(request['issue_id'], str) or not re.fullmatch(r'[0-9a-f-]{36}', request['issue_id']):
+            raise ValueError('invalid_issue')
+        return dict(issue_id=request['issue_id'], identifier=identifier, checkout=str(checkout),
+                    manifest=self.config['manifest'], result_root=str(self.root / request['issue_id']),
+                    instance='routine', port=1, timeout=self.config['timeout'],
+                    scenarios=self.config['scenarios'], runtime_binding=self.config['runtime_binding'])
+
+    def unresolved(self, current):
+        for owner in self.root.iterdir():
+            if not owner.is_dir():
+                continue
+            self.test.canonical(owner)
+            for run in owner.iterdir():
+                if not run.is_dir() or run == current:
+                    continue
+                self.test.canonical(run)
+                record = read(run / 'request.json')
+                executor = Executor(record['config'])
+                if busy(run) or not executor.receipt(run)['cleanup']:
+                    return True
+        return False
+
+    def handle(self, request):
+        with self.mutex:
+            try:
+                config = self.binding(request)
+                directory = self.test.canonical(Path(config['result_root']) / request['run_id'])
+                executor = Executor(config, self.launch)
+                executor.validate(request)
+                if request['operation'] in ('start', 'cleanup') and self.unresolved(directory):
+                    return {'error': 'test_environment_needs_cleanup'}
+                return executor.handle(request)
+            except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
+                return {'error': 'test_request_rejected_check_binding_or_journal'}
+
+    def launch(self, directory, descriptor, cleanup):
+        key = str(directory.relative_to(self.root))
+        self.active[key] = os.dup(descriptor)
+        record = read(directory / 'request.json')
+        try:
+            self.emit(dict(event='run', key=key, directory=str(directory), cleanup=cleanup,
+                           request=record['request']))
+        except BaseException:
+            os.close(self.active.pop(key))
+            raise
+
+    def complete(self, command):
+        with self.mutex:
+            key = command['key']
+            if key not in self.active:
+                raise ValueError('unknown_completion')
+            directory = self.test.canonical(self.root / key)
+            result = command['result']
+            # Retain the failed original when this is a cleanup retry.
+            if (directory / 'result.json').exists():
+                atomic(directory / ('result-' + str(time.time_ns()) + '.json'), read(directory / 'result.json'))
+            atomic(directory / 'result.json', result)
+            atomic(directory / 'executor-result.json', dict(exit_code=0 if result.get('status') == 'passed' else 1,
+                                                            cleanup_only=command['cleanup']))
+            os.close(self.active.pop(key))
+
+    def close(self):
+        with self.mutex:
+            for descriptor in self.active.values():
+                os.close(descriptor)
+            self.active.clear()
+
+
+def managed_main():
+    if os.environ.get('SYMPHONY_LINEAR_SECRET_ACCESS') == 'denied':
+        raise SystemExit('Trusted service setup required')
+    config = json.loads(sys.stdin.readline(1_048_576))
+    output_lock = threading.Lock()
+    def emit(value):
+        with output_lock:
+            print(json.dumps(value), flush=True)
+    executor = ManagedExecutor(config, emit)
+    endpoint = helper().canonical(config['socket'])
+    endpoint.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if endpoint.parent.stat().st_uid != os.getuid() or endpoint.parent.stat().st_mode & 0o077:
+        raise ValueError('private_socket_directory_required')
+    descriptor = locked(executor.root / 'service.lock')
+    socket_lock = locked(endpoint.with_suffix('.lock'))
+    if descriptor is None or socket_lock is None:
+        raise ValueError('executor_already_running')
+    if endpoint.exists():
+        if not stat.S_ISSOCK(endpoint.lstat().st_mode) or endpoint.lstat().st_uid != os.getuid():
+            raise ValueError('foreign_socket_file')
+        endpoint.unlink()
+    try:
+        with socketserver.UnixStreamServer(str(endpoint), Handler) as server:
+            os.chmod(endpoint, 0o600)
+            server.executor = executor
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            emit(dict(event='ready'))
+            try:
+                for line in sys.stdin:
+                    executor.complete(json.loads(line))
+            finally:
+                server.shutdown()
+                thread.join()
+    finally:
+        executor.close()
+        endpoint.unlink(missing_ok=True)
+        os.close(descriptor)
+        os.close(socket_lock)
 
 
 if __name__ == '__main__':

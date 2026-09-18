@@ -50,8 +50,12 @@ API-Seite verknüpft die Scope-, Status- und Assignee-Auswahl projektweise.
 Innerhalb eines Workspaces müssen alle Projekte dieselbe verifizierte App-Bindung
 und dieselben Client Credentials verwenden. Widersprüche stoppen den Start.
 Verschiedene Workspaces werden getrennt abgefragt.
-Für das vereinbarte Dummy-Projekt `Prolok/symphony-test` erlaubt `--test-instance <name>` einen
-zusätzlichen isolierten Testdienst mit exklusiver Testreservierung und eigenem
+Für das gemeinsame Dummy-Projekt `Prolok/symphony-test` verwaltet die reguläre
+Dienstinstanz nach [einmaliger Einrichtung](docs/linear-app.md#gebundener-testaufruf)
+den vorhandenen Test-Executor. `symphony_test` führt freigegebene Routinen mit
+automatischer Ticketbindung und eigenem Cleanup aus; ein zusätzlicher Akteur oder
+Workspace ist nicht erforderlich. Der gesonderte Opt-in `--test-instance <name>`
+erlaubt weiterhin einen zusätzlichen isolierten Testdienst mit exklusiver Testreservierung und eigenem
 Port. Der auf einen Quellstand festgelegte Runner, Betreiberbelege und Cleanup
 stehen unter [Isolierter Testbetrieb](docs/linear-app.md#isolierter-testbetrieb).
 Worktree-Roots müssen je Projekt getrennt sein; gleiche oder ineinander liegende

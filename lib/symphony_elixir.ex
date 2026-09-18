@@ -52,7 +52,8 @@ defmodule SymphonyElixir.Application do
           SymphonyElixir.WorkflowStore,
           orchestrator_child(),
           SymphonyElixir.HttpServer,
-          SymphonyElixir.StatusDashboard
+          SymphonyElixir.StatusDashboard,
+          SymphonyElixir.TestExecutor
         ] ++ if(Config.test_instance(), do: [SymphonyElixir.TestInstanceGuard], else: [])
 
       Supervisor.start_link(

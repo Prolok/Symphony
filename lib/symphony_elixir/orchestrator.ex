@@ -2492,6 +2492,15 @@ defmodule SymphonyElixir.Orchestrator do
      }, state}
   end
 
+  def handle_call({:stop_test_fixture, id}, _from, state) do
+    if SymphonyElixir.RoutineTest.owns?(id) do
+      state = terminate_running_issue(state, id, false)
+      {:reply, :ok, %{state | retry_attempts: Map.delete(state.retry_attempts, id)}}
+    else
+      {:reply, {:error, :test_fixture_not_owned}, state}
+    end
+  end
+
   def handle_call(:request_refresh, _from, state) do
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
@@ -2556,6 +2565,7 @@ defmodule SymphonyElixir.Orchestrator do
     )
 
     session_id = session_id_for_update(existing_session_id, update)
+    if session_id != existing_session_id, do: SymphonyElixir.RoutineTest.record_session(running_entry.issue.id, session_id)
     next_event_sequence = Map.get(running_entry, :codex_event_sequence, 0) + 1
     summarized_update = summarize_codex_update(update, session_id, next_event_sequence)
 

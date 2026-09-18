@@ -6,7 +6,8 @@ Dieses Verzeichnis enthält den in Elixir geschriebenen Orchestrierungsdienst f�
 
 - Elixir: `1.19.x` (OTP 28) via `mise`
 - Abhängigkeiten installieren: `mix setup`
-- Wichtigstes Qualitäts-Gate: `make all` (Format-Check, Lint, Coverage, Dialyzer)
+- Frühes Qualitätsgate: `make check` (Build, Format-Check, Lint inklusive Specs).
+- Vollständiges Qualitätsgate in `Test (AI)`: `make all` (zusätzlich Python-Tests, ExUnit/Coverage, Dialyzer).
 
 ## Projektspezifische Konventionen
 
@@ -25,10 +26,13 @@ Dieses Verzeichnis enthält den in Elixir geschriebenen Orchestrierungsdienst f�
 
 ## Tests und Validierung
 
-Führe während der Iteration gezielte Tests aus und vor der Übergabe die vollständigen Gates.
+Führe während der Umsetzung und vor PreReview `make check` und gezielte Tests
+für die Änderungen aus. Die Vollsuite läuft regulär erst in `Test (AI)`;
+wiederhole sie bei relevanten Änderungen oder fehlgeschlagenen Prüfungen,
+nicht allein wegen eines Phasenwechsels. Ticketseitige Pflichtnachweise bleiben bindend.
 
 ```bash
-make all
+make check
 ```
 
 ## Verbindliche Regeln

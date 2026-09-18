@@ -288,7 +288,7 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
 - Eine gemeinsame Dienstinstanz pro Benutzer; ein konkurrierender Start endet
   mit „Symphony läuft bereits“. Manuelle Helfer sind keine zweiten Dienste.
   `--test-instance <name>` erlaubt zusätzlich genau einen exklusiven Testbetrieb
-  auf den beiden verifizierten Dummy-Projekten mit disjunkten Projektbereichen,
+  auf dem verifizierten Dummy-Projekt `Prolok/symphony-test` mit disjunktem Projektbereich,
   eigenem Zustand/Port und gemeinsamen Issue-Leases/API-Grenzen; Einrichtung und
   Pflichtbelege: [Isolierter Testbetrieb](docs/linear-app.md#isolierter-testbetrieb).
   `sym-codex` und `sym-watch` verlangen bei mehrdeutigen Kennungen
@@ -373,6 +373,12 @@ lesen.
 - `symphony-land`: wenn das Ticket `Merge (AI)` erreicht, den globalen Skill `symphony-land` explizit öffnen und befolgen; dort ist die `symphony-land`-Schleife enthalten.
 
 ### Globale Arbeitsregeln
+
+- In Umsetzung und PreReview `make check` plus änderungsbezogene Tests nutzen;
+  Review-Fixes gezielt nachweisen. Die vollständige Suite (`make all`) läuft
+  regulär in `Test (AI)`. Relevante Änderungen/Rebases oder Fehler erfordern
+  erneute betroffene Nachweise, ein Phasenwechsel allein nicht. Ticketpflichten
+  und der Rücksprung Merge→Test bei Dateiänderungen bleiben erhalten.
 
 - Betrachte jeden vom Ticket vorgegebenen Abschnitt `Validation`, `Test Plan` oder `Testing` als nicht verhandelbare Validierungsvorgabe: übernimm ihn als Punkte im Abschnitt `### Validierung` des Workpads und führe ihn aus, bevor du die Arbeit als abgeschlossen betrachtest.
 - Wenn während der Ausführung sinnvolle Verbesserungen außerhalb des Scopes entdeckt werden, erstelle ein separates Linear-Issue, statt den Scope zu erweitern. Das Folge-Issue muss einen klaren Titel, eine Beschreibung und Validierungspunkte enthalten, in `Backlog` eingeordnet sein, demselben Projekt wie das aktuelle Issue zugewiesen werden, das aktuelle Issue als `related` verknüpfen und `blockedBy` verwenden, wenn das Folge-Issue vom aktuellen Issue abhängt. Löse vor der Anlage das Label `symphony-generated` im Ziel-Team sicher auf: Verwende ein vorhandenes gleichnamiges Label wieder oder lege ein fehlendes Label einmalig im Ziel-Team an. Übergib die sicher bestimmte Label-ID bereits bei `issueCreate` über `labelIds`. Kann die Label-ID nicht sicher bestimmt werden, erstelle kein Folge-Issue, melde den Fehler sichtbar und behandle den Vorgang nicht als erfolgreich.

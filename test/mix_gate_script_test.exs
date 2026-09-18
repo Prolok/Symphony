@@ -4,6 +4,22 @@ defmodule MixGateScriptTest do
   @script_path Path.expand("../scripts/mix-gate", __DIR__)
   @repo_root Path.expand("..", __DIR__)
 
+  test "make check invokes only the small gate while all retains one complete test pass" do
+    root = Path.join(System.tmp_dir!(), "make-check-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+    File.cp!(Path.join(@repo_root, "Makefile"), Path.join(root, "Makefile"))
+    fixture = Path.join(root, "mix-fixture")
+    File.write!(fixture, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> calls\n")
+    File.chmod!(fixture, 0o755)
+    assert {_, 0} = System.cmd("make", ["check", "MIX=./mix-fixture"], cd: root, stderr_to_stdout: true)
+    assert File.read!(Path.join(root, "calls")) == "setup\nbuild\nformat --check-formatted\nlint\n"
+    assert {commands, 0} = System.cmd("make", ["-n", "all"], cd: root, stderr_to_stdout: true)
+    assert length(Regex.scan(~r/python3 -m unittest discover/, commands)) == 1
+    assert length(Regex.scan(~r/mix-gate test --cover/, commands)) == 1
+    assert commands =~ "mix-gate dialyzer"
+  end
+
   test "mix-gate clears Symphony runtime env and trusts mise.toml for the process" do
     bin_dir =
       Path.join(System.tmp_dir!(), "mix-gate-bin-#{System.unique_integer([:positive])}")

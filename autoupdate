@@ -28,21 +28,22 @@ fi
 
 UPDATE_PENDING_PATH="$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-path symphony-update.pending)"
 
-run_update_gate() {
+run_update_build() {
   (
     cd "$PROJECT_DIR"
     source "$PROJECT_DIR/scripts/mix-runtime"
     mix_runtime_activate "$PROJECT_DIR"
-    make all
+    mix_runtime_prepare "$PROJECT_DIR"
+    mix_runtime_build_escript "$PROJECT_DIR"
   )
   rm -f "$UPDATE_PENDING_PATH"
 }
 
-# A failed or interrupted gate must not become a successful ordinary start
+# A failed or interrupted build must not become a successful ordinary start
 # merely because the pull already advanced the persistent checkout.
 if [[ -f "$UPDATE_PENDING_PATH" ]]; then
-  echo "symphony: Ausstehende Update-Prüfung wird fortgesetzt…" >&2
-  run_update_gate
+  echo "symphony: Ausstehender Update-Build wird fortgesetzt…" >&2
+  run_update_build
 fi
 
 if [ -n "$(git -C "$PROJECT_DIR" status --porcelain --untracked-files=normal)" ]; then
@@ -97,16 +98,16 @@ esac
 
 run_update() {
   cd "$PROJECT_DIR"
-  # Check the gate toolchain before changing the installation checkout.
+  # Check the build toolchain before changing the installation checkout.
   if ! python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
-    echo "symphony: Update nicht ausgeführt: make all benötigt Python 3.11+. Python 3.11+ muss für den Start erreichbar sein." >&2
+    echo "symphony: Update nicht ausgeführt: Der Build benötigt Python 3.11+. Python 3.11+ muss für den Start erreichbar sein." >&2
     return 0
   fi
   touch "$UPDATE_PENDING_PATH"
   git pull --ff-only "$REMOTE_NAME" "$REMOTE_BRANCH"
   # A fast-forward can change the configured toolchain. Validate it before
-  # make all, without relying on the runtime inherited from the old revision.
-  run_update_gate
+  # building, without relying on the runtime inherited from the old revision.
+  run_update_build
 }
 
 echo "Symphony Update läuft…"

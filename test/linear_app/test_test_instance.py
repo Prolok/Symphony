@@ -88,6 +88,21 @@ class TestInstancePreflightTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
+    def test_only_the_public_dummy_may_be_discovered_and_bound(self):
+        self.assertEqual(set(self.check()['manifest']['projects']), {'symphony-test'})
+        original = self.manifest['projects']
+        for projects in ({}, dict(original, unknown=original['symphony-test'])):
+            self.manifest['projects'] = projects
+            self.write_manifest()
+            with self.assertRaises(ValueError):
+                self.check()
+        self.manifest['projects'] = original
+        self.write_manifest()
+        project = self.fixtures / 'symphony-test'
+        project.rename(self.root / 'missing')
+        with self.assertRaises(ValueError):
+            self.check()
+
     def test_verified_disjoint_team_is_allowed_in_dummy_workspace(self):
         fixture = self.manifest['projects']['symphony-test']
         fixture['teams'] = [{'id': 'pro-id', 'key': 'PRO'}]

@@ -15,7 +15,7 @@ import subprocess
 import sys
 import time
 
-PROJECTS = {"symphony-test": "prolok", "symphony-test-tilor": "tilor"}
+PROJECTS = {"symphony-test": "prolok"}
 NAME = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,47}\Z")
 UUID = re.compile(r"[a-fA-F0-9]{8}(?:-[a-fA-F0-9]{4}){3}-[a-fA-F0-9]{12}\Z")
 
@@ -78,10 +78,10 @@ def read_manifest(path, project_root):
         raise ValueError("Der Testsammelroot darf keine .symphony enthalten")
     found = {p.name for p in root.iterdir() if (p / ".symphony").is_dir()}
     if found != PROJECTS.keys():
-        raise ValueError("Testdiscovery verlangt genau symphony-test und symphony-test-tilor")
+        raise ValueError("Testdiscovery verlangt ausschließlich symphony-test")
     bindings = value["projects"]
     if not isinstance(bindings, dict) or bindings.keys() != PROJECTS.keys():
-        raise ValueError("Testmanifest muss genau die beiden Dummy-Projekte binden")
+        raise ValueError("Testmanifest muss genau das freigegebene Dummy-Projekt binden")
     for name, workspace in PROJECTS.items():
         canonical(root / name)
         canonical(root / name / ".symphony")
@@ -91,8 +91,6 @@ def read_manifest(path, project_root):
         if not isinstance(binding["slug_id"], str) or not binding["slug_id"]:
             raise ValueError("Dummy-Projektslug fehlt")
         verified_teams(binding)
-    if len({b["workspace_id"] for b in bindings.values()}) != 2:
-        raise ValueError("Die beiden Dummy-Workspaces müssen verschieden sein")
     return value
 
 

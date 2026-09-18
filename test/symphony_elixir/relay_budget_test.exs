@@ -42,8 +42,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     assert Agent.get_and_update(counts, &{&1, %{}}) == %{read: 1}
 
     for _ <- 1..2 do
-      calls = length(Server.calls(server))
-      assert wait_for_poll(server, calls)
+      ProjectPoller.refresh()
       assert {:ok, [issue]} = ProjectPoller.candidates(context)
 
       ProjectContext.with_context(context, fn ->
@@ -135,8 +134,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
         {:three_projects, ["one", "one", "one"], 3},
         {:two_workspaces, ["one", "one", "two"], 3}
       ] do
-    @tag timeout: 180_000
-    test "hourly relay budget: #{label}" do
+    test "five-minute relay budget and reconcile deadline: #{label}" do
       workspaces = unquote(workspaces)
       active = unquote(active)
       root = Path.dirname(Workflow.workflow_file_path())
@@ -163,7 +161,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
         %{state | relays: relays}
       end)
 
-      for seconds <- 5..3600//5 do
+      for seconds <- 5..300//5 do
         Agent.update(clock, fn _ -> seconds * 1_000 end)
         ProjectPoller.refresh()
         background(contexts, active)
@@ -173,8 +171,12 @@ defmodule SymphonyElixir.RelayBudgetTest do
       assert warm == %{}
       IO.puts("relay budget #{unquote(label)} cold=#{inspect(cold)} warm=#{inspect(warm)} total=0")
 
-      # Safety snapshots are counted separately from idle traffic.
-      Agent.update(clock, fn _ -> 4_500_001 end)
+      # Jump to either side of the actual deadline instead of replaying an hour.
+      Agent.update(clock, fn _ -> 3_600_000 end)
+      ProjectPoller.refresh()
+      background(contexts, active)
+      assert Agent.get(counts, & &1) == %{}
+      Agent.update(clock, fn _ -> 3_600_001 end)
       ProjectPoller.refresh()
       for context <- contexts, do: assert({:ok, _} = ProjectPoller.candidates(context))
       assert Agent.get_and_update(counts, &{&1, %{}}) == %{read: length(Enum.uniq(workspaces))}

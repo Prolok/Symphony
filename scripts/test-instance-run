@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Operator entrypoint for the bounded two-project Symphony bootstrap proof."""
+"""Operator entrypoint for the bounded Symphony dummy-project bootstrap proof."""
 import argparse
 import importlib.util
 import json
@@ -157,10 +157,35 @@ class Run:
         actual = service.get("bindings", [])
         return (str(service.get("pid")) == str(self.service.pid) and service.get("source") == capsule["source"]
                 and service.get("test_instance") == self.args.test_instance
+                and bool(expected) and len(actual) == len(expected)
                 and {entry["name"] for entry in actual} == expected.keys()
                 and all(entry.get("project_id") == expected[entry["name"]]["project_id"]
                         and entry.get("workspace_id") == expected[entry["name"]]["workspace_id"] for entry in actual)
                 and all(state.get("relay", {}).get(binding["workspace_id"], {}).get("status") == "ready" for binding in expected.values()))
+
+    def fixture_ids(self, fixtures, projects):
+        if (not isinstance(fixtures, list) or not projects or len(fixtures) != len(projects)
+                or any(not isinstance(f, dict) or not isinstance(f.get("id"), str) or not f["id"]
+                       or f.get("created") is not True or f.get("deleted") is not False for f in fixtures)
+                or {f.get("project") for f in fixtures} != projects.keys()
+                or len({f["id"] for f in fixtures}) != len(fixtures)):
+            raise RunFailure("invalid_fixture_mapping")
+        return {f["id"]: f["project"] for f in fixtures}
+
+    def collect_sessions(self, running, fixtures, sessions):
+        seen = set()
+        for entry in running:
+            issue = entry.get("issue_id")
+            if issue not in fixtures or issue in seen:
+                raise RunFailure("invalid_session_mapping")
+            seen.add(issue)
+            session = entry.get("session_id")
+            if session:
+                if not isinstance(session, str) or not session.strip():
+                    raise RunFailure("invalid_session_mapping")
+                sessions[issue] = session
+        if len(set(sessions.values())) != len(sessions):
+            raise RunFailure("invalid_session_mapping")
 
     def competition(self):
         env = dict(self.env)
@@ -260,6 +285,7 @@ class Run:
                 return 1  # Cleanup in finally is a recovery receipt, never a test pass.
             fixtures = self.invoke("prepare")["fixtures"]
             self.result["fixtures"] = fixtures
+            fixture_ids = self.fixture_ids(fixtures, capsule["manifest"]["projects"])
             if self.args.scenario == "failure-probe":
                 raise RunFailure("intentional_failure_probe")
             self.competition()
@@ -276,15 +302,15 @@ class Run:
                     observed_ready = True
                     self.result["scenarios"]["readiness"] = {"passed": True, "service": state["service"]}
                     self.result["consumers"] = {key: value["consumer_id"] for key, value in state["relay"].items()}
-                for entry in state.get("running", []):
-                    if entry.get("session_id") and entry["issue_id"] in {f["id"] for f in fixtures}:
-                        sessions[entry["issue_id"]] = entry["session_id"]
+                self.collect_sessions(state.get("running", []), fixture_ids, sessions)
                 self.result["sessions"] = sessions
                 self.save()
-                if observed_ready and len(sessions) == 2 and time.monotonic() - last_probe >= 3:
+                if observed_ready and sessions.keys() == fixture_ids.keys() and time.monotonic() - last_probe >= 3:
                     probed = self.invoke("probe")["fixtures"]
                     last_probe = time.monotonic()
-                    if len(probed) == 2 and all(f["complete"] for f in probed):
+                    if self.fixture_ids(probed, capsule["manifest"]["projects"]) != fixture_ids:
+                        raise RunFailure("changed_fixture_mapping")
+                    if all(f["complete"] for f in probed):
                         self.result["scenarios"]["bootstrap"] = {"passed": True, "fixtures": probed}
                         consumers = self.result["consumers"]
                         self.stop_children()

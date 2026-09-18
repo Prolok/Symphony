@@ -50,7 +50,7 @@ API-Seite verknüpft die Scope-, Status- und Assignee-Auswahl projektweise.
 Innerhalb eines Workspaces müssen alle Projekte dieselbe verifizierte App-Bindung
 und dieselben Client Credentials verwenden. Widersprüche stoppen den Start.
 Verschiedene Workspaces werden getrennt abgefragt.
-Für die zwei vereinbarten Dummy-Projekte erlaubt `--test-instance <name>` einen
+Für das vereinbarte Dummy-Projekt `Prolok/symphony-test` erlaubt `--test-instance <name>` einen
 zusätzlichen isolierten Testdienst mit exklusiver Testreservierung und eigenem
 Port. Der auf einen Quellstand festgelegte Runner, Betreiberbelege und Cleanup
 stehen unter [Isolierter Testbetrieb](docs/linear-app.md#isolierter-testbetrieb).
@@ -212,9 +212,10 @@ Innerhalb dieses Locks prüft Symphony zunächst, ob der aktuelle Git-Upstream
 einen neueren Commit enthält. Wenn eine neue Version verfügbar ist, fragt
 Symphony `Neue Symphony Version verfügbar. Update ausführen j/n?`; bei Zustimmung
 führt das Autoupdate im ursprünglichen Symphony-Checkout `git pull --ff-only` und anschließend
-`make all` aus und zeigt währenddessen `Symphony Update läuft…`.
-Eine durch das Update geänderte Toolchain wird vor dem Gate und Build erneut
-geprüft und aktiviert. Ein fehlgeschlagenes oder unterbrochenes Update-Gate
+den Build über `scripts/mix-runtime` aus (Dependency-Abgleich, Kompilierung und
+Escript, ohne automatisierte Tests oder Qualitätsgates) und zeigt währenddessen `Symphony Update läuft…`.
+Eine durch das Update geänderte Toolchain wird vor dem Build erneut
+geprüft und aktiviert. Ein fehlgeschlagener oder unterbrochener Update-Build
 blockiert den Dienststart und wird beim nächsten Start erneut ausgeführt.
 
 Unabhängig davon, ob ein Update verfügbar oder angenommen wurde, folgt im selben
@@ -290,11 +291,19 @@ Mit `./sym-watch <TicketId>` kann eine laufende Codex-Sitzung eines Tickets im T
 
 ### Qualitaetssicherung
 
-Das wichtigste Projekt-Gate ist:
+In Umsetzung und PreReview genügt das kleine Gate plus gezielte Tests der Änderungen:
 
 ```bash
-make all
+make check
+./scripts/mix-gate test test/pfad_zum_betroffenen_test.exs
 ```
+
+`make check` umfasst Abhängigkeiten, Build, Format und Lint einschließlich
+`specs.check`; es startet keine Tests, Coverage oder Dialyzer. Die vollständige
+Suite läuft regulär in `Test (AI)` mit `make all` (zusätzlich Python-Tests,
+ExUnit/Coverage und Dialyzer). Relevante Änderungen oder Fehler erfordern neue
+betroffene Nachweise; ein Phasenwechsel allein verlangt keine Wiederholung.
+Ticketseitige Pflichtnachweise und die CI für Nicht-Symphony-PRs bleiben erhalten.
 
 Das Makefile führt Mix über `scripts/mix-gate` aus. Der Wrapper entfernt für
 den Gate-Prozess bekannte geerbte `SYMPHONY_*`-Runtime-Variablen sowie

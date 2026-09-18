@@ -6,17 +6,17 @@ defmodule AutoupdateScriptTest do
 
   test "exits quietly when upstream has no new commit" do
     %{root_dir: root_dir, worktree_dir: worktree_dir} = build_git_fixture!()
-    %{bin_dir: bin_dir, make_log: make_log} = build_make_fixture!(root_dir)
+    %{bin_dir: bin_dir, build_log: build_log} = build_build_fixture!(root_dir)
 
     on_exit(fn -> File.rm_rf(root_dir) end)
 
-    assert {"", 0} = run_autoupdate(worktree_dir, "j\n", bin_dir, make_log)
-    refute File.exists?(make_log)
+    assert {"", 0} = run_autoupdate(worktree_dir, "j\n", bin_dir, build_log)
+    refute File.exists?(build_log)
   end
 
   test "declining an available update leaves the checkout unchanged" do
     %{root_dir: root_dir, seed_dir: seed_dir, worktree_dir: worktree_dir} = build_git_fixture!()
-    %{bin_dir: bin_dir, make_log: make_log} = build_make_fixture!(root_dir)
+    %{bin_dir: bin_dir, build_log: build_log} = build_build_fixture!(root_dir)
     old_head = git_output!(worktree_dir, ["rev-parse", "HEAD"])
 
     push_remote_commit!(seed_dir, "v2\n", "remote update")
@@ -24,52 +24,54 @@ defmodule AutoupdateScriptTest do
     on_exit(fn -> File.rm_rf(root_dir) end)
 
     for answer <- ["n\n", "Nein\n", "maybe\n", ""] do
-      assert {output, 0} = run_autoupdate(worktree_dir, answer, bin_dir, make_log)
+      assert {output, 0} = run_autoupdate(worktree_dir, answer, bin_dir, build_log)
       assert output == @update_prompt
     end
 
-    assert {output, 0} = run_autoupdate(worktree_dir, "n\n", bin_dir, make_log)
+    assert {output, 0} = run_autoupdate(worktree_dir, "n\n", bin_dir, build_log)
     assert output == @update_prompt
     refute output =~ "Symphony Update läuft…"
     assert git_output!(worktree_dir, ["rev-parse", "HEAD"]) == old_head
-    refute File.exists?(make_log)
+    refute File.exists?(build_log)
   end
 
   test "detects an update from fetched head when upstream tracking ref is stale" do
-    %{root_dir: root_dir, repo_dir: repo_dir, bin_dir: bin_dir, make_log: make_log} =
+    %{root_dir: root_dir, repo_dir: repo_dir, bin_dir: bin_dir, build_log: build_log} =
       build_stale_tracking_fixture!()
 
     on_exit(fn -> File.rm_rf(root_dir) end)
 
-    assert {output, 0} = run_autoupdate(repo_dir, "n\n", bin_dir, make_log)
+    assert {output, 0} = run_autoupdate(repo_dir, "n\n", bin_dir, build_log)
 
     assert output == @update_prompt
     refute output =~ "Symphony Update läuft…"
-    refute File.exists?(make_log)
+    refute File.exists?(build_log)
   end
 
-  test "accepted update pulls the new commit and runs make all" do
+  test "accepted update pulls the new commit and builds without test or quality gates" do
     %{root_dir: root_dir, seed_dir: seed_dir, worktree_dir: worktree_dir} = build_git_fixture!()
-    %{bin_dir: bin_dir, make_log: make_log} = build_make_fixture!(root_dir)
+    %{bin_dir: bin_dir, build_log: build_log} = build_build_fixture!(root_dir)
 
     push_remote_commit!(seed_dir, "v2\n", "remote update")
     remote_head = git_output!(seed_dir, ["rev-parse", "HEAD"])
 
     on_exit(fn -> File.rm_rf(root_dir) end)
 
-    assert {output, 0} = run_autoupdate(worktree_dir, "YeS\n", bin_dir, make_log)
+    assert {output, 0} = run_autoupdate(worktree_dir, "YeS\n", bin_dir, build_log)
 
     assert output =~ @update_prompt
     assert output =~ "Symphony Update läuft…"
     assert git_output!(worktree_dir, ["rev-parse", "HEAD"]) == remote_head
 
-    assert File.read!(make_log) ==
-             "make args=all mix_deps=unset mix_build_root=unset mix_build_path=unset\n"
+    assert File.read!(build_log) ==
+             "mix args=deps.loadpaths --no-compile mix_deps=unset mix_build_root=unset mix_build_path=unset\n" <>
+               "mix args=compile mix_deps=unset mix_build_root=unset mix_build_path=unset\n" <>
+               "mix args=escript.build mix_deps=unset mix_build_root=unset mix_build_path=unset\n"
   end
 
   test "unsupported Python defers an accepted update before changing the checkout" do
     %{root_dir: root_dir, seed_dir: seed_dir, worktree_dir: worktree_dir} = build_git_fixture!()
-    %{bin_dir: bin_dir, make_log: make_log} = build_make_fixture!(root_dir)
+    %{bin_dir: bin_dir, build_log: build_log} = build_build_fixture!(root_dir)
     on_exit(fn -> File.rm_rf(root_dir) end)
     old_head = git_output!(worktree_dir, ["rev-parse", "HEAD"])
     push_remote_commit!(seed_dir, "v2\n", "remote update")
@@ -87,10 +89,10 @@ defmodule AutoupdateScriptTest do
     """)
 
     File.chmod!(fake_python, 0o755)
-    assert {output, 0} = run_autoupdate(worktree_dir, "j\n", bin_dir, make_log)
-    assert output =~ "Update nicht ausgeführt: make all benötigt Python 3.11+"
+    assert {output, 0} = run_autoupdate(worktree_dir, "j\n", bin_dir, build_log)
+    assert output =~ "Update nicht ausgeführt: Der Build benötigt Python 3.11+"
     assert git_output!(worktree_dir, ["rev-parse", "HEAD"]) == old_head
-    refute File.exists?(make_log)
+    refute File.exists?(build_log)
 
     {output, status} =
       System.cmd("/usr/bin/make", ["-f", Path.expand("../Makefile", __DIR__), "python-check"], env: SymphonyElixir.TestSupport.script_env(bin_dir), stderr_to_stdout: true)
@@ -135,7 +137,7 @@ defmodule AutoupdateScriptTest do
 
     repo_dir = Path.join(root_dir, "repo")
     bin_dir = Path.join(root_dir, "bin")
-    make_log = Path.join(root_dir, "make.log")
+    build_log = Path.join(root_dir, "build.log")
 
     File.mkdir_p!(repo_dir)
     File.mkdir_p!(bin_dir)
@@ -193,17 +195,17 @@ defmodule AutoupdateScriptTest do
 
     File.chmod!(Path.join(bin_dir, "git"), 0o755)
 
-    %{root_dir: root_dir, repo_dir: repo_dir, bin_dir: bin_dir, make_log: make_log}
+    %{root_dir: root_dir, repo_dir: repo_dir, bin_dir: bin_dir, build_log: build_log}
   end
 
-  defp build_make_fixture!(root_dir) do
+  defp build_build_fixture!(root_dir) do
     bin_dir = Path.join(root_dir, "bin")
-    make_log = Path.join(root_dir, "make.log")
+    build_log = Path.join(root_dir, "build.log")
 
     File.mkdir_p!(bin_dir)
     SymphonyElixir.TestSupport.install_runtime_fixture!(Path.join(root_dir, "worktree"), bin_dir)
 
-    for tool <- ["codex", "mix"] do
+    for tool <- ["codex"] do
       File.write!(Path.join(bin_dir, tool), "#!/bin/bash\nexit 0\n")
       File.chmod!(Path.join(bin_dir, tool), 0o755)
     end
@@ -211,18 +213,23 @@ defmodule AutoupdateScriptTest do
     # The fixture config is part of the clean checkout used by autoupdate.
     git!(Path.join(root_dir, "worktree"), ["checkout", "--", "mise.toml"])
 
-    File.write!(Path.join(bin_dir, "make"), """
+    File.write!(Path.join(bin_dir, "mix"), """
     #!/usr/bin/env bash
-    printf 'make args=%s mix_deps=%s mix_build_root=%s mix_build_path=%s\\n' \
+    printf 'mix args=%s mix_deps=%s mix_build_root=%s mix_build_path=%s\\n' \
       "$*" \
       "${MIX_DEPS_PATH-unset}" \
       "${MIX_BUILD_ROOT-unset}" \
-      "${MIX_BUILD_PATH-unset}" >> "$MAKE_LOG"
+      "${MIX_BUILD_PATH-unset}" >> "$BUILD_LOG"
+    if [[ "$1" == escript.build ]]; then
+      python3 -c 'from pathlib import Path; p=Path("bin/symphony"); p.parent.mkdir(exist_ok=True); p.write_text("fixture"); p.chmod(0o755)'
+    fi
     """)
 
+    File.chmod!(Path.join(bin_dir, "mix"), 0o755)
+    File.write!(Path.join(bin_dir, "make"), "#!/bin/bash\nexit 99\n")
     File.chmod!(Path.join(bin_dir, "make"), 0o755)
 
-    %{bin_dir: bin_dir, make_log: make_log}
+    %{bin_dir: bin_dir, build_log: build_log}
   end
 
   defp push_remote_commit!(repo_dir, contents, message) do
@@ -237,7 +244,7 @@ defmodule AutoupdateScriptTest do
     git!(repo_dir, ["config", "user.name", "Symphony Test"])
   end
 
-  defp run_autoupdate(repo_dir, input, bin_dir, make_log) do
+  defp run_autoupdate(repo_dir, input, bin_dir, build_log) do
     System.cmd(
       "/bin/bash",
       ["-c", "printf '%s' \"$AUTOUPDATE_INPUT\" | \"$AUTOUPDATE_SCRIPT\" \"$SYMPHONY_REPO\""],
@@ -246,7 +253,7 @@ defmodule AutoupdateScriptTest do
         {"AUTOUPDATE_INPUT", input},
         {"AUTOUPDATE_SCRIPT", @script_source},
         {"SYMPHONY_REPO", repo_dir},
-        {"MAKE_LOG", make_log},
+        {"BUILD_LOG", build_log},
         {"MIX_DEPS_PATH", "/tmp/foreign-deps"},
         {"MIX_BUILD_ROOT", "/tmp/foreign-build"},
         {"MIX_BUILD_PATH", "/tmp/foreign-build-path"},

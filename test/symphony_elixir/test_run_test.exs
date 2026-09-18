@@ -1042,7 +1042,8 @@ defmodule SymphonyElixir.TestRunTest do
     }
 
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
-    relay = start_supervised!({RuntimeFixture, name: SymphonyElixir.ProjectPoller, source: ctx.source_agent, context: context})
+    relay_opts = [name: SymphonyElixir.ProjectPoller, source: ctx.source_agent, context: context]
+    relay = start_supervised!({RuntimeFixture, relay_opts})
 
     complete = fn -> complete(ctx.source_agent) end
     fixture_opts = [name: SymphonyElixir.Projects.server(context), source: ctx.source_agent, complete: complete]

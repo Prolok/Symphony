@@ -3,6 +3,7 @@ defmodule SymphonyElixir.TestRunTest do
 
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.{ProjectContext, TestRun}
+  alias SymphonyElixir.Relay.Store
   alias SymphonyElixir.RelayFixture, as: RelayServer
 
   @human "11111111-1111-4111-8111-111111111111"
@@ -197,6 +198,13 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:error, :test_fixtures_not_prepared} = TestRun.bind_contexts([])
     assert {:error, :test_fixtures_not_prepared} = TestRun.bind_contexts(ctx.contexts ++ ctx.contexts)
     assert {:ok, [_]} = TestRun.bind_contexts(ctx.contexts)
+  end
+
+  test "run binding rejects an empty project set before fixture preparation", ctx do
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+    assert {:error, :test_fixtures_not_prepared} = TestRun.bind_contexts([])
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    refute File.exists?(journal_path(ctx.root))
   end
 
   test "lost creation response retains intent and recovery does not create another ticket", ctx do
@@ -421,6 +429,12 @@ defmodule SymphonyElixir.TestRunTest do
     Application.put_env(:symphony_elixir, :project_contexts, [invalid | rest])
     assert {:error, _} = TestRun.execute("prepare")
     assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    Application.put_env(:symphony_elixir, :project_contexts, ctx.contexts)
+    {:ok, consumer} = Store.identity(first.settings.tracker.relay, "synthetic-workspace")
+    RelayServer.fault(ctx.server, "synthetic-workspace", consumer, :register, {:error, {:relay_http, 503, "unavailable"}})
+    assert {:error, :test_relay_preflight_failed} = TestRun.execute("prepare")
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    refute File.exists?(journal_path(ctx.root))
   end
 
   test "clean owned worktrees and already deleted remote issues recover idempotently", ctx do

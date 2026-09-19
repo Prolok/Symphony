@@ -4,12 +4,15 @@ defmodule SymphonyElixir.Yolo.Runner do
   alias SymphonyElixir.Codex.AppServer, as: AppServer
   alias SymphonyElixir.{CommentCheckpoint, Config, ProjectContext, RuntimePaths, Tracker}
   alias SymphonyElixir.Linear.{Client, IssueLease, YoloAgent}
-  alias SymphonyElixir.Yolo.{Admission, Completion, Group, Observation, Operations}
+  alias SymphonyElixir.Yolo.{Admission, Completion, Group, Observation, OpenClaw, Operations}
+  alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{ReviewReadiness, Scope, Store, Workspace}
 
   @spec run(String.t(), [map()], [map()], keyword()) :: term()
   def run(group, issues, project_issues, opts \\ []) do
-    Store.lock(group, fn -> start_locked(group, issues, project_issues, opts) end)
+    Store.lock(group, fn ->
+      with :ok <- Journal.available(group), do: start_locked(group, issues, project_issues, opts)
+    end)
   end
 
   defp start_locked(group, issues, project_issues, opts) do
@@ -135,7 +138,6 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp current_project(_, previous, _opts), do: {:ok, previous}
 
   defp run_session(workspace, prompt, [lead | _] = issues, run_id, opts) do
-    run = Keyword.get(opts, :session, &AppServer.run/4)
     Enum.each(issues, &Logger.info("YOLO group member issue_id=#{&1.id} issue_identifier=#{&1.identifier} run_id=#{run_id}"))
 
     on_message = fn message ->
@@ -143,7 +145,10 @@ defmodule SymphonyElixir.Yolo.Runner do
       if message[:session_id], do: Enum.each(issues, &Logger.info("YOLO member event issue_id=#{&1.id} issue_identifier=#{&1.identifier} run_id=#{run_id} session_id=#{message[:session_id]}"))
     end
 
-    run.(workspace.path, prompt, lead, on_message: on_message)
+    case Config.openclaw_yolo_agent() do
+      nil -> Keyword.get(opts, :session, &AppServer.run/4).(workspace.path, prompt, lead, on_message: on_message)
+      _ -> OpenClaw.run(workspace, prompt, issues, run_id, opts)
+    end
   end
 
   defp retained_members(issues, opts) do
@@ -181,6 +186,12 @@ defmodule SymphonyElixir.Yolo.Runner do
         project: Map.take(ProjectContext.current(), [:id, :name, :root]),
         recorded_operations: Enum.map(operations, &Map.take(&1, ~w(request issue_id done closing))),
         agent_id: Config.yolo_agent_id(),
+        linear_workspace_id: Config.settings!().tracker.app["workspace_id"],
+        openclaw_agent_id: Config.openclaw_yolo_agent(),
+        contract_version: 1,
+        workflow_file: "WORKFLOW_YOLO_AGENT.md",
+        workflow_sha256: OpenClaw.digest(template),
+        run_id: Scope.current()["run_id"],
         human_handoff_id: Config.human_handoff_id(),
         yolo: Config.yolo?(),
         workspace: workspace.path,
@@ -190,7 +201,17 @@ defmodule SymphonyElixir.Yolo.Runner do
         comment_inputs: inputs
       }
 
-      {:ok, template <> "\n\nGebundener Laufkontext:\n" <> Jason.encode!(context, pretty: true)}
+      {:ok, template <> "\n\nGebundener Laufkontext:\n" <> Jason.encode!(context, pretty: true) <> review_instructions(workspace)}
+    end
+  end
+
+  defp review_instructions(workspace) do
+    path = Path.join([workspace.path, ".codex", "skills", "sym-yolo-review", "SKILL.md"])
+
+    case File.read(path) do
+      {:ok, content} -> "\n\nProjekt-Prüfanweisung (#{path}):\n" <> content
+      {:error, :enoent} -> ""
+      {:error, reason} -> raise File.Error, reason: reason, action: "read", path: path
     end
   end
 

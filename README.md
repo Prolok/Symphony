@@ -117,6 +117,7 @@ Dependabot-CI; der verpflichtende Produkt-Smoke erfolgt im Symphony-Ablauf.
    etwa `person@example.com,second@example.com`; Leerzeichen und Duplikate werden
    entfernt, auch dieselbe Person per E-Mail und UUID. App-Identitäten und `me`
    sind nicht zulässig. Der erste konfigurierte Mensch ist das Übergabeziel.
+   Für den optionalen OpenClaw-PO-Ausführungsweg siehe [Einrichtung und Live-Nachweis](docs/openclaw-yolo.md).
    Optional bindet `LINEAR_YOLO_AGENT=Projekt-Agent` in `.symphony/.env.local` einen
    workspacebezogenen Agenten; siehe [Agentenbindung](docs/linear-app.md#agentenbindung).
    Die verifizierte lokale Auswahl bestimmt die

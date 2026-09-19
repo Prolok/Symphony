@@ -289,6 +289,9 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   nach [WORKFLOW_YOLO_AGENT.md](WORKFLOW_YOLO_AGENT.md), einschließlich dessen
   Mehrticket-/Statusvertrag. Die folgende Statustabelle und ihre Turn-Grenzen
   gelten weiterhin für reguläre Einzelläufe.
+  Optional wählt `OPENCLAW_YOLO_AGENT` ausschließlich deren PO-Ausführungsweg;
+  ohne Wert erfolgen keine OpenClaw-Zugriffe. Aktivierung verlangt den separaten
+  Live-Nachweis, Standardgates bleiben unabhängig; [Vertrag](docs/openclaw-yolo.md).
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
   `config.toml` oder der geprüften Repository-Skills blockieren den

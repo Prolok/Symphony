@@ -56,6 +56,10 @@ done
 # fixtures may explicitly clear it for their synthetic credential sources.
 unset LINEAR_APP_SECRET LINEAR_APP_CLIENT_ID LINEAR_APP_WORKSPACE_ID LINEAR_APP_USER_ID
 unset LINEAR_APP_INSTALLATION_ID
+unset OPENCLAW_YOLO_AGENT
+# This deny flag also covers mix run/build helpers. Live validation has a
+# separate launcher; an agent selection alone never enables real test I/O.
+export SYMPHONY_OPENCLAW_TEST_DENY=1
 unset LINEAR_APP_SECRET_ENV
 unset LINEAR_RELAY_KEY LINEAR_RELAY_URL LINEAR_RELAY_CONSUMER_ID LINEAR_RELAY_OWNERS
 

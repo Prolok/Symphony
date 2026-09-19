@@ -1,5 +1,7 @@
 import Config
 
+config :symphony_elixir, :openclaw_test_build, config_env() == :test
+
 config :phoenix, :json_library, Jason
 
 config :symphony_elixir, SymphonyElixirWeb.Endpoint,

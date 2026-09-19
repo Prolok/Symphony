@@ -130,6 +130,12 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     assert {:error, :test_po_workspace_cleanup_unconfirmed} = PoIncoming.cleanup(context, plan)
     assert File.read!(Path.join(workspace.path, "tracked")) == "preserve unexpected work"
     git(workspace.path, ["restore", "tracked"])
+    journal = SymphonyElixir.Yolo.OpenClaw.Journal
+    order = %{"id" => Ecto.UUID.generate(), "group" => "incoming", "state" => "unknown", "members" => [], "workspace" => workspace.path}
+    assert :ok = ProjectContext.with_context(context, fn -> journal.write(order) end)
+    assert {:error, :test_po_workspace_cleanup_unconfirmed} = PoIncoming.cleanup(context, plan)
+    assert File.dir?(workspace.path)
+    assert :ok = ProjectContext.with_context(context, fn -> journal.write(Map.put(order, "state", "failed")) end)
     assert :ok = PoIncoming.cleanup(context, plan)
     refute File.exists?(workspace.path)
     assert :ok = PoIncoming.cleanup(context, plan)

@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Linear.IssueLease do
 
   alias SymphonyElixir.{Config, RuntimePaths, Tracker, Workpad}
   alias SymphonyElixir.Linear.{WorkpadTransfer, YoloAgent}
+  alias SymphonyElixir.Yolo.OpenClaw.Journal, as: OpenClawJournal
   alias SymphonyElixir.Yolo.Operations, as: Operations
 
   @spec run(map(), (-> term())) :: term()
@@ -19,7 +20,8 @@ defmodule SymphonyElixir.Linear.IssueLease do
   end
 
   defp run_owned(binding, issue, callback) do
-    with :ok <- SymphonyElixir.Relay.execution_allowed(issue) do
+    with :ok <- OpenClawJournal.member_available(issue.id),
+         :ok <- SymphonyElixir.Relay.execution_allowed(issue) do
       with_lock(binding["workspace_id"], issue.id, fn -> run_ready(binding, issue, callback) end)
     end
   end

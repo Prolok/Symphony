@@ -2,6 +2,7 @@ defmodule SymphonyElixir.TestRun.PoIncoming do
   @moduledoc "Bound proof of a mixed incoming PO group, with separate workspace receipts and cleanup."
   alias SymphonyElixir.{Config, PathSafety, ProjectContext, TestInstance}
   alias SymphonyElixir.Linear.{Client, DurableState}
+  alias SymphonyElixir.Yolo.OpenClaw.Journal, as: OpenClawJournal
   alias SymphonyElixir.Yolo.{Store, Workspace}
 
   @spec record(map(), String.t()) :: :ok | {:error, term()}
@@ -36,7 +37,8 @@ defmodule SymphonyElixir.TestRun.PoIncoming do
       Enum.all?([~s(skip "freigabe implementierung"), ~s(skip "freigabe review")], &(&1 in names)) and
         get_in(issue, ["assignee", "id"]) == fixture["assignee_id"] and is_binary(completed[fixture["id"]])
 
-    if valid, do: {:ok, Map.put(fixture, "po_receipt", %{"session_id" => session, "sha" => sha, "workspace" => path})}, else: {:ok, fixture}
+    receipt = %{"session_id" => session, "sha" => sha, "workspace" => path, "openclaw" => OpenClawJournal.receipt("incoming", session)}
+    if valid, do: {:ok, Map.put(fixture, "po_receipt", receipt)}, else: {:ok, fixture}
   end
 
   defp probe_receipt({:ok, _}, _issue, fixture), do: {:ok, fixture}
@@ -65,6 +67,7 @@ defmodule SymphonyElixir.TestRun.PoIncoming do
 
   defp remove_receipt(path, receipt, context, plan) do
     with true <- receipt["source"] == plan["source"],
+         :ok <- external_finished(context, receipt["path"]),
          workspace = %{path: receipt["path"], sha: receipt["sha"]},
          :ok <- safe_workspace(context, workspace),
          :ok <- remove(context, workspace) do
@@ -72,6 +75,18 @@ defmodule SymphonyElixir.TestRun.PoIncoming do
     else
       _ -> {:error, :test_po_workspace_cleanup_unconfirmed}
     end
+  end
+
+  defp external_finished(context, path) do
+    ProjectContext.with_context(context, fn ->
+      with {:ok, orders} <- OpenClawJournal.pending() do
+        cleanup_allowed(orders, path)
+      end
+    end)
+  end
+
+  defp cleanup_allowed(orders, path) do
+    if Enum.any?(orders, &(&1["workspace"] == path)), do: {:error, :openclaw_cleanup_pending}, else: :ok
   end
 
   defp safe_workspace(context, workspace) do

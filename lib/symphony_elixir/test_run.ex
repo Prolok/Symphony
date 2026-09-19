@@ -8,6 +8,7 @@ defmodule SymphonyElixir.TestRun do
   alias SymphonyElixir.{Config, PathSafety, ProjectContext, Projects, TestInstance, Workspace}
   alias SymphonyElixir.Linear.{Client, DurableState}
   alias SymphonyElixir.TestRun.{Delegation, Derived, PoActions, PoHandoff, Readiness, Scenario}
+  alias SymphonyElixir.Yolo.Operations, as: YoloOperations
 
   @spec stage() :: String.t() | nil
   def stage, do: if(routine(), do: routine().stage, else: Config.test_run_stage())
@@ -56,6 +57,7 @@ defmodule SymphonyElixir.TestRun do
         state_allowed =
           issue.state == "Todo (AI)" or
             (plan["scenario"] in ["po_incoming", "po_aggregation"] and issue.state in ["Backlog", "Todo", "Definiert"]) or
+            (plan["scenario"] == "po_aggregation" and YoloOperations.recovering_origin?(issue)) or
             (plan["scenario"] in ["po_handoff", "po_followup"] and issue.state in ["BLOCKER", "Review"])
 
         state_allowed and Delegation.start_allowed?(issue, plan, journal)
@@ -197,7 +199,9 @@ defmodule SymphonyElixir.TestRun do
          {:ok, plan} <- DurableState.read(path),
          true <- plan["evidence"] == "live" and is_binary(plan["run_id"]) and Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9_-]{0,47}\z/, plan["run_id"]),
          true <- plan["instance"] == instance()["name"] do
-      if Map.get(plan, "scenario", "bootstrap") in ["bootstrap", "delegation", "po_incoming", "po_handoff", "po_aggregation", "po_followup"], do: {:ok, plan}, else: {:error, :invalid_public_test_plan}
+      if Map.get(plan, "scenario", "bootstrap") in ["bootstrap", "failure-probe", "delegation", "po_incoming", "po_handoff", "po_aggregation", "po_followup"],
+        do: {:ok, plan},
+        else: {:error, :invalid_public_test_plan}
     else
       _ -> {:error, :invalid_public_test_plan}
     end

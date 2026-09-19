@@ -211,7 +211,12 @@ Relationsplan. Wiederaufnahme gleicht dieselbe ID ab; eine veränderte Operation
 oder Quelle wird abgewiesen. Vollständig gelesene Abhängigkeiten werden in beide
 Richtungen übertragen; erkannte Zyklen verhindern Relationsschreiben und
 Ursprungabschluss. Ursprünge schließen erst nach bestätigten Links. Unfertige
-Anlagen sperren die menschliche Schlussübergabe.
+Anlagen sperren die menschliche Schlussübergabe. Bleibt nach dem letzten
+Ursprungabschluss eine Aggregationsoperation offen, lädt der Eingangslauf die
+journalisierten Ursprünge gezielt nach. Nur unveränderte, weiterhin delegierte
+Ursprünge nehmen diese Operation wieder auf; das neue Ticket bleibt bis zum
+bestätigten Operationsabschluss gesperrt. Daraus entsteht keine neue Arbeit
+für sonstige abgeschlossene Tickets.
 
 Die Review-Warteentscheidung entsteht ohne Codex-Lauf aus dem vollständigen
 Relay-Bestand. Unmittelbar vor einem tatsächlichen Reviewstart wird dieser
@@ -1036,7 +1041,8 @@ lokal prüfen und mit `make build` bauen. Für denselben alten Lauf zusätzlich
 `--cleanup-plan-sha256 <SHA256-der-unveränderten-plan.json>` angeben; dabei
 `--expected-sha` und `--expected-source` auf den korrigierten Build setzen.
 `--resume --cleanup-only`, ursprüngliche Instanz, Lauf-ID, Ergebnisablage,
-Checkout, Szenario und Startmodus bleiben erforderlich. Der Preflight prüft
+Checkout, Szenario und Startmodus bleiben erforderlich. Der `--yolo`-Startmodus
+wird auch in den Hilfsphasen vor der Projektvorbereitung gesetzt. Der Preflight prüft
 aktuellen Quellstand und Buildstempel sowie den ausdrücklich benannten alten
 Plan. Die Runtime erlaubt diesen Quellwechsel ausschließlich für Cleanup und
 prüft unverändert die alten Journal-, Projekt-, App-, Fixture- und Workspacebindungen.

@@ -52,7 +52,7 @@ defmodule SymphonyElixir.CLI do
   defp evaluate_or_test_stage(args) do
     case SymphonyElixir.TestRun.stage() do
       stage when stage in ["prepare", "probe", "cleanup", "delegate", "withdraw"] ->
-        case run_test_stage(stage) do
+        case run_test_stage(stage, &prepare_test_projects/0, args) do
           :ok -> System.halt(0)
           error -> error
         end
@@ -65,9 +65,11 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  @spec run_test_stage(String.t(), (-> :ok | {:error, term()})) :: :ok | {:error, String.t()}
-  def run_test_stage(stage, prepare \\ &prepare_test_projects/0) do
-    with :ok <- prepare.(),
+  @spec run_test_stage(String.t(), (-> :ok | {:error, term()}), [String.t()]) :: :ok | {:error, String.t()}
+  def run_test_stage(stage, prepare \\ &prepare_test_projects/0, args \\ []) do
+    with {opts, [], []} <- OptionParser.parse(args, strict: @switches),
+         :ok <- maybe_set_yolo_mode(opts, runtime_deps()),
+         :ok <- prepare.(),
          {:ok, result} <- SymphonyElixir.TestRun.execute(stage) do
       IO.puts("Test run result=" <> Jason.encode!(result))
       :ok

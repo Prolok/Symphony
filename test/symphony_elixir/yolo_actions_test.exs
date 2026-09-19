@@ -3,7 +3,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionScope, ActionTool, Admission, API, Followup, GeneratedLabel, Handoff, Operations}
-  alias SymphonyElixir.Yolo.{Completion, Relations, Scope, Store}
+  alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Relations, Runner, Scope, Store}
 
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
@@ -335,6 +335,82 @@ defmodule SymphonyElixir.YoloActionsTest do
     change(&%{&1 | fail: nil})
     group(tl(issues), fn -> assert {:ok, _} = Followup.invoke(args(issues), opts()) end)
     assert length(writes("YoloCreate")) == 1
+  end
+
+  test "scheduler recovers aggregation after the last origin update response is lost", %{issues: issues, root: root} do
+    labels = [~s(skip "freigabe implementierung"), ~s(skip "freigabe review")]
+    issues = Enum.map(issues, &%{&1 | labels: labels})
+    change(&%{&1 | issues: Map.new(issues, fn issue -> {issue.id, issue} end)})
+    last_id = List.last(issues).id
+
+    query = fn document, variables ->
+      result = query(document, variables)
+      if String.contains?(document, "mutation YoloUpdate") and variables[:id] == last_id, do: {:error, :response_lost}, else: result
+    end
+
+    group(issues, fn ->
+      assert {:error, :response_lost} = Followup.invoke(args(issues), Keyword.put(opts(), :query, query))
+    end)
+
+    assert Enum.all?(db().issues, fn {_, issue} -> issue.state == "Umsetzungsticket erstellt" end)
+    [{target_id, _}] = Map.to_list(db().created)
+    target = %{hd(issues) | id: target_id, state: "Backlog"}
+    refute Operations.target_ready?(target_id)
+    parent = self()
+
+    options =
+      Keyword.merge(opts(),
+        scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
+        start: fn "incoming", callback ->
+          callback.()
+          {:error, :fixture_finished}
+        end,
+        runner: fn "incoming", members, all ->
+          assert Enum.sort(Enum.map(members, & &1.id)) == Enum.sort(Enum.map(issues, & &1.id))
+
+          run_opts =
+            Keyword.merge(opts(),
+              lease: fn _, callback -> callback.() end,
+              scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
+              workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+              unchanged: fn _ -> true end,
+              checkpoint: fn _ -> {:ok, %{}} end,
+              session: fn _, _, _, _ ->
+                assert {:ok, %{"id" => ^target_id}} = Followup.invoke(args(issues), opts())
+                for member <- members, do: assert(:ok = Completion.invoke(%{"issue_id" => member.id, "result" => "Aggregation bestätigt"}, opts()))
+                {:ok, %{session_id: "recovered"}}
+              end
+            )
+
+          assert :ok = Runner.run("incoming", members, all, run_opts)
+          send(parent, :aggregation_recovered)
+        end
+      )
+
+    # A restarted poll contains only the new Backlog target, since all origins
+    # have already left the candidate statuses.
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    blocked = Keyword.put(options, :start, fn _, _ -> flunk("changed or unavailable sources must not start recovery") end)
+    closed = db().issues
+
+    for update <- [fn issue -> %{issue | delegate_id: nil} end, fn issue -> %{issue | description: "human edit"} end] do
+      change(&%{&1 | issues: Map.new(closed, fn {id, issue} -> {id, update.(issue)} end)})
+      Coordinator.tick(state, [target], blocked)
+    end
+
+    change(&%{&1 | issues: closed})
+    Coordinator.tick(state, [target], Keyword.put(blocked, :fetch, fn _ -> {:error, :offline} end))
+    {:ok, record} = Store.read("incoming")
+    :ok = Store.write("incoming", Map.put(record, "retry_at", System.system_time(:millisecond) + 30_000))
+    Coordinator.tick(state, [target], Keyword.put(blocked, :fetch, fn _ -> flunk("retry cooldown") end))
+    :ok = Store.write("incoming", record)
+    Coordinator.tick(state, [target], options)
+    assert_receive :aggregation_recovered
+    assert Operations.target_ready?(target_id)
+    assert length(writes("YoloCreate")) == 1
+    assert length(writes("YoloRelation")) == 3
+    assert length(writes("YoloUpdate")) == 3
+    assert Group.groups(Map.values(db().issues)) == %{}
   end
 
   test "ordered-list edits block reconciliation and cleanup without closing origins", ctx do

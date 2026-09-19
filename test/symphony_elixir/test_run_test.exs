@@ -264,6 +264,79 @@ defmodule SymphonyElixir.TestRunTest do
     assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
   end
 
+  test "standalone failure-probe prepares fixtures and permits normal cleanup", ctx do
+    :ok = DurableState.write(ctx.plan_path, Map.put(ctx.plan, "scenario", "failure-probe"))
+    assert {:ok, prepared} = TestRun.execute("prepare")
+    assert [%{"created" => true, "deleted" => false}] = prepared["fixtures"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert {:ok, cleaned} = TestRun.execute("cleanup")
+    assert [%{"deleted" => true}] = cleaned["fixtures"]
+    assert Agent.get(ctx.source_agent, &map_size(&1.issues)) == 0
+  end
+
+  test "CLI stages apply the yolo flag before project preparation and cleanup recovery", ctx do
+    :ok = DurableState.write(ctx.plan_path, Map.put(ctx.plan, "yolo", true))
+
+    for stage <- ["prepare", "probe"] do
+      Application.put_env(:symphony_elixir, :yolo, false)
+      System.put_env("SYMPHONY_TEST_RUN_STAGE", stage)
+
+      output =
+        ExUnit.CaptureIO.capture_io(fn ->
+          assert :ok =
+                   SymphonyElixir.CLI.run_test_stage(
+                     stage,
+                     fn ->
+                       assert Config.yolo?()
+                       :ok
+                     end,
+                     ["--test-instance", "dev", "--yolo"]
+                   )
+        end)
+
+      assert output =~ "Test run result="
+    end
+
+    original_plan = File.read!(ctx.plan_path)
+    recovery = %{"plan_path" => ctx.plan_path, "source" => ctx.plan["source"], "plan_sha256" => Base.encode16(:crypto.hash(:sha256, original_plan), case: :lower)}
+    instance = %{ctx.instance | "source" => Map.put(ctx.instance["source"], "source_sha256", String.duplicate("c", 64))} |> Map.put("cleanup_recovery", recovery)
+    Application.put_env(:symphony_elixir, :test_instance, instance)
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "cleanup")
+
+    ExUnit.CaptureIO.capture_io(fn ->
+      assert {:error, _} =
+               SymphonyElixir.CLI.run_test_stage(
+                 "cleanup",
+                 fn ->
+                   refute Config.yolo?()
+                   :ok
+                 end,
+                 []
+               )
+    end)
+
+    assert Agent.get(ctx.source_agent, &map_size(&1.issues)) == 1
+    Application.put_env(:symphony_elixir, :yolo, false)
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok =
+                 SymphonyElixir.CLI.run_test_stage(
+                   "cleanup",
+                   fn ->
+                     assert Config.yolo?()
+                     :ok
+                   end,
+                   ["--yolo"]
+                 )
+      end)
+
+    assert "Test run result=" <> result = output
+    assert [%{"deleted" => true}] = Jason.decode!(result)["fixtures"]
+    assert File.read!(ctx.plan_path) == original_plan
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+  end
+
   test "bootstrap may finish after its status transition without starting planning", ctx do
     assert {:ok, prepared} = TestRun.execute("prepare")
     System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
@@ -1758,6 +1831,34 @@ defmodule SymphonyElixir.TestRunTest do
       File.rm!(Path.join([ctx.root, "test-state", "runs", "fixture-run", "fixtures.json"]))
       System.put_env("SYMPHONY_TEST_RUN_STAGE", "prepare")
     end
+  end
+
+  test "isolated aggregation permits only journal-bound closed origins for recovery", ctx do
+    {contexts, context, first} = prepare_delegation(ctx, "po_aggregation")
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+    assert {:ok, [bound]} = TestRun.bind_contexts(contexts)
+
+    ProjectContext.with_context(bound, fn ->
+      alias SymphonyElixir.Yolo.Operations
+      closed = %Issue{id: first["id"], state: "Umsetzungsticket erstellt", delegate_id: "fixture-agent"}
+      source = %{"title" => nil, "description" => nil, "project_id" => nil, "team_id" => nil, "assignee_id" => nil, "delegate_id" => "fixture-agent"}
+      refute TestRun.start_allowed?(closed)
+
+      assert :ok =
+               Operations.run("recovery-gate", %{"kind" => "aggregate", "origin_ids" => [closed.id]}, fn intent ->
+                 Operations.save(Map.merge(intent, %{"closing" => [closed.id], "sources" => %{closed.id => source}}))
+               end)
+
+      assert TestRun.start_allowed?(closed)
+      refute TestRun.start_allowed?(%{closed | delegate_id: nil})
+      refute TestRun.start_allowed?(%{closed | title: "changed"})
+      {:ok, [intent]} = Operations.pending([closed.id])
+      :ok = Operations.save(Map.put(intent, "done", true))
+      refute TestRun.start_allowed?(closed)
+    end)
+
+    assert context.id == bound.id
+    assert {:ok, _} = TestRun.execute("cleanup")
   end
 
   defp prepare_delegation(ctx, scenario \\ "delegation") do

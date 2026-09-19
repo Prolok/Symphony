@@ -26,6 +26,9 @@ AI-Ticketphasen mit ihren unveränderten Pflichtgates.
   Offene Anlageoperationen sperren die Bestätigung und den Sammelabschluss;
   nimm sie mit demselben Auftrag wieder auf. Eine belegte menschliche
   BLOCKER-Übergabe bleibt mit dokumentierten offenen Operationen möglich.
+  Journalisierte Aggregationsursprünge können dafür im Eingangslauf bereits
+  `Umsetzungsticket erstellt` sein: nur die offene Operation unverändert
+  abschließen, diese Ursprünge nicht erneut fachlich bewerten oder umplanen.
 - Der eigene Checkout liegt unter dem Workspace-Root. Die angegebene SHA ist
   der zu prüfende Stand. Keine Ticket-Hooks, Ticketbranches oder Bereinigung von
   Ursprungworktrees auf diesen Sammellauf übertragen; keine Quelländerungen,

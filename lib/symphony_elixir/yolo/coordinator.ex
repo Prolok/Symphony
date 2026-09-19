@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.Yolo.Coordinator do
   @moduledoc "PO scheduling inside the existing project orchestrator and shared capacity."
   require Logger
-  alias SymphonyElixir.{Config, ProjectContext}
+  alias SymphonyElixir.{Config, ProjectContext, Tracker}
   alias SymphonyElixir.Linear.YoloAgent
   alias SymphonyElixir.Yolo.{Admission, Completion, Group, Observation, Operations, ReviewReadiness, Runner, Store}
 
@@ -13,12 +13,43 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       current_ids = Enum.flat_map(runs, fn {_, run} -> run.ids end) |> MapSet.new()
       claimed = state.claimed |> MapSet.difference(previous_ids) |> MapSet.union(current_ids)
       state = %{state | yolo_runs: runs, claimed: claimed}
+      issues = recover_origins(state, issues, opts)
       {issues, state} = admit(issues, state, opts)
 
       schedule_groups(state, issues, opts)
     else
       state
     end
+  end
+
+  defp recover_origins(state, issues, opts) do
+    ids = Enum.map(issues, & &1.id)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+
+    # A lost last close response can leave only the blocked target in the poll.
+    # Rehydrate its journalled sources under the existing incoming run/leases;
+    # never admit the target before its operation has actually finished.
+    with false <- Map.has_key?(state.yolo_runs, "incoming"),
+         {:ok, record} <- Store.read("incoming"),
+         true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
+         {:ok, pending} <- Operations.pending(ids),
+         missing = recovery_ids(pending, ids),
+         true <- missing != [],
+         {:ok, recovered} <- fetch.(missing),
+         true <- Enum.sort(Enum.map(recovered, & &1.id)) == missing do
+      issues ++ Enum.filter(recovered, &Operations.recovering_origin?/1)
+    else
+      _ -> issues
+    end
+  end
+
+  defp recovery_ids(pending, ids) do
+    pending
+    |> Enum.filter(&(&1["request"]["kind"] == "aggregate"))
+    |> Enum.flat_map(&(&1["closing"] || []))
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 in ids))
+    |> Enum.sort()
   end
 
   defp schedule_groups(state, issues, opts) do

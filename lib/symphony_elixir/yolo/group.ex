@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Yolo.Group do
   @moduledoc "Project/agent PO groups; incoming states share one lock and one decision."
-  alias SymphonyElixir.{Dialog, Yolo.Admission}
+  alias SymphonyElixir.{Dialog, Yolo.Admission, Yolo.Operations}
   alias SymphonyElixir.Linear.YoloAgent
 
   @terminal ["Fertig", "Abgebrochen", "Verworfen", "Duplicate", "Umsetzungsticket erstellt"]
@@ -14,10 +14,12 @@ defmodule SymphonyElixir.Yolo.Group do
         "In Arbeit" -> "in_progress"
         "BLOCKER" -> "blocker"
         "Review" -> "review"
-        _ -> nil
+        _ -> recovery_group(issue)
       end
     end
   end
+
+  defp recovery_group(issue), do: if(Operations.recovering_origin?(issue), do: "incoming")
 
   @spec expected?(map()) :: boolean()
   def expected?(issue) do

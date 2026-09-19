@@ -52,6 +52,24 @@ defmodule SymphonyElixir.Yolo.Operations do
     with {:ok, operations} <- related(ids), do: {:ok, Enum.reject(operations, & &1["done"])}
   end
 
+  @spec recovering_origin?(map()) :: boolean()
+  def recovering_origin?(%{state: "Umsetzungsticket erstellt"} = issue) do
+    source = Map.take(issue, [:title, :description, :project_id, :team_id, :assignee_id, :delegate_id]) |> Jason.encode!() |> Jason.decode!()
+
+    case pending([issue.id]) do
+      {:ok, operations} ->
+        Enum.any?(operations, fn intent ->
+          intent["request"]["kind"] == "aggregate" and issue.id in (intent["closing"] || []) and
+            get_in(intent, ["sources", issue.id]) == source
+        end)
+
+      _ ->
+        false
+    end
+  end
+
+  def recovering_origin?(_), do: false
+
   @spec related([String.t()]) :: {:ok, [map()]} | {:error, term()}
   def related(ids) do
     Path.wildcard(Path.join(Path.dirname(path("")), "*.json"))

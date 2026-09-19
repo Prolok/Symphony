@@ -7,9 +7,15 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
+  alias SymphonyElixir.Yolo.Admission, as: YoloAdmission
+  alias SymphonyElixir.Yolo.Coordinator, as: YoloCoordinator
+  alias SymphonyElixir.Yolo.Group, as: YoloGroup
+  alias SymphonyElixir.Yolo.Operations, as: YoloOperations
+
   alias SymphonyElixir.Codex.ReviewState
   alias SymphonyElixir.CommentCheckpoint
   alias SymphonyElixir.Linear.WriteContext
+  alias SymphonyElixir.Linear.YoloAgent
 
   alias SymphonyElixir.{
     AgentRunner,
@@ -72,6 +78,7 @@ defmodule SymphonyElixir.Orchestrator do
       external_poll: false,
       shutdown_requested: false,
       running: %{},
+      yolo_runs: %{},
       completed: MapSet.new(),
       completed_states: %{},
       claimed: MapSet.new(),
@@ -146,7 +153,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def terminate(_reason, %State{external_poll: true, running: running, comment_scans: scans}) do
+  def terminate(_reason, %State{external_poll: true, running: running, comment_scans: scans, yolo_runs: yolo_runs}) do
+    YoloCoordinator.stop(yolo_runs)
     stop_comment_scans(scans)
 
     Enum.each(running, fn {_id, entry} ->
@@ -154,7 +162,10 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  def terminate(_reason, %State{comment_scans: scans}), do: stop_comment_scans(scans)
+  def terminate(_reason, %State{comment_scans: scans, yolo_runs: yolo_runs}) do
+    YoloCoordinator.stop(yolo_runs)
+    stop_comment_scans(scans)
+  end
 
   def terminate(_reason, _state), do: :ok
 
@@ -251,6 +262,7 @@ defmodule SymphonyElixir.Orchestrator do
               state =
                 schedule_issue_retry(state, issue_id, next_attempt, %{
                   identifier: running_entry.identifier,
+                  delegate_id: Map.get(running_entry.issue, :delegate_id),
                   error: "agent exited: #{inspect(reason)}",
                   worker_host: Map.get(running_entry, :worker_host),
                   workspace_path: Map.get(running_entry, :workspace_path),
@@ -378,6 +390,7 @@ defmodule SymphonyElixir.Orchestrator do
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
+                delegate_id: Map.get(running_entry.issue, :delegate_id),
                 error: "agent exited: #{inspect(exit_reason)}",
                 worker_host: Map.get(running_entry, :worker_host),
                 workspace_path: Map.get(running_entry, :workspace_path),
@@ -400,6 +413,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info({:yolo_event, group, message}, state) do
+    runs = YoloCoordinator.event(state.yolo_runs, group, message)
+    {:noreply, %{state | yolo_runs: runs}}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
@@ -410,6 +428,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
+      state = YoloCoordinator.tick(state, issues)
       state = reconcile_idle_review_stays(state, issues)
       state = retain_visible_completed_states(state, issues)
       state = retain_visible_dialog_observations(state, issues)
@@ -598,7 +617,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           terminate_running_issue(state, issue.id, true)
 
-        !issue_routable_to_worker?(issue) or SymphonyElixir.Relay.execution_allowed(issue) != :ok ->
+        not worker_routing_continued?(state, issue) ->
           Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
           terminate_running_issue(state, issue.id, false)
@@ -616,6 +635,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp worker_routing_continued?(state, issue) do
+    issue_routable_to_worker?(issue) and SymphonyElixir.Relay.execution_allowed(issue) == :ok and
+      running_delegation_continued?(state, issue)
+  end
+
+  defp running_delegation_continued?(state, issue) do
+    case state.running[issue.id] do
+      %{issue: previous} -> YoloAgent.continued?(previous, issue)
+      _ -> true
+    end
+  end
 
   defp pending_merge_handoff?(state, %Issue{id: issue_id, state: issue_state}) do
     case Map.get(state.running, issue_id) do
@@ -926,6 +957,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
         error: "stalled for #{elapsed_ms}ms without codex activity",
+        delegate_id: Map.get(running_entry.issue, :delegate_id),
         worker_host: Map.get(running_entry, :worker_host),
         workspace_path: Map.get(running_entry, :workspace_path),
         recovered_turn_context: recoverable_turn_context(running_entry, :stalled),
@@ -1107,7 +1139,7 @@ defmodule SymphonyElixir.Orchestrator do
          active_states,
          terminal_states
        ) do
-    candidate_issue?(issue, active_states, terminal_states) and
+    regular_candidate?(issue, active_states, terminal_states) and
       !blocked_issue_in_dispatch_state?(issue, terminal_states) and
       dispatchable_after_completion?(issue, completed_states) and
       dispatch_recovery_ready?(retry_attempts, review_cleanup_blocked, issue.id) and
@@ -1119,6 +1151,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp regular_candidate?(issue, active, terminal) do
+    is_nil(YoloGroup.name(issue)) and not YoloAdmission.needed?(issue) and
+      YoloOperations.target_ready?(issue.id) and candidate_issue?(issue, active, terminal)
+  end
 
   defp executor_has_capacity?(issue, state) do
     SymphonyElixir.Relay.execution_allowed(issue) == :ok and available_slots(state) > 0
@@ -1325,6 +1362,7 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: issue.identifier,
           error: "dispatch refresh failed: #{inspect(reason)}",
           worker_host: preferred_worker_host,
+          delegate_id: issue.delegate_id,
           review_stay: review_issue_state?(issue.state)
         })
     end
@@ -1341,6 +1379,7 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: issue.identifier,
           error: "no worker capacity",
           worker_host: preferred_worker_host,
+          delegate_id: issue.delegate_id,
           review_stay: review_issue_state?(issue.state)
         })
 
@@ -1424,6 +1463,7 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: issue.identifier,
           error: "failed to spawn agent: #{inspect(reason)}",
           worker_host: worker_host,
+          delegate_id: issue.delegate_id,
           review_stay: review_issue_state?(issue.state)
         })
     end
@@ -1435,13 +1475,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp start_agent_task(_state, _worker_host, _issue_state, fun), do: Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun)
 
-  defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
+  defp revalidate_issue_for_dispatch(%Issue{id: issue_id} = previous, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
     case issue_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
         allowed = SymphonyElixir.Relay.execution_allowed(refreshed_issue) == :ok
 
-        if retry_candidate_issue?(refreshed_issue, terminal_states) and allowed do
+        if retry_candidate_issue?(refreshed_issue, terminal_states) and allowed and
+             YoloAgent.continued?(previous, refreshed_issue) do
           {:ok, refreshed_issue}
         else
           {:skip, refreshed_issue}
@@ -1672,6 +1713,7 @@ defmodule SymphonyElixir.Orchestrator do
             review_subagent_ids: review_subagent_ids,
             codex_token_checkpoint: codex_token_checkpoint,
             review_stay: review_stay,
+            delegate_id: Map.get(metadata, :delegate_id, Map.get(previous_retry, :delegate_id)),
             completion_pending: Map.get(metadata, :completion_pending, Map.get(previous_retry, :completion_pending, false))
           })
     }
@@ -1682,6 +1724,7 @@ defmodule SymphonyElixir.Orchestrator do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
+          delegate_id: Map.get(retry_entry, :delegate_id),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path),
@@ -1755,6 +1798,9 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Issue state is terminal: issue_id=#{issue_id} issue_identifier=#{issue.identifier} state=#{issue.state}; removing associated workspace")
 
         cleanup_issue_workspace(issue.identifier, metadata[:worker_host])
+        {:noreply, release_issue_claim(state, issue_id)}
+
+      not YoloAgent.continued?(metadata, issue) ->
         {:noreply, release_issue_claim(state, issue_id)}
 
       clean_review_retry_handoff_ready?(issue, metadata) ->
@@ -2004,6 +2050,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> complete_issue(issue_id, completed_issue)
       |> schedule_issue_retry(issue_id, 1, %{
         identifier: running_entry.identifier,
+        delegate_id: Map.get(running_entry.issue, :delegate_id),
         delay_type: :continuation,
         completion_pending: true,
         worker_host: Map.get(running_entry, :worker_host),
@@ -2032,6 +2079,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     schedule_issue_retry(state, issue_id, 1, %{
       identifier: running_entry.identifier,
+      delegate_id: Map.get(running_entry.issue, :delegate_id),
       delay_type: :continuation,
       worker_host: Map.get(running_entry, :worker_host),
       workspace_path: Map.get(running_entry, :workspace_path),
@@ -2400,7 +2448,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp available_slots(%State{} = state) do
     max(
       (state.max_concurrent_agents || Config.settings!().agent.max_concurrent_agents) -
-        map_size(state.running),
+        map_size(state.running) - map_size(state.yolo_runs),
       0
     )
   end
@@ -2480,11 +2528,14 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    activity_at = if map_size(state.yolo_runs) > 0, do: now_ms, else: state.last_activity_at_ms
+
     {:reply,
      %{
-       running: running,
+       running: running ++ YoloCoordinator.entries(state.yolo_runs),
        retrying: retrying,
-       last_activity_at_ms: state.last_activity_at_ms,
+       yolo_running: map_size(state.yolo_runs),
+       last_activity_at_ms: activity_at,
        idle_shutdown_ms: state.idle_shutdown_ms,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
@@ -4413,7 +4464,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp activity_state_changed?(%State{} = previous_state, %State{} = next_state) do
-    previous_state.running != next_state.running or
+    previous_state.yolo_runs != next_state.yolo_runs or
+      previous_state.running != next_state.running or
       previous_state.retry_attempts != next_state.retry_attempts or
       previous_state.claimed != next_state.claimed or
       previous_state.completed != next_state.completed or
@@ -4429,7 +4481,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_request_idle_shutdown(%State{} = state) do
     cond do
-      map_size(state.running) > 0 ->
+      map_size(state.running) > 0 or map_size(state.yolo_runs) > 0 ->
         state
 
       map_size(state.retry_attempts) > 0 ->

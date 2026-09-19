@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -179,6 +180,41 @@ class TestInstancePreflightTest(unittest.TestCase):
             self.assertEqual(self.check()['source'],revision)
         stamp.write_text(json.dumps(dict(revision,sha='f'*40)))
         with self.assertRaises(ValueError):self.check()
+
+    def test_corrected_cleanup_build_requires_original_plan_hash_and_same_owner(self):
+        (self.source/'.git/info/exclude').write_text('_build/\n')
+        old = self.check()['source']
+        plan = dict(evidence='live', instance='development', run_id='old-run', source=old)
+        plan_path = self.root/'plan.json'
+        plan_path.write_text(json.dumps(plan))
+        raw = plan_path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        (self.source/'code').write_text('corrected cleanup')
+        current = test_instance.source(self.source)
+        stamp = self.source/'_build/symphony-source.json'
+        stamp.parent.mkdir()
+        stamp.write_text(json.dumps(current))
+        self.env.update(SYMPHONY_TEST_EXPECTED_SOURCE=current['source_sha256'],
+                        SYMPHONY_TEST_RUN_PLAN=str(plan_path), SYMPHONY_TEST_CLEANUP_PLAN_SHA256=digest)
+        for stage in ('prepare', 'run', 'probe', 'delegate', 'withdraw'):
+            self.env['SYMPHONY_TEST_RUN_STAGE'] = stage
+            with self.assertRaises(ValueError): self.check()
+        self.env['SYMPHONY_TEST_RUN_STAGE'] = 'cleanup'
+        capsule = self.check()
+        self.assertEqual(capsule['source'], current)
+        self.assertEqual(capsule['cleanup_recovery'], dict(source=old, plan_path=str(plan_path), plan_sha256=digest))
+        self.assertEqual(plan_path.read_bytes(), raw)
+        for key, value in [('instance', 'other'), ('run_id', '../other'), ('evidence', 'fixture'),
+                           ('source', dict(old, checkout='/foreign'))]:
+            plan_path.write_text(json.dumps(dict(plan, **{key: value})))
+            self.env['SYMPHONY_TEST_CLEANUP_PLAN_SHA256'] = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+            with self.assertRaises(ValueError): self.check()
+        plan_path.write_bytes(raw)
+        self.env['SYMPHONY_TEST_CLEANUP_PLAN_SHA256'] = '0'*64
+        with self.assertRaises(ValueError): self.check()
+        self.env['SYMPHONY_TEST_CLEANUP_PLAN_SHA256'] = digest
+        (self.source/'code').write_text('changed after build')
+        with self.assertRaises(ValueError): self.check()
 
     def test_actual_direct_escript_rejects_invalid_and_duplicate_names_before_lock(self):
         env=dict(os.environ,SYMPHONY_ROOT_DIR=str(REPO),SYMPHONY_WORKFLOW_FILE=str(REPO/'WORKFLOW.md'),

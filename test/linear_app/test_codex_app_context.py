@@ -149,10 +149,12 @@ class AppContextTest(unittest.TestCase):
             "SYMPHONY_PROJECT_ROOT": str(self.project),
             "SYMPHONY_PROJECT_WORKTREES_ROOT": str(worktrees),
             "SYMPHONY_ISSUE_IDENTIFIER": workspace.name,
+            "SYMPHONY_YOLO_SCOPE": '{"members":["one","two"],"group":"incoming"}',
         }
         args = context.launch_config(self.release, target, self.project, self.personal, environment)
         configuration = tomllib.loads(next(arg for arg in args if arg.startswith("mcp_servers.symphony_linear.env=")))
         child_env = configuration["mcp_servers"]["symphony_linear"]["env"]
+        self.assertEqual(child_env["SYMPHONY_YOLO_SCOPE"], environment["SYMPHONY_YOLO_SCOPE"])
         # Codex does not implicitly inherit arbitrary runtime variables into MCP.
         result = subprocess.run([
             os.sys.executable, "-c",

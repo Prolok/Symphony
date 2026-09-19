@@ -285,7 +285,7 @@ defmodule SymphonyElixir.ProjectContractsTest do
     previous = Application.get_env(:symphony_elixir, :yolo)
     on_exit(fn -> Application.put_env(:symphony_elixir, :yolo, previous) end)
     Application.put_env(:symphony_elixir, :yolo, true)
-    context = %{one | settings: %{one.settings | tracker: %{one.settings.tracker | assignee: nil}}}
+    context = %{one | yolo: true, settings: %{one.settings | tracker: %{one.settings.tracker | assignee: nil}}}
 
     SymphonyElixir.TestSupport.stub_linear_client(fn _payload, _headers ->
       node = Map.put(issue_node(context), "assignee", nil)

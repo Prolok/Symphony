@@ -123,7 +123,7 @@ UUIDs aus `LINEAR_ASSIGNEE` (maximal 20 je Workspace). Mehrere kommagetrennte
 E-Mails/UUIDs sind möglich; Trimmen und Deduplizieren erfassen auch dieselbe Person
 per E-Mail und UUID. Die lokale Auswahl bestimmt je Projekt die Ausführung;
 die vereinigte Workspace-Subscription erweitert keine Projektberechtigung.
-`--yolo` empfängt workspaceweit, darf aber ebenfalls nur Issues lokal
+`--yolo` oder eine konfigurierte Agentenbindung empfängt workspaceweit, darf aber ebenfalls nur Issues lokal
 konfigurierter, verifizierter Menschen ausführen. Ohne lokale Auswahl bleiben
 Starts gesperrt. Consumer-ID und Zustellstand hängen nicht von der Reihenfolge
 oder Schreibweise der Auswahl ab.
@@ -136,6 +136,100 @@ Sperre oder automatisches Failover. Eine zusätzliche Beobachter-/Executorrolle
 Diese Zuständigkeit gilt für Dispatch, Retry/Resume und manuelle Helfer.
 Reconciliation beendet laufende Worker bei einem nicht mehr lokalen Assignee.
 Lokale Issue-Leases, Service-Mutex und beide PO-Freigaben bleiben erhalten.
+
+### Agentenbindung
+
+`LINEAR_YOLO_AGENT` in der projektspezifischen `.symphony/.env.local` benennt
+optional einen Linear-Agenten. Fehlend oder leer erhält den bisherigen Betrieb,
+auch bei `--yolo`. Ein Name wird über den gebundenen App-Client vollständig und
+eindeutig im konfigurierten Workspace aufgelöst. Der Benutzer muss aktiv sein,
+eine App-Identität besitzen und zuweisbar sein (`isAssignable=true`).
+Linear-Agent-Sessions sind keine Voraussetzung für die PO-Ausführung durch
+Symphony/Codex. Unbekannte,
+mehrdeutige oder ungeeignete Identitäten sperren den Start mit einem
+Konfigurationsfehler; eine unvollständige Abfrage gilt nicht als Auflösung.
+
+Die Agent-ID gehört zu `Issue.delegate`/`delegateId`. `assignee` bleibt ein
+Mensch aus `LINEAR_ASSIGNEE`; der erste getrimmte, deduplizierte Eintrag wird
+separat als Übergabeziel aufgelöst. Die sortierte Relay-Auswahl verändert diese
+Reihenfolge nicht. Auch unter `--yolo` verlangt eine Agentenbindung eine gültige
+menschliche Konfiguration. Agentenname und Assignee-Reihenfolge sind Teil der
+Neustartgrenze. Ungültiger Reload erhält den zuvor akzeptierten Kontext;
+Worker/Helfer erhalten dessen Identitäten und den unabhängigen Startmodus.
+
+Pro Workspace/Agent/Projektbereich darf genau ein Rechner die Agentenarbeit
+ausführen. Eine bestehende Agent-Integration muss auf dieselbe
+PO-Entscheidungshoheit abgestimmt sein; eine zweite Integration darf die
+delegierten Tickets nicht gleichzeitig autonom steuern. Workspaceweiter
+Empfang erweitert weder Projekt- noch menschliche Ausführungsberechtigungen.
+Die regulären Worker bewahren die Delegation in Cache, Dispatch und Retry.
+Entzug bei unverändertem Assignee stoppt den begonnenen delegierten Lauf;
+die Issue-Lease prüft die Delegation vor Arbeitsbeginn erneut.
+
+Der vollständige delegierte Projektbestand bleibt für PO-Entscheidungen im
+Relay-Cache sichtbar, auch wenn ein fremder menschlicher Assignee seine lokale
+Ausführung sperrt. Unzugewiesene delegierte Arbeit erhält nach frischer Prüfung
+unter der Ticketsperre den ersten konfigurierten Menschen. Die beiden vorhandenen
+Skip-Labels werden additiv ergänzt; andere Labels und vorhandene menschliche
+Zuweisungen bleiben erhalten. Unvollständige oder mehrdeutige Labelauflösung
+verhindert die Aufnahme.
+
+Backlog/Todo/Definiert bilden eine gemeinsame PO-Gruppe. Eine Gruppe belegt eine
+Sessionkapazität; ihre Mitglieder bleiben bis zum Abschluss für Einzelläufe
+reserviert. Gruppensperre und deterministisch erworbene Ticketleases verhindern
+lokale Doppelstarts. Der gesonderte Checkout liegt unter
+`<workspace.root>/yolo/<statusgruppe>/<lauf-id>` auf einer festgehaltenen
+`origin/main`-SHA, ohne Ticket-Hooks oder Änderung des Hauptcheckouts.
+Der App-Server erhält dafür eine eigene Laufbindung mit Projekt, Agent,
+Mitgliedern, Lauf-ID, Checkout und SHA. `sym-codex` prüft den exakten sauberen,
+detached Git-Checkout und dessen Projektzugehörigkeit, bevor es das normale
+Projektprofil samt gebundenem MCP startet. Manuelle Aufrufe oder Ticketargumente
+aktivieren diesen Pfad nicht. Die Ticketbranchprüfung bleibt für Einzelläufe
+bestehen. Nach Checkout-Erstellung und Kommentarabgleich prüft der Sammelrunner
+die eingefrorenen Mitglieder erneut frisch, während er alle Leases hält;
+geänderte Delegation, Zuständigkeit oder Anforderungen verhindern den Start.
+
+Beobachtungen und explizite Mitgliedsabschlüsse liegen dauerhaft unter dem
+projektgebundenen App-Zustand in `yolo/`. Relay-Signale entscheiden, ob Kommentare
+frisch eingelesen werden müssen. Bestätigte eigene Kommentare und Skip-Labels
+erzeugen keine neuen fachlichen Beobachtungen. Ein reguläres Turn-Ende ersetzt
+keine `symphony_yolo_complete`-Bestätigung; Änderungen während des Turns bleiben
+gegenüber dem eingefrorenen Ausgangsstand offen. Der beobachtete Wechsel zwischen
+weiterer erwarteter Arbeit und freier Schlussabnahme wird separat dauerhaft
+gespeichert; auch ein unverändertes zuvor bearbeitetes Review wird nach dem
+Wegfall der letzten weiteren Arbeit erneut bewertet. Fehler-/Teilresultate erhalten
+ihren Lauf-/Sessionbezug. Der Sammelvertrag steht in
+[WORKFLOW_YOLO_AGENT.md](../WORKFLOW_YOLO_AGENT.md).
+
+PO-Anlagen und Übergaben verwenden `symphony_yolo_action`. Der gemeinsame
+Folgeticketpfad steht auch regulären Workern zur Verfügung: `--yolo` plus
+Agentenkonfiguration setzt Agent und ersten konfigurierten Menschen, sonst
+entsteht das Backlog-Ticket ohne beide Zuweisungen. Aggregation übernimmt die
+Delegation unabhängig vom Startmodus. Das dauerhafte Journal `yolo-actions/`
+reserviert die ID vor Anlage und erhält den genauen Auftrag, Anforderungen und
+Relationsplan. Wiederaufnahme gleicht dieselbe ID ab; eine veränderte Operation
+oder Quelle wird abgewiesen. Vollständig gelesene Abhängigkeiten werden in beide
+Richtungen übertragen; erkannte Zyklen verhindern Relationsschreiben und
+Ursprungabschluss. Ursprünge schließen erst nach bestätigten Links. Unfertige
+Anlagen sperren die menschliche Schlussübergabe.
+
+Die Review-Warteentscheidung entsteht ohne Codex-Lauf aus dem vollständigen
+Relay-Bestand. Unmittelbar vor einem tatsächlichen Reviewstart wird dieser
+Bestand nochmals vollständig frisch geprüft. Bei Entzug eines Gruppenmitglieds
+bleiben die anderen bearbeitbar; jeder weitere Mitgliedsschreibzugriff prüft
+Zuständigkeit und Kommentare erneut. Review-/BLOCKER-Übergabe hält tatsächliche
+Prüfergebnisse und offene Fixes im Workpad, erhält den Status und entfernt die
+Delegation. Der Symphony-Zusatz steht in
+[Symphony-Schlussabnahme](../.codex/skills/sym-yolo-review/SKILL.md).
+
+Unvollständige lokale YOLO-Anlageoperationen sperren den Start ihres Zieltickets
+bis zur bestätigten Verknüpfung und zum Ursprungabschluss. Externe BLOCKER dürfen
+mit offenem Anlagejournal an den Menschen übergeben werden: Der Bericht nennt
+die reservierten IDs und den erforderlichen Abgleich, ohne die Operationen als
+erledigt zu markieren. Review-Übergaben verlangen weiterhin abgeschlossene
+Anlagen und Links.
+
+### Snapshot und Ereignisabgleich
 
 Die Subscription bzw. `resync begin` wird vor dem Initialsnapshot registriert.
 Erst nach dauerhaftem Snapshot folgen `complete` und Replay ab dem gespeicherten
@@ -204,6 +298,8 @@ nächsten Poll; Neustart und Listenänderung mit gleicher Consumer-ID und fortge
 Zustand. Hauptkonfiguration und laufenden Testbetrieb dabei erhalten.
 Lokale HTTP-/Prozesstests und diese Vorbereitung sind keine Cloudabnahme auf
 3–5 Rechnern. Die nachfolgenden PRO-716-Messwerte beschreiben den damaligen Stand.
+
+
 
 ## Schutz der Zugangsdaten
 
@@ -751,7 +847,147 @@ Erfolg verlangt eine vollständige, eindeutige Zuordnung der Fixtures und
 beobachteten Session-IDs sowie bestätigte Workpads/Statuswechsel.
 Danach prüft ein Dienstneustart dieselben Test-Consumer-IDs. Konkurrenzstarts über
 Normal-/Test-/Ticketlauncher und Escript müssen mit „Symphony läuft bereits“ scheitern.
-Fachliche YOLO-Szenarien und `sym-yolo-review` entstehen erst in PRO-734.
+
+Alle Szenarien bleiben an das einzige verifizierte `Prolok/symphony-test`
+gebunden. Vor der ersten Fixtureanlage prüft der Runner den konfigurierten
+Agenten sowie vollständig paginierte Projektteams und alle benötigten Teamstatus,
+einschließlich der Zielstatus wie `Umsetzungsticket erstellt`. Fehlende oder
+mehrdeutige Status und unvollständige Abfragen sperren die Anlage. Der Runner
+legt keine Teamstatus an. Fixture-/Sessionmengen richten sich nach dem Szenario:
+
+| Szenario | Ursprungsfixtures | Sessionzuordnung |
+| --- | --- | --- |
+| bootstrap / delegation | 1 Todo (AI) | 1 reguläre Session |
+| po_incoming / po_aggregation | 1 Todo (AI), Backlog, Todo, Definiert | 1 reguläre und 1 gemeinsame PO-Session |
+| po_handoff | 1 Todo (AI), BLOCKER, Review | 1 reguläre, 1 BLOCKER- und 1 Review-Session |
+| po_followup | 1 Todo (AI), Review | 1 reguläre und 1 Review-Session |
+
+Der begleitende reguläre Bootstrap erhält in PO-Szenarien keine Delegation;
+er zählt nicht zur weiteren erwarteten YOLO-Arbeit. Alle IDs und Rollen müssen
+vollständig und eindeutig erhalten bleiben. Gemeinsame Session-IDs sind nur für
+die drei Mitglieder der Eingangsgruppe zulässig.
+
+Der explizite Runnerparameter `--scenario delegation` ergänzt einen begrenzten
+Delegationsnachweis. Vor Beginn muss der Betreiber im freigegebenen Projekt
+`Prolok/symphony-test` `LINEAR_YOLO_AGENT` konfigurieren und die bestehende
+Agent-Integration für diesen Test auf eine Entscheidungshoheit abstimmen.
+Der Runner löst die Identität frisch auf, reserviert genau eine eigene
+Fixture-ID und lässt ausschließlich deren Todo-Bootstrap zu. Dieses Ticket
+startet erst mit der vorgesehenen Delegation. Zuweisung und anschließender
+Entzug ändern ausschließlich `delegateId`, der menschliche Assignee bleibt
+gleich. Beide Änderungen müssen im isolierten Relay-Cache mit fortgeschrittenem
+Cursor und Ticket-Epoche beobachtet werden. Ein zwischenzeitlicher Vollsnapshot
+ersetzt diesen Ereignisbeleg nicht. Journal und Ergebnis enthalten die konkreten
+IDs und Beobachtungen, ohne Relay-Receipts oder Secrets. Neustart, Exklusivität,
+Zeitgrenze und Cleanup des Bootstrap-Szenarios bleiben wirksam.
+
+`--scenario po_incoming` prüft den ersten gemeinsamen Eingangslauf: ein regulärer
+Bootstrap und drei anfänglich menschlich unzugewiesene, an den konfigurierten
+Agenten delegierte Fixtures im selben `symphony-test`
+aus Backlog/Todo/Definiert. Deren bereits erfüllte Anforderungen werden gemeinsam
+beurteilt und begründet verworfen. Erwartet werden Erstzuweisung, beide Skip-Labels,
+drei explizite Mitgliedsabschlüsse in genau einer PO-Session sowie die ausgeführte
+Checkout-SHA. Die Startliste enthält ausschließlich diese vier IDs; weitere
+AI-Phasen und neue Tickets gehören nicht zu diesem begrenzten Szenario. Eigene
+PO-Worktrees werden mit separaten Quell-/SHA-Belegen journalisiert und nach
+Sauberkeits-/Identitätsprüfung entfernt. Abweichende Worktrees bleiben zur
+Recovery erhalten; das Cleanup meldet einen Fehler. Das Szenario ersetzt weder
+Aggregation/Relationsübernahme noch Folge-Ticket- oder gemeinsame Reviewbelege.
+
+`--scenario po_handoff` verwendet genau drei eigene IDs: einen regulären
+Bootstrap sowie einen delegierten BLOCKER und ein delegiertes Review im selben
+`symphony-test`.
+Der BLOCKER beschreibt einen erforderlichen externen Betreiberbeleg und wird
+begründet an den Menschen übergeben. Dadurch wird das unveränderte Review frei;
+es prüft den sauberen separaten Checkout und dessen vollständige gemergte SHA.
+Erfolg verlangt beide tatsächlichen Sessions, ausdrückliche Mitgliedsbelege,
+entfernte Delegation bei erhaltenem Status und bestätigtes Cleanup. Weitere
+Implementierungsphasen, Aggregationen und neue Folge-Tickets sind in diesen
+begrenzten Szenarien gesperrt; sie brauchen eigene registrierte Testszenarien.
+Dieser Pass wäre keine vollständige Featureabnahme oder Fix-Ticket-Abnahme.
+
+`--scenario po_aggregation` prüft drei eigene Backlog-/Todo-/Definiert-Ursprünge
+in einer Sitzung und genau ein journalisiertes Aggregationsticket. Anforderungen,
+`symphony-generated`, menschliche Zuständigkeit, Delegation und sämtliche
+Ursprunglinks werden bestätigt, bevor die Ursprünge abgeschlossen werden.
+`--scenario po_followup` prüft ein eigenes Review-Ticket mit einer tatsächlich
+fehlenden Dokumentationsdatei, genau ein verknüpftes Fix-Ticket und die sofortige
+menschliche Übergabe. Mit `--yolo` erhält der Fix den konfigurierten Menschen
+und Agenten, ohne den Schalter bleiben beide leer. Der Startmodus gehört zum
+Laufplan und darf bei Wiederaufnahme nicht geändert werden.
+
+Diese beiden begrenzten Szenarien enden bei Anlage/Übergabe. Abgeleitete IDs werden
+vor dem ersten Schreibversuch in separaten Laufbelegen registriert und beim Probe-
+und Cleanup-Pfad einbezogen; sie erweitern **nicht** die Startfreigabe der
+Testinstanz. Eine zweite Anlage, fremde Ursprünge oder Abhängigkeiten werden
+abgewiesen. Eigene abgeleitete Tickets werden vor den Ursprüngen gelöscht;
+unerwartete Workspaces, fremde Änderungen oder unbestätigte Löschung erhalten das
+Journal und verhindern Erfolg. Ein vollständiger Implementierungs-/Merge-/Fix-
+Durchlauf ist damit noch nicht nachgewiesen.
+
+Für diesen Gesamtweg ergänzt `scripts/test-instance-pipeline` einen begrenzten
+Betreiberstart mit ausdrücklich angegebenen eigenen Ticket-UUIDs. Er verwendet
+die PRO-736-Projektprüfung, gemeinsame Exklusivsperre und Prozessbereinigung.
+Ein separates Workflow-Abbild unter `_build/` ergänzt ausschließlich
+`tracker.app.allowed_issue_ids`; alle regulären Phasen, Hooks, Tests, Skills und
+Merge-Gates bleiben erhalten. Es gibt keine Bootstrap-Phasensperre. Der bereits
+gebaute, quellgebundene Kandidat startet über `mise exec -- bin/symphony`;
+Hauptcheckout und Hauptinstanz werden nicht aktualisiert. Dieses Betreiberwerkzeug
+ist kein zusätzlicher Workerzugriff auf private Konfiguration oder Linear.
+
+1. Die vorhandene Umgebung exklusiv übernehmen; frisches Manifest, vollständiges
+   Dummy-Inventar, eigene Fixture-UUIDs und GitHub-Rechte bestätigen. Unbeteiligte
+   Projekte/Worktrees/Dateien, Remote-Stand und Konfiguration protokollieren.
+   Den Kandidaten mit `make check` bauen, seine Quelle mit
+   `python3 scripts/test-instance.py source "$PWD"` in einer Datei unter `_build/`
+   festhalten. Vor dem ersten Schreibversuch die eigenen UUIDs journalisieren.
+2. Über den erlaubten gebundenen Linear-Weg ein delegiertes Umsetzungsticket im
+   Dummy-Projekt mit einer konkreten, begrenzten Anforderung an eine neue Datei
+   `docs/po-proof-<lauf-id>.md` anlegen. Anforderungen/Validierung und menschliche
+   Zuständigkeit vollständig angeben. Projekt/Team/Agent/Labels frisch bestätigen;
+   keine fremden Tickets in die Startliste aufnehmen. Für die gemeinsame
+   Eingangsprüfung können mehrere eigene IDs übergeben werden.
+3. Den folgenden Aufruf zunächst ohne `--execute` prüfen; zum tatsächlichen Start
+   einen neuen Ergebnisordner verwenden. `--yolo` entsprechend der zu prüfenden
+   Startmodusmatrix setzen. Der Prozess endet spätestens nach 600 Sekunden;
+   SIGTERM/SIGINT beendet eigene Worker kontrolliert. Zeitablauf ist kein Pass.
+
+   ```bash
+   scripts/test-instance-pipeline --source "$SOURCE_JSON" --manifest "$MANIFEST" \
+     --run-id "$RUN_ID" --issue-id "$FIXTURE_UUID" \
+     --result-dir "$PWD/_build/pipeline/$RUN_ID" --port 4101 --timeout 600 --yolo --execute
+   ```
+
+4. Reguläre Planung/Implementierung/PreReview/Review/Test/Merge anhand tatsächlicher
+   Workpads, Sessions, Prüfungen und GitHub-PR beobachten. Merge-Commit-SHA und
+   fachlichen Reviewcheckout belegen. Keine Statussprünge zum Vortäuschen des
+   Durchlaufs. Ein bewusst eingebrachtes, separat beschriebenes Review-Finding
+   muss ein verknüpftes Fix-Ticket erzeugen und den Ursprung sofort beim Menschen
+   in Review belassen. Neu angelegte IDs erweitern die explizite Startliste nicht
+   automatisch: Instanz kontrolliert beenden, Anlage/Links/Zuständigkeit bestätigen
+   und nur das eigene Fix-Ticket in einem neuen protokollierten Abschnitt starten.
+   Der Fix durchläuft dieselben regulären Gates und seine eigene Schlussabnahme.
+   Ohne `--yolo` bleibt der neu angelegte Fix unzugewiesen im Backlog; dessen
+   automatische Weiterbearbeitung darf dieser Gegenfall nicht behaupten.
+5. `result.json` protokolliert ausschließlich `operator_pipeline_observation`,
+   beobachtete Sessions/Status/Projektbindungen und Prozessbereinigung. Es vergibt
+   keinen Abnahmestatus und quittiert Daten-Cleanup nie automatisch. Betreiber
+   ergänzt tatsächliche Test-/PR-/Merge-/Abnahmebelege, getrennte Relay-Consumer
+   und Empfang/Ack sowie Hauptfortschritt. Fehlende kurze Statusbeobachtungen
+   anhand dauerhafter Session-/Workpad-Belege abgleichen, nicht erfinden.
+6. Eigene Testtickets/Relationen, Branches/PRs und Workspaces über ihre exakten IDs
+   bereinigen; gemergte Teständerungen gezielt reversieren, keinen fremden Stand
+   zurücksetzen oder force-pushen. Unerwartete Änderungen erhalten. Konfiguration,
+   unbeteiligte Ausgangsarbeit, Portfreiheit und gestoppte Prozesse unabhängig
+   bestätigen. Prüf-/Fehlerbelege und SHAs erhalten. Ein separater Cleanupbeleg
+   ändert kein fehlgeschlagenes Testergebnis. Erst der vollständige fachliche
+   Beleg einschließlich Restore erfüllt den Gesamtfall.
+
+`--scenario bootstrap` ist der unveränderte Standard. Ein Wiederaufnahmelauf
+muss dasselbe Szenario angeben; `--resume --cleanup-only` räumt ausschließlich
+seine eigenen Fixtures auf. Verlorene Schreibantworten bleiben Fehlläufe und
+werden beim Cleanup anhand der bereits journalisierten IDs abgeglichen.
+Der Delegationstest weist noch keine PO-Aggregation oder Schlussabnahme nach.
 
 `result.json` enthält `evidence: live`, Quellstand/-modus, Projektbindungen,
 Zeitgrenze/-punkte, Szenarioresultate, Worker-/Sessionbezug, Test-Consumer-IDs,
@@ -761,6 +997,28 @@ Fehlende Bereitschaft, Timeout, Signal, ungültiger Quellstand und unbestätigte
 Cleanup bleiben Fehler mit Exit 1. Synthetische Tests unter `test/` haben keinen
 Livebeleg; deren Ergebnis heißt ausdrücklich `fixture`. Providerpayloads, Tokens
 und Relay-Receipts gehören nicht in öffentliche Belege. Lokale Logs sind privat.
+Bei einem fehlgeschlagenen App-Probeabruf bleibt der sichere Fehlercode
+`runtime_failure.code=linear_app_request_unavailable` im Ergebnis erhalten.
+Die privaten Prozesslogs ergänzen eine feste Transportkategorie und Anfragedauer
+sowie den Fixture-/Laufbezug; weder Providertexte noch Exceptions gelangen in
+den öffentlichen Fehlerbeleg. Nur die in Linear rein lesende Beobachtungsprobe
+darf bei genau diesem Fehler oder `linear_http` mit Status `503` innerhalb
+desselben Laufs erneut beginnen: insgesamt
+höchstens zwei Wiederholungen nach zwei bzw. fünf Sekunden, auch über erfolgreiche
+Zwischenprobes und `--resume` hinweg. Dienst, Fixtures und Gesamtfrist bleiben bestehen;
+`probe_retries` dokumentiert die Versuche. Erst eine vollständige frische Probe
+kann Erfolg belegen. Auth-, Rate-Limit-, Schema-, Journal- und fachliche Fehler
+sowie abgelaufene Fristen stoppen weiterhin. Anlage, Delegationsänderung und
+Cleanup werden nicht automatisch wiederholt. Bei ausgeschöpftem Budget bleibt
+der Lauf fehlgeschlagen; Cleanup läuft weiterhin. Ein unbekannter Transportgrund
+ist kein Authnachweis.
+
+Eine PO-Probe löst Menschen und Agenten einmal je gebundenem Projektkontext auf
+und verwendet diese IDs für alle Mitglieder desselben Aufrufs. Die nächste
+CLI-Probe beginnt mit frisch geladenen Kontexten; die aufgelösten IDs werden
+nicht im Laufjournal oder einem zusätzlichen Cache gespeichert. Ticketdaten und
+Kommentare bleiben je Mitglied frisch. Fehler bei der Auflösung brechen die
+Probe ab; das Cleanup benötigt keine erneute Agentenauflösung.
 
 Das dauerhaft vor Ticketanlage geschriebene Laufjournal enthält die gewählten UUIDs.
 Unklare Anlageantworten erzeugen keine erneute Anlage. `--resume` akzeptiert nur
@@ -772,6 +1030,45 @@ Zum reinen Aufräumen denselben Aufruf mit
 `--resume --cleanup-only` ausführen: keine neuen Tickets/Worker, vorhandenes Escript
 mit passendem eingebettetem Quellbezug, auch nach Quelländerung oder Hauptdienstende.
 Die Wiederherstellung wird dokumentiert, aber nicht als bestandener Test ausgegeben.
+
+Benötigt gerade das Cleanup eine Codekorrektur, den korrigierten Stand zunächst
+lokal prüfen und mit `make build` bauen. Für denselben alten Lauf zusätzlich
+`--cleanup-plan-sha256 <SHA256-der-unveränderten-plan.json>` angeben; dabei
+`--expected-sha` und `--expected-source` auf den korrigierten Build setzen.
+`--resume --cleanup-only`, ursprüngliche Instanz, Lauf-ID, Ergebnisablage,
+Checkout, Szenario und Startmodus bleiben erforderlich. Der Preflight prüft
+aktuellen Quellstand und Buildstempel sowie den ausdrücklich benannten alten
+Plan. Die Runtime erlaubt diesen Quellwechsel ausschließlich für Cleanup und
+prüft unverändert die alten Journal-, Projekt-, App-, Fixture- und Workspacebindungen.
+Plan und Operationsintents werden nicht umgeschrieben. Das Recoveryresultat
+nennt alten Plan samt Hash und tatsächlich ausgeführten neuen Build; archivierte
+Fehlresultate bleiben erhalten, Exitstatus 1 und `status=failed` bleiben auch bei
+`cleanup=true` bestehen. Keine neue Probe oder Sitzung vor bestätigtem Cleanup.
+
+Für neu angelegte YOLO-Tickets verwenden Anlageabgleich und abgeleitete
+Testfixtures denselben begrenzten Beschreibungsvergleich: `-`/`*` bei
+obersten Listen, zusammengefasste leere Zeilen, eine Leerzeile zwischen
+Doppelpunkt-Einleitung und oberster Aufzählung oder `1. `-Liste sowie endständige
+Linear-Issuelinks mit exakt gleichem Schlüssel und Ziel-URL. Nummerierung,
+Listentrennzeichen und Abstände innerhalb nummerierter Listen bleiben unverändert.
+Für eindeutige Prosa gilt zusätzlich der belegte Backslash-Roundtrip:
+Ein oder zwei Backslashes vor ASCII-Buchstaben/Ziffern stellen denselben
+literalen Backslash dar ([CommonMark §2.4](https://spec.commonmark.org/0.31.2/#backslash-escapes)).
+Längere Folgen, Satzzeichen-Escapes und Zeilenumbrüche werden nicht angeglichen.
+Diese zusätzliche Toleranz gilt konservativ nur für Dokumente ohne Code,
+allgemeine Linksyntax, HTML oder verschachtelte/eingerückte Blöcke; bekannte
+endständige Linear-Issuelinks sind ausgenommen, URL-Zeilen bleiben unverändert.
+Der beobachtete Linkziel-Roundtrip `[Text](URL)` / `[Text](<URL>)` wird für
+einfache Linear-Issue-URLs in eindeutigen Prosaabsätzen angeglichen
+([CommonMark §6.3](https://spec.commonmark.org/0.31.2/#links)). Beschriftung und
+URL bleiben exakt; Absätze mit Code, Escapes, Bildern, verschachtelten Links,
+HTML oder unbestätigter Linksyntax sind von dieser Toleranz ausgeschlossen.
+Anlagepayload und journalisierter Intent werden dabei nicht umgeschrieben.
+Codeblöcke bleiben unverändert; Dokumente mit
+eingerückten Blöcken oder rohem HTML verlangen weiterhin Bytegleichheit.
+Andere Texte, Links, Einrückungen, Checkboxen, Titel, Identitäten, Status und
+Zuweisungen bleiben strikt geprüft. Unbekannte Transformationen werden abgewiesen;
+unvollständige Anlagen sind weder erfolgreiche Aggregationen noch Testpässe.
 
 SIGINT/SIGTERM lösen kontrolliertes Cleanup aus; ein Guardian hält die Reservierung,
 bis eigene Nachkommen beendet sind, auch nach SIGKILL des Runners. Kernel-Locks

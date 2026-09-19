@@ -4,7 +4,8 @@ defmodule SymphonyElixir.Linear.IssueLease do
   """
 
   alias SymphonyElixir.{Config, RuntimePaths, Tracker, Workpad}
-  alias SymphonyElixir.Linear.WorkpadTransfer
+  alias SymphonyElixir.Linear.{WorkpadTransfer, YoloAgent}
+  alias SymphonyElixir.Yolo.Operations, as: Operations
 
   @spec run(map(), (-> term())) :: term()
   def run(issue, callback) do
@@ -68,9 +69,30 @@ defmodule SymphonyElixir.Linear.IssueLease do
   end
 
   defp run_ready(binding, issue, callback) do
-    with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id),
+    with :ok <- ready_target(issue.id),
+         :ok <- verify_delegation(issue),
+         {:ok, comments} <- Tracker.fetch_issue_comments(issue.id),
          :ok <- workpad_ready(binding, issue, comments) do
       callback.()
+    end
+  end
+
+  defp ready_target(id) do
+    if Operations.target_ready?(id), do: :ok, else: {:error, :yolo_creation_incomplete}
+  end
+
+  defp verify_delegation(issue) do
+    if YoloAgent.delegated?(issue) do
+      with {:ok, [current]} <- Tracker.fetch_issue_states_by_ids([issue.id]),
+           true <- YoloAgent.continued?(issue, current),
+           :ok <- SymphonyElixir.Relay.execution_allowed(current) do
+        :ok
+      else
+        {:error, _} = error -> error
+        _ -> {:error, :yolo_delegation_changed}
+      end
+    else
+      :ok
     end
   end
 

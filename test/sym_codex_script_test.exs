@@ -79,6 +79,7 @@ defmodule SymCodexScriptTest do
     print('relay-reference=' + os.environ['SYMPHONY_RELAY_KEY_ENV'])
     print('project-context=' + os.environ.get('SYMPHONY_PROJECT_CONTEXT', 'absent'))
     print('model=' + os.environ.get('SYM_CODEX_MODEL', 'absent'))
+    print('group-scope=' + os.environ.get('SYMPHONY_YOLO_SCOPE', ''))
     """)
 
     runtime = %{
@@ -88,7 +89,9 @@ defmodule SymCodexScriptTest do
       "SYMPHONY_LINEAR_BINDING_HASH" => "synthetic-binding",
       "SYMPHONY_CODEX_STATE_ROOT" => Path.join(repo_dir, "state"),
       "SYMPHONY_RUN_ID" => "synthetic-run",
-      "SYMPHONY_PHASE" => "In Arbeit (AI)"
+      "SYMPHONY_PHASE" => "In Arbeit (AI)",
+      "SYMPHONY_PROJECT_CONTEXT" => "synthetic-project-context",
+      "SYMPHONY_YOLO_SCOPE" => ""
     }
 
     prompt = "SYM_CODEX_CONTEXT_V3\n#{Jason.encode!(runtime)}\nIn Arbeit (AI)\n\nSYM_CODEX_PROMPT_V1\nTest"
@@ -102,6 +105,8 @@ defmodule SymCodexScriptTest do
     assert output =~ "bound-app=synthetic-binding"
     assert output =~ "state=#{repo_dir}/state"
     assert output =~ "relay-reference=CUSTOM_RELAY_SECRET"
+    assert output =~ "project-context=synthetic-project-context"
+    assert output =~ "group-scope=\n"
     refute output =~ "codex-stub"
 
     File.write!(Path.join(worktree, ".env"), "SYM_CODEX_MODEL=manual-project-model\n")

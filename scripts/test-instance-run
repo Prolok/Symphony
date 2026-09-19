@@ -50,11 +50,13 @@ def parser():
     result.add_argument("--expected-source", required=True)
     result.add_argument("--port", type=int, required=True)
     result.add_argument("--result-dir", type=Path, required=True)
+    result.add_argument("--scenario", choices=("bootstrap", "failure-probe", "delegation", "po_incoming", "po_handoff", "po_aggregation", "po_followup"), default="bootstrap")
+    result.add_argument("--yolo", action="store_true", help="Folgeticket-Zuweisungsmatrix im isolierten Testlauf")
     result.add_argument("--source-mode", choices=("development", "merged"), default="development")
     result.add_argument("--timeout", type=float, default=180)
     result.add_argument("--resume", action="store_true")
     result.add_argument("--cleanup-only", action="store_true", help="Nur eigenes Journal aufräumen; verlangt --resume")
-    result.add_argument("--scenario", choices=("bootstrap", "failure-probe"), default="bootstrap")
+    result.add_argument("--cleanup-plan-sha256", help="Cleanup mit korrigiertem Build; SHA256 des unveränderten ursprünglichen plan.json")
     return result
 
 
@@ -79,6 +81,9 @@ class Run:
                         MISE_TRUSTED_CONFIG_PATHS=str(args.checkout / "mise.toml"))
         for key in ("SYMPHONY_PROJECT_CONTEXT", "SYMPHONY_LINEAR_AUTH_MODE", "SYMPHONY_LINEAR_BINDING_HASH"):
             self.env.pop(key, None)
+        self.env.pop("SYMPHONY_TEST_CLEANUP_PLAN_SHA256", None)
+        if args.cleanup_plan_sha256:
+            self.env["SYMPHONY_TEST_CLEANUP_PLAN_SHA256"] = args.cleanup_plan_sha256
 
     def save(self):
         atomic(self.result_path, self.result)
@@ -92,6 +97,8 @@ class Run:
     def start(self, stage, direct=False):
         env = dict(self.env, SYMPHONY_TEST_RUN_STAGE=stage)
         flags = ["--test-instance", self.args.test_instance, "--port", str(self.args.port)]
+        if self.args.yolo:
+            flags.append("--yolo")
         command = (["mise", "exec", "--", str(self.args.checkout / "bin/symphony")] if direct else [str(self.args.checkout / "symphony")]) + flags
         # The parent owns the fixture reservation through build, run and cleanup.
         # All child entrypoints still validate the explicit test mode and source.
@@ -110,9 +117,11 @@ class Run:
         return child
 
     def invoke(self, stage, timeout=None):
-        child = self.start(stage, direct=stage in ("probe", "cleanup"))
+        if timeout is None:
+            self.remaining()
+        child = self.start(stage, direct=stage in ("probe", "cleanup", "delegate", "withdraw"))
         try:
-            output, _ = child.communicate(timeout=timeout or self.remaining())
+            output, _ = child.communicate(timeout=timeout if timeout is not None else self.remaining())
         except subprocess.TimeoutExpired as error:
             raise RunFailure(stage + "_timeout") from error
         # Preserve local process evidence; provider contents never enter result.json.
@@ -120,11 +129,43 @@ class Run:
         with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab") as stream:
             stream.write(output)
         if child.returncode:
+            # Only the runtime's small allowlisted diagnostic reaches the public receipt.
+            for line in output.splitlines():
+                if line.startswith(b"Test run failure="):
+                    try:
+                        detail = json.loads(line[len(b"Test run failure="):])
+                        self.result["runtime_failure"] = {key: detail[key] for key in ("code", "status", "state", "states") if key in detail}
+                    except (ValueError, TypeError):
+                        pass
             raise RunFailure(stage + "_failed")
         lines = [line[len(b"Test run result="):] for line in output.splitlines() if line.startswith(b"Test run result=")]
         if len(lines) != 1:
             raise RunFailure(stage + "_missing_receipt")
         return json.loads(lines[0])
+
+    def probe(self):
+        # Only this observation stage is read-only in Linear. Keep the same
+        # service, fixtures and deadline; never replay preparation or mutations.
+        while self.remaining():
+            if self.service.poll() is not None:
+                raise RunFailure("service_exited")
+            self.result.pop("runtime_failure", None)
+            try:
+                return self.invoke("probe")
+            except RunFailure as error:
+                failure = self.result.get("runtime_failure")
+                retries = self.result.get("probe_retries", [])
+                if (str(error) != "probe_failed" or
+                        failure not in ({"code": "linear_app_request_unavailable"},
+                                        {"code": "linear_http", "status": 503}) or len(retries) >= 2):
+                    raise
+                delay = (2, 5)[len(retries)]
+                if self.remaining() <= delay:
+                    raise RunFailure("timeout") from error
+                retries.append(dict(attempt=len(retries) + 2, delay_seconds=delay, failure=failure))
+                self.result["probe_retries"] = retries
+                self.save()
+                time.sleep(delay)
 
     def stop_children(self):
         self.processes.descendants(os.getpid(), self.known, {int(os.environ.get("SYMPHONY_SERVICE_GUARD_PID", "0"))})
@@ -163,16 +204,23 @@ class Run:
                         and entry.get("workspace_id") == expected[entry["name"]]["workspace_id"] for entry in actual)
                 and all(state.get("relay", {}).get(binding["workspace_id"], {}).get("status") == "ready" for binding in expected.values()))
 
-    def fixture_ids(self, fixtures, projects):
-        if (not isinstance(fixtures, list) or not projects or len(fixtures) != len(projects)
+    def fixture_ids(self, fixtures, projects, scenario="bootstrap"):
+        states = ["Todo (AI)"] + {
+            "po_incoming": ["Backlog", "Todo", "Definiert"],
+            "po_aggregation": ["Backlog", "Todo", "Definiert"],
+            "po_handoff": ["BLOCKER", "Review"],
+            "po_followup": ["Review"],
+        }.get(scenario, [])
+        expected = {(project, state) for project in projects for state in states}
+        if (not isinstance(fixtures, list) or not projects or len(fixtures) != len(expected)
                 or any(not isinstance(f, dict) or not isinstance(f.get("id"), str) or not f["id"]
                        or f.get("created") is not True or f.get("deleted") is not False for f in fixtures)
-                or {f.get("project") for f in fixtures} != projects.keys()
+                or {(f.get("project"), f.get("initial_state", "Todo (AI)")) for f in fixtures} != expected
                 or len({f["id"] for f in fixtures}) != len(fixtures)):
             raise RunFailure("invalid_fixture_mapping")
-        return {f["id"]: f["project"] for f in fixtures}
+        return {f["id"]: (f["project"], f.get("initial_state", "Todo (AI)")) for f in fixtures}
 
-    def collect_sessions(self, running, fixtures, sessions):
+    def collect_sessions(self, running, fixtures, sessions, shared=frozenset()):
         seen = set()
         for entry in running:
             issue = entry.get("issue_id")
@@ -184,8 +232,10 @@ class Run:
                 if not isinstance(session, str) or not session.strip():
                     raise RunFailure("invalid_session_mapping")
                 sessions[issue] = session
-        if len(set(sessions.values())) != len(sessions):
-            raise RunFailure("invalid_session_mapping")
+        for session in set(sessions.values()):
+            members = {issue for issue, value in sessions.items() if value == session}
+            if len(members) > 1 and not members <= shared:
+                raise RunFailure("invalid_session_mapping")
 
     def competition(self):
         env = dict(self.env)
@@ -251,6 +301,7 @@ class Run:
             history = self.args.result_dir / ("result-" + str(time.time_ns()) + ".json")
             atomic(history, previous)
             self.result["original_projects"] = originals
+            self.result["probe_retries"] = previous.get("probe_retries", [])
         try:
             if self.args.cleanup_only:
                 plan = json.loads(self.plan_path.read_text())
@@ -272,27 +323,32 @@ class Run:
             self.result["original_projects"] = originals
             if self.plan_path.exists():
                 existing = json.loads(self.plan_path.read_text())
-                if (not self.args.resume or existing["source"] != capsule["source"] or existing["run_id"] != self.args.run_id
-                        or existing.get("scenario", "bootstrap") != self.args.scenario):
+                owner_source = capsule.get("cleanup_recovery", {}).get("source", capsule["source"])
+                if not self.args.resume or existing["source"] != owner_source or existing["run_id"] != self.args.run_id or existing.get("scenario", "bootstrap") != self.args.scenario or existing.get("yolo", False) != self.args.yolo:
                     raise RunFailure("run_already_exists_or_changed")
             else:
                 atomic(self.plan_path, {"evidence": "live", "instance": self.args.test_instance,
-                                        "run_id": self.args.run_id, "source": capsule["source"], "scenario": self.args.scenario})
+                                        "run_id": self.args.run_id, "source": capsule["source"], "scenario": self.args.scenario, "yolo": self.args.yolo})
             self.save()
             prepared = True  # Intent may be durable even when prepare loses its response.
             if self.args.cleanup_only:
                 self.result["scenarios"]["cleanup_only"] = True
+                if self.args.cleanup_plan_sha256:
+                    self.result["cleanup_recovery"] = capsule["cleanup_recovery"]
                 return 1  # Cleanup in finally is a recovery receipt, never a test pass.
             fixtures = self.invoke("prepare")["fixtures"]
             self.result["fixtures"] = fixtures
-            fixture_ids = self.fixture_ids(fixtures, capsule["manifest"]["projects"])
+            fixture_ids = self.fixture_ids(fixtures, capsule["manifest"]["projects"], self.args.scenario)
             if self.args.scenario == "failure-probe":
                 raise RunFailure("intentional_failure_probe")
             self.competition()
             self.service = self.start("run")
             sessions = {}
+            shared = {f["id"] for f in fixtures if f.get("po_incoming")}
             observed_ready = False
             last_probe = 0
+            delegated = False
+            withdrawn = False
             while self.remaining():
                 if self.service.poll() is not None:
                     raise RunFailure("service_exited")
@@ -302,16 +358,67 @@ class Run:
                     observed_ready = True
                     self.result["scenarios"]["readiness"] = {"passed": True, "service": state["service"]}
                     self.result["consumers"] = {key: value["consumer_id"] for key, value in state["relay"].items()}
-                self.collect_sessions(state.get("running", []), fixture_ids, sessions)
+                    if self.args.scenario == "delegation" and not delegated:
+                        self.result["fixtures"] = self.invoke("delegate")["fixtures"]
+                        delegated = True
+                self.collect_sessions(state.get("running", []), fixture_ids, sessions, shared)
                 self.result["sessions"] = sessions
                 self.save()
-                if observed_ready and sessions.keys() == fixture_ids.keys() and time.monotonic() - last_probe >= 3:
-                    probed = self.invoke("probe")["fixtures"]
+                if observed_ready and (len(sessions) == len(fixtures) or self.args.scenario in ("po_incoming", "po_handoff", "po_aggregation", "po_followup")) and time.monotonic() - last_probe >= 3:
+                    probe = self.probe()
+                    probed = probe["fixtures"]
+                    self.result["derived"] = probe.get("derived", [])
                     last_probe = time.monotonic()
-                    if self.fixture_ids(probed, capsule["manifest"]["projects"]) != fixture_ids:
+                    if self.fixture_ids(probed, capsule["manifest"]["projects"], self.args.scenario) != fixture_ids:
                         raise RunFailure("changed_fixture_mapping")
                     if all(f["complete"] for f in probed):
-                        self.result["scenarios"]["bootstrap"] = {"passed": True, "fixtures": probed}
+                        if self.args.scenario in ("po_aggregation", "po_followup"):
+                            derived = probe.get("derived", [])
+                            if len(derived) != 1 or derived[0].get("complete") is not True:
+                                raise RunFailure("derived_fixture_unconfirmed")
+                        if self.args.scenario in ("po_incoming", "po_aggregation"):
+                            po = [f for f in probed if f.get("po_incoming")]
+                            receipts = [f.get("po_receipt", {}) for f in po]
+                            if len(po) != 3 or {f["initial_state"] for f in po} != {"Backlog", "Todo", "Definiert"}:
+                                raise RunFailure("po_membership_unconfirmed")
+                            if len({r.get("session_id") for r in receipts}) != 1 or not all(r.get("session_id") and r.get("sha") for r in receipts):
+                                raise RunFailure("po_shared_session_unconfirmed")
+                            for fixture in po:
+                                sessions[fixture["id"]] = fixture["po_receipt"]["session_id"]
+                            if len(sessions) != len(fixtures):
+                                continue
+                            self.result["scenarios"][self.args.scenario] = {"passed": True, "fixtures": po}
+                            self.result["sessions"] = sessions
+                        if self.args.scenario in ("po_handoff", "po_followup"):
+                            po = [f for f in probed if f.get("po_handoff")]
+                            if {f["initial_state"] for f in po} != ({"BLOCKER", "Review"} if self.args.scenario == "po_handoff" else {"Review"}) or len(po) != (2 if self.args.scenario == "po_handoff" else 1):
+                                raise RunFailure("po_handoff_membership_unconfirmed")
+                            for fixture in po:
+                                receipt = fixture.get("handoff_receipt", {})
+                                if not all(receipt.get(key) for key in ("session_id", "sha", "workspace", "report")):
+                                    raise RunFailure("po_handoff_receipt_unconfirmed")
+                                sessions[fixture["id"]] = receipt["session_id"]
+                            if len(sessions) != len(fixtures):
+                                continue
+                            self.result["scenarios"][self.args.scenario] = {"passed": True, "fixtures": po}
+                            self.result["sessions"] = sessions
+                        if self.args.scenario in ("po_aggregation", "po_followup"):
+                            self.result["scenarios"][self.args.scenario]["derived"] = derived
+                        self.result["scenarios"]["bootstrap"] = {"passed": True, "fixtures": [f for f in probed if not f.get("po_incoming") and not f.get("po_handoff")]}
+                        if self.args.scenario == "delegation":
+                            selected = [f for f in probed if f.get("test_delegate_id")]
+                            if len(selected) != 1 or not selected[0].get("delegation_assigned"):
+                                raise RunFailure("delegation_assignment_unconfirmed")
+                            if not withdrawn:
+                                self.result["fixtures"] = self.invoke("withdraw")["fixtures"]
+                                withdrawn = True
+                                continue
+                            if not selected[0].get("delegation_withdrawn"):
+                                continue
+                            self.result["scenarios"]["delegation"] = {"passed": True, "fixture": selected[0]}
+                        if sessions.keys() != fixture_ids.keys():
+                            continue
+                        self.collect_sessions([], fixture_ids, sessions, shared)
                         consumers = self.result["consumers"]
                         self.stop_children()
                         self.service = self.start("run", direct=True)
@@ -336,7 +443,8 @@ class Run:
             if prepared:
                 try:
                     restored = self.invoke("cleanup", timeout=60)
-                    self.result["cleanup"] = all(f["deleted"] for f in restored["fixtures"])
+                    self.result["cleanup"] = all(f["deleted"] for f in restored["fixtures"]) and all(f["deleted"] for f in restored.get("derived", []))
+                    self.result["derived"] = restored.get("derived", [])
                     self.result["fixtures"] = restored["fixtures"]
                 except (RunFailure, ValueError, KeyError, OSError):
                     self.stop_children()
@@ -378,6 +486,8 @@ def main():
     args.result_dir = test.canonical(args.result_dir)
     if args.cleanup_only and not args.resume:
         raise SystemExit("--cleanup-only verlangt --resume")
+    if args.cleanup_plan_sha256 and not (args.cleanup_only and args.resume):
+        raise SystemExit("--cleanup-plan-sha256 verlangt --resume --cleanup-only")
     if os.environ.get("SYMPHONY_SERVICE_OWNER_PID") != str(os.getpid()):
         module("service-lock").launch([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]], name=args.test_instance)
     if (args.result_dir / "result.json").exists() and not args.resume:
@@ -385,10 +495,11 @@ def main():
     if args.resume:
         plan = json.loads((args.result_dir / "plan.json").read_text())
         if (plan.get("run_id") != args.run_id or plan.get("instance") != args.test_instance
+                or (not args.cleanup_plan_sha256 and plan.get("source", {}).get("sha") != args.expected_sha)
+                or (not args.cleanup_plan_sha256 and plan.get("source", {}).get("source_sha256") != args.expected_source)
+                or plan.get("source", {}).get("checkout") != str(args.checkout)
                 or plan.get("scenario", "bootstrap") != args.scenario
-                or plan.get("source", {}).get("sha") != args.expected_sha
-                or plan.get("source", {}).get("source_sha256") != args.expected_source
-                or plan.get("source", {}).get("checkout") != str(args.checkout)):
+                or plan.get("yolo", False) != args.yolo):
             raise SystemExit("Wiederaufnahme gehört nicht zum bestehenden Lauf; Resultate erhalten")
     signalled = []
     def interrupted(signum, _frame):

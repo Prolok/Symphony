@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Linear.AppAuth do
   """
 
   use GenServer
+  require Logger
 
   alias SymphonyElixir.Config
   alias SymphonyElixir.Linear.{Assignees, CommentJournal, RateLimit}
@@ -20,7 +21,7 @@ defmodule SymphonyElixir.Linear.AppAuth do
   @required ~w(client_secret_env workspace_id user_id client_id state_root installation_id)
 
   @spec validate(map()) :: :ok | {:error, term()}
-  def validate(%{auth_mode: "app", app: app, endpoint: endpoint, assignee: assignee}) do
+  def validate(%{auth_mode: "app", app: app, endpoint: endpoint, assignee: assignee} = tracker) do
     cond do
       not Enum.all?(@required, &nonempty?(app[&1])) -> {:error, :missing_linear_app_binding}
       not Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, app["client_secret_env"]) -> {:error, :invalid_linear_client_secret_reference}
@@ -29,11 +30,15 @@ defmodule SymphonyElixir.Linear.AppAuth do
       Path.type(app["state_root"]) != :absolute -> {:error, :invalid_linear_app_state_root}
       not valid_issue_scope?(app["allowed_issue_ids"]) -> {:error, :invalid_linear_app_issue_scope}
       not valid_assignees?(assignee, app["user_id"]) -> {:error, :linear_app_requires_human_assignee}
-      true -> :ok
+      true -> validate_agent_human(tracker)
     end
   end
 
   def validate(_tracker), do: {:error, :invalid_linear_app_configuration}
+
+  defp validate_agent_human(tracker) do
+    if Map.get(tracker, :yolo_agent) != nil and not Assignees.human?(tracker.assignee, tracker.app["user_id"]), do: {:error, :linear_yolo_agent_requires_human_assignee}, else: :ok
+  end
 
   defp valid_assignees?(assignee, app_user) do
     (Config.yolo?() and Assignees.parse(assignee) == []) or Assignees.human?(assignee, app_user)
@@ -349,15 +354,36 @@ defmodule SymphonyElixir.Linear.AppAuth do
   end
 
   defp safe_request(request_fun, payload, headers) do
+    timed_request(request_fun, payload, headers, System.monotonic_time(:millisecond))
+  end
+
+  defp timed_request(request_fun, payload, headers, started) do
     case request_fun.(payload, headers) do
       {:error, {:linear_app_rate_limited, _}} = error -> error
       {:error, reason} = error when reason in @rate_limit_state_errors -> error
       {:ok, response} -> {:ok, response}
-      _ -> {:error, :linear_app_request_unavailable}
+      {:error, reason} -> unavailable_request(reason, :returned_error, payload, started)
+      _ -> unavailable_request(nil, :unexpected_response, payload, started)
     end
   rescue
-    _ -> {:error, :linear_app_request_unavailable}
+    error -> unavailable_request(error, :exception, payload, started)
   end
+
+  defp unavailable_request(reason, fallback, payload, started) do
+    # Preserve the existing failure contract; only fixed diagnostic values may
+    # cross this boundary. Exception messages and provider terms can hold secrets.
+    category = transport_category(reason, fallback)
+    elapsed = System.monotonic_time(:millisecond) - started
+    Logger.warning("Linear app request unavailable kind=#{budget_kind(payload)} reason=#{category} elapsed_ms=#{elapsed}")
+    {:error, :linear_app_request_unavailable}
+  end
+
+  defp transport_category(%Req.TransportError{reason: reason}, _fallback)
+       when reason in [:timeout, :closed, :econnrefused, :nxdomain, :enetunreach, :ehostunreach],
+       do: reason
+
+  defp transport_category(%Req.TransportError{}, _fallback), do: :transport_error
+  defp transport_category(_reason, fallback), do: fallback
 
   defp headers(token), do: [{"Authorization", "Bearer " <> token.access_token}, {"Content-Type", "application/json"}]
 

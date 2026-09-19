@@ -281,6 +281,14 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   dieselben Client Credentials. `LINEAR_ASSIGNEE` ist eine getrimmte,
   deduplizierte Liste menschlicher E-Mails/UUIDs; `me` und App-Benutzer sind
   unzulässig. Der `--yolo`-Sonderfall steht in der Statusübersicht.
+- Optional bindet `LINEAR_YOLO_AGENT` einen eindeutig aufgelösten Linear-Agenten
+  über `delegateId`; menschliche Zuständigkeit bleibt separat. Das Übergabeziel
+  ist der erste konfigurierte Mensch in Listenreihenfolge. Bindungsänderungen
+  verlangen Neustart; Details: [Agentenbindung](docs/linear-app.md#agentenbindung).
+  Die Agentenbindung aktiviert unabhängig von `--yolo` gesonderte PO-Sammelläufe
+  nach [WORKFLOW_YOLO_AGENT.md](WORKFLOW_YOLO_AGENT.md), einschließlich dessen
+  Mehrticket-/Statusvertrag. Die folgende Statustabelle und ihre Turn-Grenzen
+  gelten weiterhin für reguläre Einzelläufe.
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
   `config.toml` oder der geprüften Repository-Skills blockieren den
@@ -383,7 +391,13 @@ lesen.
   und der Rücksprung Merge→Test bei Dateiänderungen bleiben erhalten.
 
 - Betrachte jeden vom Ticket vorgegebenen Abschnitt `Validation`, `Test Plan` oder `Testing` als nicht verhandelbare Validierungsvorgabe: übernimm ihn als Punkte im Abschnitt `### Validierung` des Workpads und führe ihn aus, bevor du die Arbeit als abgeschlossen betrachtest.
-- Wenn während der Ausführung sinnvolle Verbesserungen außerhalb des Scopes entdeckt werden, erstelle ein separates Linear-Issue, statt den Scope zu erweitern. Das Folge-Issue muss einen klaren Titel, eine Beschreibung und Validierungspunkte enthalten, in `Backlog` eingeordnet sein, demselben Projekt wie das aktuelle Issue zugewiesen werden, das aktuelle Issue als `related` verknüpfen und `blockedBy` verwenden, wenn das Folge-Issue vom aktuellen Issue abhängt. Löse vor der Anlage das Label `symphony-generated` im Ziel-Team sicher auf: Verwende ein vorhandenes gleichnamiges Label wieder oder lege ein fehlendes Label einmalig im Ziel-Team an. Übergib die sicher bestimmte Label-ID bereits bei `issueCreate` über `labelIds`. Kann die Label-ID nicht sicher bestimmt werden, erstelle kein Folge-Issue, melde den Fehler sichtbar und behandle den Vorgang nicht als erfolgreich.
+- Folge-Tickets über `symphony_yolo_action` (`kind=followup`) mit klaren
+  Anforderungen/Validierung, aktuellem Ursprung und stabilem `operation_key`
+  erstellen. Der gebundene Pfad bestätigt `symphony-generated`, dasselbe
+  Projekt, Backlog und `related`; `blocked_by` nennt vorausgehende Arbeit.
+  Mit `--yolo` und Agentenkonfiguration erhalten sie Agent und konfigurierten
+  Menschen, sonst keine dieser Zuweisungen. Unklare Schreibausgänge mit derselben
+  Operation abgleichen; ohne bestätigte Labels/Links keinen Erfolg melden.
 - Nutze den blocked-access escape hatch nur für echte externe Blocker (fehlende erforderliche Tools/Auth), nachdem dokumentierte Fallbacks ausgeschöpft wurden.
 
 ### Turn-Abschlussvertrag für aktive AI-Status

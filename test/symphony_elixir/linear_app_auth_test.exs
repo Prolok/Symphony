@@ -264,6 +264,41 @@ defmodule SymphonyElixir.LinearAppAuthTest do
     assert {:error, :linear_app_runtime_failed} = call(ctx, journal: fn _, _, _, _ -> raise "synthetic-token-1" end)
   end
 
+  test "unavailable request diagnostics retain safe transport reasons without retrying or leaking terms", ctx do
+    owner = self()
+
+    cases = [
+      {fn -> {:error, %Req.TransportError{reason: :timeout}} end, "timeout"},
+      {fn -> raise Req.TransportError, reason: :closed end, "closed"},
+      {fn -> {:error, %Req.TransportError{reason: {:tls_alert, "synthetic-token-1"}}} end, "transport_error"},
+      {fn -> {:error, "synthetic-token-1"} end, "returned_error"},
+      {fn -> raise "synthetic-client-secret" end, "exception"},
+      {fn -> {:invalid, "synthetic-token-1"} end, "unexpected_response"}
+    ]
+
+    for {failure, expected} <- cases do
+      request = fn payload, _ ->
+        if payload.query =~ "SymphonyAppIdentity" do
+          identity()
+        else
+          send(owner, :business_request)
+          failure.()
+        end
+      end
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, :linear_app_request_unavailable} = call(ctx, request: request)
+        end)
+
+      assert log =~ "Linear app request unavailable kind=write reason=#{expected} elapsed_ms="
+      refute log =~ "synthetic-token"
+      refute log =~ "synthetic-client-secret"
+      assert_received :business_request
+      refute_received :business_request
+    end
+  end
+
   test "old API scope array is accepted without changing requested scopes", ctx do
     assert {:ok, _} =
              call(ctx,

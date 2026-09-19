@@ -326,7 +326,7 @@ sym_codex_parse_manual_prompt_context() {
 import json,sys
 data=json.loads(sys.argv[1])
 required={"SYMPHONY_LINEAR_AUTH_MODE","SYMPHONY_LINEAR_CLIENT_SECRET_ENV","SYMPHONY_RELAY_KEY_ENV","SYMPHONY_LINEAR_BINDING_HASH","SYMPHONY_CODEX_STATE_ROOT","SYMPHONY_RUN_ID","SYMPHONY_PHASE"}
-allowed=required | {"SYMPHONY_PROJECT_CONTEXT"}
+allowed=required | {"SYMPHONY_PROJECT_CONTEXT","SYMPHONY_YOLO_SCOPE"}
 assert required <= set(data) <= allowed and data["SYMPHONY_LINEAR_AUTH_MODE"] == "app"
 for key,value in data.items():
     assert isinstance(value,str) and "\n" not in value and "\r" not in value
@@ -715,6 +715,17 @@ sym_codex_run() {
     dialog_workflow_file="${SYMPHONY_WORKFLOW_DIALOG_FILE:-$dialog_workflow_file}"
   fi
 
+  if [[ -n "${SYMPHONY_YOLO_SCOPE:-}" ]]; then
+    # A PO session owns a detached group checkout, never a ticket named yolo.
+    # No manual/positional shortcut: only the runtime-bound app-server may use it.
+    if (( ! observer_mode )) || [[ -n "$issue_identifier" ]]; then
+      sym_codex_die "YOLO group requires a bound app-server launch without an issue argument"
+    fi
+    workspace="$("${SYMPHONY_PYTHON:-python3}" "$source_repo/scripts/codex-app-context.py" --validate-yolo-workspace)" ||
+      sym_codex_die "invalid YOLO workspace binding"
+    workflow_step="${SYMPHONY_PHASE:-}"
+  fi
+
   if (( ! observer_mode )); then
     sym_codex_prepare_mix "$source_repo" || return "$?"
   fi
@@ -725,7 +736,7 @@ sym_codex_run() {
     issue_identifier="$(printf '%s' "$project_selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["identifier"])')" || return 1
   fi
 
-  if [[ -z "$issue_identifier" ]]; then
+  if [[ -z "$issue_identifier" && -z "$workspace" ]]; then
     issue_identifier="$(sym_codex_infer_issue_identifier_from_branch 2>/dev/null || true)"
 
     if [[ -n "$issue_identifier" ]]; then

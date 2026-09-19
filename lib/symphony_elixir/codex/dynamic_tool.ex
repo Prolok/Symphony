@@ -3,6 +3,9 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
+  alias SymphonyElixir.Yolo.ActionTool
+  alias SymphonyElixir.Yolo.Completion, as: YoloCompletion
+
   alias SymphonyElixir.Codex.CommentTool
   alias SymphonyElixir.Codex.LinearGraphqlTool
   alias SymphonyElixir.Codex.MergeTool
@@ -20,6 +23,12 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       name when name in ["symphony_comments", "symphony_linear.symphony_comments"] ->
         CommentTool.execute(arguments, opts)
 
+      name when name in ["symphony_yolo_complete", "symphony_linear.symphony_yolo_complete"] ->
+        YoloCompletion.execute(arguments, opts)
+
+      name when name in ["symphony_yolo_action", "symphony_linear.symphony_yolo_action"] ->
+        ActionTool.execute(arguments, opts)
+
       "linear_graphql" ->
         LinearGraphqlTool.execute(arguments, opts)
 
@@ -35,7 +44,14 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   @spec tool_specs() :: [map()]
   def tool_specs do
-    [LinearGraphqlTool.tool_spec(), CommentTool.tool_spec(), MergeTool.tool_spec(), TestTool.tool_spec()]
+    [
+      LinearGraphqlTool.tool_spec(),
+      CommentTool.tool_spec(),
+      MergeTool.tool_spec(),
+      TestTool.tool_spec(),
+      YoloCompletion.tool_spec(),
+      ActionTool.tool_spec()
+    ]
   end
 
   defp failure_response(payload) do

@@ -44,6 +44,18 @@ nur Meldungen ab Stufe `info`. Das gilt auch für die Testlaufphasen. Der Filter
 Debugmeldungen bleiben ausgeblendet. stdout enthält ausschließlich den
 maschinenlesbaren Projekt-, Workflow- oder Promptkontext.
 
+`Linear app request unavailable` nennt nur die feste Anfrageart `kind`, eine
+erlaubte Transportkategorie `reason` und die gemessene Dauer `elapsed_ms`.
+Unbekannte Rückgaben und Exceptions erhalten feste Ersatzkategorien; ihre Texte,
+URLs und beliebigen Fehlerdaten werden nicht protokolliert. Die Fehlersemantik
+bleibt `linear_app_request_unavailable`; der HTTP-Pfad wiederholt nicht.
+Der isolierte Testrunner darf ausschließlich seine lesende Beobachtungsprobe
+begrenzt wiederholen und hält dies unter `probe_retries` im Laufbeleg fest
+(siehe [Probe-Vertrag](linear-app.md#szenarien-resultate-und-wiederaufnahme)).
+`Test fixture operation failed` ordnet den Abbruch über `stage`, `run_id`,
+`project`, `issue_id` und `issue_identifier` dem Prüfabruf zu. Ein zeitlicher
+Abstand im Log allein belegt keinen Timeout oder Authfehler.
+
 ## Scope Guidance
 
 - `AgentRunner`: log start/completion/failure with issue context, plus `session_id` when known.

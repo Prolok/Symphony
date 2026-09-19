@@ -7,6 +7,8 @@ defmodule SymphonyElixir.TestRunTest do
   alias SymphonyElixir.Relay.Store
   alias SymphonyElixir.RelayFixture, as: RelayServer
   alias SymphonyElixir.RoutineRuntimeFixture, as: RuntimeFixture
+  alias SymphonyElixir.TestRun.PoHandoff, as: PoHandoff
+  alias SymphonyElixir.Yolo.Store, as: YoloStore
 
   @human "11111111-1111-4111-8111-111111111111"
 
@@ -217,6 +219,49 @@ defmodule SymphonyElixir.TestRunTest do
     Agent.update(ctx.source_agent, &%{&1 | failure: nil})
     assert {:ok, restored} = TestRun.execute("cleanup")
     assert [%{"deleted" => true}] = restored["fixtures"]
+  end
+
+  test "corrected build cleans only the hash-bound original plan without rebinding journals", ctx do
+    assert {:ok, _} = TestRun.execute("prepare")
+    original_plan = File.read!(ctx.plan_path)
+    original_journal = File.read!(journal_path(ctx.root))
+    recovery = %{"plan_path" => ctx.plan_path, "source" => ctx.plan["source"], "plan_sha256" => Base.encode16(:crypto.hash(:sha256, original_plan), case: :lower)}
+    instance = %{ctx.instance | "source" => Map.put(ctx.instance["source"], "source_sha256", String.duplicate("c", 64))} |> Map.put("cleanup_recovery", recovery)
+    Application.put_env(:symphony_elixir, :test_instance, instance)
+    Agent.update(ctx.source_agent, &%{&1 | calls: []})
+
+    for stage <- ["prepare", "run", "probe", "delegate", "withdraw"] do
+      System.put_env("SYMPHONY_TEST_RUN_STAGE", stage)
+      assert {:error, :invalid_test_run} = TestRun.execute("cleanup")
+    end
+
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "cleanup")
+    for stage <- ["prepare", "probe", "delegate", "withdraw"], do: assert({:error, :invalid_test_run} = TestRun.execute(stage))
+
+    for patch <- [%{"plan_path" => ctx.plan_path <> ".other"}, %{"source" => %{}}, %{"plan_sha256" => String.duplicate("0", 64)}] do
+      Application.put_env(:symphony_elixir, :test_instance, Map.put(instance, "cleanup_recovery", Map.merge(recovery, patch)))
+      assert {:error, :invalid_test_run} = TestRun.execute("cleanup")
+    end
+
+    assert count_calls(ctx.source_agent, "mutation") == 0
+    assert File.read!(journal_path(ctx.root)) == original_journal
+    Application.put_env(:symphony_elixir, :test_instance, instance)
+    Application.put_env(:symphony_elixir, :yolo, true)
+    assert {:error, :invalid_test_run} = TestRun.execute("cleanup")
+    Application.put_env(:symphony_elixir, :yolo, false)
+    File.rm!(journal_path(ctx.root))
+    assert {:error, :invalid_test_run} = TestRun.execute("cleanup")
+    File.write!(journal_path(ctx.root), original_journal)
+    changed = Enum.map(ctx.contexts, &put_in(&1.settings.tracker.app["user_id"], "foreign"))
+    Application.put_env(:symphony_elixir, :project_contexts, changed)
+    assert {:error, :test_journal_identity_mismatch} = TestRun.execute("cleanup")
+    Application.put_env(:symphony_elixir, :project_contexts, ctx.contexts)
+    assert {:ok, cleaned} = TestRun.execute("cleanup")
+    assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+    assert {:ok, ^cleaned} = TestRun.execute("cleanup")
+    assert cleaned["source"] == ctx.plan["source"]
+    assert File.read!(ctx.plan_path) == original_plan
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
   end
 
   test "bootstrap may finish after its status transition without starting planning", ctx do
@@ -434,7 +479,7 @@ defmodule SymphonyElixir.TestRunTest do
     Application.put_env(:symphony_elixir, :project_contexts, ctx.contexts)
     {:ok, consumer} = Store.identity(first.settings.tracker.relay, "synthetic-workspace")
     RelayServer.fault(ctx.server, "synthetic-workspace", consumer, :register, {:error, {:relay_http, 503, "unavailable"}})
-    assert {:error, :test_relay_preflight_failed} = TestRun.execute("prepare")
+    assert {:error, {:test_relay_preflight, :degraded}} = TestRun.execute("prepare")
     assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
     refute File.exists?(journal_path(ctx.root))
   end
@@ -884,6 +929,30 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:ok, %{"fixtures" => [%{"deleted" => true, "merge" => ^merge}]}} = stage.("cleanup")
   end
 
+  test "routine cleanup ignores isolated PO receipts with the same run ID", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, request)
+    plan = %{"instance" => "routine", "run_id" => request["run_id"], "scenario" => "bootstrap", "source" => ctx.plan["source"]}
+
+    paths =
+      for directory <- ["derived", "yolo-workspaces"] do
+        path = Path.join([ctx.root, "test-state", "runs", plan["run_id"], directory, "foreign.json"])
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, "foreign receipt")
+        path
+      end
+
+    stage = fn operation ->
+      TestRun.with_routine(context, plan, job["directory"], operation, fn -> TestRun.execute(operation) end)
+    end
+
+    assert {:ok, _} = stage.("prepare")
+    complete(ctx.source_agent)
+    assert {:ok, %{"fixtures" => [%{"complete" => true}]}} = stage.("probe")
+    assert {:ok, %{"fixtures" => [%{"deleted" => true}]}} = stage.("cleanup")
+    assert Enum.all?(paths, &(File.read!(&1) == "foreign receipt"))
+  end
+
   test "routine cancellation timeout failure and recovery clean only their fixtures", ctx do
     {context, config, request} = routine_context(ctx)
     runtime = %{"sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
@@ -1291,6 +1360,42 @@ defmodule SymphonyElixir.TestRunTest do
     {context, config, request}
   end
 
+  test "CLI probe preserves the app failure, stops without retry and leaves the fixture journal recoverable", ctx do
+    assert {:ok, prepared} = TestRun.execute("prepare")
+    journal_path = Path.join([ctx.root, "test-state", "runs", "fixture-run", "fixtures.json"])
+    before = File.read!(journal_path)
+    calls = count_calls(ctx.source_agent, "TestFixture(")
+    Agent.update(ctx.source_agent, &%{&1 | failure: :probe_transport})
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        output =
+          ExUnit.CaptureIO.capture_io(fn ->
+            assert {:error, message} = SymphonyElixir.CLI.run_test_stage("probe", fn -> :ok end)
+            assert message =~ "Laufjournal erhalten"
+          end)
+
+        assert output == "Test run failure={\"code\":\"linear_app_request_unavailable\"}\n"
+        refute output =~ "Test run result="
+      end)
+
+    assert log =~ "reason=timeout elapsed_ms="
+    assert log =~ "stage=probe run_id=fixture-run"
+    first = hd(prepared["fixtures"])
+    assert log =~ "issue_id=#{first["id"]} issue_identifier=#{first["identifier"]}"
+    assert count_calls(ctx.source_agent, "TestFixture(") == calls + 1
+    assert File.read!(journal_path) == before
+    Agent.update(ctx.source_agent, &%{&1 | failure: nil})
+
+    output =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok = SymphonyElixir.CLI.run_test_stage("cleanup", fn -> :ok end)
+      end)
+
+    assert "Test run result=" <> json = output
+    assert Enum.all?(Jason.decode!(json)["fixtures"], & &1["deleted"])
+  end
+
   defp journal_path(root), do: Path.join(root, "test-state/runs/fixture-run/fixtures.json")
 
   defp count_calls(source, name),
@@ -1358,6 +1463,444 @@ defmodule SymphonyElixir.TestRunTest do
     end
   end
 
+  test "delegation scenario gates only its fixture and verifies events with unchanged human ownership", ctx do
+    {contexts, context, target} = prepare_delegation(ctx)
+    assert target["test_delegate_id"] == "fixture-agent"
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+    issue = %Issue{id: target["id"], state: "Todo (AI)", assignee_id: @human}
+    refute TestRun.start_allowed?(issue)
+    assert TestRun.start_allowed?(%{issue | delegate_id: "fixture-agent"})
+    refute TestRun.start_allowed?(%{issue | delegate_id: "other"})
+    refute TestRun.start_allowed?(%{issue | id: "unrelated"})
+    assert {:ok, journal} = TestRun.execute("probe")
+    assert length(journal["fixtures"]) == 1
+    assert {:ok, bound} = TestRun.bind_contexts(contexts)
+    assert Enum.all?(bound, &(length(&1.settings.tracker.app["allowed_issue_ids"]) == 1))
+
+    cache_delegation(context, target, nil, 1)
+    assert {:ok, _} = TestRun.execute("delegate")
+    assert get_in(Agent.get(ctx.source_agent, & &1.issues), [target["id"], "delegate", "id"]) == "fixture-agent"
+    assert {:ok, unchanged} = TestRun.execute("probe")
+    refute Enum.any?(unchanged["fixtures"], & &1["delegation_assigned"])
+    cache_delegation(context, target, "fixture-agent", 2)
+    assert {:ok, assigned} = TestRun.execute("probe")
+    assert Enum.any?(assigned["fixtures"], & &1["delegation_assigned"])
+    assert {:ok, _} = TestRun.execute("withdraw")
+    assert get_in(Agent.get(ctx.source_agent, & &1.issues), [target["id"], "delegate", "id"]) == nil
+    cache_delegation(context, target, nil, 3)
+    assert {:ok, withdrawn} = TestRun.execute("probe")
+    assert Enum.any?(withdrawn["fixtures"], & &1["delegation_withdrawn"])
+    assert count_calls(ctx.source_agent, "mutation TestDelegation") == 2
+    assert {:ok, cleaned} = TestRun.execute("cleanup")
+    assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+  end
+
+  test "handoff scenario retains scope until both explicit receipts and undelegation exist", ctx do
+    {contexts, context, _} = prepare_delegation(ctx, "po_handoff")
+    assert {:ok, prepared} = TestRun.execute("prepare")
+    assert length(prepared["fixtures"]) == 3
+    members = Enum.filter(prepared["fixtures"], & &1["po_handoff"])
+    assert Enum.sort(Enum.map(members, & &1["initial_state"])) == ["BLOCKER", "Review"]
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+    assert {:ok, bound} = TestRun.bind_contexts(contexts)
+    assert length(Enum.find(bound, &(&1.name == context.name)).settings.tracker.app["allowed_issue_ids"]) == 3
+
+    for member <- members do
+      issue = %Issue{id: member["id"], state: member["initial_state"], delegate_id: "fixture-agent"}
+      assert TestRun.start_allowed?(issue)
+      refute TestRun.start_allowed?(%{issue | state: "In Arbeit (AI)"})
+      refute TestRun.start_allowed?(%{issue | delegate_id: nil})
+
+      ProjectContext.with_context(context, fn ->
+        group = if member["initial_state"] == "Review", do: "review", else: "blocker"
+        {:ok, record} = YoloStore.read(group)
+        assert {:ok, ^member} = PoHandoff.probe(%{}, member)
+
+        :ok =
+          YoloStore.write(
+            group,
+            Map.put(record, "attempt", %{
+              "session_id" => "handoff-" <> group,
+              "completed" => %{member["id"] => "actual checks"},
+              "sha" => "merged-sha",
+              "workspace" => "separate-checkout"
+            })
+          )
+
+        node = %{"state" => %{"name" => member["initial_state"]}, "assignee" => %{"id" => @human}, "delegate" => %{"id" => "fixture-agent"}}
+        assert {:ok, ^member} = PoHandoff.probe(node, member)
+        assert {:ok, checked} = PoHandoff.probe(Map.put(node, "delegate", nil), member)
+        assert checked["handoff_receipt"]["sha"] == "merged-sha"
+        File.write!(YoloStore.path(group), "corrupt")
+        assert {:error, :yolo_state_corrupt} = PoHandoff.probe(node, member)
+      end)
+    end
+
+    assert {:ok, cleaned} = TestRun.execute("cleanup")
+    assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+  end
+
+  test "mixed PO scenario reserves exactly three project members and a separate bootstrap", ctx do
+    {contexts, context, _} = prepare_delegation(ctx, "po_incoming")
+    assert {:ok, prepared} = TestRun.execute("prepare")
+    assert length(prepared["fixtures"]) == 4
+    members = Enum.filter(prepared["fixtures"], & &1["po_incoming"])
+    assert Enum.sort(Enum.map(members, & &1["initial_state"])) == ["Backlog", "Definiert", "Todo"]
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 4
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+    assert {:ok, bound} = TestRun.bind_contexts(contexts)
+    project = Enum.find(bound, &(&1.name == context.name))
+    assert length(project.settings.tracker.app["allowed_issue_ids"]) == 4
+
+    for member <- members do
+      issue = %Issue{id: member["id"], state: member["initial_state"], delegate_id: "fixture-agent"}
+      assert TestRun.start_allowed?(issue)
+      refute TestRun.start_allowed?(%{issue | state: "In Arbeit (AI)"})
+      refute TestRun.start_allowed?(%{issue | delegate_id: nil})
+    end
+
+    assert {:ok, pending} = TestRun.execute("probe")
+    refute Enum.any?(pending["fixtures"], & &1["complete"])
+
+    ProjectContext.with_context(context, fn ->
+      alias SymphonyElixir.Yolo.Store
+      {:ok, record} = Store.read("incoming")
+      completed = Map.new(members, &{&1["id"], "Verworfen: bereits erfüllt"})
+      :ok = Store.write("incoming", Map.put(record, "attempt", %{"completed" => completed, "session_id" => "one-session", "sha" => "merged-sha", "workspace" => "owned-workspace"}))
+    end)
+
+    Agent.update(ctx.source_agent, fn state ->
+      issues =
+        Map.new(state.issues, fn {id, issue} ->
+          if Enum.any?(members, &(&1["id"] == id)) do
+            {id,
+             Map.merge(issue, %{
+               "state" => %{"name" => "Verworfen"},
+               "assignee" => %{"id" => @human},
+               "labels" => %{"nodes" => Enum.map([~s(Skip "Freigabe Implementierung"), ~s(Skip "Freigabe Review")], &%{"name" => &1})}
+             })}
+          else
+            {id, issue}
+          end
+        end)
+
+      %{state | issues: issues}
+    end)
+
+    assert {:ok, receipts} = TestRun.execute("probe")
+    assert Enum.all?(Enum.filter(receipts["fixtures"], & &1["po_incoming"]), &(&1["po_receipt"]["session_id"] == "one-session"))
+
+    ProjectContext.with_context(context, fn ->
+      File.write!(YoloStore.path("incoming"), "corrupt")
+    end)
+
+    assert {:error, :yolo_state_corrupt} = TestRun.execute("probe")
+    assert {:ok, cleaned} = TestRun.execute("cleanup")
+    assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+  end
+
+  test "one probe reuses its verified PO context but the next probe resolves freshly", ctx do
+    {contexts, _, _} = prepare_delegation(ctx, "po_aggregation")
+    unresolved = unresolved_contexts(contexts)
+    Application.put_env(:symphony_elixir, :project_contexts, unresolved)
+    Agent.update(ctx.source_agent, &%{&1 | calls: []})
+
+    assert {:ok, pending} = TestRun.execute("probe")
+    refute Enum.any?(pending["fixtures"], & &1["complete"])
+    assert count_calls(ctx.source_agent, "SymphonyHumanAssignees") == 1
+    assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 1
+    assert count_calls(ctx.source_agent, "TestFixture(") == 4
+    assert count_calls(ctx.source_agent, "SymphonyLinearIssueComments") == 4
+    assert SymphonyElixir.Projects.configured() == unresolved
+
+    assert {:ok, _} = TestRun.execute("probe")
+    assert count_calls(ctx.source_agent, "SymphonyHumanAssignees") == 2
+    assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 2
+    assert count_calls(ctx.source_agent, "TestFixture(") == 8
+    assert count_calls(ctx.source_agent, "SymphonyLinearIssueComments") == 8
+    assert count_calls(ctx.source_agent, "mutation") == 0
+  end
+
+  test "incoming and handoff probes share only identities and still observe delegation changes", ctx do
+    for scenario <- ["po_incoming", "po_handoff", "po_followup"] do
+      {contexts, _, target} = prepare_delegation(ctx, scenario)
+      Application.put_env(:symphony_elixir, :project_contexts, unresolved_contexts(contexts))
+      Agent.update(ctx.source_agent, &%{&1 | calls: []})
+      assert {:ok, pending} = TestRun.execute("probe")
+      refute Enum.any?(pending["fixtures"], & &1["complete"])
+      assert count_calls(ctx.source_agent, "SymphonyHumanAssignees") == 1
+      assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 1
+
+      Agent.update(ctx.source_agent, fn state -> put_in(state.issues[target["id"]]["delegate"], %{"id" => "foreign"}) end)
+      assert {:error, :test_fixture_changed_externally} = TestRun.execute("probe")
+      assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 2
+      Agent.update(ctx.source_agent, fn state -> put_in(state.issues[target["id"]]["delegate"], %{"id" => "fixture-agent"}) end)
+
+      assert {:ok, cleaned} = TestRun.execute("cleanup")
+      assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+      assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 2
+      File.rm!(journal_path(ctx.root))
+    end
+  end
+
+  test "failed probe identity is not retried or retained and cleanup needs no agent lookup", ctx do
+    {contexts, _, _} = prepare_delegation(ctx, "po_aggregation")
+    Application.put_env(:symphony_elixir, :project_contexts, unresolved_contexts(contexts))
+    before = File.read!(journal_path(ctx.root))
+
+    for {failure, error} <- [
+          {:agent_timeout, {:linear_api_request, :linear_app_request_unavailable}},
+          {:agent_incomplete, :linear_yolo_agent_incomplete_response},
+          {:agent_missing, {:linear_yolo_agent_not_found, "Fixture Agent"}}
+        ] do
+      Agent.update(ctx.source_agent, &%{&1 | calls: [], failure: failure})
+      assert {:error, ^error} = TestRun.execute("probe")
+      assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 1
+      assert count_calls(ctx.source_agent, "TestFixture(") == 0
+      assert count_calls(ctx.source_agent, "mutation") == 0
+      assert File.read!(journal_path(ctx.root)) == before
+    end
+
+    Agent.update(ctx.source_agent, &%{&1 | calls: [], failure: nil})
+    assert {:ok, _} = TestRun.execute("probe")
+    assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 1
+    changed = Enum.map(unresolved_contexts(contexts), &put_in(&1.settings.tracker.yolo_agent, "Different"))
+    Application.put_env(:symphony_elixir, :project_contexts, changed)
+    assert {:error, {:linear_yolo_agent_invalid, "Different"}} = TestRun.execute("probe")
+    assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 2
+
+    Agent.update(ctx.source_agent, &%{&1 | failure: :agent_timeout})
+    assert {:ok, cleaned} = TestRun.execute("cleanup")
+    assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+    assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 2
+  end
+
+  defp unresolved_contexts(contexts) do
+    Enum.map(contexts, fn context ->
+      if context.name == "symphony-test",
+        do: %{context | assignee_ids: nil, human_handoff_id: nil, yolo_agent_id: nil},
+        else: context
+    end)
+  end
+
+  test "required PO status and complete team pages are checked before any fixture mutation", ctx do
+    [context] = ctx.contexts
+    context = put_in(context.settings.tracker.yolo_agent, "Fixture Agent")
+    context = %{context | yolo_agent_id: "fixture-agent", human_handoff_id: @human}
+    Application.put_env(:symphony_elixir, :project_contexts, [context])
+    :ok = DurableState.write(ctx.plan_path, Map.put(ctx.plan, "scenario", "po_aggregation"))
+
+    for {failure, expected} <- [
+          {:missing_aggregate_state, {:test_scenario_states_unavailable, ["Umsetzungsticket erstellt"]}},
+          {:duplicate_aggregate_state, {:test_scenario_states_unavailable, ["Umsetzungsticket erstellt"]}},
+          {:incomplete_states, :yolo_page_incomplete},
+          {:multiple_teams, :test_scenario_team_unconfirmed},
+          {:states_transport, {:linear_api_request, :linear_app_request_unavailable}}
+        ] do
+      Agent.update(ctx.source_agent, &%{&1 | calls: [], failure: failure})
+      assert {:error, ^expected} = TestRun.execute("prepare")
+      assert count_calls(ctx.source_agent, "mutation") == 0
+      refute File.exists?(journal_path(ctx.root))
+    end
+
+    Agent.update(ctx.source_agent, &%{&1 | calls: [], failure: :paged_states})
+    assert {:ok, prepared} = TestRun.execute("prepare")
+    assert count_calls(ctx.source_agent, "TestScenarioStates") == 2
+    assert length(prepared["fixtures"]) == 4
+    assert Enum.all?(prepared["fixtures"], &(&1["project"] == "symphony-test"))
+    bootstrap = Enum.find(prepared["fixtures"], &(&1["initial_state"] == "Todo (AI)"))
+    refute bootstrap["test_delegate_id"]
+    refute bootstrap["po_aggregation"]
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+    assert TestRun.start_allowed?(%Issue{id: bootstrap["id"], state: "Todo (AI)"})
+    assert {:ok, [_]} = TestRun.bind_contexts([context])
+
+    for fixtures <- [tl(prepared["fixtures"]), Enum.map(prepared["fixtures"], &Map.put(&1, "initial_state", "Todo (AI)")), List.replace_at(prepared["fixtures"], 0, List.last(prepared["fixtures"]))] do
+      :ok = DurableState.write(journal_path(ctx.root), Map.put(prepared, "fixtures", fixtures))
+      assert {:error, :test_fixtures_not_prepared} = TestRun.bind_contexts([context])
+    end
+
+    :ok = DurableState.write(journal_path(ctx.root), prepared)
+    assert {:ok, _} = TestRun.execute("cleanup")
+  end
+
+  test "delegation preflight and scenario replacement fail before creating or adopting fixtures", ctx do
+    :ok = DurableState.write(ctx.plan_path, Map.put(ctx.plan, "scenario", "delegation"))
+    assert {:error, :test_agent_delegation_unavailable} = TestRun.execute("prepare")
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 0
+    :ok = DurableState.write(ctx.plan_path, ctx.plan)
+    assert {:ok, _} = TestRun.execute("prepare")
+    :ok = DurableState.write(ctx.plan_path, Map.put(ctx.plan, "scenario", "delegation"))
+    assert {:error, :test_journal_identity_mismatch} = TestRun.execute("probe")
+    :ok = DurableState.write(ctx.plan_path, Map.put(ctx.plan, "scenario", "unknown"))
+    assert {:error, :invalid_public_test_plan} = TestRun.execute("prepare")
+  end
+
+  test "derived scenarios prepare only their original members and retain strict phase bounds", ctx do
+    for scenario <- ["po_aggregation", "po_followup"] do
+      {contexts, context, _} = prepare_delegation(ctx, scenario)
+      assert {:ok, prepared} = TestRun.execute("prepare")
+      members = Enum.filter(prepared["fixtures"], &(&1["test_delegate_id"] != nil))
+      assert length(members) == if(scenario == "po_aggregation", do: 3, else: 1)
+      assert Enum.all?(members, &(&1["test_delegate_id"] == "fixture-agent"))
+      assert Enum.all?(members, &String.contains?(&1["description"], "po-proof-fixture-run.md"))
+      System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+      assert {:ok, bound} = TestRun.bind_contexts(contexts)
+      bound_context = Enum.find(bound, &(&1.name == context.name))
+      assert length(bound_context.settings.tracker.app["allowed_issue_ids"]) == length(members) + 1
+      first = hd(members)
+      assert TestRun.start_allowed?(%Issue{id: first["id"], state: first["initial_state"], delegate_id: "fixture-agent"})
+      refute TestRun.start_allowed?(%Issue{id: first["id"], state: "In Arbeit (AI)", delegate_id: "fixture-agent"})
+      refute TestRun.start_allowed?(%Issue{id: "child", state: first["initial_state"], delegate_id: "fixture-agent"})
+      assert {:ok, _} = TestRun.execute("probe")
+      assert {:ok, cleaned} = TestRun.execute("cleanup")
+      assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+      File.rm!(Path.join([ctx.root, "test-state", "runs", "fixture-run", "fixtures.json"]))
+      System.put_env("SYMPHONY_TEST_RUN_STAGE", "prepare")
+    end
+  end
+
+  defp prepare_delegation(ctx, scenario \\ "delegation") do
+    plan = Map.put(ctx.plan, "scenario", scenario)
+    :ok = DurableState.write(ctx.plan_path, plan)
+
+    contexts =
+      Enum.map(ctx.contexts, fn context ->
+        if context.name == "symphony-test" do
+          context = put_in(context.settings.tracker.yolo_agent, "Fixture Agent")
+          %{context | yolo_agent_id: "fixture-agent", human_handoff_id: @human}
+        else
+          context
+        end
+      end)
+
+    Application.put_env(:symphony_elixir, :project_contexts, contexts)
+    assert {:ok, prepared} = TestRun.execute("prepare")
+    target = Enum.find(prepared["fixtures"], &(&1["test_delegate_id"] != nil))
+    context = Enum.find(contexts, &(&1.name == target["project"]))
+    {contexts, context, target}
+  end
+
+  test "uncertain writes and invalid cache observations cannot report a delegation pass", ctx do
+    alias SymphonyElixir.TestRun.Delegation
+    {_contexts, context, target} = prepare_delegation(ctx)
+    plan = Map.put(ctx.plan, "scenario", "delegation")
+    assert {:error, :test_agent_project_missing} = Delegation.preflight([], plan)
+    {:ok, journal} = DurableState.read(journal_path(ctx.root))
+
+    for change <- [&Map.delete(&1, "test_delegate_id"), &Map.put(&1, "test_delegate_id", nil), &Map.put(&1, "test_delegate_id", "")] do
+      incomplete = Map.update!(journal, "fixtures", &Enum.map(&1, change))
+      :ok = DurableState.write(journal_path(ctx.root), incomplete)
+      assert {:error, :test_delegation_fixture_unconfirmed} = TestRun.execute("delegate")
+      assert count_calls(ctx.source_agent, "mutation TestDelegation") == 0
+    end
+
+    :ok = DurableState.write(journal_path(ctx.root), journal)
+    assert {:error, :test_delegation_cache_unconfirmed} = TestRun.execute("delegate")
+    cache_delegation(context, target, "fixture-agent", 1)
+    assert {:error, :test_initial_delegation_unconfirmed} = TestRun.execute("delegate")
+    assert {:error, :test_assigned_delegation_unconfirmed} = TestRun.execute("withdraw")
+    cache_delegation(context, target, nil, 1)
+
+    assert {:error, :test_delegation_changed_externally} =
+             Delegation.change("delegate", %{"delegate" => %{"id" => "foreign"}}, context, target)
+
+    Agent.update(ctx.source_agent, &%{&1 | failure: :reject_delegation})
+    assert {:error, :test_delegation_write_unconfirmed} = TestRun.execute("delegate")
+    Agent.update(ctx.source_agent, &%{&1 | failure: :lost_delegation})
+    assert {:error, _} = TestRun.execute("delegate")
+    Agent.update(ctx.source_agent, &%{&1 | failure: nil})
+    assert {:ok, _} = TestRun.execute("delegate")
+    assert count_calls(ctx.source_agent, "mutation TestDelegation") == 2
+
+    cache_delegation(context, target, "fixture-agent", 2, 100)
+    assert {:ok, snapshot} = TestRun.execute("probe")
+    refute Enum.any?(snapshot["fixtures"], & &1["delegation_assigned"])
+    cache_delegation(context, target, "fixture-agent", "invalid")
+    assert {:error, :test_delegation_cache_unconfirmed} = TestRun.execute("probe")
+    Agent.update(ctx.source_agent, &%{&1 | failure: :transport})
+    assert {:error, _} = Delegation.preflight([context], plan)
+    Agent.update(ctx.source_agent, &%{&1 | failure: nil})
+    assert {:ok, _} = TestRun.execute("cleanup")
+  end
+
+  defp cache_delegation(context, fixture, delegate, cursor, reconcile_at \\ 99) do
+    alias SymphonyElixir.Relay.Store
+    tracker = context.settings.tracker
+    {:ok, consumer} = Store.identity(tracker.relay, tracker.app["workspace_id"])
+    path = Store.path(tracker.relay, tracker.app["workspace_id"], consumer)
+    {:ok, record} = DurableState.read(path)
+    node = %{"id" => fixture["id"], "assignee" => %{"id" => @human}, "delegate" => if(delegate, do: %{"id" => delegate})}
+    record = Map.merge(record, %{"phase" => "ready", "dirty" => [], "cursor" => cursor, "reconcile_at" => reconcile_at, "issues" => %{fixture["id"] => node}, "epochs" => %{fixture["id"] => cursor}})
+    :ok = DurableState.write(path, record)
+  end
+
+  defp respond_query("query TestScenarioTeams" <> _, _variables, state) do
+    teams = if state.failure == :multiple_teams, do: [%{"id" => "team"}, %{"id" => "other"}], else: [%{"id" => "team"}]
+    answer(%{"project" => %{"teams" => page(teams)}}, state)
+  end
+
+  defp respond_query("query TestScenarioStates" <> _, _variables, %{failure: :states_transport} = state), do: {{:error, :offline}, state}
+
+  defp respond_query("query TestScenarioStates" <> _, variables, state) do
+    names = ["Todo (AI)", "Planung (AI)", "Backlog", "Todo", "Definiert", "BLOCKER", "Review", "Verworfen", "Umsetzungsticket erstellt"]
+    nodes = Enum.map(names, &%{"id" => &1, "name" => &1})
+
+    result =
+      case state.failure do
+        :missing_aggregate_state ->
+          page(Enum.reject(nodes, &(&1["name"] == "Umsetzungsticket erstellt")))
+
+        :duplicate_aggregate_state ->
+          page(nodes ++ [%{"id" => "duplicate", "name" => "Umsetzungsticket erstellt"}])
+
+        :incomplete_states ->
+          %{"nodes" => nodes}
+
+        :paged_states ->
+          if variables["after"] == nil,
+            do: %{"nodes" => Enum.take(nodes, 4), "pageInfo" => %{"hasNextPage" => true, "endCursor" => "next"}},
+            else: page(Enum.drop(nodes, 4))
+
+        _ ->
+          page(nodes)
+      end
+
+    answer(%{"team" => %{"states" => result}}, state)
+  end
+
+  defp respond_query("query TestDelegationSchema" <> _, _variables, state) do
+    answer(%{"__type" => %{"inputFields" => [%{"name" => "delegateId"}]}}, state)
+  end
+
+  defp respond_query("query SymphonyYoloAgent" <> _, _variables, %{failure: :agent_timeout} = state),
+    do: {{:error, %Req.TransportError{reason: :timeout}}, state}
+
+  defp respond_query("query SymphonyYoloAgent" <> _, _variables, %{failure: :agent_incomplete} = state),
+    do: answer(%{"users" => %{"nodes" => []}}, state)
+
+  defp respond_query("query SymphonyYoloAgent" <> _, _variables, %{failure: :agent_missing} = state),
+    do: answer(%{"users" => page([])}, state)
+
+  defp respond_query("query SymphonyYoloAgent" <> _, _variables, state) do
+    answer(%{"users" => page([%{"id" => "fixture-agent", "name" => "Fixture Agent", "app" => true, "active" => true, "isAssignable" => true}])}, state)
+  end
+
+  defp respond_query("mutation TestDelegation" <> _, variables, state) do
+    assert Map.keys(variables["input"]) == ["delegateId"]
+    delegate = variables["input"]["delegateId"]
+    updated = put_in(state.issues[variables["id"]]["delegate"], if(delegate, do: %{"id" => delegate}))
+
+    case state.failure do
+      :reject_delegation -> answer(%{"issueUpdate" => %{"success" => false}}, state)
+      :lost_delegation -> {{:error, :lost_response}, updated}
+      _ -> answer(%{"issueUpdate" => %{"success" => true, "issue" => updated.issues[variables["id"]]}}, updated)
+    end
+  end
+
+  defp respond_query("query TestFixture(" <> _, _variables, %{failure: :probe_transport} = state),
+    do: {{:error, %Req.TransportError{reason: :timeout}}, state}
+
   defp respond_query(query, variables, state) do
     cond do
       query =~ "SymphonyAppIdentity" ->
@@ -1399,7 +1942,12 @@ defmodule SymphonyElixir.TestRunTest do
         "__type" => %{"inputFields" => fields},
         "project" => %{
           "teams" => %{
-            "nodes" => [%{"id" => "team", "states" => %{"nodes" => [%{"id" => "todo", "name" => "Todo (AI)"}]}}]
+            "nodes" => [
+              %{
+                "id" => "team",
+                "states" => %{"nodes" => Enum.map(["Todo (AI)", "Backlog", "Todo", "Definiert", "BLOCKER", "Review"], &%{"id" => if(&1 == "Todo (AI)", do: "todo", else: &1), "name" => &1})}
+              }
+            ]
           }
         }
       },
@@ -1414,7 +1962,7 @@ defmodule SymphonyElixir.TestRunTest do
     do: answer(%{"issueDelete" => %{"success" => true}}, %{state | issues: Map.delete(state.issues, id)})
 
   defp schema_fields(:schema), do: []
-  defp schema_fields(_), do: Enum.map(~w(id title description teamId projectId assigneeId stateId), &%{"name" => &1})
+  defp schema_fields(_), do: Enum.map(~w(id title description teamId projectId assigneeId delegateId stateId), &%{"name" => &1})
 
   defp create_response(input, state) do
     issue = %{
@@ -1424,8 +1972,9 @@ defmodule SymphonyElixir.TestRunTest do
       "description" => input["description"],
       "project" => %{"id" => input["projectId"]},
       "team" => %{"id" => input["teamId"]},
-      "assignee" => %{"id" => input["assigneeId"]},
-      "state" => %{"name" => "Todo (AI)"}
+      "assignee" => if(input["assigneeId"], do: %{"id" => input["assigneeId"]}),
+      "delegate" => if(input["delegateId"], do: %{"id" => input["delegateId"]}),
+      "state" => %{"name" => if(input["stateId"] == "todo", do: "Todo (AI)", else: input["stateId"])}
     }
 
     updated = put_in(state.issues[issue["id"]], issue)

@@ -11,14 +11,14 @@ defmodule SymphonyElixir.Linear.CommentMutations do
   @update_fields ~w(body bodyData quotedText resolvingUserId resolvingCommentId)
 
   @doc "Resolve only the existing issueUpdate(stateId) action path, using the same GraphQL parser."
-  @spec state_updates(map()) :: {:ok, [map()]} | {:error, term()}
-  def state_updates(%{"query" => query} = payload) do
+  @spec state_updates(map(), boolean()) :: {:ok, [map()]} | {:error, term()}
+  def state_updates(%{"query" => query} = payload, all? \\ false) do
     with {:ok, %{input: document}} <- Parse.run(%L.Source{body: query}),
          {:ok, operation} <- select_operation(document, payload["operationName"]) do
       if operation.operation == :mutation do
         variables = variable_values(operation, payload["variables"] || %{})
         fragments = Map.new(Enum.filter(document.definitions, &match?(%L.Fragment{}, &1)), &{&1.name, &1})
-        {:ok, state_fields(expand(operation.selection_set.selections, fragments, []), variables)}
+        {:ok, state_fields(expand(operation.selection_set.selections, fragments, []), variables, all?)}
       else
         {:ok, []}
       end
@@ -31,17 +31,17 @@ defmodule SymphonyElixir.Linear.CommentMutations do
     :invalid_comment_mutation -> {:error, :invalid_state_mutation}
   end
 
-  defp state_fields(selections, variables) do
+  defp state_fields(selections, variables, all?) do
     selections
     |> Enum.filter(&enabled?(&1.directives, variables))
     |> Enum.flat_map(fn
       %L.InlineFragment{selection_set: set} ->
-        state_fields(set.selections, variables)
+        state_fields(set.selections, variables, all?)
 
       %L.Field{name: "issueUpdate", arguments: arguments} ->
         values = Map.new(arguments, &{&1.name, value(&1.value, variables)})
 
-        if is_map(values["input"]) and Map.has_key?(values["input"], "stateId"),
+        if is_map(values["input"]) and (all? or Map.has_key?(values["input"], "stateId")),
           do: [%{"id" => values["id"], "state_id" => values["input"]["stateId"]}],
           else: []
 

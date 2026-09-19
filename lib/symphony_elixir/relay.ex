@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Relay do
       binding = binding_key(contexts)
 
       Session.open(relay, app["workspace_id"], consumer, assignees, binding,
-        workspace_wide: Config.yolo?(),
+        workspace_wide: workspace_wide?(contexts),
         contexts: contexts,
         authority: Store.digest({relay["endpoint"], Map.take(app, ~w(workspace_id client_id user_id))}),
         request: fn op, body -> SymphonyElixir.Relay.Client.request(relay, app, consumer, op, body) end,
@@ -27,7 +27,13 @@ defmodule SymphonyElixir.Relay do
   end
 
   defp subscription_assignees(contexts) do
-    if Config.yolo?(), do: {:ok, []}, else: Client.relay_assignees(contexts)
+    if workspace_wide?(contexts), do: {:ok, []}, else: Client.relay_assignees(contexts)
+  end
+
+  defp workspace_wide?(contexts) do
+    Enum.any?(contexts, fn context ->
+      is_binary(context.yolo_agent_id) or ProjectContext.with_context(context, &Config.yolo?/0)
+    end)
   end
 
   @spec binding_key([ProjectContext.t()]) :: String.t()
@@ -37,7 +43,7 @@ defmodule SymphonyElixir.Relay do
       tracker = context.settings.tracker
       assignees = context.assignee_ids || Enum.sort(Assignees.parse(tracker.assignee))
       relay = if tracker.relay, do: Map.delete(tracker.relay, "owners")
-      {context.id, %{tracker | assignee: assignees, relay: relay}}
+      {context.id, %{tracker | assignee: assignees, relay: relay}, context.yolo_agent_id, context.human_handoff_id}
     end)
     |> Enum.sort()
     |> Store.digest()
@@ -45,8 +51,9 @@ defmodule SymphonyElixir.Relay do
 
   @spec resolved_contexts(Session.t(), [ProjectContext.t()]) :: [ProjectContext.t()]
   def resolved_contexts(session, contexts) do
-    ids = Map.new(session.contexts, &{&1.id, &1.assignee_ids})
-    Enum.map(contexts, &%{&1 | assignee_ids: Map.get(ids, &1.id, &1.assignee_ids)})
+    fields = [:assignee_ids, :human_handoff_id, :yolo_agent_id]
+    identities = Map.new(session.contexts, &{&1.id, Map.take(&1, fields)})
+    Enum.map(contexts, &struct(&1, Map.get(identities, &1.id, %{})))
   end
 
   @spec candidates(Session.t(), [ProjectContext.t()]) :: {:ok, map()} | {:error, term()}

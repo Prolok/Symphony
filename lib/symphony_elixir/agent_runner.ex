@@ -8,6 +8,7 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.CommentCheckpoint
   alias SymphonyElixir.Linear.IssueLease
   alias SymphonyElixir.Linear.WriteContext
+  alias SymphonyElixir.Linear.YoloAgent
 
   alias SymphonyElixir.{
     AutocommitMessage,
@@ -954,13 +955,11 @@ defmodule SymphonyElixir.AgentRunner do
        when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        resolve_issue_continuation(
-          started_issue,
-          refreshed_issue,
-          issue_state_fetcher,
-          workspace,
-          worker_host
-        )
+        if YoloAgent.continued?(started_issue, refreshed_issue) do
+          resolve_issue_continuation(started_issue, refreshed_issue, issue_state_fetcher, workspace, worker_host)
+        else
+          {:done, refreshed_issue}
+        end
 
       {:ok, []} ->
         {:done, started_issue}
@@ -987,7 +986,8 @@ defmodule SymphonyElixir.AgentRunner do
        when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
       {:ok, [%Issue{} = refreshed_issue | _]} ->
-        with :ok <-
+        with true <- YoloAgent.continued?(started_issue, refreshed_issue),
+             :ok <-
                maybe_clear_review_autocommit_marker_after_review_departure(
                  started_issue,
                  refreshed_issue,
@@ -1001,6 +1001,9 @@ defmodule SymphonyElixir.AgentRunner do
             workspace,
             worker_host
           )
+        else
+          false -> {:done, refreshed_issue}
+          error -> error
         end
 
       {:ok, []} ->

@@ -134,7 +134,7 @@ defmodule SymCodexMcpScriptTest do
              }
            }
 
-    assert [linear_tool, comment_tool, merge_tool, test_tool] = get_in(tools_list, ["result", "tools"])
+    assert [linear_tool, comment_tool, merge_tool, test_tool, %{"name" => "symphony_yolo_complete"}, %{"name" => "symphony_yolo_action"}] = get_in(tools_list, ["result", "tools"])
     assert comment_tool == CommentTool.tool_spec()
     assert merge_tool == MergeTool.tool_spec()
     assert test_tool == TestTool.tool_spec()

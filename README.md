@@ -314,11 +314,14 @@ betroffene Nachweise; ein Phasenwechsel allein verlangt keine Wiederholung.
 Ticketseitige Pflichtnachweise und die CI für Nicht-Symphony-PRs bleiben erhalten.
 
 Das Makefile führt Mix über `scripts/mix-gate` aus. Der Wrapper entfernt für
-den Gate-Prozess bekannte geerbte `SYMPHONY_*`-Runtime-Variablen sowie
+den Gate-Prozess bekannte geerbte `SYMPHONY_*`-Runtime-Variablen,
+`LINEAR_YOLO_AGENT`, `OPENCLAW_YOLO_AGENT` sowie
 `MIX_DEPS_PATH`, `MIX_BUILD_ROOT` und `MIX_BUILD_PATH` und ergänzt
 `MISE_TRUSTED_CONFIG_PATHS` prozesslokal um `<Checkout>/mise.toml`, falls die
 Datei existiert. Ein dauerhaftes `mise trust` ist für `make all` nicht
-erforderlich.
+erforderlich. TestSupport bereinigt die Agentenvariablen zusätzlich beim
+Suite-/Fixture-Setup und stellt ihren vorherigen Zustand danach wieder her.
+Tests können Agenten nach dem Setup ausdrücklich konfigurieren.
 Der Gate-Wrapper normalisiert außerdem das temporäre Verzeichnis auf seinen
 physischen Pfad, damit Skripte und Test-Fixtures unter macOS dieselbe Adresse
 verwenden (`/var` und `/private/var` können auf dasselbe Verzeichnis zeigen).

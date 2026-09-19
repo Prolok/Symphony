@@ -3,28 +3,32 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Transport do
   alias SymphonyElixir.{Config, RuntimePaths}
   @test_build Application.compile_env(:symphony_elixir, :openclaw_test_build, false)
 
-  @spec command([String.t()]) :: {:ok, String.t()} | {:error, atom()}
-  def command(args) do
-    if @test_build or System.get_env("SYMPHONY_OPENCLAW_TEST_DENY") == "1" do
+  @spec command([String.t()], keyword()) :: {:ok, String.t()} | {:error, atom()}
+  def command(args, opts \\ []) do
+    ports = Keyword.get(opts, :ports, Port)
+
+    if ports == Port and (@test_build or System.get_env("SYMPHONY_OPENCLAW_TEST_DENY") == "1") do
       raise "OpenClaw process access forbidden in standard tests; inject a transport"
     end
 
-    case System.find_executable("python3") do
+    find = Keyword.get(opts, :find_executable, &System.find_executable/1)
+
+    case find.("python3") do
       nil -> {:error, :openclaw_transport_python_missing}
-      python -> invoke(python, args)
+      python -> invoke(python, args, ports, opts)
     end
   end
 
-  defp invoke(python, args) do
+  defp invoke(python, args, ports, opts) do
     helper = Path.join(RuntimePaths.workflow_dir(), "scripts/openclaw-rpc.py")
     env = Config.without_linear_secret([]) |> Enum.map(fn {k, v} -> {String.to_charlist(k), if(v, do: String.to_charlist(v), else: false)} end)
-    port = Port.open({:spawn_executable, python}, [:binary, :exit_status, :use_stdio, :stderr_to_stdout, args: ["-I", helper], env: env])
+    port = ports.open({:spawn_executable, python}, [:binary, :exit_status, :use_stdio, :stderr_to_stdout, args: ["-I", helper], env: env])
 
     try do
-      true = Port.command(port, Jason.encode!(args) <> "\n")
-      receive_output(port, "", System.monotonic_time(:millisecond) + 15_000)
+      true = ports.command(port, Jason.encode!(args) <> "\n")
+      receive_output(port, "", System.monotonic_time(:millisecond) + Keyword.get(opts, :timeout_ms, 15_000))
     after
-      if Port.info(port), do: Port.close(port)
+      if ports.info(port), do: ports.close(port)
     end
   rescue
     _ -> {:error, :openclaw_transport_failed}

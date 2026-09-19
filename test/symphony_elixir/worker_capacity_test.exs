@@ -76,6 +76,7 @@ defmodule SymphonyElixir.WorkerCapacityTest do
     updated = put_in(context.settings.agent.max_concurrent_agents, 2)
     assert :ok = WorkerCapacity.configure([updated])
     assert {:error, :max_children} = WorkerCapacity.start_child("another", "Review (AI)", &wait/0)
+    assert {:error, :max_children} = WorkerCapacity.recover_child("YOLO incoming", &wait/0)
     assert WorkerCapacity.count("another") == 0
     ref = Process.monitor(pid)
     Task.Supervisor.terminate_child(tasks, pid)

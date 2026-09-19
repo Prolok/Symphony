@@ -78,6 +78,9 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
   test "activated path uses real MCP dispatch and only completes after member decisions", %{issues: issues, context: context, opts: opts} do
     parent = self()
+    skill = Path.join(context.root, ".codex/skills/sym-yolo-review/SKILL.md")
+    File.mkdir_p!(Path.dirname(skill))
+    File.write!(skill, "Synthetic project acceptance instructions")
 
     handler = fn
       "agent", params ->
@@ -91,7 +94,20 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         assert params["sessionKey"] =~ ":incoming:#{id}"
         assert params["deliver"] == false
 
-        for text <- ["workflow_sha256", "linear_workspace_id", "human_handoff_id", "comment_inputs", "recorded_operations", "member0", "member1", "member2", "merged-sha", "WORKFLOW", "LinearBridge"] do
+        for text <- [
+              "workflow_sha256",
+              "linear_workspace_id",
+              "human_handoff_id",
+              "comment_inputs",
+              "recorded_operations",
+              "member0",
+              "member1",
+              "member2",
+              "merged-sha",
+              "WORKFLOW",
+              "LinearBridge",
+              "Synthetic project acceptance instructions"
+            ] do
           assert params["message"] =~ text
         end
 
@@ -126,7 +142,9 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     refute File.exists?(descriptor(context, id))
-    assert {:ok, %{"state" => "completed", "writable" => false}} = Journal.read("incoming")
+    assert {:ok, %{"state" => "completed", "writable" => false} = completed} = Journal.read("incoming")
+    assert Journal.receipt("incoming", completed["session_id"])["id"] == id
+    assert Journal.receipt("incoming", "other-session") == nil
     assert {:ok, record} = Store.read("incoming")
     assert is_binary(record["processed"])
     assert map_size(record["attempt"]["completed"]) == 3
@@ -293,7 +311,13 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:error, :openclaw_binary_missing} = Gateway.preflight("po", transport: missing)
     assert {:error, :openclaw_version_unsupported} = Gateway.preflight("po", transport: fn _ -> {:ok, "2026.1.1"} end)
 
-    for {response, error} <- [{"broken", :openclaw_invalid_response}, {"{\"agents\":[]}", :openclaw_agent_not_found}] do
+    cases = [
+      {"broken", :openclaw_invalid_response},
+      {"{\"agents\":[]}", :openclaw_agent_not_found},
+      {"{}", :openclaw_protocol_mismatch}
+    ]
+
+    for {response, error} <- cases do
       assert {:error, ^error} =
                Gateway.preflight("po",
                  transport: fn
@@ -302,6 +326,9 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
                  end
                )
     end
+
+    assert {:error, :openclaw_abort_unconfirmed} = Gateway.cancel(%{}, transport: fn _ -> {:ok, "{}"} end)
+    assert {:error, :connection_lost} = Gateway.cancel(%{}, transport: fn _ -> {:error, :connection_lost} end)
 
     assert {:error, :openclaw_gateway_unavailable} =
              Gateway.preflight("po",
@@ -401,5 +428,155 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("slot freed") end)
     assert :ok = Journal.write(Map.put(order, "state", "failed"))
     assert {:ok, _} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> :ok end)
+  end
+
+  test "corrupt reservations fail closed across scheduling, reconciliation and shared capacity", %{issues: issues, context: context} do
+    order = %{"id" => "orphan", "group" => "incoming", "members" => [], "state" => "unknown"}
+    assert :ok = Journal.write(order)
+    File.write!(Journal.path("incoming"), "broken")
+    assert {:error, :openclaw_journal_corrupt} = Journal.read("incoming")
+    assert {:error, :openclaw_journal_corrupt} = Journal.update(order, %{"writable" => false})
+    assert {:error, :openclaw_journal_corrupt} = Journal.pending()
+    sleeper = spawn(fn -> receive do: (:finish -> :ok) end)
+    on_exit(fn -> Process.exit(sleeper, :kill) end)
+    run = %{pid: sleeper, ids: Enum.map(issues, & &1.id), issues: issues}
+    state = %Orchestrator.State{max_concurrent_agents: 1, yolo_runs: %{"incoming" => run}}
+    result = Coordinator.tick(state, issues, start: fn _, _ -> flunk("unsafe replacement") end)
+    assert result.max_concurrent_agents == 0
+    assert result.yolo_runs["incoming"].pid == sleeper
+    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("unsafe worker") end)
+  end
+
+  test "failed recovery starts retain members and shutdown revokes the durable binding", %{issues: issues} do
+    members = Enum.map(issues, &%{"id" => &1.id, "identifier" => &1.identifier, "state" => &1.state})
+    order = %{"id" => "orphan", "group" => "incoming", "members" => members, "state" => "accepted", "writable" => true}
+    assert :ok = Journal.write(order)
+    state = %Orchestrator.State{max_concurrent_agents: 1}
+    result = Coordinator.tick(state, issues, start: fn _, _ -> {:error, :max_children} end)
+    assert result.max_concurrent_agents == 0
+    assert result.claimed == MapSet.new(issues, & &1.id)
+    sleeper = spawn(fn -> receive do: (:finish -> :ok) end)
+    ref = Process.monitor(sleeper)
+    assert :ok = Coordinator.stop(%{"incoming" => %{pid: sleeper}})
+    assert_receive {:DOWN, ^ref, :process, ^sleeper, :shutdown}
+    assert {:ok, %{"writable" => false, "cancel_requested" => true}} = Journal.read("incoming")
+  end
+
+  test "stale recovery cannot change another generation" do
+    old = %{"id" => "old", "group" => "incoming", "members" => [], "state" => "accepted"}
+    assert :ok = Journal.write(%{old | "id" => "new"})
+    assert {:error, :openclaw_generation_changed} = Journal.update(old, %{"state" => "completed"})
+    assert {:error, :openclaw_generation_changed} = OpenClaw.recover(old)
+    assert {:ok, %{"id" => "new", "state" => "accepted"}} = Journal.read("incoming")
+  end
+
+  test "missing verified ownership and unreadable project skill prevent submission", %{issues: issues, context: context, opts: opts} do
+    ProjectContext.with_context(%{context | yolo_agent_id: nil}, fn ->
+      Scope.with_scope("incoming", issues, "unverified", fn ->
+        assert {:error, :openclaw_requires_verified_linear_yolo_agent} =
+                 OpenClaw.run(%{path: context.root, sha: "sha"}, "prompt", issues, "unverified", transport: fn _ -> flunk("unverified agent") end)
+      end)
+    end)
+
+    skill = Path.join(context.root, ".codex/skills/sym-yolo-review/SKILL.md")
+    File.mkdir_p!(skill)
+    assert_raise File.Error, fn -> Runner.run("incoming", issues, issues, opts) end
+  end
+
+  test "repeated transport failures keep the same order until terminal proof and publish lifecycle events", %{issues: issues, context: context} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", %{"runId" => id} ->
+        count = Process.get(:status_count, 0)
+        Process.put(:status_count, count + 1)
+        if count < 2, do: {:error, :connection_lost}, else: %{"runId" => id, "status" => "ok", "endedAt" => 3}
+    end
+
+    id = Ecto.UUID.generate()
+
+    Scope.with_scope("incoming", issues, id, fn ->
+      assert {:ok, %{session_id: session}} =
+               OpenClaw.run(%{path: context.root, sha: "sha"}, "prompt", issues, id, transport: transport(handler), openclaw_wait: fn _ -> :ok end, recipient: self())
+
+      for event <- [:submitted, :acceptance, :uncertain, :ended] do
+        assert_receive {:yolo_event, "incoming", %{event: ^event, session_id: ^session}}
+      end
+
+      refute_receive {:yolo_event, "incoming", %{event: :uncertain}}
+    end)
+
+    assert Process.get(:status_count) == 3
+  end
+
+  test "cancellation messages target the accepted run and require terminal proof", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        send(self(), :openclaw_cancel)
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "sessions.abort", params ->
+        send(self(), {:aborted, params["runId"]})
+        %{"ok" => true}
+
+      "agent.wait", %{"runId" => id} ->
+        %{"runId" => id, "status" => "error", "endedAt" => 3}
+    end
+
+    assert {:error, :openclaw_run_failed_or_cancelled} = Runner.run("incoming", issues, issues, Keyword.put(opts, :transport, transport(handler)))
+    assert {:ok, %{"id" => id, "state" => "failed", "writable" => false, "abort_acknowledged" => true}} = Journal.read("incoming")
+    assert_receive {:aborted, ^id}
+  end
+
+  test "journal replacement during observation cannot overwrite the new order even on cancellation", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", _ ->
+        {:ok, current} = Journal.read("incoming")
+        :ok = Journal.write(Map.put(current, "id", "new-generation"))
+        {:error, :connection_lost}
+    end
+
+    wait = fn _ ->
+      if Process.get(:waited) do
+        throw(:stale_reservation)
+      else
+        Process.put(:waited, true)
+        send(self(), :openclaw_cancel)
+      end
+    end
+
+    opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: wait)
+    assert catch_throw(Runner.run("incoming", issues, issues, opts)) == :stale_reservation
+    assert {:ok, %{"id" => "new-generation", "state" => "accepted"}} = Journal.read("incoming")
+  end
+
+  test "tool bridge keeps idle bindings and supports the MCP handshake", %{root: root} do
+    order = %{"id" => "handshake", "group" => "incoming", "members" => [], "state" => "accepted", "writable" => true}
+    :ok = Journal.write(order)
+    {:ok, bridge} = ToolBridge.start(order, Path.join(root, "handshake"))
+
+    try do
+      Process.sleep(550)
+      assert bridge_call(bridge.descriptor, request("ping"))["result"] == %{}
+      response = bridge_call(bridge.descriptor, request("initialize"))
+      assert response["result"]["serverInfo"]["name"] == "symphony-linear"
+    after
+      ToolBridge.stop(bridge)
+    end
+  end
+
+  test "live knowledge question is confined to the review fixture" do
+    alias SymphonyElixir.TestRun.PoHandoff
+    plan = %{"scenario" => "po_handoff", "openclaw_knowledge_question" => "Synthetic knowledge question?"}
+    review = PoHandoff.fixture(%{"initial_state" => "Review", "title" => "fixture"}, plan)
+    assert review["description"] =~ plan["openclaw_knowledge_question"]
+    assert review["description"] =~ "Nenne Antwort und Quelle"
+    blocker = PoHandoff.fixture(%{"initial_state" => "BLOCKER", "title" => "fixture"}, plan)
+    refute blocker["description"] =~ plan["openclaw_knowledge_question"]
   end
 end

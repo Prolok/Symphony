@@ -29,7 +29,7 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
   test "rejection envelopes require the exact request hash, method and allowlisted preflight reason" do
     order = %{"id" => "run", "agent" => "po", "session_id" => "session", "timeout_seconds" => 3600}
 
-    for change <- [%{"request_sha256" => "other"}, %{"method" => "agent.wait"}, %{"phase" => "final"}, %{"reason" => "SECRET"}] do
+    for change <- [%{"symphony_openclaw_rejection" => 2}, %{"request_sha256" => "other"}, %{"method" => "agent.wait"}, %{"phase" => "final"}, %{"reason" => "SECRET"}] do
       transport = fn ["gateway", "call", "agent", "--params", raw | _] ->
         proof = %{
           "symphony_openclaw_rejection" => 1,

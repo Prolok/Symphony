@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.OpenClawRuntimeTest do
   use SymphonyElixir.TestSupport
+  alias Mix.Tasks.Openclaw.Recover, as: RecoverCommand
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Relay.Store, as: Digest
@@ -785,6 +786,9 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, ^recovered} = Journal.history("incoming", order["id"])
     assert {:ok, ^recovered} = recover_evidence(evidence, true)
     assert {:ok, ^new} = Journal.read("incoming")
+    changed = Map.put(evidence, "reviewer", "another-operator")
+    assert {:error, :openclaw_generation_changed} = recover_evidence(changed, true)
+    assert {:ok, ^new} = Journal.read("incoming")
   end
 
   test "recovery denies uncorrelated evidence and conflicting execution", %{issues: issues, opts: opts} do
@@ -799,6 +803,8 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       put_in(evidence, ["binding", "sha"], "other"),
       put_in(evidence, ["execution_check", "basis"], "missing_session"),
       put_in(evidence, ["execution_check", "no_active_or_foreign_execution"], false),
+      put_in(evidence, ["execution_check", "checked_at"], nil),
+      put_in(evidence, ["execution_check", "checked_at"], "invalid-time"),
       put_in(evidence, ["execution_check", "checked_at"], "2020-01-01T00:00:00Z")
     ]
 
@@ -818,6 +824,13 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     assert {:ok, record} = Store.read("incoming")
+
+    for attempt <- [nil, %{"id" => "foreign-attempt"}] do
+      :ok = Store.write("incoming", Map.put(record, "attempt", attempt))
+      assert {:error, :openclaw_recovery_conflict} = recover_evidence(evidence, true)
+      assert {:ok, ^order} = Journal.read("incoming")
+    end
+
     Store.write("incoming", put_in(record, ["attempt", "completed"], %{hd(issues).id => "action"}))
     assert {:error, :openclaw_recovery_conflict} = recover_evidence(evidence, true)
     Store.write("incoming", record)
@@ -858,6 +871,16 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     alias SymphonyElixir.Yolo.OpenClaw.Checkout
     assert {:ok, measured} = Checkout.verify(order, proof)
     assert measured["payload_sha256"] == order["payload_sha256"]
+    assert {:error, :openclaw_checkout_unverified} = Checkout.verify(order, nil)
+
+    original_path = System.get_env("PATH")
+
+    try do
+      System.put_env("PATH", Path.join(workspace.path, "missing-executables"))
+      assert {:error, :openclaw_checkout_unverified} = Checkout.verify(order, proof)
+    after
+      restore_env("PATH", original_path)
+    end
 
     for changed <- [
           Map.put(proof, "cwd", "/knowledge"),
@@ -888,6 +911,13 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     # Model the durable boundary after archive sync, before current replacement.
     assert :ok = DurableState.write(Path.join(archive, Digest.digest(previous["id"]) <> ".json"), previous)
     assert {:ok, ^previous} = Journal.read("incoming")
+    conflicting = Map.put(previous, "error", "conflicting-history")
+    archive_path = Path.join(archive, Digest.digest(previous["id"]) <> ".json")
+    assert :ok = DurableState.write(archive_path, conflicting)
+    assert {:error, :openclaw_history_conflict} = Journal.write(following)
+    assert {:ok, ^previous} = Journal.read("incoming")
+    assert {:ok, ^conflicting} = Journal.history("incoming", previous["id"])
+    assert :ok = DurableState.write(archive_path, previous)
     assert :ok = Journal.write(following)
     assert {:ok, ^previous} = Journal.history("incoming", previous["id"])
     assert {:ok, ^following} = Journal.read("incoming")
@@ -898,7 +928,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
   end
 
   test "operator command refuses malformed packages and mismatched source hashes without exposing contents", %{root: root} do
-    command = Mix.Tasks.Openclaw.Recover
+    command = RecoverCommand
     assert_raise Mix.Error, ~r/openclaw_recovery_input_invalid/, fn -> command.run([]) end
     path = Path.join(root, "evidence.json")
     File.write!(path, "[]")
@@ -909,5 +939,112 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     File.write!(path, Jason.encode!(%{"source_file" => source, "source_sha256" => String.duplicate("a", 64)}))
     assert_raise Mix.Error, ~r/^OpenClaw recovery refused: openclaw_recovery_input_invalid$/, fn -> command.run(args ++ ["--apply"]) end
     assert {:ok, nil} = Journal.read("incoming")
+  end
+
+  test "default recovery cannot release a reservation when the real gateway boundary is denied", %{issues: issues, opts: opts} do
+    order = uncertain_order(issues, opts)
+
+    assert_raise RuntimeError, ~r/OpenClaw process access forbidden in standard tests/, fn ->
+      Recovery.resolve(rejection_evidence(order))
+    end
+
+    assert {:ok, ^order} = Journal.read("incoming")
+    assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+  end
+
+  test "journal write authority follows the current generation and revocation", %{issues: issues, opts: opts} do
+    refute Journal.writable?("incoming", "missing")
+    order = uncertain_order(issues, opts)
+    refute Journal.writable?("incoming", order["id"])
+    assert {:ok, running} = Journal.update(order, %{"state" => "running", "writable" => true})
+    assert Journal.writable?("incoming", running["id"])
+    refute Journal.writable?("incoming", "foreign")
+    assert {:ok, _} = Journal.update(running, %{"state" => "cancel_pending", "writable" => false})
+    refute Journal.writable?("incoming", running["id"])
+  end
+
+  test "journal lock failure cannot authorize cancellation or erase a later corruption", %{issues: issues, opts: opts, root: root} do
+    original_path = System.get_env("PATH")
+
+    handler = fn
+      "agent", params -> %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+      "agent.wait", %{"runId" => id} -> %{"runId" => id, "status" => "running"}
+      "sessions.abort", _ -> flunk("failed journal transition must not send an external abort")
+    end
+
+    wait = fn _ ->
+      assert {:ok, %{"state" => "accepted", "writable" => true, "acceptance_observed" => true}} = Journal.read("incoming")
+
+      if Process.get(:lock_failure_observed) do
+        restore_env("PATH", original_path)
+        File.write!(Journal.path("incoming"), "corrupt-journal")
+      else
+        Process.put(:lock_failure_observed, true)
+        System.put_env("PATH", Path.join(root, "missing-executables"))
+        send(self(), :openclaw_cancel)
+      end
+    end
+
+    try do
+      assert {:error, :openclaw_journal_corrupt} =
+               Runner.run("incoming", issues, issues, Keyword.merge(opts, transport: transport(handler), openclaw_wait: wait))
+
+      assert File.read!(Journal.path("incoming")) == "corrupt-journal"
+      assert {:error, :openclaw_journal_corrupt} = Journal.member_available(hd(issues).id)
+    after
+      restore_env("PATH", original_path)
+    end
+  end
+
+  test "recovered legacy rejection reports a released reservation without inventing a reason", %{issues: issues, opts: opts} do
+    order = uncertain_order(issues, opts)
+    assert {:ok, _} = Journal.update(order, %{"state" => "rejected", "rejection" => %{}})
+
+    assert {:error, :openclaw_request_rejected_before_acceptance} =
+             OpenClaw.recover(order, recipient: self(), transport: fn _ -> flunk("terminal journal must not call the gateway") end)
+
+    assert_receive {:yolo_event, "incoming", %{message: "Vor Annahme abgelehnt; Reservierung freigegeben."}}
+    assert :ok = Journal.member_available(hd(issues).id)
+  end
+
+  test "operator command reloads isolated project configuration and idempotently reports a recovered package", %{issues: issues, opts: opts, root: root, context: context} do
+    {:ok, reloaded} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    context = put_in(context.settings.tracker.app["state_root"], reloaded.settings.tracker.app["state_root"])
+    ProjectContext.bind(context)
+    order = uncertain_order(issues, opts)
+    source = "synthetic correlated rejection"
+    execution_source = "synthetic operator execution check"
+
+    evidence =
+      rejection_evidence(order)
+      |> Map.put("source_sha256", OpenClaw.digest(source))
+      |> Map.put("execution_source_sha256", OpenClaw.digest(execution_source))
+
+    assert {:ok, recovered} = recover_evidence(evidence, true)
+    path = Path.join(root, "evidence.json")
+    package = Map.merge(evidence, %{"source_file" => "rejection.txt", "execution_source_file" => "execution.txt"})
+    File.write!(path, Jason.encode!(package))
+    File.write!(Path.join(root, "rejection.txt"), source)
+    File.write!(Path.join(root, "execution.txt"), execution_source)
+
+    helper = "priv/linear_app/issue_lease.py"
+    File.mkdir_p!(Path.dirname(Path.join(root, helper)))
+    File.cp!(Path.join(SymphonyElixir.RuntimePaths.workflow_dir(), helper), Path.join(root, helper))
+    isolated = %{context | env: Map.put(context.env, "SYMPHONY_ROOT_DIR", root)}
+
+    ProjectContext.with_context(isolated, fn ->
+      for {extra, mode} <- [{[], "dry_run"}, {["--apply"], "applied"}] do
+        output = ExUnit.CaptureIO.capture_io(fn -> RecoverCommand.run(["--project", root, "--evidence", path] ++ extra) end)
+        result = Jason.decode!(String.trim(output))
+        assert result["mode"] == mode
+        assert result["id"] == order["id"]
+        assert result["state"] == "rejected"
+        assert result["recovery"] == recovered["recovery"]
+        refute output =~ source
+        refute output =~ execution_source
+      end
+    end)
+
+    assert {:ok, ^recovered} = Journal.read("incoming")
   end
 end

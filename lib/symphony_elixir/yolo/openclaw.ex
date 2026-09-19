@@ -67,7 +67,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
       "linear_workspace_id" => Config.settings!().tracker.app["workspace_id"],
       "workspace" => workspace.path,
       "sha" => workspace.sha,
-      "members" => Enum.map(issues, &Map.take(&1, [:id, :identifier, :state])),
+      "members" => Enum.map(issues, &%{"id" => &1.id, "identifier" => &1.identifier, "state" => &1.state}),
       "state" => "intent",
       "writable" => true,
       "execution" => "openclaw",

@@ -113,14 +113,42 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     tool_opts = [fetch: opts[:fetch], before_action: opts[:before_action], linear_client: &synthetic_linear/3]
-    assert :ok = Runner.run("incoming", issues, issues, Keyword.merge(opts, transport: transport(handler), tool_opts: tool_opts))
+
+    logs =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok = Runner.run("incoming", issues, issues, Keyword.merge(opts, transport: transport(handler), tool_opts: tool_opts))
+      end)
+
     assert_receive {:submitted, id}
+
+    for issue <- issues, event <- ~w(submitted acceptance ended) do
+      assert logs =~ "OpenClaw PO event=#{event} project_root=#{context.id} issue_id=#{issue.id} issue_identifier=#{issue.identifier} run_id=#{id} session_id=agent:po:symphony:"
+    end
+
     refute File.exists?(descriptor(context, id))
     assert {:ok, %{"state" => "completed", "writable" => false}} = Journal.read("incoming")
     assert {:ok, record} = Store.read("incoming")
     assert is_binary(record["processed"])
     assert map_size(record["attempt"]["completed"]) == 3
     assert {:error, :yolo_group_changed} = Runner.run("incoming", issues, issues, opts)
+  end
+
+  test "preflight failures retain every member's issue and session context", %{issues: issues, context: context, opts: opts} do
+    logs =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :openclaw_binary_missing} =
+                 Runner.run("incoming", issues, issues, Keyword.put(opts, :transport, fn _ -> {:error, :openclaw_binary_missing} end))
+      end)
+
+    assert {:ok, nil} = Journal.read("incoming")
+    {:ok, record} = Store.read("incoming")
+    id = record["attempt"]["id"]
+
+    for issue <- issues do
+      assert logs =~ "OpenClaw PO event=failed project_root=#{context.id} issue_id=#{issue.id} issue_identifier=#{issue.identifier} run_id=#{id} session_id=agent:po:symphony:"
+    end
+
+    assert logs =~ "state=local_error reason=openclaw_binary_missing"
   end
 
   test "blank selection never calls OpenClaw through start, poll, replay or lease checks", %{context: context, issues: issues, opts: opts} do

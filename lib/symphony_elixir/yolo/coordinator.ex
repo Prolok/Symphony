@@ -4,21 +4,50 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   alias SymphonyElixir.{Config, ProjectContext, Tracker}
   alias SymphonyElixir.Linear.YoloAgent
   alias SymphonyElixir.Yolo.{Admission, Completion, Group, Observation, Operations, ReviewReadiness, Runner, Store}
+  alias SymphonyElixir.Yolo.OpenClaw
+  alias SymphonyElixir.Yolo.OpenClaw.Journal
 
   @spec tick(map(), [map()], keyword()) :: map()
   def tick(state, issues, opts \\ []) do
+    state = recover_external(state, opts)
+    runs = reconcile(state.yolo_runs, issues)
+    previous_ids = Enum.flat_map(state.yolo_runs, fn {_, run} -> run.ids end) |> MapSet.new()
+    current_ids = Enum.flat_map(runs, fn {_, run} -> run.ids end) |> MapSet.new()
+    claimed = state.claimed |> MapSet.difference(previous_ids) |> MapSet.union(current_ids)
+    state = %{state | yolo_runs: runs, claimed: claimed}
+
     if is_binary(Config.yolo_agent_id()) do
-      runs = reconcile(state.yolo_runs, issues)
-      previous_ids = Enum.flat_map(state.yolo_runs, fn {_, run} -> run.ids end) |> MapSet.new()
-      current_ids = Enum.flat_map(runs, fn {_, run} -> run.ids end) |> MapSet.new()
-      claimed = state.claimed |> MapSet.difference(previous_ids) |> MapSet.union(current_ids)
-      state = %{state | yolo_runs: runs, claimed: claimed}
       issues = recover_origins(state, issues, opts)
       {issues, state} = admit(issues, state, opts)
 
       schedule_groups(state, issues, opts)
     else
       state
+    end
+  end
+
+  defp recover_external(state, opts) do
+    case Journal.pending() do
+      {:ok, orders} ->
+        Enum.reduce(orders, state, &recover_order(&2, &1, opts))
+
+      {:error, reason} ->
+        Logger.error("OpenClaw reservations unavailable project_root=#{ProjectContext.current().root} reason=#{inspect(reason)}")
+        # An unreadable reservation cannot prove any slot/member is free.
+        %{state | max_concurrent_agents: 0}
+    end
+  end
+
+  defp recover_order(state, order, opts) do
+    group = order["group"]
+    run = state.yolo_runs[group]
+
+    if run && is_pid(run.pid) && Process.alive?(run.pid) do
+      state
+    else
+      members = Enum.map(order["members"], fn member -> %{id: member["id"], identifier: member["identifier"], state: member["state"]} end)
+      runner = fn _, _, _ -> OpenClaw.recover(order, opts) end
+      start(state, group, members, [], Keyword.merge(opts, runner: runner, recovering: true))
     end
   end
 
@@ -69,17 +98,28 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     by_id = Map.new(issues, &{&1.id, &1})
 
     Map.filter(runs, fn {group, run} ->
-      alive? = Process.alive?(run.pid)
+      alive? = is_pid(run.pid) and Process.alive?(run.pid)
 
       withdrawn? =
         Enum.all?(run.ids, &withdrawn?(by_id[&1]))
 
       own_finish? = Completion.ready?(group, run.issues)
       withdrawn? = withdrawn? and not own_finish?
-      if alive? and withdrawn?, do: Process.exit(run.pid, :shutdown)
-      alive? and not withdrawn?
+
+      external? =
+        case Journal.read(group) do
+          {:ok, order} -> Journal.pending?(order)
+          _ -> true
+        end
+
+      if alive? and withdrawn?, do: stop_withdrawn(run.pid, external?)
+
+      alive? and (external? or not withdrawn?)
     end)
   end
+
+  defp stop_withdrawn(pid, true), do: send(pid, :openclaw_cancel)
+  defp stop_withdrawn(pid, false), do: Process.exit(pid, :shutdown)
 
   defp withdrawn?(nil), do: true
   defp withdrawn?(issue), do: not YoloAgent.delegated?(issue) or not Admission.eligible?(issue)
@@ -133,7 +173,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   end
 
   defp observe_group(group, members, opts) do
-    with {:ok, record} <- Store.read(group),
+    with :ok <- Journal.available(group),
+         {:ok, record} <- Store.read(group),
          true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
          {:ok, observations, fingerprint} <- Observation.capture(members, record["observations"], opts),
          {:ok, pending} <- Operations.pending(Enum.map(members, & &1.id)),
@@ -158,9 +199,11 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
     start =
       Keyword.get(opts, :start, fn name, fun ->
-        if state.external_poll,
-          do: SymphonyElixir.WorkerCapacity.start_child(nil, "YOLO #{name}", fun),
-          else: Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun)
+        cond do
+          state.external_poll and opts[:recovering] -> SymphonyElixir.WorkerCapacity.recover_child("YOLO #{name}", fun)
+          state.external_poll -> SymphonyElixir.WorkerCapacity.start_child(nil, "YOLO #{name}", fun)
+          true -> Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun)
+        end
       end)
 
     case start.(group, callback) do
@@ -173,7 +216,11 @@ defmodule SymphonyElixir.Yolo.Coordinator do
         }
 
       _ ->
-        state
+        if opts[:recovering] do
+          %{state | claimed: MapSet.union(state.claimed, MapSet.new(members, & &1.id)), max_concurrent_agents: 0}
+        else
+          state
+        end
     end
   end
 
@@ -214,7 +261,15 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   @spec stop(map()) :: :ok
   def stop(runs) do
-    Enum.each(runs, fn {_, run} -> Process.exit(run.pid, :shutdown) end)
+    Enum.each(runs, fn {group, run} ->
+      case Journal.read(group) do
+        {:ok, order} when is_map(order) -> Journal.update(order, %{"writable" => false, "cancel_requested" => true})
+        _ -> :ok
+      end
+
+      Process.exit(run.pid, :shutdown)
+    end)
+
     :ok
   end
 end

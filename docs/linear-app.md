@@ -139,6 +139,10 @@ Lokale Issue-Leases, Service-Mutex und beide PO-Freigaben bleiben erhalten.
 
 ### Agentenbindung
 
+Der optionale lokale OpenClaw-Ausführungsweg für diese PO-Läufe ist in
+[OpenClaw-YOLO](openclaw-yolo.md) beschrieben, einschließlich Testisolation,
+Werkzeugbindung und gesondertem Aktivierungsnachweis.
+
 `LINEAR_YOLO_AGENT` in der projektspezifischen `.symphony/.env.local` benennt
 optional einen Linear-Agenten. Fehlend oder leer erhält den bisherigen Betrieb,
 auch bei `--yolo`. Ein Name wird über den gebundenen App-Client vollständig und

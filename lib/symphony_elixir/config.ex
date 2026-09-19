@@ -184,6 +184,7 @@ defmodule SymphonyElixir.Config do
     identity = {tracker.auth_mode, tracker.app, tracker.relay, tracker.endpoint, tracker.project_slug, tracker.team_key, tracker.assignee}
 
     if(tracker.yolo_agent, do: {identity, tracker.yolo_agent}, else: identity)
+    |> then(fn binding -> if tracker.openclaw_yolo_agent, do: {binding, tracker.openclaw_yolo_agent}, else: binding end)
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
@@ -322,6 +323,9 @@ defmodule SymphonyElixir.Config do
   @spec yolo_agent_name() :: String.t() | nil
   def yolo_agent_name, do: settings!().tracker.yolo_agent
 
+  @spec openclaw_yolo_agent() :: String.t() | nil
+  def openclaw_yolo_agent, do: settings!().tracker.openclaw_yolo_agent
+
   @spec yolo_agent_id() :: String.t() | nil
   def yolo_agent_id do
     case ProjectContext.current() do
@@ -387,6 +391,19 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
+    with :ok <- validate_openclaw(settings.tracker), do: validate_tracker_semantics(settings)
+  end
+
+  defp validate_openclaw(%{openclaw_yolo_agent: nil}), do: :ok
+  defp validate_openclaw(%{yolo_agent: nil}), do: {:error, :openclaw_requires_linear_yolo_agent}
+
+  defp validate_openclaw(%{kind: "linear", openclaw_yolo_agent: agent}) do
+    if Regex.match?(~r/^[a-z0-9][a-z0-9_-]*$/, agent), do: :ok, else: {:error, :invalid_openclaw_agent_id}
+  end
+
+  defp validate_openclaw(_), do: {:error, :openclaw_requires_linear_yolo_agent}
+
+  defp validate_tracker_semantics(settings) do
     case settings.tracker.kind do
       nil ->
         {:error, :missing_tracker_kind}

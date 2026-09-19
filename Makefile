@@ -34,7 +34,7 @@ python-check:
 
 python-tests: python-check
 	mkdir -p tmp
-	python3 -m unittest discover -s test/linear_app -v
+	SYMPHONY_OPENCLAW_TEST_DENY=1 python3 -m unittest discover -s test/linear_app -v
 
 dialyzer:
 	$(MIX) deps.get

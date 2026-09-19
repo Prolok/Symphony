@@ -52,6 +52,8 @@ def parser():
     result.add_argument("--result-dir", type=Path, required=True)
     result.add_argument("--scenario", choices=("bootstrap", "failure-probe", "delegation", "po_incoming", "po_handoff", "po_aggregation", "po_followup"), default="bootstrap")
     result.add_argument("--yolo", action="store_true", help="Folgeticket-Zuweisungsmatrix im isolierten Testlauf")
+    result.add_argument("--openclaw-agent", help="Ausdrücklicher Live-Opt-in für genau diesen OpenClaw-Agenten; nur PO-Szenarien")
+    result.add_argument("--openclaw-knowledge-question", help="Nichtgeheime Wissensfrage für den Review-Live-Nachweis; Antwort wird vom Betreiber geprüft")
     result.add_argument("--source-mode", choices=("development", "merged"), default="development")
     result.add_argument("--timeout", type=float, default=180)
     result.add_argument("--resume", action="store_true")
@@ -82,11 +84,25 @@ class Run:
         for key in ("SYMPHONY_PROJECT_CONTEXT", "SYMPHONY_LINEAR_AUTH_MODE", "SYMPHONY_LINEAR_BINDING_HASH"):
             self.env.pop(key, None)
         self.env.pop("SYMPHONY_TEST_CLEANUP_PLAN_SHA256", None)
+        if not getattr(args, "openclaw_agent", None):
+            self.env["SYMPHONY_OPENCLAW_TEST_DENY"] = "1"
         if args.cleanup_plan_sha256:
             self.env["SYMPHONY_TEST_CLEANUP_PLAN_SHA256"] = args.cleanup_plan_sha256
 
     def save(self):
         atomic(self.result_path, self.result)
+
+    def verify_openclaw(self, fixtures):
+        receipts = [f.get("po_receipt", f.get("handoff_receipt", {}))
+                    for f in fixtures if f.get("po_incoming") or f.get("po_handoff")]
+        proofs = [r.get("openclaw", {}) for r in receipts]
+        if not proofs or not all(p.get("agent") == self.args.openclaw_agent and
+                                 p.get("state") == "completed" and p.get("payload_sha256") and
+                                 p.get("session_id") == r.get("session_id")
+                                 for p, r in zip(proofs, receipts)):
+            raise RunFailure("openclaw_execution_unconfirmed")
+        self.result["openclaw"] = {"agent": self.args.openclaw_agent, "executions": proofs,
+                                  "knowledge_and_instruction_review": "operator_evidence_required"}
 
     def remaining(self):
         value = self.deadline - time.monotonic()
@@ -324,11 +340,15 @@ class Run:
             if self.plan_path.exists():
                 existing = json.loads(self.plan_path.read_text())
                 owner_source = capsule.get("cleanup_recovery", {}).get("source", capsule["source"])
-                if not self.args.resume or existing["source"] != owner_source or existing["run_id"] != self.args.run_id or existing.get("scenario", "bootstrap") != self.args.scenario or existing.get("yolo", False) != self.args.yolo:
+                if not self.args.resume or existing["source"] != owner_source or existing["run_id"] != self.args.run_id or existing.get("scenario", "bootstrap") != self.args.scenario or existing.get("yolo", False) != self.args.yolo or existing.get("openclaw_agent") != getattr(self.args, "openclaw_agent", None):
                     raise RunFailure("run_already_exists_or_changed")
+                if existing.get("openclaw_knowledge_question") != getattr(self.args, "openclaw_knowledge_question", None):
+                    raise RunFailure("openclaw_knowledge_question_changed")
             else:
                 atomic(self.plan_path, {"evidence": "live", "instance": self.args.test_instance,
-                                        "run_id": self.args.run_id, "source": capsule["source"], "scenario": self.args.scenario, "yolo": self.args.yolo})
+                                        "run_id": self.args.run_id, "source": capsule["source"], "scenario": self.args.scenario, "yolo": self.args.yolo,
+                                        "openclaw_agent": getattr(self.args, "openclaw_agent", None),
+                                        "openclaw_knowledge_question": getattr(self.args, "openclaw_knowledge_question", None)})
             self.save()
             prepared = True  # Intent may be durable even when prepare loses its response.
             if self.args.cleanup_only:
@@ -372,6 +392,8 @@ class Run:
                     if self.fixture_ids(probed, capsule["manifest"]["projects"], self.args.scenario) != fixture_ids:
                         raise RunFailure("changed_fixture_mapping")
                     if all(f["complete"] for f in probed):
+                        if getattr(self.args, "openclaw_agent", None):
+                            self.verify_openclaw(probed)
                         if self.args.scenario in ("po_aggregation", "po_followup"):
                             derived = probe.get("derived", [])
                             if len(derived) != 1 or derived[0].get("complete") is not True:
@@ -479,6 +501,11 @@ def main():
     args = parser().parse_args()
     test = module("test-instance")
     test.instance_name(sys.argv[1:])
+    if args.openclaw_agent and (os.environ.get("SYMPHONY_OPENCLAW_TEST_DENY") == "1" or
+                               args.scenario not in ("po_incoming", "po_handoff", "po_aggregation", "po_followup")):
+        raise SystemExit("OpenClaw-Live-Aufruf verlangt ein PO-Szenario außerhalb der Standardgates")
+    if args.openclaw_agent and args.scenario == "po_handoff" and not (args.openclaw_knowledge_question or "").strip():
+        raise SystemExit("OpenClaw-Abnahme verlangt --openclaw-knowledge-question")
     if not test.NAME.fullmatch(args.test_instance) or not test.NAME.fullmatch(args.run_id) or not 0 < args.timeout <= 3600 or not 0 < args.port <= 65535:
         raise SystemExit("Ungültiger Testname, Lauf, Port oder Timeout")
     args.checkout = test.canonical(args.checkout)
@@ -499,7 +526,8 @@ def main():
                 or (not args.cleanup_plan_sha256 and plan.get("source", {}).get("source_sha256") != args.expected_source)
                 or plan.get("source", {}).get("checkout") != str(args.checkout)
                 or plan.get("scenario", "bootstrap") != args.scenario
-                or plan.get("yolo", False) != args.yolo):
+                or plan.get("yolo", False) != args.yolo
+                or plan.get("openclaw_agent") != args.openclaw_agent):
             raise SystemExit("Wiederaufnahme gehört nicht zum bestehenden Lauf; Resultate erhalten")
     signalled = []
     def interrupted(signum, _frame):

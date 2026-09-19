@@ -33,7 +33,8 @@ defmodule SymphonyElixir.TestRun.Scenario do
     teams_query = "query TestScenarioTeams($id: String!, $after: String) { project(id: $id) { teams(first: 100, after: $after) { nodes { id } pageInfo { hasNextPage endCursor } } } }"
     states_query = "query TestScenarioStates($id: String!, $after: String) { team(id: $id) { states(first: 100, after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } } }"
 
-    with {:ok, [team]} <- API.pages(teams_query, %{id: project}, ["project", "teams"], []),
+    with :ok <- check_openclaw(plan),
+         {:ok, [team]} <- API.pages(teams_query, %{id: project}, ["project", "teams"], []),
          {:ok, available} <- API.pages(states_query, %{id: team["id"]}, ["team", "states"], []) do
       required = Enum.uniq(states(plan) ++ ["Planung (AI)"] ++ result_states(plan))
       missing = Enum.reject(required, fn name -> Enum.count(available, &(&1["name"] == name)) == 1 end)
@@ -42,6 +43,12 @@ defmodule SymphonyElixir.TestRun.Scenario do
       {:error, _} = error -> error
       _ -> {:error, :test_scenario_team_unconfirmed}
     end
+  end
+
+  defp check_openclaw(plan) do
+    if Config.openclaw_yolo_agent() == plan["openclaw_agent"],
+      do: :ok,
+      else: {:error, :test_openclaw_explicit_agent_mismatch}
   end
 
   defp result_states(%{"scenario" => "po_incoming"}), do: ["Verworfen"]

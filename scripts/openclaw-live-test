@@ -1,0 +1,28 @@
+#!/usr/bin/env python3
+"""Explicit operator start for isolated OpenClaw PO evidence (never a normal gate)."""
+import argparse
+import os
+from pathlib import Path
+import re
+import sys
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--execute-live", action="store_true", required=True)
+    parser.add_argument("--agent", required=True)
+    parser.add_argument("runner_args", nargs=argparse.REMAINDER, help="-- followed by test-instance-run arguments")
+    args = parser.parse_args()
+    if os.environ.get("SYMPHONY_OPENCLAW_TEST_DENY") == "1":
+        parser.error("OpenClaw access is forbidden in standard gates")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", args.agent):
+        parser.error("invalid OpenClaw agent id")
+    forward = args.runner_args
+    if not forward or forward[0] != "--" or any(x.startswith("--openclaw-agent") for x in forward):
+        parser.error("pass the isolated runner arguments after --")
+    runner = Path(__file__).with_name("test-instance-run")
+    os.execv(sys.executable, [sys.executable, str(runner), "--openclaw-agent", args.agent, *forward[1:]])
+
+
+if __name__ == "__main__":
+    main()

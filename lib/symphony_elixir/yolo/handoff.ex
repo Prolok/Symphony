@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Yolo.Handoff do
          {:ok, [fresh]} <- ActionScope.sources([id], opts),
          true <- fresh.state == issue.state,
          :ok <- API.update(id, %{assigneeId: human, delegateId: nil}, opts) do
-      Completion.invoke(%{"issue_id" => id, "result" => report}, opts)
+      Completion.invoke(%{"issue_id" => id, "result" => report}, Keyword.put(opts, :handoff_completed, true))
     else
       {:error, _} = error -> error
       _ -> {:error, :yolo_handoff_not_ready}

@@ -2,7 +2,7 @@ defmodule SymphonyElixir.Yolo.Completion do
   @moduledoc "Explicit per-member receipts; a normal Codex exit alone never completes a PO group."
   alias SymphonyElixir.{CommentCheckpoint, Config, Tracker}
   alias SymphonyElixir.Linear.IssueLease
-  alias SymphonyElixir.Yolo.{Operations, Scope, Store}
+  alias SymphonyElixir.Yolo.{Admission, Operations, Scope, Store}
 
   @spec tool_spec() :: map()
   def tool_spec do
@@ -42,7 +42,8 @@ defmodule SymphonyElixir.Yolo.Completion do
          {:ok, [issue]} <- fetch.([id]),
          true <- issue.in_project_scope,
          :ok <- check.(issue),
-         :ok <- operations_complete(issue) do
+         :ok <- operations_complete(issue),
+         true <- Admission.eligible?(issue) or Keyword.get(opts, :handoff_completed, false) do
       # Separate journal lock: the worker retains the group and issue leases.
       IssueLease.with_journal_lock(Store.path(scope["group"]) <> ".completion", fn ->
         complete(scope["group"], id, result)
@@ -78,7 +79,7 @@ defmodule SymphonyElixir.Yolo.Completion do
   defp complete(group, id, result) do
     with {:ok, record} <- Store.read(group),
          %{"members" => ids} = attempt <- record["attempt"],
-         true <- id in ids do
+         true <- id in ids and attempt["id"] in [nil, Scope.current()["run_id"]] do
       attempt = Map.put(attempt, "completed", Map.put(attempt["completed"] || %{}, id, result))
       Store.write(group, Map.put(record, "attempt", attempt))
     else

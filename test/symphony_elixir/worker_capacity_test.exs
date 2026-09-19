@@ -2,6 +2,25 @@ defmodule SymphonyElixir.WorkerCapacityTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.{ProjectContext, WorkerCapacity}
 
+  test "recovered external runs reserve shared capacity even after a lower limit reload" do
+    settings = Config.settings!()
+    context = %ProjectContext{settings: %{settings | agent: %{settings.agent | max_concurrent_agents: 1}}}
+    start_supervised!({WorkerCapacity, contexts: [context]})
+    assert {:ok, first} = WorkerCapacity.recover_child("YOLO incoming", &wait/0)
+    assert {:ok, second} = WorkerCapacity.recover_child("YOLO review", &wait/0)
+    assert WorkerCapacity.count(nil) == 2
+    assert {:error, :worker_capacity} = WorkerCapacity.start_child(nil, "Test (AI)", &wait/0)
+    ref = Process.monitor(first)
+    send(first, :stop)
+    assert_receive {:DOWN, ^ref, :process, ^first, :normal}, 1_000
+    assert WorkerCapacity.count(nil) == 1
+    assert {:error, :worker_capacity} = WorkerCapacity.start_child(nil, "Test (AI)", &wait/0)
+    ref = Process.monitor(second)
+    send(second, :stop)
+    assert_receive {:DOWN, ^ref, :process, ^second, :normal}, 1_000
+    assert {:ok, _} = WorkerCapacity.start_child(nil, "Test (AI)", &wait/0)
+  end
+
   test "concurrent project owners share host limits and release workers on owner exit" do
     settings = Config.settings!()
     worker = %{settings.worker | ssh_hosts: ["shared", "other"], max_concurrent_agents_per_host: 1}
@@ -57,6 +76,7 @@ defmodule SymphonyElixir.WorkerCapacityTest do
     updated = put_in(context.settings.agent.max_concurrent_agents, 2)
     assert :ok = WorkerCapacity.configure([updated])
     assert {:error, :max_children} = WorkerCapacity.start_child("another", "Review (AI)", &wait/0)
+    assert {:error, :max_children} = WorkerCapacity.recover_child("YOLO incoming", &wait/0)
     assert WorkerCapacity.count("another") == 0
     ref = Process.monitor(pid)
     Task.Supervisor.terminate_child(tasks, pid)

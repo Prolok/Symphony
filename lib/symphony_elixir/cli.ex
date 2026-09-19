@@ -4,6 +4,7 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.{BudgetCapture, EnvFile, LogFile, Workflow}
+  alias SymphonyElixir.TestRun.Readiness, as: TestReadiness
 
   # Keep the legacy acknowledgement flag accepted so older scripts still parse.
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
@@ -50,16 +51,10 @@ defmodule SymphonyElixir.CLI do
 
   defp evaluate_or_test_stage(args) do
     case SymphonyElixir.TestRun.stage() do
-      stage when stage in ["prepare", "probe", "cleanup"] ->
-        root = SymphonyElixir.RuntimePaths.workflow_dir()
-
-        with :ok <- Workflow.set_workflow_file_path(default_workflow_path()),
-             :ok <- prepare_projects(root, default_workflow_path()),
-             {:ok, result} <- SymphonyElixir.TestRun.execute(stage) do
-          IO.puts("Test run result=" <> Jason.encode!(result))
-          System.halt(0)
-        else
-          _ -> {:error, "Testlauf: gebundene Laufzeitoperation fehlgeschlagen; Laufjournal erhalten"}
+      stage when stage in ["prepare", "probe", "cleanup", "delegate", "withdraw"] ->
+        case run_test_stage(stage, &prepare_test_projects/0, args) do
+          :ok -> System.halt(0)
+          error -> error
         end
 
       stage when stage in [nil, "run"] ->
@@ -68,6 +63,28 @@ defmodule SymphonyElixir.CLI do
       _ ->
         {:error, "Ungültige Testlaufphase"}
     end
+  end
+
+  @spec run_test_stage(String.t(), (-> :ok | {:error, term()}), [String.t()]) :: :ok | {:error, String.t()}
+  def run_test_stage(stage, prepare \\ &prepare_test_projects/0, args \\ []) do
+    with {opts, [], []} <- OptionParser.parse(args, strict: @switches),
+         :ok <- maybe_set_yolo_mode(opts, runtime_deps()),
+         :ok <- prepare.(),
+         {:ok, result} <- SymphonyElixir.TestRun.execute(stage) do
+      IO.puts("Test run result=" <> Jason.encode!(result))
+      :ok
+    else
+      error ->
+        IO.puts("Test run failure=" <> Jason.encode!(TestReadiness.public_error(error)))
+        {:error, "Testlauf: gebundene Laufzeitoperation fehlgeschlagen; Laufjournal erhalten"}
+    end
+  end
+
+  defp prepare_test_projects do
+    root = SymphonyElixir.RuntimePaths.workflow_dir()
+
+    with :ok <- Workflow.set_workflow_file_path(default_workflow_path()),
+         do: prepare_projects(root, default_workflow_path())
   end
 
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}

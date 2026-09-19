@@ -179,7 +179,21 @@ def preflight(name, repo, env=None):
         raise ValueError("Testquellcode muss außerhalb der Fixture-Discovery liegen")
     if revision["sha"] != env["SYMPHONY_TEST_EXPECTED_SHA"] or revision["source_sha256"] != env["SYMPHONY_TEST_EXPECTED_SOURCE"]:
         raise ValueError("Testquellstand stimmt nicht mit der erwarteten SHA/Quellkennung überein")
-    return {"name": name, "manifest": manifest, "source": revision}
+    capsule = {"name": name, "manifest": manifest, "source": revision}
+    recovery = env.get("SYMPHONY_TEST_CLEANUP_PLAN_SHA256")
+    if recovery:
+        if env.get("SYMPHONY_TEST_RUN_STAGE") != "cleanup" or revision != source(repo):
+            raise ValueError("Cleanup-Recovery verlangt den unveränderten korrigierten Build und ausschließlich Cleanup")
+        path = canonical(env["SYMPHONY_TEST_RUN_PLAN"])
+        raw = path.read_bytes()
+        plan = json.loads(raw)
+        if (not re.fullmatch(r"[0-9a-f]{64}", recovery) or hashlib.sha256(raw).hexdigest() != recovery
+                or plan.get("evidence") != "live" or plan.get("instance") != name
+                or not NAME.fullmatch(plan.get("run_id", ""))
+                or plan.get("source", {}).get("checkout") != str(canonical(repo))):
+            raise ValueError("Cleanup-Recovery gehört nicht zum unveränderten ursprünglichen Laufplan")
+        capsule["cleanup_recovery"] = {"plan_path": str(path), "plan_sha256": recovery, "source": plan["source"]}
+    return capsule
 
 
 if __name__ == "__main__":

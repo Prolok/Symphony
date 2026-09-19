@@ -2,6 +2,7 @@
 """Prepare project-local Codex profiles without copying the Symphony checkout."""
 
 import fcntl
+import base64
 import hashlib
 import json
 import os
@@ -9,6 +10,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import uuid
+import zlib
 
 
 def skill_directories(root):
@@ -168,7 +171,7 @@ def launch_config(release, target, cwd, user_home, environment=None):
                  "--config", "mcp_servers.symphony_linear.required=true",
                  "--config", "mcp_servers.symphony_linear.command=" + json.dumps(str(release / "sym-codex-mcp"))])
     names = ("SYMPHONY_ROOT_DIR", "SYMPHONY_PROJECT_CONTEXT", "SYMPHONY_LINEAR_ENV_DIR", "SYMPHONY_LINEAR_AUTH_MODE", "SYMPHONY_LINEAR_CLIENT_SECRET_ENV", "SYMPHONY_LINEAR_BINDING_HASH",
-             "SYMPHONY_RUN_ID", "SYMPHONY_PHASE", "SYMPHONY_ISSUE_ID", "SYMPHONY_ISSUE_IDENTIFIER",
+             "SYMPHONY_RUN_ID", "SYMPHONY_PHASE", "SYMPHONY_ISSUE_ID", "SYMPHONY_ISSUE_IDENTIFIER", "SYMPHONY_YOLO_SCOPE",
              "SYMPHONY_SOURCE_REPO", "SYMPHONY_PROJECT_ROOT", "SYMPHONY_PROJECT_WORKTREES_ROOT", "SYMPHONY_WORKFLOW_FILE", "SYMPHONY_CODEX_STATE_ROOT", "SYMPHONY_PYTHON")
     forwarded = ",".join(json.dumps(name) + "=" + json.dumps(environment[name]) for name in names if name in environment)
     # Only the configured MCP may load the project secret on demand. A shell child
@@ -211,7 +214,58 @@ def bind_sessions(target, state):
             raise RuntimeError("changed session binding")
 
 
+def yolo_workspace(environment):
+    """Validate the runtime-minted reservation before shell ticket inference.
+
+    The parent holds the group/member leases and checks fresh Linear ownership.
+    This boundary binds that reservation to the exact detached checkout and
+    immutable project context; it does not grant an independent manual start.
+    """
+    scope = json.loads(environment["SYMPHONY_YOLO_SCOPE"])
+    context = json.loads(zlib.decompress(base64.urlsafe_b64decode(environment["SYMPHONY_PROJECT_CONTEXT"])))
+    group = scope["group"]
+    run_id = str(uuid.UUID(scope["run_id"]))
+    members = scope["members"]
+    if (environment["SYMPHONY_LINEAR_AUTH_MODE"] != "app"
+            or group not in ("incoming", "planning", "in_progress", "blocker", "review")
+            or run_id != environment["SYMPHONY_RUN_ID"]
+            or environment["SYMPHONY_PHASE"] != "YOLO " + group
+            or not isinstance(members, list) or not members
+            or not all(isinstance(member, str) and member for member in members)
+            or len(set(members)) != len(members)
+            or environment["SYMPHONY_ISSUE_ID"] not in members
+            or not scope["agent_id"] or scope["agent_id"] != context["yolo_agent_id"]
+            or not context["human_handoff_id"] or context["human_handoff_id"] not in context["assignee_ids"]
+            or scope["project_context_id"] != context["root"]):
+        raise ValueError("unbound YOLO group")
+
+    project = Path(context["root"]).resolve(strict=True)
+    root = Path(scope["workspace_root"]).resolve(strict=True)
+    workspace = root / "yolo" / group / run_id
+    if (not root.is_absolute() or not Path(scope["workspace_root"]).is_absolute()
+            or workspace.resolve(strict=True) != workspace
+            or str(workspace) != scope["workspace"]
+            or str(project / ".symphony") != environment["SYMPHONY_LINEAR_ENV_DIR"]
+            or str(workspace) != environment["SYMPHONY_ACTIVE_REPO_ROOT"]
+            or Path.cwd() != workspace):
+        raise ValueError("changed YOLO workspace")
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(workspace), *args], stderr=subprocess.DEVNULL).decode().strip()
+
+    if (git("rev-parse", "--show-toplevel") != str(workspace)
+            or project_root(workspace) != project
+            or git("branch", "--show-current")
+            or git("rev-parse", "HEAD") != scope["sha"]
+            or git("status", "--porcelain")):
+        raise ValueError("changed YOLO checkout")
+    return workspace
+
+
 def main():
+    if sys.argv[1:] == ["--validate-yolo-workspace"]:
+        print(yolo_workspace(os.environ))
+        return
     release = Path(os.environ["SYMPHONY_ROOT_DIR"]).resolve()
     state = Path(os.environ["SYMPHONY_CODEX_STATE_ROOT"])
     if not state.is_absolute():
@@ -240,6 +294,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, RuntimeError, KeyError, ValueError, ImportError):
+    except (OSError, RuntimeError, KeyError, ValueError, ImportError, TypeError, AttributeError, zlib.error, subprocess.CalledProcessError):
         print("sym-codex: Gebundener App-Kontext ist nicht verfügbar (Python 3.11+ erforderlich).", file=sys.stderr)
         sys.exit(1)

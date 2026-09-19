@@ -2,6 +2,9 @@ defmodule SymphonyElixir.CommentCheckpoint do
   @moduledoc "Safe comment delivery and business acknowledgement for adopted regular issues."
 
   require Logger
+  alias SymphonyElixir.Linear.YoloAgent, as: YoloAgent
+  alias SymphonyElixir.Yolo.Scope, as: YoloScope
+
   alias SymphonyElixir.{Config, Dialog, ProjectContext, Tracker, Workpad}
   alias SymphonyElixir.Linear.{Client, CommentInbox, CommentVersion, Issue, WriteContext}
 
@@ -9,8 +12,9 @@ defmodule SymphonyElixir.CommentCheckpoint do
   def active?(issue) do
     state = String.downcase(issue.state || "")
 
-    Config.settings!().tracker.kind == "linear" and String.contains?(state, "(ai)") and
-      state not in ["todo (ai)", "abbruch (ai)"] and not Dialog.state?(issue.state)
+    Config.settings!().tracker.kind == "linear" and
+      (YoloScope.member?(issue.id) or
+         (String.contains?(state, "(ai)") and state not in ["todo (ai)", "abbruch (ai)"] and not Dialog.state?(issue.state)))
   end
 
   @spec scan(map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -114,9 +118,10 @@ defmodule SymphonyElixir.CommentCheckpoint do
     fetch = Keyword.get(opts, :fetch_issue, &Client.fetch_issue_states_by_ids/1)
     owner = WriteContext.current()["issue_id"]
 
-    with true <- is_binary(id) and (is_nil(owner) or owner == id) and allowed_issue?(id),
+    with true <- is_binary(id) and (is_nil(owner) or owner == id or YoloScope.member?(id)) and allowed_issue?(id),
          {:ok, [%Issue{id: ^id, assigned_to_worker: true} = issue]} <- fetch.([id]),
-         true <- active?(issue) do
+         true <- active?(issue),
+         true <- is_nil(YoloScope.current()) or (issue.in_project_scope and YoloAgent.delegated?(issue)) do
       {:ok, issue}
     else
       {:error, _} = error -> error

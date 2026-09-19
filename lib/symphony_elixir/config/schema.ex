@@ -68,6 +68,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:project_slug, :string)
       field(:team_key, :string)
       field(:assignee, :string)
+      field(:yolo_agent, :string)
       field(:active_states, {:array, :string}, default: @default_active_states)
       field(:terminal_states, {:array, :string}, default: @default_terminal_states)
     end
@@ -82,7 +83,7 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        ~w(kind endpoint auth_mode app relay project_slug team_key assignee active_states terminal_states)a,
+        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent active_states terminal_states)a,
         empty_values: []
       )
       |> validate_inclusion(:auth_mode, ["app"])
@@ -422,6 +423,7 @@ defmodule SymphonyElixir.Config.Schema do
         project_slug: resolve_linear_scope_setting(settings.tracker.project_slug, @linear_project_slug_env),
         team_key: resolve_linear_scope_setting(settings.tracker.team_key, @linear_team_key_env),
         assignee: resolve_secret_setting(settings.tracker.assignee, ProjectContext.env("LINEAR_ASSIGNEE")),
+        yolo_agent: resolve_secret_setting(settings.tracker.yolo_agent, ProjectContext.env("LINEAR_YOLO_AGENT")),
         active_states: filter_managed_states(settings.tracker.active_states)
     }
 

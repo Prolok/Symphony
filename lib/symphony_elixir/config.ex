@@ -158,7 +158,8 @@ defmodule SymphonyElixir.Config do
         "SYMPHONY_CODEX_STATE_ROOT" => Path.join([tracker.app["state_root"], "codex", tracker.app["installation_id"]]),
         "SYMPHONY_LINEAR_BINDING_HASH" => binding_hash(tracker),
         "SYMPHONY_RUN_ID" => WriteContext.current()["run_id"] || "",
-        "SYMPHONY_PHASE" => WriteContext.current()["phase"] || ""
+        "SYMPHONY_PHASE" => WriteContext.current()["phase"] || "",
+        "SYMPHONY_YOLO_SCOPE" => WriteContext.current()["yolo_scope"] || ""
       }
       |> Map.merge(ProjectContext.runtime_env())
     else
@@ -180,7 +181,9 @@ defmodule SymphonyElixir.Config do
   end
 
   defp binding_hash(tracker) do
-    {tracker.auth_mode, tracker.app, tracker.relay, tracker.endpoint, tracker.project_slug, tracker.team_key, tracker.assignee}
+    identity = {tracker.auth_mode, tracker.app, tracker.relay, tracker.endpoint, tracker.project_slug, tracker.team_key, tracker.assignee}
+
+    if(tracker.yolo_agent, do: {identity, tracker.yolo_agent}, else: identity)
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
@@ -310,7 +313,29 @@ defmodule SymphonyElixir.Config do
 
   @spec yolo?() :: boolean()
   def yolo? do
-    Application.get_env(:symphony_elixir, :yolo, false) == true
+    case ProjectContext.current() do
+      %ProjectContext{yolo: value} when is_boolean(value) -> value
+      _ -> Application.get_env(:symphony_elixir, :yolo, false) == true
+    end
+  end
+
+  @spec yolo_agent_name() :: String.t() | nil
+  def yolo_agent_name, do: settings!().tracker.yolo_agent
+
+  @spec yolo_agent_id() :: String.t() | nil
+  def yolo_agent_id do
+    case ProjectContext.current() do
+      %ProjectContext{yolo_agent_id: id} -> id
+      _ -> nil
+    end
+  end
+
+  @spec human_handoff_id() :: String.t() | nil
+  def human_handoff_id do
+    case ProjectContext.current() do
+      %ProjectContext{human_handoff_id: id} -> id
+      _ -> nil
+    end
   end
 
   @spec validate!() :: :ok | {:error, term()}
@@ -403,13 +428,15 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp validate_required_environment(%{tracker: %{kind: "linear"}}) do
+  defp validate_required_environment(%{tracker: %{kind: "linear", yolo_agent: nil}}) do
     if yolo?() do
       :ok
     else
       validate_required_assignee_environment()
     end
   end
+
+  defp validate_required_environment(%{tracker: %{kind: "linear"}}), do: validate_required_assignee_environment()
 
   defp validate_required_environment(_settings), do: :ok
 

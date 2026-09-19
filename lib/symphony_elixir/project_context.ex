@@ -16,6 +16,9 @@ defmodule SymphonyElixir.ProjectContext do
     :settings,
     :code_root,
     :assignee_ids,
+    :human_handoff_id,
+    :yolo_agent_id,
+    :yolo,
     :test_instance,
     root_env: %{},
     env: %{}
@@ -89,6 +92,7 @@ defmodule SymphonyElixir.ProjectContext do
         workflow: workflow,
         code_root: code_root,
         root_env: root_env,
+        yolo: Config.yolo?(),
         test_instance: SymphonyElixir.TestInstance.current(),
         env: env
       }
@@ -124,7 +128,8 @@ defmodule SymphonyElixir.ProjectContext do
         %{}
 
       context ->
-        payload = Map.take(context, [:root, :workflow_path, :workflow, :env, :assignee_ids, :test_instance])
+        payload = Map.take(context, [:root, :workflow_path, :workflow, :env, :assignee_ids, :human_handoff_id, :yolo_agent_id, :test_instance])
+        payload = Map.put(payload, :yolo, Config.yolo?())
         encoded = payload |> Jason.encode!() |> :zlib.compress() |> Base.url_encode64()
         %{"SYMPHONY_PROJECT_CONTEXT" => encoded}
     end
@@ -139,6 +144,8 @@ defmodule SymphonyElixir.ProjectContext do
          true <- path == System.get_env("SYMPHONY_WORKFLOW_FILE"),
          true <- is_map(env) and Enum.all?(env, fn {key, value} -> is_binary(key) and is_binary(value) end),
          true <- valid_assignee_ids?(payload["assignee_ids"]),
+         true <- valid_optional_id?(payload["human_handoff_id"]) and valid_optional_id?(payload["yolo_agent_id"]),
+         true <- is_boolean(payload["yolo"]) or is_nil(payload["yolo"]),
          %{"config" => config, "prompt" => prompt, "prompt_template" => template} <- workflow do
       context = %__MODULE__{
         id: root,
@@ -148,6 +155,9 @@ defmodule SymphonyElixir.ProjectContext do
         workflow: %{config: config, prompt: prompt, prompt_template: template},
         env: env,
         test_instance: payload["test_instance"],
+        yolo: payload["yolo"],
+        yolo_agent_id: payload["yolo_agent_id"],
+        human_handoff_id: payload["human_handoff_id"],
         assignee_ids: payload["assignee_ids"]
       }
 
@@ -164,16 +174,17 @@ defmodule SymphonyElixir.ProjectContext do
 
   defp valid_assignee_ids?(nil), do: true
   defp valid_assignee_ids?(ids), do: is_list(ids) and Enum.all?(ids, &is_binary/1)
+  defp valid_optional_id?(id), do: is_nil(id) or (is_binary(id) and id != "")
 
   defp accept_refreshed_context({:ok, %{workflow: workflow, env: env}}, %{workflow: workflow, env: env} = context), do: context
 
   defp accept_refreshed_context({:ok, updated}, context) do
-    keys = [:auth_mode, :app, :relay, :assignee, :endpoint, :kind, :project_slug, :team_key]
+    keys = [:auth_mode, :app, :relay, :assignee, :yolo_agent, :endpoint, :kind, :project_slug, :team_key]
 
     if Map.take(updated.settings.tracker, keys) == Map.take(context.settings.tracker, keys) and
          updated.settings.workspace.root == context.settings.workspace.root and
          Map.take(updated.settings.worker, [:test_executor, :test_executor_socket]) == Map.take(context.settings.worker, [:test_executor, :test_executor_socket]),
-       do: %{updated | assignee_ids: context.assignee_ids},
+       do: %{updated | assignee_ids: context.assignee_ids, human_handoff_id: context.human_handoff_id, yolo_agent_id: context.yolo_agent_id, yolo: context.yolo},
        else: keep_context(context, :project_binding_change_requires_restart)
   end
 

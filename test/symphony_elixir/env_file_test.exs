@@ -230,6 +230,7 @@ defmodule SymphonyElixir.EnvFileTest do
     assert {:error, {:env_file_read_failed, path, reason}} = EnvFile.load(symphony_dir(project_root))
     assert path == env_path
     assert reason in [:eacces, :eperm]
+    assert {:error, {:env_file_read_failed, ^env_path, ^reason}} = EnvFile.read(symphony_dir(project_root))
   end
 
   test "returns a clear error for trailing characters after a quoted value" do

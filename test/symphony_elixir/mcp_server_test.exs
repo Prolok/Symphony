@@ -151,7 +151,9 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
              },
              %{"name" => "symphony_comments"},
              %{"name" => "symphony_merge"},
-             %{"name" => "symphony_test"}
+             %{"name" => "symphony_test"},
+             %{"name" => "symphony_yolo_complete"},
+             %{"name" => "symphony_yolo_action"}
            ] = get_in(response, ["result", "tools"])
 
     assert description =~ "Linear"
@@ -239,6 +241,14 @@ defmodule SymphonyElixir.Codex.MCPServerTest do
                "text" => "{\n  \"error\": {\n    \"message\": \"`linear_graphql` requires a non-empty `query` string.\"\n  }\n}"
              }
            ]
+  end
+
+  test "PO completion is available through both bound MCP names and rejects an unbound call" do
+    for name <- ["symphony_yolo_complete", "symphony_linear.symphony_yolo_complete", "symphony_yolo_action", "symphony_linear.symphony_yolo_action"] do
+      response = MCPServer.handle_request(%{"jsonrpc" => "2.0", "id" => 4, "method" => "tools/call", "params" => %{"name" => name, "arguments" => %{}}})
+      assert get_in(response, ["result", "isError"])
+      assert get_in(response, ["result", "content", Access.at(0), "text"]) =~ if(String.ends_with?(name, "action"), do: "invalid_yolo_followup", else: "invalid_yolo_completion")
+    end
   end
 
   test "tools/call surfaces enriched linear_graphql HTTP diagnostics" do

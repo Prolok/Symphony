@@ -1,17 +1,21 @@
 defmodule SymphonyElixir.TestRun do
   @moduledoc "Bound fixture operations shared by managed routines and explicit isolated tests."
+  require Logger
+
+  alias SymphonyElixir.TestRun.PoIncoming, as: PoIncoming
 
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, PathSafety, ProjectContext, Projects, TestInstance, Workspace}
   alias SymphonyElixir.Linear.{Client, DurableState}
-  alias SymphonyElixir.Relay.Session
+  alias SymphonyElixir.TestRun.{Delegation, Derived, PoActions, PoHandoff, Readiness, Scenario}
+  alias SymphonyElixir.Yolo.Operations, as: YoloOperations
 
   @spec stage() :: String.t() | nil
   def stage, do: if(routine(), do: routine().stage, else: Config.test_run_stage())
 
   @spec start_allowed?(map()) :: boolean()
   def start_allowed?(issue) do
-    SymphonyElixir.RoutineTest.start_allowed?(issue) and (stage() != "run" or issue.state == "Todo (AI)")
+    SymphonyElixir.RoutineTest.start_allowed?(issue) and instance_start_allowed?(issue)
   end
 
   @doc false
@@ -46,6 +50,25 @@ defmodule SymphonyElixir.TestRun do
     end
   end
 
+  defp instance_start_allowed?(issue) do
+    if stage() == "run" do
+      with {:ok, plan} <- plan(),
+           {:ok, journal} <- journal(plan) do
+        state_allowed =
+          issue.state == "Todo (AI)" or
+            (plan["scenario"] in ["po_incoming", "po_aggregation"] and issue.state in ["Backlog", "Todo", "Definiert"]) or
+            (plan["scenario"] == "po_aggregation" and YoloOperations.recovering_origin?(issue)) or
+            (plan["scenario"] in ["po_handoff", "po_followup"] and issue.state in ["BLOCKER", "Review"])
+
+        state_allowed and Delegation.start_allowed?(issue, plan, journal)
+      else
+        _ -> false
+      end
+    else
+      true
+    end
+  end
+
   @spec record_workspace(Path.t(), map(), boolean()) :: :ok | {:error, term()}
   def record_workspace(path, issue, created?) do
     if stage() == "run" and created? do
@@ -66,10 +89,10 @@ defmodule SymphonyElixir.TestRun do
   end
 
   @spec execute(String.t()) :: {:ok, map()} | {:error, term()}
-  def execute(stage) when stage in ["prepare", "probe", "cleanup"] do
+  def execute(stage) when stage in ["prepare", "probe", "cleanup", "delegate", "withdraw"] do
     with %{} = instance <- instance(),
          {:ok, plan} <- plan(),
-         true <- plan["source"] == instance["source"],
+         true <- valid_source?(stage, plan, instance),
          {:ok, journal} <- journal(plan),
          {:ok, result} <- execute_stage(stage, plan, journal) do
       {:ok, result}
@@ -78,6 +101,22 @@ defmodule SymphonyElixir.TestRun do
       _ -> {:error, :invalid_test_run}
     end
   end
+
+  defp valid_source?(stage, plan, %{"cleanup_recovery" => recovery}) do
+    with "cleanup" <- stage,
+         "cleanup" <- Config.test_run_stage(),
+         true <- recovery["plan_path"] == Path.expand(Config.test_run_plan()),
+         true <- recovery["source"] == plan["source"],
+         true <- Map.get(plan, "yolo", false) == Config.yolo?(),
+         true <- File.regular?(journal_path(plan)),
+         {:ok, raw} <- File.read(Config.test_run_plan()) do
+      Base.encode16(:crypto.hash(:sha256, raw), case: :lower) == recovery["plan_sha256"]
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_source?(_stage, plan, instance), do: plan["source"] == instance["source"]
 
   @spec bind_contexts([ProjectContext.t()]) :: {:ok, [ProjectContext.t()]} | {:error, term()}
   def bind_contexts(contexts) do
@@ -115,7 +154,7 @@ defmodule SymphonyElixir.TestRun do
     if stage() == "run" do
       with {:ok, plan} <- plan(),
            {:ok, journal} <- journal(plan, contexts),
-           true <- prepared_fixtures?(journal["fixtures"], contexts) do
+           true <- prepared_fixtures?(journal["fixtures"], contexts, plan) do
         {:ok, Enum.map(contexts, &bind_fixture(&1, journal))}
       else
         _ -> {:error, :test_fixtures_not_prepared}
@@ -125,25 +164,28 @@ defmodule SymphonyElixir.TestRun do
     end
   end
 
-  defp prepared_fixtures?(fixtures, contexts) when is_list(fixtures) and contexts != [] do
+  defp prepared_fixtures?(fixtures, contexts, plan) when is_list(fixtures) and contexts != [] do
     names = Enum.map(contexts, & &1.name) |> Enum.sort()
     expected = instance()["manifest"]["projects"] |> Map.keys() |> Enum.sort()
+    members = for name <- names, state <- Scenario.states(plan), do: {name, state}
 
     names == expected and Enum.all?(fixtures, &is_map/1) and
-      Enum.sort(Enum.map(fixtures, & &1["project"])) == names and
+      Enum.sort(Enum.map(fixtures, &{&1["project"], Map.get(&1, "initial_state", "Todo (AI)")})) == Enum.sort(members) and
       length(Enum.uniq_by(fixtures, & &1["id"])) == length(fixtures) and
-      Enum.all?(fixtures, &(is_binary(&1["id"]) and &1["id"] != "" and &1["created"] == true and &1["deleted"] == false))
+      Enum.all?(fixtures, &prepared_fixture?/1)
   end
 
-  defp prepared_fixtures?(_, _), do: false
+  defp prepared_fixtures?(_, _, _), do: false
+
+  defp prepared_fixture?(fixture), do: is_binary(fixture["id"]) and fixture["id"] != "" and fixture["created"] == true and fixture["deleted"] == false
 
   defp bind_fixture(context, journal) do
-    fixture = Enum.find(journal["fixtures"], &(&1["project"] == context.name))
+    ids = journal["fixtures"] |> Enum.filter(&(&1["project"] == context.name)) |> Enum.map(& &1["id"])
     settings = context.settings
-    tracker = %{settings.tracker | app: Map.put(settings.tracker.app, "allowed_issue_ids", [fixture["id"]])}
+    tracker = %{settings.tracker | app: Map.put(settings.tracker.app, "allowed_issue_ids", ids)}
     # Keep reconciliation active through the bootstrap's phase transition.
     # start_allowed?/1 independently excludes a subsequent planning worker.
-    config = put_in(context.workflow.config, ["tracker", "app", "allowed_issue_ids"], [fixture["id"]])
+    config = put_in(context.workflow.config, ["tracker", "app", "allowed_issue_ids"], ids)
     workflow = %{context.workflow | config: config}
     %{context | settings: %{settings | tracker: tracker}, workflow: workflow, code_root: nil}
   end
@@ -157,7 +199,9 @@ defmodule SymphonyElixir.TestRun do
          {:ok, plan} <- DurableState.read(path),
          true <- plan["evidence"] == "live" and is_binary(plan["run_id"]) and Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9_-]{0,47}\z/, plan["run_id"]),
          true <- plan["instance"] == instance()["name"] do
-      {:ok, plan}
+      if Map.get(plan, "scenario", "bootstrap") in ["bootstrap", "failure-probe", "delegation", "po_incoming", "po_handoff", "po_aggregation", "po_followup"],
+        do: {:ok, plan},
+        else: {:error, :invalid_public_test_plan}
     else
       _ -> {:error, :invalid_public_test_plan}
     end
@@ -174,9 +218,14 @@ defmodule SymphonyElixir.TestRun do
     owner = plan_owner(plan)
 
     case DurableState.read(journal_path(plan)) do
-      {:error, :enoent} -> {:ok, %{"run_id" => plan["run_id"], "source" => plan["source"], "binding" => binding, "owner" => owner, "fixtures" => []}}
-      {:ok, %{"run_id" => ^id, "source" => ^source, "binding" => ^binding, "owner" => ^owner} = journal} -> {:ok, journal}
-      _ -> {:error, :test_journal_identity_mismatch}
+      {:error, :enoent} ->
+        {:ok, %{"run_id" => plan["run_id"], "source" => plan["source"], "binding" => binding, "owner" => owner, "scenario" => Map.get(plan, "scenario", "bootstrap"), "fixtures" => []}}
+
+      {:ok, %{"run_id" => ^id, "source" => ^source, "binding" => ^binding, "owner" => ^owner} = journal} ->
+        if Map.get(journal, "scenario", "bootstrap") == Map.get(plan, "scenario", "bootstrap"), do: {:ok, journal}, else: {:error, :test_journal_identity_mismatch}
+
+      _ ->
+        {:error, :test_journal_identity_mismatch}
     end
   end
 
@@ -198,22 +247,86 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp execute_stage("prepare", plan, journal) do
-    with :ok <- preflight_access(contexts()) do
+    with :ok <- Delegation.preflight(contexts(), plan),
+         :ok <- scenario_preflight(plan),
+         :ok <- preflight_access(contexts()) do
       Enum.reduce_while(contexts(), {:ok, journal}, &prepare_context(&1, &2, plan))
     end
   end
 
   defp execute_stage(stage, plan, journal) do
+    with {:ok, derived} <- inspect_derived(stage, plan),
+         {:ok, result} <- inspect_fixtures(stage, plan, journal) do
+      {:ok, if(derived == [], do: result, else: Map.put(result, "derived", derived))}
+    end
+  end
+
+  defp inspect_derived(stage, plan) do
+    if routine(), do: {:ok, []}, else: Derived.inspect_fixtures(stage, plan)
+  end
+
+  defp scenario_preflight(plan) do
+    if routine(), do: :ok, else: Scenario.preflight(contexts(), plan)
+  end
+
+  defp inspect_fixtures(stage, plan, journal) do
+    with {:ok, contexts} <- inspection_contexts(stage, journal) do
+      inspect_fixtures(stage, plan, journal, contexts)
+    end
+  end
+
+  defp inspection_contexts("probe", journal) do
+    po_projects = for fixture <- journal["fixtures"], fixture["po_incoming"] == true or fixture["po_handoff"] == true, do: fixture["project"]
+
+    # The CLI loads fresh contexts for every probe. Reuse a verified context only
+    # within this invocation, as workers already do; never cache observations.
+    Enum.reduce_while(contexts(), {:ok, []}, fn context, {:ok, contexts} ->
+      result = if context.name in po_projects, do: Client.resolve_relay_contexts([context]), else: {:ok, [context]}
+
+      case result do
+        {:ok, [verified]} -> {:cont, {:ok, contexts ++ [verified]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp inspection_contexts(_, _), do: {:ok, contexts()}
+
+  defp inspect_fixtures(stage, plan, journal, contexts) do
     Enum.reduce_while(journal["fixtures"], {:ok, journal}, fn fixture, {:ok, current} ->
-      context = Enum.find(contexts(), &(&1.name == fixture["project"]))
+      context = Enum.find(contexts, &(&1.name == fixture["project"]))
       result = ProjectContext.with_context(context, fn -> inspect_fixture(stage, context, fixture, plan, current) end)
-      if match?({:ok, _}, result), do: {:cont, result}, else: {:halt, result}
+
+      if match?({:ok, _}, result) do
+        {:cont, result}
+      else
+        Logger.warning(
+          "Test fixture operation failed stage=#{stage} run_id=#{plan["run_id"]} " <>
+            "issue_id=#{fixture["id"]} issue_identifier=#{fixture["identifier"]} " <>
+            "project=#{fixture["project"]} failure=#{Jason.encode!(Readiness.public_error(result))}"
+        )
+
+        {:halt, result}
+      end
     end)
   end
 
   defp prepare_context(context, {:ok, current}, plan) do
-    result = ProjectContext.with_context(context, fn -> prepare_fixture(context, plan, current) end)
+    states = Scenario.states(plan)
+
+    result =
+      ProjectContext.with_context(context, fn ->
+        Enum.reduce_while(states, {:ok, current}, &prepare_state(&1, &2, context, plan))
+      end)
+
     if match?({:ok, _}, result), do: {:cont, result}, else: {:halt, result}
+  end
+
+  defp prepare_state(state, {:ok, journal}, context, plan) do
+    case prepare_fixture(context, Map.put(plan, "fixture_state", state), journal) do
+      {:ok, updated} -> {:cont, {:ok, updated}}
+      error -> {:halt, error}
+    end
   end
 
   defp preflight_access(contexts) do
@@ -228,7 +341,7 @@ defmodule SymphonyElixir.TestRun do
     result =
       ProjectContext.with_context(context, fn ->
         with {:ok, relay} <- SymphonyElixir.Relay.open([context]),
-             %{status: :ready} <- Session.tick(relay),
+             :ok <- Readiness.await(relay),
              {:ok, session} <- AppServer.start_session(context.root, allow_source_repo_cwd: true) do
           AppServer.stop_session(session)
         end
@@ -237,12 +350,11 @@ defmodule SymphonyElixir.TestRun do
     case result do
       :ok -> {:cont, :ok}
       {:error, _} = error -> {:halt, error}
-      _ -> {:halt, {:error, :test_relay_preflight_failed}}
     end
   end
 
   defp prepare_fixture(context, plan, journal) do
-    case Enum.find(journal["fixtures"], &(&1["project"] == context.name)) do
+    case Enum.find(journal["fixtures"], &(&1["project"] == context.name and Map.get(&1, "initial_state", "Todo (AI)") == plan["fixture_state"])) do
       nil -> create_fixture(context, plan, journal)
       %{"created" => true, "deleted" => false} -> {:ok, journal}
       _ -> {:error, :test_creation_requires_reconciliation}
@@ -253,18 +365,19 @@ defmodule SymphonyElixir.TestRun do
     binding = instance()["manifest"]["projects"][context.name]
 
     with {:ok, [verified]} <- Client.resolve_relay_contexts([context]),
-         [assignee | _] <- verified.assignee_ids,
+         assignee when is_binary(assignee) <- verified.human_handoff_id || List.first(verified.assignee_ids),
          {:ok, data} <-
            query("query TestFixtureSchema($id: String!) { __type(name: \"IssueCreateInput\") { inputFields { name } } project(id: $id) { teams { nodes { id states { nodes { id name } } } } } }", %{
              id: binding["project_id"]
            }),
          true <- Enum.all?(~w(id title description teamId projectId assigneeId stateId), fn field -> Enum.any?(data["__type"]["inputFields"], &(&1["name"] == field)) end),
          [team] <- data["project"]["teams"]["nodes"],
-         [initial] <- Enum.filter(team["states"]["nodes"], &(&1["name"] == "Todo (AI)")),
+         [initial] <- Enum.filter(team["states"]["nodes"], &(&1["name"] == plan["fixture_state"])),
          {head, 0} <- System.cmd("git", ["rev-parse", "origin/main"], cd: context.root, env: Config.without_linear_secret([])) do
       fixture = %{
         "id" => Ecto.UUID.generate(),
         "project" => context.name,
+        "initial_state" => plan["fixture_state"],
         "project_id" => binding["project_id"],
         "team_id" => team["id"],
         "assignee_id" => assignee,
@@ -276,6 +389,20 @@ defmodule SymphonyElixir.TestRun do
         "complete" => false
       }
 
+      fixture = Map.merge(fixture, Delegation.fixture(verified, plan))
+      po? = plan["scenario"] in ["po_incoming", "po_aggregation"] and plan["fixture_state"] in ["Backlog", "Todo", "Definiert"]
+
+      fixture =
+        if po?,
+          do:
+            Map.merge(fixture, %{
+              "po_incoming" => true,
+              "description" =>
+                "Isolierte PO-Prüfanforderung #{plan["run_id"]} / #{plan["fixture_state"]}: Die Anforderung, dass Symphony einen dokumentierten Todo-Bootstrap hat, ist nachweislich bereits erfüllt. Es besteht kein Änderungsbedarf. Fachlich prüfen und mit Begründung nach Verworfen abschließen; kein neues Ticket, keine Aggregation, kein Code. Vorhandenen menschlichen Verantwortlichen erhalten bzw. konfigurierte Erstzuweisung verwenden."
+            }),
+          else: fixture
+
+      fixture = fixture |> PoHandoff.fixture(plan) |> PoActions.fixture(plan)
       id = fixture["id"]
 
       with {:ok, journal} <- save_fixture(plan, journal, fixture),
@@ -286,7 +413,8 @@ defmodule SymphonyElixir.TestRun do
                  title: fixture["title"],
                  teamId: fixture["team_id"],
                  projectId: fixture["project_id"],
-                 assigneeId: assignee,
+                 assigneeId: if(po?, do: nil, else: assignee),
+                 delegateId: if(po? or fixture["po_handoff"], do: fixture["test_delegate_id"]),
                  stateId: initial["id"],
                  description: fixture["description"]
                }
@@ -309,13 +437,20 @@ defmodule SymphonyElixir.TestRun do
   defp inspect_fixture("cleanup", _context, %{"deleted" => true}, _plan, journal), do: {:ok, journal}
 
   defp inspect_fixture(stage, context, fixture, plan, journal) do
-    with {:ok, data} <- query("query TestFixture($id: String!) { issue(id: $id) { id identifier title description project { id } team { id } assignee { id } state { name } } }", %{id: fixture["id"]}) do
+    with {:ok, data} <-
+           query(
+             "query TestFixture($id: String!) { issue(id: $id) { id identifier title description project { id } team { id } assignee { id } delegate { id } labels { nodes { name } } state { name } } }",
+             %{
+               id: fixture["id"]
+             }
+           ) do
       inspect_observed(stage, data["issue"], context, fixture, plan, journal)
     end
   end
 
   defp inspect_observed("cleanup", nil, context, %{"created" => true} = fixture, plan, journal) do
-    with :ok <- remove_workspace(context, fixture["identifier"], fixture, plan) do
+    with :ok <- cleanup_po_workspaces(context, plan),
+         :ok <- remove_workspace(context, fixture["identifier"], fixture, plan) do
       save_fixture(plan, journal, Map.put(fixture, "deleted", true))
     end
   end
@@ -333,7 +468,7 @@ defmodule SymphonyElixir.TestRun do
   defp owned_fixture?(issue, fixture, plan) do
     issue["id"] == fixture["id"] and issue["title"] == fixture["title"] and description_matches?(issue["description"], fixture, plan) and
       get_in(issue, ["project", "id"]) == fixture["project_id"] and get_in(issue, ["team", "id"]) == fixture["team_id"] and
-      get_in(issue, ["assignee", "id"]) == fixture["assignee_id"]
+      fixture_assignee?(issue, fixture) and get_in(issue, ["delegate", "id"]) in [nil, fixture["test_delegate_id"]]
   end
 
   defp description_matches?(description, fixture, plan) do
@@ -394,19 +529,44 @@ defmodule SymphonyElixir.TestRun do
     "Begrenzter Symphony-Infrastrukturtest #{plan["run_id"]}. Der reguläre Todo-Bootstrap mit Workpad und Übergabe nach Planung (AI) ist das Erfolgskriterium."
   end
 
-  defp inspect_owned("probe", issue, _context, fixture, plan, journal) do
+  defp fixture_assignee?(issue, fixture) do
+    get_in(issue, ["assignee", "id"]) == fixture["assignee_id"] or (fixture["po_incoming"] == true and is_nil(issue["assignee"]))
+  end
+
+  defp inspect_owned("probe", issue, context, fixture, plan, journal) do
     with {:ok, comments} <- Client.fetch_issue_comments(fixture["id"]) do
       workpad = Enum.find(comments, &(&1.user_id == Config.settings!().tracker.app["user_id"] and SymphonyElixir.Workpad.comment_matches?(&1.body)))
-
       merge = workflow_merge(plan, issue, workpad)
-      complete = if plan["scenario"] == "workflow", do: merge != nil, else: get_in(issue, ["state", "name"]) == "Planung (AI)" and workpad != nil
 
-      save_fixture(plan, journal, Map.merge(fixture, %{"complete" => complete, "observed_state" => get_in(issue, ["state", "name"]), "merge" => merge}))
+      complete =
+        if plan["scenario"] == "workflow",
+          do: merge != nil,
+          else: get_in(issue, ["state", "name"]) == fixture_target(fixture) and workpad != nil
+
+      with {:ok, fixture} <- Delegation.probe(context, fixture),
+           {:ok, fixture} <- PoIncoming.probe(issue, fixture),
+           {:ok, fixture} <- PoHandoff.probe(issue, fixture) do
+        complete = complete and fixture_receipts?(fixture)
+
+        save_fixture(plan, journal, Map.merge(fixture, %{"complete" => complete, "observed_state" => get_in(issue, ["state", "name"]), "merge" => merge}))
+      end
+    end
+  end
+
+  defp inspect_owned(stage, issue, context, fixture, plan, journal) when stage in ["delegate", "withdraw"] do
+    if plan["scenario"] == "delegation" do
+      with {:ok, journal} <- save_fixture(plan, journal, Map.put(fixture, "delegation_intent", stage)),
+           {:ok, updated} <- Delegation.change(stage, issue, context, fixture) do
+        save_fixture(plan, journal, Map.put(updated, "delegation_intent", stage))
+      end
+    else
+      {:error, :invalid_test_delegation_stage}
     end
   end
 
   defp inspect_owned("cleanup", issue, context, fixture, plan, journal) do
-    with :ok <- remove_workspace(context, issue["identifier"], fixture, plan),
+    with :ok <- cleanup_po_workspaces(context, plan),
+         :ok <- remove_workspace(context, issue["identifier"], fixture, plan),
          {:ok, journal} <- save_fixture(plan, journal, Map.merge(fixture, %{"created" => true, "identifier" => issue["identifier"]})),
          {:ok, data} <- query("mutation DeleteTestFixture($id: String!) { issueDelete(id: $id) { success } }", %{id: fixture["id"]}),
          true <- data["issueDelete"]["success"] == true do
@@ -417,12 +577,30 @@ defmodule SymphonyElixir.TestRun do
     end
   end
 
+  defp cleanup_po_workspaces(context, plan) do
+    if routine(), do: :ok, else: PoIncoming.cleanup(context, plan)
+  end
+
   defp workflow_merge(%{"scenario" => "workflow"}, issue, workpad) do
     if get_in(issue, ["state", "name"]) in ["Review", "Fertig"] and workpad != nil and String.contains?(workpad.body, "Merge-Evidenz"),
       do: SymphonyElixir.RoutineTest.merge_evidence(issue["identifier"])
   end
 
   defp workflow_merge(_, _, _), do: nil
+
+  defp fixture_target(fixture) do
+    cond do
+      fixture["po_aggregation"] -> "Umsetzungsticket erstellt"
+      fixture["po_incoming"] -> "Verworfen"
+      fixture["po_handoff"] -> fixture["initial_state"]
+      true -> "Planung (AI)"
+    end
+  end
+
+  defp fixture_receipts?(fixture) do
+    (fixture["po_incoming"] != true or fixture["po_receipt"] != nil) and
+      (fixture["po_handoff"] != true or fixture["handoff_receipt"] != nil)
+  end
 
   defp remove_workspace(context, identifier, fixture, plan) do
     path = Path.join(context.settings.workspace.root, identifier)

@@ -3,6 +3,9 @@ defmodule SymphonyElixir.Codex.MCPServer do
   Minimal stdio MCP server exposing Symphony's `linear_graphql` tool.
   """
 
+  alias SymphonyElixir.Yolo.ActionTool
+  alias SymphonyElixir.Yolo.Completion, as: YoloCompletion
+
   alias SymphonyElixir.Codex.CommentTool
   alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.Codex.LinearGraphqlTool
@@ -159,6 +162,16 @@ defmodule SymphonyElixir.Codex.MCPServer do
   defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)
        when name in ["symphony_test", "symphony_linear.symphony_test"] do
     jsonrpc_result(id, TestTool.mcp_call(arguments, opts))
+  end
+
+  defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)
+       when name in ["symphony_yolo_action", "symphony_linear.symphony_yolo_action"] do
+    jsonrpc_result(id, ActionTool.mcp_call(arguments, opts))
+  end
+
+  defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)
+       when name in ["symphony_yolo_complete", "symphony_linear.symphony_yolo_complete"] do
+    jsonrpc_result(id, YoloCompletion.mcp_call(arguments, opts))
   end
 
   defp handle_tool_call(id, %{"name" => name, "arguments" => arguments}, opts)

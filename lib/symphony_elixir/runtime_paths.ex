@@ -32,7 +32,8 @@ defmodule SymphonyElixir.RuntimePaths do
     "SYMPHONY_TEST_EXPECTED_SOURCE",
     "SYMPHONY_TEST_RUN_PLAN",
     "SYMPHONY_TEST_RUN_STAGE",
-    "SYMPHONY_PHASE"
+    "SYMPHONY_PHASE",
+    "SYMPHONY_YOLO_SCOPE"
   ]
 
   @spec runtime_env_names() :: [String.t()]

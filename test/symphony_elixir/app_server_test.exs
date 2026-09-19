@@ -745,7 +745,15 @@ defmodule SymphonyElixir.AppServerTest do
           if payload["method"] == "thread/resume", do: payload
         end)
 
-      assert [%{"name" => "linear_graphql"}, %{"name" => "symphony_comments"}, %{"name" => "symphony_merge"}, %{"name" => "symphony_test"}] = get_in(resume_payload, ["params", "dynamicTools"])
+      assert [
+               %{"name" => "linear_graphql"},
+               %{"name" => "symphony_comments"},
+               %{"name" => "symphony_merge"},
+               %{"name" => "symphony_test"},
+               %{"name" => "symphony_yolo_complete"},
+               %{"name" => "symphony_yolo_action"}
+             ] =
+               get_in(resume_payload, ["params", "dynamicTools"])
     after
       File.rm_rf(test_root)
     end
@@ -1002,7 +1010,9 @@ defmodule SymphonyElixir.AppServerTest do
                        },
                        %{"name" => "symphony_comments"},
                        %{"name" => "symphony_merge"},
-                       %{"name" => "symphony_test"}
+                       %{"name" => "symphony_test"},
+                       %{"name" => "symphony_yolo_complete"},
+                       %{"name" => "symphony_yolo_action"}
                      ] ->
                        description =~ "Linear"
 

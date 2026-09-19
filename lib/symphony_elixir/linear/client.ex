@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.Linear.WriteContext
 
   alias SymphonyElixir.{Config, Dialog, Linear.Issue, ProjectContext}
-  alias SymphonyElixir.Linear.{Assignees, CommentVersion, RateLimit}
+  alias SymphonyElixir.Linear.{Assignees, CommentVersion, RateLimit, YoloAgent}
 
   @issue_page_size 50
   @typep page_cursors :: %{optional(String.t()) => true}
@@ -33,9 +33,10 @@ defmodule SymphonyElixir.Linear.Client do
     email
     app
   }
+  delegate { id }
   project { id slugId }
   team { id key }
-  labels {
+  labels(first: 50) {
     nodes {
       name
     }
@@ -135,9 +136,19 @@ defmodule SymphonyElixir.Linear.Client do
 
     with {:ok, scope} <- Config.linear_scope(tracker),
          {:ok, assignee_filter} <- routing_assignee_filter(),
-         {:ok, issues} <- do_fetch_by_states(scope, candidate_state_names(tracker.active_states), assignee_filter),
+         {:ok, issues} <- fetch_candidates_in_context(scope, tracker, assignee_filter),
          :ok <- validate_candidate_scope(tracker, issues) do
       {:ok, issues}
+    end
+  end
+
+  defp fetch_candidates_in_context(scope, tracker, filter) do
+    case ProjectContext.current() do
+      %ProjectContext{yolo_agent_id: id} = context when is_binary(id) ->
+        with {:ok, found} <- fetch_project_candidates([context]), do: {:ok, found[context.id]}
+
+      _ ->
+        do_fetch_by_states(scope, candidate_state_names(tracker.active_states), filter)
     end
   end
 
@@ -161,9 +172,17 @@ defmodule SymphonyElixir.Linear.Client do
   @doc "Resolve each project's local selection once; only the subscription uses their union."
   @spec resolve_relay_contexts([ProjectContext.t()]) :: {:ok, [ProjectContext.t()]} | {:error, term()}
   def resolve_relay_contexts(contexts) do
-    if Enum.all?(contexts, &is_list(&1.assignee_ids)),
-      do: {:ok, contexts},
-      else: resolve_unverified_contexts(contexts)
+    cond do
+      contexts |> Enum.map(& &1.settings.tracker.app["workspace_id"]) |> Enum.uniq() |> length() > 1 -> {:error, :linear_yolo_agent_workspace_mismatch}
+      Enum.all?(contexts, &resolved_context?/1) -> {:ok, contexts}
+      true -> resolve_unverified_contexts(contexts)
+    end
+  end
+
+  defp resolved_context?(context) do
+    is_list(context.assignee_ids) and
+      (context.settings.tracker.yolo_agent == nil or
+         (is_binary(context.yolo_agent_id) and context.human_handoff_id in context.assignee_ids))
   end
 
   defp resolve_unverified_contexts([first | _] = contexts) do
@@ -171,17 +190,26 @@ defmodule SymphonyElixir.Linear.Client do
 
     with {:ok, users} <- ProjectContext.with_context(first, fn -> fetch_assignees(configured, nil, %{}, []) end),
          true <- Enum.all?(configured, &verified_human?(&1, users)) do
-      {:ok, Enum.map(contexts, &resolve_context_assignees(&1, users))}
+      resolve_workspace_agents(contexts, users)
     else
       {:error, _} = error -> error
       _ -> {:error, :relay_requires_verified_humans}
     end
   end
 
+  defp resolve_workspace_agents(contexts, users) do
+    Enum.reduce_while(contexts, {:ok, []}, fn context, {:ok, resolved} ->
+      case context |> resolve_context_assignees(users) |> YoloAgent.resolve() do
+        {:ok, next} -> {:cont, {:ok, resolved ++ [next]}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
   defp resolve_context_assignees(context, users) do
     selected = Assignees.parse(context.settings.tracker.assignee)
-    ids = users |> Enum.filter(&selected_human?(&1, selected)) |> Enum.map(& &1["id"]) |> Enum.uniq() |> Enum.sort()
-    %{context | assignee_ids: ids}
+    ids = Enum.map(selected, fn value -> Enum.find(users, &selected_human?(&1, [value]))["id"] end) |> Enum.uniq()
+    %{context | assignee_ids: Enum.sort(ids), human_handoff_id: List.first(ids)}
   end
 
   defp selected_human?(user, selected) do
@@ -245,7 +273,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp relay_candidate?(node, context) do
     ids = context.settings.tracker.app["allowed_issue_ids"]
 
-    project_candidate?(node, context) and relay_assignee_matches?(node, context) and
+    project_candidate?(node, context) and (delegated_node?(node, context) or relay_assignee_matches?(node, context)) and
       (not is_list(ids) or node["id"] in ids)
   end
 
@@ -264,17 +292,31 @@ defmodule SymphonyElixir.Linear.Client do
 
     case result do
       {:ok, users} ->
-        if Enum.all?(configured, &verified_human?(&1, users)), do: {:cont, :ok}, else: {:halt, {:error, {:linear_assignees_not_human_or_unavailable, workspace, configured}}}
+        if Enum.all?(configured, &verified_human?(&1, users)) do
+          verify_workspace_agents(contexts, users)
+        else
+          {:halt, {:error, {:linear_assignees_not_human_or_unavailable, workspace, configured}}}
+        end
 
       error ->
         {:halt, error}
     end
   end
 
+  defp verify_workspace_agents(contexts, users) do
+    result =
+      Enum.reduce_while(contexts, :ok, fn context, :ok ->
+        case context |> resolve_context_assignees(users) |> YoloAgent.resolve() do
+          {:ok, _} -> {:cont, :ok}
+          error -> {:halt, error}
+        end
+      end)
+
+    if result == :ok, do: {:cont, :ok}, else: {:halt, result}
+  end
+
   defp verified_human?(value, users) do
-    Enum.any?(users, fn user ->
-      user["app"] == false and value in [user["id"], String.downcase(user["email"] || "")]
-    end)
+    users |> Enum.filter(&selected_human?(&1, [value])) |> Enum.uniq_by(& &1["id"]) |> length() == 1
   end
 
   @spec fetch_assignees([String.t()], String.t() | nil, page_cursors(), [map()]) :: {:ok, [map()]} | {:error, term()}
@@ -399,11 +441,23 @@ defmodule SymphonyElixir.Linear.Client do
       |> Map.put("state", %{"name" => %{"in" => candidate_state_names(tracker.active_states)}})
       |> restrict_candidate_ids(tracker.app["allowed_issue_ids"])
 
-    filter = if Config.yolo?(), do: filter, else: Map.put(filter, "assignee", Map.put(Assignees.filter(tracker.assignee), "app", %{"eq" => false}))
+    yolo? = ProjectContext.with_context(context, &Config.yolo?/0)
+    filter = if yolo?, do: filter, else: Map.put(filter, "assignee", Map.put(Assignees.filter(tracker.assignee), "app", %{"eq" => false}))
 
     # Linear propagates the enclosing OR to fields in a branch. Explicit AND
     # groups keep each project's scope, states and assignees correlated.
-    %{"and" => Enum.map(filter, fn {field, value} -> %{field => value} end)}
+    regular = %{"and" => Enum.map(filter, fn {field, value} -> %{field => value} end)}
+
+    if is_binary(context.yolo_agent_id) do
+      delegated =
+        scope_filter(scope)
+        |> Map.put("delegate", %{"id" => %{"eq" => context.yolo_agent_id}})
+        |> restrict_candidate_ids(tracker.app["allowed_issue_ids"])
+
+      %{"or" => [regular, %{"and" => Enum.map(delegated, fn {field, value} -> %{field => value} end)}]}
+    else
+      regular
+    end
   end
 
   defp restrict_candidate_ids(filter, ids) when is_list(ids), do: Map.put(filter, "id", %{"in" => ids})
@@ -421,15 +475,23 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, {:team, key}} -> get_in(node, ["team", "key"]) == key
       end
 
-    scope_matches and get_in(node, ["state", "name"]) in candidate_state_names(tracker.active_states) and
-      project_assignee_matches?(node, tracker.assignee)
+    ids = tracker.app["allowed_issue_ids"]
+
+    scope_matches and (not is_list(ids) or node["id"] in ids) and
+      (delegated_node?(node, context) or
+         (get_in(node, ["state", "name"]) in candidate_state_names(tracker.active_states) and
+            project_assignee_matches?(node, context)))
   end
 
-  defp project_assignee_matches?(node, assignee) do
-    if Config.yolo?() do
+  defp delegated_node?(node, context) do
+    is_binary(context.yolo_agent_id) and get_in(node, ["delegate", "id"]) == context.yolo_agent_id
+  end
+
+  defp project_assignee_matches?(node, context) do
+    if ProjectContext.with_context(context, &Config.yolo?/0) do
       true
     else
-      {:ok, filter} = build_assignee_filter(assignee)
+      {:ok, filter} = build_assignee_filter(context.settings.tracker.assignee)
       get_in(node, ["assignee", "app"]) != true and assigned_to_worker?(node["assignee"], filter)
     end
   end
@@ -1210,6 +1272,10 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      delegate_id: get_in(issue, ["delegate", "id"]),
+      team_id: get_in(issue, ["team", "id"]),
+      project_id: get_in(issue, ["project", "id"]),
+      in_project_scope: not is_nil(context) and issue_in_context?(issue, context),
       project_context_id: context && context.id,
       project_name: context && context.name,
       workspace_id: context && context.settings.tracker.app["workspace_id"],

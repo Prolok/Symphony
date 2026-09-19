@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Prepare or supervise a source-bound operator pipeline run for explicit fixture IDs.
+
+Linear fixture creation, GitHub acceptance and data reset remain operator duties.
+This launcher records observations, never a successful feature acceptance.
+"""
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+
+def helper(name, filename):
+    loader = importlib.machinery.SourceFileLoader(name, str(Path(__file__).with_name(filename)))
+    spec = importlib.util.spec_from_loader(name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+RUNNER = helper('pipeline_runner', 'test-instance-run')
+TEST = RUNNER.module('test-instance')
+PROCESSES = RUNNER.module('test-processes')
+
+
+def parser():
+    result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument('--manifest', type=Path, required=True)
+    result.add_argument('--source', type=Path, required=True, help='Pinned output of test-instance.py source')
+    result.add_argument('--run-id', required=True)
+    result.add_argument('--issue-id', action='append', required=True, help='Verified run-owned Linear UUID; repeat for each fixture')
+    result.add_argument('--result-dir', type=Path, required=True)
+    result.add_argument('--port', type=int, required=True)
+    result.add_argument('--timeout', type=float, default=600)
+    result.add_argument('--yolo', action='store_true')
+    result.add_argument('--execute', action='store_true')
+    return result
+
+
+def prepare(args):
+    source = json.loads(args.source.read_text())
+    checkout = TEST.canonical(source['checkout'])
+    if TEST.source(checkout) != source:
+        raise ValueError('source_changed')
+    if not TEST.NAME.fullmatch(args.run_id) or not 1 <= args.port <= 65535 or not 0 < args.timeout <= 600:
+        raise ValueError('invalid_run_limits')
+    ids = sorted(set(args.issue_id))
+    if len(ids) != len(args.issue_id) or any(str(uuid.UUID(value)) != value for value in ids):
+        raise ValueError('invalid_fixture_ids')
+    output = TEST.canonical(args.result_dir)
+    manifest = TEST.canonical(args.manifest)
+    if not output.is_relative_to(checkout / '_build') or output.exists():
+        raise ValueError('result_directory_already_exists')
+    # Keep every phase rule, technical gate, hook and skill reference intact.
+    workflow = (checkout / 'WORKFLOW.md').read_text()
+    marker = '    user_id: $LINEAR_APP_USER_ID\n'
+    if workflow.count(marker) != 1 or 'allowed_issue_ids:' in workflow:
+        raise ValueError('unsupported_workflow_binding')
+    scoped = workflow.replace(marker, marker + '    allowed_issue_ids: ' + json.dumps(ids) + '\n', 1)
+    output.mkdir(parents=True, mode=0o700)
+    path = output / 'WORKFLOW.md'
+    path.write_text(scoped)
+    path.chmod(0o600)
+    plan = dict(evidence='operator_pipeline_plan', run_id=args.run_id, source=source,
+                manifest=str(manifest), workflow=str(path), issue_ids=ids,
+                port=args.port, timeout_seconds=args.timeout, yolo=args.yolo,
+                acceptance='pending_operator_evidence', cleanup='pending_operator_reset')
+    RUNNER.atomic(output / 'plan.json', plan)
+    return plan
+
+
+def environment(plan):
+    env = dict(os.environ)
+    # Never inherit a bootstrap-stage allowance or a ticket worker binding.
+    for key in list(env):
+        if (key.startswith(('SYMPHONY_TEST_RUN_', 'SYMPHONY_ISSUE_', 'SYMPHONY_YOLO_', 'SYMPHONY_SERVICE_'))
+                or key in ('SYMPHONY_PROJECT_CONTEXT', 'SYMPHONY_LINEAR_AUTH_MODE',
+                           'SYMPHONY_LINEAR_BINDING_HASH', 'SYMPHONY_TEST_CLEANUP_PLAN_SHA256')):
+            env.pop(key)
+    source = plan['source']
+    env.update(SYMPHONY_ROOT_DIR=source['checkout'], SYMPHONY_WORKFLOW_DIR=source['checkout'],
+               SYMPHONY_WORKFLOW_FILE=plan['workflow'], SYMPHONY_TEST_MANIFEST=plan['manifest'],
+               SYMPHONY_TEST_EXPECTED_SHA=source['sha'], SYMPHONY_TEST_EXPECTED_SOURCE=source['source_sha256'],
+               SYM_PROJECT_ROOT=json.loads(Path(plan['manifest']).read_text())['project_root'],
+               MISE_TRUSTED_CONFIG_PATHS=str(Path(source['checkout']) / 'mise.toml'))
+    for key in ('SYMPHONY_SERVICE_GUARD_PID', 'SYMPHONY_SERVICE_LOCK_MODE'):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    return env
+
+
+def execute(plan):
+    env = environment(plan)
+    checkout = Path(plan['source']['checkout'])
+    output = Path(plan['workflow']).parent
+    # Existing PRO-736 preflight verifies the exclusive dummy/main separation.
+    capsule = TEST.preflight(plan['run_id'], checkout, env)
+    stamp = json.loads((checkout / '_build/symphony-source.json').read_text())
+    if stamp != plan['source']:
+        raise ValueError('build_source_changed')
+    command = ['mise', 'exec', '--', str(checkout / 'bin/symphony'),
+               '--test-instance', plan['run_id'], '--port', str(plan['port'])]
+    if plan['yolo']:
+        command.append('--yolo')
+    receipt = dict(plan, evidence='operator_pipeline_observation', status='observing', sessions=[],
+                   projects=capsule['manifest']['projects'], processes_stopped=False,
+                   started_at=time.time())
+    originals = {name: TEST.source(Path(capsule['manifest']['project_root']) / name)
+                 for name in capsule['manifest']['projects']}
+    receipt['original_projects'] = originals
+    known = {}
+    excluded = {int(os.environ.get('SYMPHONY_SERVICE_GUARD_PID', '0'))}
+    child = None
+    deadline = time.monotonic() + plan['timeout_seconds']
+    path = output / 'result.json'
+    try:
+        RUNNER.atomic(path, receipt)
+        with os.fdopen(os.open(output / 'service.log', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as log:
+            trampoline = "import os,sys; os.environ['SYMPHONY_SERVICE_OWNER_PID']=str(os.getpid()); os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+            child = subprocess.Popen([sys.executable, '-c', trampoline, *command], cwd=checkout, env=env, stdin=subprocess.DEVNULL,
+                                     stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        while time.monotonic() < deadline:
+            if child.poll() is not None:
+                raise RUNNER.RunFailure('service_exited')
+            PROCESSES.descendants(os.getpid(), known, excluded)
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{plan['port']}/api/v1/state", timeout=min(2, deadline - time.monotonic())) as response:
+                    state = json.load(response)
+            except (OSError, ValueError, urllib.error.URLError):
+                state = {}
+            service = state.get('service', {})
+            if (service.get('source') == plan['source'] and str(service.get('pid')) == str(child.pid)
+                    and service.get('test_instance') == plan['run_id']):
+                actual = service.get('bindings', [])
+                expected = capsule['manifest']['projects']
+                if ({entry.get('name') for entry in actual} != expected.keys()
+                        or len(actual) != len(expected)
+                        or any(entry.get('project_id') != expected[entry['name']]['project_id']
+                               or entry.get('workspace_id') != expected[entry['name']]['workspace_id'] for entry in actual)):
+                    raise RUNNER.RunFailure('project_binding_changed')
+                for entry in state.get('running', []):
+                    if entry.get('issue_id') not in plan['issue_ids']:
+                        raise RUNNER.RunFailure('unexpected_issue')
+                    observed = {key: entry.get(key) for key in ('issue_id', 'session_id', 'state', 'workspace_path')}
+                    if observed not in receipt['sessions']:
+                        receipt['sessions'].append(observed)
+                receipt['service'] = service
+                receipt['consumers'] = {key: value.get('consumer_id') for key, value in state.get('relay', {}).items()}
+                RUNNER.atomic(path, receipt)
+            time.sleep(min(.5, max(0, deadline - time.monotonic())))
+        raise RUNNER.RunFailure('timeout')
+    except RUNNER.RunFailure as error:
+        receipt['status'] = str(error)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        receipt['status'] = 'observation_failed'
+    finally:
+        if child is not None:
+            PROCESSES.descendants(os.getpid(), known, excluded)
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGTERM)
+            try:
+                child.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=5)
+            PROCESSES.cleanup(os.getpid(), known, excluded)
+        receipt['processes_stopped'] = True
+        try:
+            receipt['originals_preserved'] = all(TEST.source(value['checkout']) == value for value in originals.values())
+            main = capsule['manifest']['main_instance']
+            receipt['main_preserved'] = TEST.normal_service_running() and TEST.process_started(main['pid']) == main['started']
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+            receipt['preservation_unconfirmed'] = True
+        receipt['finished_at'] = time.time()
+        RUNNER.atomic(path, receipt)
+    # Observing real sessions alone never proves an accepted or cleaned test.
+    return 1
+
+
+def main():
+    args = parser().parse_args()
+    if args.execute and os.environ.get('SYMPHONY_SERVICE_OWNER_PID') != str(os.getpid()):
+        if not TEST.NAME.fullmatch(args.run_id):
+            raise ValueError('invalid_run_id')
+        RUNNER.module('service-lock').launch([sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]], name=args.run_id)
+    plan = prepare(args)
+    print(json.dumps(plan, sort_keys=True), flush=True)
+    if args.execute:
+        signalled = []
+        def interrupt(number, _):
+            if not signalled:
+                signalled.append(number)
+                raise RUNNER.RunFailure('signal_' + str(number))
+        for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(number, interrupt)
+        return execute(plan)
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (ValueError, KeyError, OSError, subprocess.SubprocessError, RUNNER.RunFailure):
+        sys.exit('Pipeline-Start abgewiesen; öffentlichen Plan, Quellstand und Betreiberbindung prüfen.')

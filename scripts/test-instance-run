@@ -2,6 +2,7 @@
 """Operator entrypoint for the bounded Symphony dummy-project bootstrap proof."""
 import argparse
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,7 @@ def parser():
     result.add_argument("--yolo", action="store_true", help="Folgeticket-Zuweisungsmatrix im isolierten Testlauf")
     result.add_argument("--openclaw-agent", help="Ausdrücklicher Live-Opt-in für genau diesen OpenClaw-Agenten; nur PO-Szenarien")
     result.add_argument("--openclaw-knowledge-question", help="Nichtgeheime Wissensfrage für den Review-Live-Nachweis; Antwort wird vom Betreiber geprüft")
+    result.add_argument("--openclaw-previous-incoming-result", type=Path, help="Bestandener vorheriger incoming-Live-Beleg für den Nachweis weiterer Eingangsarbeit")
     result.add_argument("--source-mode", choices=("development", "merged"), default="development")
     result.add_argument("--timeout", type=float, default=180)
     result.add_argument("--resume", action="store_true")
@@ -98,11 +100,46 @@ class Run:
         proofs = [r.get("openclaw", {}) for r in receipts]
         if not proofs or not all(p.get("agent") == self.args.openclaw_agent and
                                  p.get("state") == "completed" and p.get("payload_sha256") and
-                                 p.get("session_id") == r.get("session_id")
+                                 p.get("session_id") == r.get("session_id") and
+                                 self.checkout_evidence(p, r)
                                  for p, r in zip(proofs, receipts)):
             raise RunFailure("openclaw_execution_unconfirmed")
         self.result["openclaw"] = {"agent": self.args.openclaw_agent, "executions": proofs,
                                   "knowledge_and_instruction_review": "operator_evidence_required"}
+        previous = getattr(self.args, "openclaw_previous_incoming_result", None)
+        if previous:
+            self.verify_subsequent_incoming(previous, proofs)
+
+    @staticmethod
+    def checkout_evidence(proof, receipt):
+        checkout = proof.get("checkout_proof", {})
+        terminal = proof.get("terminal", {})
+        return (all(proof.get(k) and checkout.get(k) == proof[k] for k in
+                    ("id", "project_id", "session_id", "workspace", "sha", "payload_sha256")) and
+                checkout.get("clean") is True and
+                checkout.get("cwd") == checkout.get("git_root") == receipt.get("workspace") == proof["workspace"] and
+                receipt.get("sha") == proof["sha"] and
+                terminal.get("runId") == proof["id"] and terminal.get("status") == "ok" and
+                isinstance(terminal.get("endedAt"), (int, float)))
+
+    def verify_subsequent_incoming(self, path, proofs):
+        raw = path.read_bytes()
+        previous = json.loads(raw)
+        old = previous.get("openclaw", {}).get("executions", [])
+        if (self.args.scenario != "po_incoming" or previous.get("scenario") != "po_incoming" or
+                previous.get("evidence") != "live" or previous.get("status") != "passed" or
+                not all(previous.get(k) is True for k in ("cleanup", "main_preserved", "originals_preserved")) or
+                not previous.get("source") or previous.get("source") != self.result.get("source") or
+                previous.get("openclaw", {}).get("agent") != self.args.openclaw_agent or
+                not old or any(p.get("state") != "completed" or p.get("agent") != self.args.openclaw_agent or
+                               not self.checkout_evidence(p, p) for p in old) or
+                {p.get("project_id") for p in old} != {p["project_id"] for p in proofs} or
+                {p.get("id") for p in old} & {p["id"] for p in proofs} or
+                {p.get("session_id") for p in old} & {p["session_id"] for p in proofs}):
+            raise RunFailure("openclaw_subsequent_incoming_unconfirmed")
+        self.result["openclaw"]["subsequent_incoming"] = {
+            "passed": True, "previous_run_id": previous["run_id"],
+            "previous_result_sha256": hashlib.sha256(raw).hexdigest()}
 
     def remaining(self):
         value = self.deadline - time.monotonic()
@@ -506,6 +543,8 @@ def main():
         raise SystemExit("OpenClaw-Live-Aufruf verlangt ein PO-Szenario außerhalb der Standardgates")
     if args.openclaw_agent and args.scenario == "po_handoff" and not (args.openclaw_knowledge_question or "").strip():
         raise SystemExit("OpenClaw-Abnahme verlangt --openclaw-knowledge-question")
+    if args.openclaw_previous_incoming_result and (not args.openclaw_agent or args.scenario != "po_incoming"):
+        raise SystemExit("Vorheriger Eingangsbeleg verlangt OpenClaw und po_incoming")
     if not test.NAME.fullmatch(args.test_instance) or not test.NAME.fullmatch(args.run_id) or not 0 < args.timeout <= 3600 or not 0 < args.port <= 65535:
         raise SystemExit("Ungültiger Testname, Lauf, Port oder Timeout")
     args.checkout = test.canonical(args.checkout)

@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
   alias SymphonyElixir.Relay.Store, as: Digest
   @groups ~w(incoming planning in_progress blocker review)
   @terminal ~w(completed failed cancelled rejected)
+  @mutable ~w(state writable error cancel_requested abort_acknowledged terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery)
 
   @spec path(String.t()) :: Path.t()
   def path(group) do
@@ -41,18 +42,59 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
   defp member?(order, id), do: Enum.any?(order["members"], &(&1["id"] == id))
 
   @spec write(map()) :: :ok | {:error, term()}
-  def write(order), do: DurableState.write(path(order["group"]), order)
+  def write(order) do
+    locked(order["group"], fn ->
+      with {:ok, previous} <- read(order["group"]),
+           false <- pending?(previous),
+           true <- is_nil(previous) or previous["id"] != order["id"],
+           {:error, :enoent} <- history(order["group"], order["id"]),
+           :ok <- archive(previous),
+           :ok <- DurableState.write(path(order["group"]), order) do
+        :ok
+      else
+        true -> {:error, :openclaw_unresolved_order}
+        false -> {:error, :openclaw_generation_reused}
+        {:ok, _} -> {:error, :openclaw_generation_reused}
+        error -> error
+      end
+    end)
+  end
+
+  @spec history(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def history(group, id), do: DurableState.read(archive_path(group, id))
+
+  defp archive_path(group, id), do: Path.join(path(group) <> ".history", Digest.digest(id) <> ".json")
+  defp archive(nil), do: :ok
+
+  defp archive(order) do
+    target = archive_path(order["group"], order["id"])
+
+    case DurableState.read(target) do
+      {:ok, ^order} -> :ok
+      {:error, :enoent} -> DurableState.write(target, order)
+      _ -> {:error, :openclaw_history_conflict}
+    end
+  end
+
+  defp locked(group, fun), do: IssueLease.with_journal_lock(path(group) <> ".update", fun)
 
   @spec update(map(), map()) :: {:ok, map()} | {:error, term()}
   def update(order, changes) do
-    IssueLease.with_journal_lock(path(order["group"]) <> ".update", fn -> update_locked(order, changes) end)
+    transition(order, fn _ -> {:ok, changes} end)
   end
 
-  defp update_locked(order, changes) do
+  @spec transition(map(), (map() -> {:ok, map()} | {:error, term()}), boolean()) :: {:ok, map()} | {:error, term()}
+  def transition(order, callback, apply? \\ true) do
+    locked(order["group"], fn -> update_locked(order, callback, apply?) end)
+  end
+
+  defp update_locked(order, callback, apply?) do
     with {:ok, %{"id" => id} = current} <- read(order["group"]),
          true <- id == order["id"],
-         updated = Map.merge(current, changes),
-         :ok <- persist_change(current, updated) do
+         {:ok, changes} <- callback.(current),
+         :ok <- validate_changes(changes),
+         {:ok, updated} <- change(current, changes),
+         :ok <- if(apply?, do: persist_change(current, updated), else: :ok) do
       {:ok, updated}
     else
       {:error, _} = error -> error
@@ -60,8 +102,36 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
     end
   end
 
+  defp validate_changes(changes) do
+    if Enum.all?(Map.keys(changes), &(&1 in @mutable)), do: :ok, else: {:error, :openclaw_immutable_order}
+  end
+
+  # A late poll/cancel/acceptance cannot reopen a terminal generation. Once
+  # execution was observed, no later preflight claim can prove non-execution.
+  defp change(%{"state" => state} = current, _) when state in @terminal, do: {:ok, current}
+
+  defp change(current, %{"state" => "rejected"} = changes) do
+    if current["acceptance_observed"] == true or current["execution_observed"] == true or
+         current["state"] in ~w(accepted running) or not is_map(changes["rejection"]) do
+      {:error, :openclaw_rejection_conflicts_with_execution}
+    else
+      {:ok, Map.merge(current, changes)}
+    end
+  end
+
+  defp change(current, changes) do
+    updated = Map.merge(current, changes)
+
+    updated =
+      Enum.reduce(~w(acceptance_observed execution_observed), updated, fn key, acc ->
+        if current[key] == true, do: Map.put(acc, key, true), else: acc
+      end)
+
+    {:ok, updated}
+  end
+
   defp persist_change(current, current), do: :ok
-  defp persist_change(_current, updated), do: write(updated)
+  defp persist_change(_current, updated), do: DurableState.write(path(updated["group"]), updated)
 
   @spec pending?(map() | nil) :: boolean()
   def pending?(nil), do: false
@@ -96,7 +166,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
   def receipt(group, session) do
     case read(group) do
       {:ok, %{"session_id" => ^session, "state" => "completed"} = order} ->
-        Map.take(order, ~w(id agent session_id state payload_sha256 sha terminal))
+        Map.take(order, ~w(id project_id agent session_id state payload_sha256 workspace sha terminal checkout_proof))
 
       _ ->
         nil

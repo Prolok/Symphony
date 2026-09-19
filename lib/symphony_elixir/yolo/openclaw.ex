@@ -36,7 +36,15 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
   defp log_failure({:error, reason}, order, opts) do
     code = if is_atom(reason), do: Atom.to_string(reason), else: "openclaw_local_error"
-    event(Map.merge(order, %{"state" => "local_error", "error" => code}), :failed, opts)
+    id = order["id"]
+
+    current =
+      case Journal.read(order["group"]) do
+        {:ok, %{"id" => ^id} = current} -> current
+        _ -> Map.put(order, "state", "local_error")
+      end
+
+    event(Map.put(current, "error", code), :failed, opts)
   end
 
   defp log_failure(_, _, _), do: :ok
@@ -94,7 +102,15 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     end
   end
 
-  defp acceptance({:ok, %{"runId" => id, "status" => "accepted"}}, %{"id" => id}), do: %{"state" => "accepted"}
+  defp acceptance({:ok, %{"runId" => id, "status" => "accepted"}}, %{"id" => id}), do: %{"state" => "accepted", "acceptance_observed" => true}
+
+  defp acceptance({:rejected, %{"method" => "agent", "phase" => "pre_acceptance", "code" => "INVALID_REQUEST", "reason" => reason} = proof}, order)
+       when reason in ~w(cwd_reserved cwd_not_absolute) do
+    proof = Map.take(proof, ~w(method phase code reason request_sha256))
+    proof = Map.merge(proof, Map.take(order, ~w(id session_id agent payload_sha256)))
+    %{"state" => "rejected", "writable" => false, "error" => "openclaw_pre_acceptance_rejected", "rejection" => proof}
+  end
+
   defp acceptance(_, _), do: %{"state" => "unknown", "writable" => false, "error" => "openclaw_acceptance_unconfirmed"}
 
   defp tool_instructions(bridge, order) do
@@ -111,8 +127,12 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     Dein Wissensworkspace ist kein Prüfstand. Keine weiteren Agents starten.
 
     Die vorhandenen Symphony-MCP-Werkzeuge sind über diesen laufgebundenen Helfer
-    tatsächlich erreichbar. Nutze dein lokales exec-Werkzeug für:
-    python3 #{shell_quote(bridge.helper)} #{shell_quote(bridge.descriptor)}
+    tatsächlich erreichbar. Nutze dein lokales exec-Werkzeug mit Arbeitsverzeichnis
+    #{shell_quote(order["workspace"])} oder führe exakt aus:
+    cd -- #{shell_quote(order["workspace"])} && python3 #{shell_quote(bridge.helper)} #{shell_quote(bridge.descriptor)}
+    Der Helfer misst sein reales Arbeitsverzeichnis, Git-Root, SHA und sauberen
+    Stand bei jedem Aufruf; Symphony prüft diese vor dem Werkzeugzugriff erneut.
+    Referenzierte Prüfanweisungen mit absoluten Pfaden aus diesem Checkout lesen.
     Übergib jeweils genau eine JSON-RPC-Anfrage über stdin, zuerst
     {"jsonrpc":"2.0","id":1,"method":"tools/list"}.
     Aufrufe: {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"TOOL","arguments":{}}}.
@@ -138,6 +158,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   defp recover_locked(order, opts) do
     hold_members(order["members"], order, opts, fn ->
       with {:ok, current} <- Journal.update(order, %{"writable" => false, "cancel_requested" => true}) do
+        event(current, :recovered, opts)
         await(current, Keyword.get(opts, :openclaw_adapter, Gateway), opts)
       end
     end)
@@ -151,6 +172,21 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   end
 
   defp await(order, adapter, opts) do
+    with {:ok, %{"id" => id} = current} <- Journal.read(order["group"]),
+         true <- id == order["id"] do
+      if Journal.pending?(current) do
+        await_pending(current, adapter, opts)
+      else
+        event(current, :ended, opts)
+        run_result(current, current["state"])
+      end
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :openclaw_generation_changed}
+    end
+  end
+
+  defp await_pending(order, adapter, opts) do
     order = maybe_cancel(order, adapter, opts)
     response = if enabled_for?(order), do: adapter.status(order, opts), else: {:error, :openclaw_disabled_with_pending_order}
 
@@ -158,7 +194,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
       {:terminal, state, evidence} ->
         with {:ok, finished} <- Journal.update(order, %{"state" => state, "writable" => false, "terminal" => evidence}) do
           event(finished, :ended, opts)
-          run_result(order, state)
+          run_result(finished, finished["state"])
         end
 
       :pending ->
@@ -186,6 +222,19 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     end
   end
 
+  defp observe_failure(%{"id" => id} = order, {:ok, %{"runId" => id} = reply}, _opts) do
+    if is_number(reply["startedAt"]) or reply["status"] in ~w(accepted running) do
+      # Observed execution rules out non-start recovery, but does not change
+      # existing authority or overwrite a concurrent cancellation/transport loss.
+      case Journal.update(order, %{"acceptance_observed" => true}) do
+        {:ok, updated} -> updated
+        _ -> order
+      end
+    else
+      order
+    end
+  end
+
   defp observe_failure(order, _response, _opts), do: order
 
   defp maybe_cancel(order, adapter, opts) do
@@ -207,7 +256,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   end
 
   defp abort_external(order, adapter, opts) do
-    with true <- enabled_for?(order) and order["abort_acknowledged"] != true,
+    with true <- Journal.pending?(order) and enabled_for?(order) and order["abort_acknowledged"] != true,
          :ok <- adapter.cancel(order, opts),
          {:ok, acknowledged} <- Journal.update(order, %{"abort_acknowledged" => true}) do
       acknowledged
@@ -215,6 +264,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
       _ -> order
     end
   end
+
+  defp run_result(_order, "rejected"), do: {:error, :openclaw_request_rejected_before_acceptance}
 
   defp run_result(order, state) do
     if state == "completed" and order["cancel_requested"] != true do
@@ -242,15 +293,31 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   defp event(order, event, opts) do
     Enum.each(order["members"], fn member ->
       Logger.info(
-        "OpenClaw PO event=#{event} project_root=#{order["project_id"]} issue_id=#{member["id"]} issue_identifier=#{member["identifier"]} run_id=#{order["id"]} session_id=#{order["session_id"]} state=#{order["state"]} reason=#{order["error"]}"
+        "OpenClaw PO event=#{event} project_root=#{order["project_id"]} issue_id=#{member["id"]} issue_identifier=#{member["identifier"]} run_id=#{order["id"]} session_id=#{order["session_id"]} state=#{order["state"]} reason=#{order["error"]} action=#{operator_action(order)}"
       )
     end)
 
     if recipient = opts[:recipient] do
-      message = %{event: event, session_id: order["session_id"], workspace_path: order["workspace"]}
+      message = %{event: event, session_id: order["session_id"], workspace_path: order["workspace"], message: operator_action(order)}
       send(recipient, {:yolo_event, order["group"], message})
     end
   end
+
+  defp operator_action(%{"state" => "rejected", "rejection" => %{"code" => "INVALID_REQUEST", "reason" => reason}})
+       when reason in ~w(cwd_reserved cwd_not_absolute),
+       do: "Vor Annahme abgelehnt (INVALID_REQUEST/#{reason}); Reservierung freigegeben, regulärer Retry möglich."
+
+  defp operator_action(%{"state" => "rejected"}), do: "Vor Annahme abgelehnt; Reservierung freigegeben."
+
+  defp operator_action(%{"state" => "local_error"}), do: "OpenClaw-Aufruf fehlgeschlagen; Gateway und Auftragsjournal prüfen."
+
+  defp operator_action(%{"writable" => false} = order) do
+    if Journal.pending?(order),
+      do: "OpenClaw ungeklärt; reserviert. Betreiber: Endbeleg prüfen oder beleggebundene Recovery gemäß docs/openclaw-yolo.md.",
+      else: "OpenClaw beendet; Reservierung freigegeben."
+  end
+
+  defp operator_action(_), do: "OpenClaw-Auftrag läuft."
 
   @spec digest(binary()) :: String.t()
   def digest(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)

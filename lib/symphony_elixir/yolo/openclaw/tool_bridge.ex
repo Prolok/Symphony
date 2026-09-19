@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.ToolBridge do
   alias SymphonyElixir.Codex.MCPServer
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.{ProjectContext, RuntimePaths}
-  alias SymphonyElixir.Yolo.OpenClaw.Journal
+  alias SymphonyElixir.Yolo.OpenClaw.{Checkout, Journal}
   @allowed ~w(linear_graphql symphony_comments symphony_yolo_action symphony_yolo_complete symphony_test)
 
   @spec start(map(), Path.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -14,7 +14,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.ToolBridge do
          {:ok, port} <- :inet.port(socket) do
       token = :crypto.strong_rand_bytes(32) |> Base.url_encode64(padding: false)
       descriptor = Path.join(directory, "tools.json")
-      File.write!(descriptor, Jason.encode!(%{port: port, token: token}))
+      File.write!(descriptor, Jason.encode!(%{port: port, token: token, checkout: Map.take(order, ~w(id project_id session_id workspace sha))}))
       File.chmod!(descriptor, 0o600)
       parent = self()
       context = ProjectContext.current()
@@ -65,15 +65,26 @@ defmodule SymphonyElixir.Yolo.OpenClaw.ToolBridge do
   defp respond(client, order, token, opts) do
     result =
       with {:ok, line} <- :gen_tcp.recv(client, 0, 5000),
-           {:ok, %{"token" => ^token, "request" => %{"jsonrpc" => "2.0", "id" => id} = request}} <- Jason.decode(line),
+           {:ok, %{"token" => ^token, "checkout" => proof, "request" => %{"jsonrpc" => "2.0", "id" => id} = request}} <- Jason.decode(line),
            false <- is_nil(id),
-           true <- Journal.writable?(order["group"], order["id"]) do
+           {:ok, _} <- authorize(order, proof) do
         dispatch(request, opts)
       else
-        _ -> %{"error" => %{"code" => -32_603, "message" => "Expired or invalid Symphony run binding"}}
+        _ -> %{"error" => %{"code" => -32_603, "message" => "Expired Symphony run binding or unverified checkout; use the bound clean checkout and SHA"}}
       end
 
     :gen_tcp.send(client, Jason.encode!(result) <> "\n")
+  end
+
+  defp authorize(order, proof) do
+    Journal.transition(order, fn current ->
+      with true <- current["writable"] == true and current["state"] in ~w(intent accepted running),
+           {:ok, measured} <- Checkout.verify(current, proof) do
+        {:ok, %{"execution_observed" => true, "checkout_proof" => measured}}
+      else
+        _ -> {:error, :openclaw_checkout_or_binding_invalid}
+      end
+    end)
   end
 
   defp dispatch(%{"method" => "tools/list"} = request, opts) do

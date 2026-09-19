@@ -135,7 +135,7 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     assert :ok = ProjectContext.with_context(context, fn -> journal.write(order) end)
     assert {:error, :test_po_workspace_cleanup_unconfirmed} = PoIncoming.cleanup(context, plan)
     assert File.dir?(workspace.path)
-    assert :ok = ProjectContext.with_context(context, fn -> journal.write(Map.put(order, "state", "failed")) end)
+    assert {:ok, _} = ProjectContext.with_context(context, fn -> journal.update(order, %{"state" => "failed"}) end)
     assert :ok = PoIncoming.cleanup(context, plan)
     refute File.exists?(workspace.path)
     assert :ok = PoIncoming.cleanup(context, plan)

@@ -46,7 +46,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       state
     else
       members = Enum.map(order["members"], fn member -> %{id: member["id"], identifier: member["identifier"], state: member["state"]} end)
-      runner = fn _, _, _ -> OpenClaw.recover(order, opts) end
+      recovery_opts = Keyword.put(opts, :recipient, self())
+      runner = fn _, _, _ -> OpenClaw.recover(order, recovery_opts) end
       start(state, group, members, [], Keyword.merge(opts, runner: runner, recovering: true))
     end
   end
@@ -250,7 +251,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
           turn_count: 1,
           started_at: run.started_at,
           last_codex_timestamp: nil,
-          last_codex_message: nil,
+          last_codex_message: run.event[:message],
           last_codex_event: run.event[:event],
           recent_codex_events: [],
           runtime_seconds: DateTime.diff(DateTime.utc_now(), run.started_at)

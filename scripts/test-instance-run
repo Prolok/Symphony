@@ -77,6 +77,8 @@ class Run:
         self.plan_path = args.result_dir / "plan.json"
         self.deadline = time.monotonic() + args.timeout
         self.result["timeout_seconds"] = args.timeout
+        self.probe_interval = 15 if getattr(args, "openclaw_agent", None) else 3
+        self.result["probe_interval_seconds"] = self.probe_interval
         self.result["started_at"] = time.time()
         self.env = dict(os.environ, SYMPHONY_TEST_MANIFEST=str(args.manifest),
                         SYMPHONY_TEST_EXPECTED_SHA=args.expected_sha, SYMPHONY_TEST_EXPECTED_SOURCE=args.expected_source,
@@ -421,7 +423,7 @@ class Run:
                 self.collect_sessions(state.get("running", []), fixture_ids, sessions, shared)
                 self.result["sessions"] = sessions
                 self.save()
-                if observed_ready and (len(sessions) == len(fixtures) or self.args.scenario in ("po_incoming", "po_handoff", "po_aggregation", "po_followup")) and time.monotonic() - last_probe >= 3:
+                if observed_ready and (len(sessions) == len(fixtures) or self.args.scenario in ("po_incoming", "po_handoff", "po_aggregation", "po_followup")) and time.monotonic() - last_probe >= self.probe_interval:
                     probe = self.probe()
                     probed = probe["fixtures"]
                     self.result["derived"] = probe.get("derived", [])

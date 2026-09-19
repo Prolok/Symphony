@@ -254,6 +254,11 @@ der incoming-Gruppe. Für PRO-810 bleibt dies separate Betreiberarbeit.
 
 ## Standardtests und separater Live-Nachweis
 
+Im expliziten OpenClaw-Livetest fragt der Testrunner den Linear-Abnahmestand
+höchstens alle 15 Sekunden ab (sonst 3 Sekunden), um die zusätzlichen lesenden
+Betreiberabfragen zu begrenzen. Identitätsprüfung, Fehlerklassifikation und das
+gesamte Retrybudget des Laufs bleiben unverändert. Das Intervall steht im Ergebnisbeleg.
+
 `make check`, `make all` und ExUnit verwenden keine echte OpenClaw-Installation.
 Testbuilds sperren die echte Prozessgrenze; `scripts/mix-gate` entfernt geerbte
 Agentenwahl und setzt zusätzlich `SYMPHONY_OPENCLAW_TEST_DENY=1`. Python-Gates

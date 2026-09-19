@@ -589,6 +589,10 @@ defmodule SymphonyElixir.YoloActionsTest do
     assert {:error, :yolo_operation_changed_or_corrupt} = Operations.run("fixed", %{}, fn _ -> flunk("changed") end)
     File.write!(Operations.path("fixed"), "broken")
     assert {:error, :yolo_operation_changed_or_corrupt} = Operations.pending(Enum.map(issues, & &1.id))
+
+    for issue <- issues do
+      assert Group.name(%{issue | state: "Umsetzungsticket erstellt"}) == nil
+    end
   end
 
   test "incomplete lookup and write answers cannot confirm an issue, label, state or relation" do

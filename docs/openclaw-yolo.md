@@ -89,6 +89,9 @@ Testexecutorgrenzen bleiben wirksam; ein Werkzeugname allein erteilt keine
 zusätzliche Berechtigung. Nach Abbruch, Transportunsicherheit oder Wiederaufnahme
 ist die alte Schreibbindung gesperrt. Die lokale Bindungsdatei gehört nur diesem
 Lauf und enthält keine Linear-Credentials; sie darf nicht ausgegeben werden.
+Die Bridge empfängt vollständige JSON-Zeilen bis 1 MiB; ihr Empfangspuffer ist
+ebenfalls darauf begrenzt, damit größere Workpads nicht vor dem JSON-Parser
+abgeschnitten und fälschlich als ungültige Laufbindung behandelt werden.
 
 Der Betreiber muss für den gewählten Agenten prüfen und dokumentieren:
 
@@ -216,7 +219,8 @@ der benannte Betreiber mit diesem Paket:
 `binding` enthält diese Felder vollständig und unverändert aus genau dem Originalauftrag,
 einschließlich **aller** Mitglieder. Der Originalbeleg muss den exakten Gatewaytext
 `cwd is reserved for plugin-owned subagent runs` tragen; `cwd_reserved` normalisiert
-diesen Grund. Keine frei erfundene RPC-Kennung ergänzen. Fehlende Korrelation hält
+diesen Grund. Die originale RPC-Kennung darf das OpenClaw-Format `Sequenz:UUID`
+enthalten. Keine frei erfundene oder aus gekürzten Logs ergänzte Kennung verwenden. Fehlende Korrelation hält
 die Reservierung geschlossen. Die Ausführungsprüfung darf beim ersten Anwenden
 höchstens fünf Minuten alt sein. Quellpfade beziehen sich auf das Paketverzeichnis.
 

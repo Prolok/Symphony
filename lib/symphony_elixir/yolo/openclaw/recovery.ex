@@ -93,7 +93,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
     binding = evidence["binding"]
 
     with %{"request_id" => request_id, "method" => "agent", "run_id" => run_id, "session_id" => session} <- evidence["request"],
-         true <- is_binary(request_id) and Regex.match?(~r/^[a-zA-Z0-9_-]{8,128}$/, request_id),
+         true <- is_binary(request_id) and Regex.match?(~r/^[a-zA-Z0-9_:-]{8,128}$/, request_id),
          true <- run_id == binding["id"] and session == binding["session_id"] and evidence["request"]["agent"] == binding["agent"],
          true <- evidence["request"]["payload_sha256"] == binding["payload_sha256"] and evidence["request"]["cwd"] == binding["workspace"],
          %{"request_id" => ^request_id, "phase" => "pre_acceptance", "code" => "INVALID_REQUEST", "reason" => "cwd_reserved"} <- evidence["response"],

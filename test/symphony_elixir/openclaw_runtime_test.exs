@@ -635,6 +635,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     try do
       Process.sleep(550)
       assert bridge_call(bridge.descriptor, request("ping"))["result"] == %{}
+      assert bridge_call(bridge.descriptor, request("ping", %{padding: String.duplicate("ä", 20_000)}))["result"] == %{}
       response = bridge_call(bridge.descriptor, request("initialize"))
       assert response["result"]["serverInfo"]["name"] == "symphony-linear"
     after
@@ -670,7 +671,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       "binding" => Map.take(order, ~w(id group project_id agent linear_agent_id linear_workspace_id session_id payload_sha256 workspace sha members)),
       "gateway_version" => "2026.9.4",
       "request" => %{
-        "request_id" => "request-1234",
+        "request_id" => "2:11111111-2222-4333-8444-555555555555",
         "method" => "agent",
         "run_id" => order["id"],
         "session_id" => order["session_id"],
@@ -678,7 +679,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         "payload_sha256" => order["payload_sha256"],
         "cwd" => order["workspace"]
       },
-      "response" => %{"request_id" => "request-1234", "phase" => "pre_acceptance", "code" => "INVALID_REQUEST", "reason" => "cwd_reserved"},
+      "response" => %{"request_id" => "2:11111111-2222-4333-8444-555555555555", "phase" => "pre_acceptance", "code" => "INVALID_REQUEST", "reason" => "cwd_reserved"},
       "execution_check" => %{
         "run_id" => order["id"],
         "session_id" => order["session_id"],

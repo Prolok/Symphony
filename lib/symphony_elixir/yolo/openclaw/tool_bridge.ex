@@ -27,7 +27,9 @@ defmodule SymphonyElixir.Yolo.OpenClaw.ToolBridge do
   end
 
   defp listen do
-    :gen_tcp.listen(0, [:binary, packet: :line, packet_size: 1_048_576, active: false, ip: {127, 0, 0, 1}, send_timeout: 5000, send_timeout_close: true])
+    # Line packets are truncated at the receive buffer, independently of
+    # packet_size. Workpad mutations must arrive as one complete JSON frame.
+    :gen_tcp.listen(0, [:binary, packet: :line, packet_size: 1_048_576, buffer: 1_048_576, active: false, ip: {127, 0, 0, 1}, send_timeout: 5000, send_timeout_close: true])
   end
 
   @spec stop(map()) :: :ok

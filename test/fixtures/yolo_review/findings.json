@@ -1,0 +1,50 @@
+[
+  {
+    "reproduction": "Importiere eine Zeile und exportiere sie erneut.",
+    "observed": "Die Ausgabe weicht vom vereinbarten Format ab.",
+    "expected": "Die dokumentierte Ausgabe bleibt stabil.",
+    "evidence": "Synthetischer Vergleich: input.csv → actual.csv; erwartete Zeile in expected.csv.",
+    "prereview": {
+      "recognizable": true,
+      "reason": "Die Anforderung und ein lokaler Vergleich waren bereits verfügbar."
+    },
+    "category": "regression",
+    "action": "fix_and_regression_test",
+    "rationale": "Ein isolierter Nullwertfall lässt sich günstig mit einem Regressionstest sichern; keine wiederkehrende Prüflücke belegt.",
+    "followup_operation_key": "regression"
+  },
+  {
+    "reproduction": "Importiere eine Zeile und exportiere sie erneut.",
+    "observed": "Die Ausgabe weicht vom vereinbarten Format ab.",
+    "expected": "Die dokumentierte Ausgabe bleibt stabil.",
+    "evidence": "Synthetischer Vergleich: input.csv → actual.csv; erwartete Zeile in expected.csv.",
+    "prereview": {
+      "recognizable": true,
+      "reason": "Die Anforderung und ein lokaler Vergleich waren bereits verfügbar."
+    },
+    "category": "reusable_gap",
+    "action": "fix_and_review_skill_proposal",
+    "rationale": "Mehrere Exportwege verlieren dieselbe Invariante; eine kurze PreReview-Regel vermeidet künftige Wiederholungen.",
+    "followup_operation_key": "reusable_gap",
+    "skill_proposal": {
+      "change": "Im Projekt-PreReview gemeinsame CSV-Invarianten über alle Exportwege prüfen.",
+      "future_relevance": "Drei bestehende Exportwege und weitere geplante Erweiterungen.",
+      "cost": "Eine kurze Regel und vorhandene Parametertests ergänzen.",
+      "benefit": "Verhindert wiederholte Exportfehler; Nutzen überwiegt den einmaligen Prüfaufwand."
+    }
+  },
+  {
+    "reproduction": "Fordere JSON statt CSV an.",
+    "observed": "JSON ist nicht verfügbar.",
+    "expected": "JSON-Ausgabe als neue Funktion.",
+    "evidence": "Synthetischer Vergleich: input.csv → actual.csv; erwartete Zeile in expected.csv.",
+    "prereview": {
+      "recognizable": false,
+      "reason": "Diese Anforderung entstand erst nach dem Merge."
+    },
+    "category": "new_requirement",
+    "action": "requirement_ticket",
+    "rationale": "JSON-Export war nicht vereinbart; als eigene Anforderung planen statt bestehende Abnahme nachträglich ändern.",
+    "followup_operation_key": "new_requirement"
+  }
+]

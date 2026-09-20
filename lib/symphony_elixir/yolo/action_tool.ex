@@ -21,7 +21,12 @@ defmodule SymphonyElixir.Yolo.ActionTool do
           "validation" => %{"type" => "string"},
           "blocked_by" => %{"type" => "array", "items" => %{"type" => "string"}},
           "issue_id" => %{"type" => "string"},
-          "report" => %{"type" => "string"}
+          "report" => %{"type" => "string"},
+          "review" => %{
+            "type" => "object",
+            "description" =>
+              "Review handoff evidence per WORKFLOW_YOLO_AGENT.md: binding, checks, findings with learning decisions, limitations, decision. Required for Review; copy binding from review_contract."
+          }
         }
       }
     }

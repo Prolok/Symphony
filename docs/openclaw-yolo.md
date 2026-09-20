@@ -64,8 +64,13 @@ Jeder Auftrag enthält den gesamten versionierten `WORKFLOW_YOLO_AGENT.md`,
 Vertragsversion, Workflow-Hash, Projekt-/Linear-Bindung, beide Agentenidentitäten,
 Mitglieder mit Anforderungen/Abhängigkeiten, Kommentarquellen, Aktionsjournale,
 Startmodus und menschliches Übergabeziel. Der Payload erhält zusätzlich einen
-SHA-256-Hash. Der projektspezifische `sym-yolo-review` aus dem Prüfcheckout wird
-eingebettet, sofern vorhanden; seine referenzierten Dateien liegen im Checkout.
+SHA-256-Hash. Der projektspezifische `sym-yolo-review` wird nur nach Prüfung von Projekt,
+Commit und Dateiinhalt eingebettet. Seine Bindung (`review_contract`, Version 1)
+und der [Prüf-/Lernvertrag](../WORKFLOW_YOLO_AGENT.md#review-gemeinsame-fachliche-schlussabnahme)
+sind für Review-Übergaben verpflichtend und für Codex/OpenClaw identisch.
+Fehlende oder abweichende Bindung ist keine gültige Abnahme; referenzierte Dateien
+werden aus demselben Checkout gelesen. Fachwissen aus Memory darf ergänzen,
+den versionierten Projektprüfmaßstab jedoch nicht ersetzen.
 
 Eigene Sitzungsschlüssel enthalten Projektkennung, OpenClaw-Agent, Aufgabenbereich
 und Lauf-ID. Normale Agentengespräche werden nicht wiederverwendet. OpenClaw
@@ -272,6 +277,9 @@ des [isolierten Testbetriebs](linear-app.md#isolierter-testbetrieb): eigenes
 freigegebenes Manifest für `Prolok/symphony-test`, disjunkter Projektbereich,
 exklusive Entscheidungshoheit, Testtickets und dokumentierter Quellstand.
 Nur dort zunächst `LINEAR_YOLO_AGENT` und `OPENCLAW_YOLO_AGENT` konfigurieren.
+Für Review muss auch das Dummy-Projekt einen passenden versionierten
+`.codex/skills/sym-yolo-review/SKILL.md` im gemergten Prüfstand besitzen;
+die Bereitstellung erfolgt im zuständigen Projekt über dessen reguläres PR-Verfahren.
 
 ```sh
 scripts/openclaw-live-test --execute-live --agent po -- \
@@ -311,3 +319,25 @@ bleiben vor Test-Handoff beziehungsweise Merge bindend.
 Bei Fehlern denselben Auftrag erhalten. Der vorhandene isolierte Runner unterstützt
 `--resume --cleanup-only` mit unveränderten Lauf-/Quellparametern; dies ist nur
 Cleanup, kein nachträglicher Pass. Unbestätigtes externes Ende verhindert Cleanup.
+
+## Projektintegration und Lernrückkopplung
+
+Die gemeinsame Schnittstelle wird durch `test/fixtures/yolo_review` und simulierte
+Codex-/OpenClaw-Läufe nachgewiesen, unabhängig von den Projektpaketen. Tilo/Pai
+richten lokale Agentenanweisungen und Rechte separat im eigenen Zuständigkeitsbereich
+auf diesen Vertrag aus; Repository-Worker ändern keine privaten Agentdateien.
+Die erstmalige Aktivierung behält den oben beschriebenen Live-Nachweis.
+Bei der nächsten bereits freigegebenen lokalen Nutzung gehören Projekt, Lauf,
+gemergte SHA, Skillpfad/-Hash, tatsächliche Prüfungen, Einschränkungen und begründete
+Folgeentscheidungen in den bestehenden Ergebnisbeleg.
+
+Danach integrieren die zuständigen Projektbetreiber QuantInvest/QuantAI bei ohnehin
+freigegebenen Aufgaben mit demselben Vertrag. Kein zusätzliches Pilotprojekt/-ticket
+oder neue Startfreigabe. Der PO wertet die nächsten etwa zehn bereits freigegebenen
+Produkttickets anhand ihrer Workpads knapp aus: ungeplante Eingriffe, vermeidbare
+Folgefehler, wiederkehrende Fehlerklassen und unnötige Wiederholungen. Gewollte
+Nicht-YOLO-Freigaben zählen nicht als Störung. Künftige Skillverbesserungen nur bei
+wiederverwendbarer Prüflücke und positivem Aufwand/Nutzen über reguläre Fix-/PR-
+Verfahren vorschlagen; Einzelregressionen und neue Anforderungen getrennt behandeln.
+Fixes erhalten ihre eigene Pipeline/Abnahme; der Ursprung wird nach bestätigten
+Folgeanlagen sofort an den Menschen übergeben und dafür nicht erneut abgenommen.

@@ -84,10 +84,67 @@ für einen leeren Bestand. Übergebene BLOCKER, verworfene/abgebrochene Tickets
 und abgeschlossene Aggregationsursprünge zählen nicht als erwartete Arbeit.
 
 Prüfe den dokumentierten gemergten Stand anhand der Anforderungen aller
-Review-Mitglieder und ihres gemeinsamen End-to-End-Verhaltens. Baue das Produkt,
-wenn erforderlich. Lies den projektspezifischen Skill `sym-yolo-review`, sofern
-vorhanden; auch ohne diesen Zusatz bleiben Anforderungen, tatsächliche Tests,
-Zeitgrenzen, Belege und kontrolliertes Cleanup Pflicht.
+Review-Mitglieder und ihres gemeinsamen End-to-End-Verhaltens. Verbindlicher
+Projektprüfmaßstab ist `.codex/skills/sym-yolo-review/SKILL.md` aus dem im
+Laufkontext gebundenen Projektcheckout und Commit. Symphony liefert unter
+`review_contract.binding` Projekt, Lauf, Checkout, SHA, Skillpfad/-Hash und
+Vertragsversion 1 sowie den geprüften Skillinhalt. Lies referenzierte Dateien
+ausschließlich aus demselben Checkout. Agentenwechsel, Memory und private
+Prüfkataloge ersetzen oder verändern diesen Maßstab nicht. Fehlender, unlesbarer,
+unversionierter oder falsch gebundener Skill erlaubt keine gültige Abnahme.
+Dokumentiere die Einschränkung; bei einer externen Voraussetzung nutze den
+bestehenden BLOCKER-Pfad. Keine spontane Skillreparatur im Abnahmecheckout.
+
+Baue das Produkt und führe die für die Anforderungen relevanten Skillprüfungen
+aus. Berichte konkret: Prüfstand, tatsächlich ausgeführte Prüfungen mit Ergebnis
+und Belegen, Findings, Einschränkungen (einschließlich nicht ausgeführter Prüfungen)
+und Folgeentscheidung. Vollständige Fehlerfreiheit ist kein Abschlusskriterium;
+ausgelagerte Mängel müssen erkennbar bleiben.
+
+Pro Finding Reproduktion, Ist-/Sollverhalten und Beleg festhalten. Beantworte mit
+Begründung: War es mit damaligem Wissen kostengünstig in PreReview erkennbar?
+Ordne Ursache und Folgemaßnahme ein:
+
+| Kategorie | Folgemaßnahme |
+| --- | --- |
+| `regression` – fehlender Regressionstest | `fix_and_regression_test`: Korrektur mit gezieltem Regressionstest |
+| `test_selection` – falsche Testauswahl | `correct_test_selection`: Auswahl korrigieren und passend nachweisen |
+| `reusable_gap` – wiederverwendbare Prüflücke | `fix_and_review_skill_proposal`: Korrektur und Skillvorschlag nur bei plausibler künftiger Relevanz und positivem Aufwand/Nutzen; sonst `fix_and_regression_test` mit Begründung |
+| `integration` – erst durch Integration/Laufzeit entstanden | `fix_and_integration_test`: Korrektur und Integrationstest, keine rückwirkende Schuldzuweisung |
+| `new_requirement` – neue Anforderung | `requirement_ticket`: eigener begründeter Anforderungsscope, kein Skillvorschlag |
+
+Einzelbesonderheiten vorzugsweise als Regressionstest behandeln. Skilländerungen
+laufen über das reguläre Projekt-Fix-/PR-Verfahren; produktiv verwendete Skills
+während der Abnahme unverändert lassen. Wiederverwendbare Regeln knapp halten,
+keine Ticketchronik im Prompt. Zusammengehörige Korrekturen mit Reproduktion,
+Sollverhalten und Validierung sinnvoll bündeln; neue Anforderungen erkennbar
+abgrenzen. Operationsschlüssel bei Wiederaufnahme erhalten.
+
+Für `kind=handoff` im Status `Review` zusätzlich zum lesbaren `report` den
+strukturierten `review`-Beleg übergeben:
+
+```json
+{
+  "binding": "unverändert das Objekt review_contract.binding übernehmen",
+  "checks": [{"name": "ausgeführte Prüfung", "result": "passed", "evidence": "konkreter Ergebnis-/Logbeleg"}],
+  "findings": [],
+  "limitations": [],
+  "decision": "Geprüft; an Menschen übergeben"
+}
+```
+
+`checks` ist nicht leer; `result` ist `passed` oder `failed`. Nicht ausgeführte
+Prüfungen gehören in `limitations`. Jedes Finding enthält `reproduction`,
+`observed`, `expected`, `evidence`, `prereview: {recognizable: true|false, reason}`,
+`category`, `action`, `rationale` und `followup_operation_key` einer bestätigten,
+mit diesem Ursprung verknüpften Followup-Operation. Nur ein begründeter
+`reusable_gap` mit `fix_and_review_skill_proposal` enthält `skill_proposal` mit
+`change`, `future_relevance`, `cost` und `benefit`. Symphony prüft Bindung und
+Pflichtbestandteile, bestätigt jedoch nicht automatisch die fachliche Wahrheit
+der Agentenbelege. Eine kleine [versionierte Fixture](test/fixtures/yolo_review)
+zeigt die drei unterschiedlichen Lernentscheidungen. Der strukturierte Beleg wird
+im selben Workpad gespeichert. Freitext über `symphony_yolo_complete` ersetzt
+die Review-Übergabe nicht; echte BLOCKER-Berichte bleiben ohne Abnahmebeleg möglich.
 
 Bei Findings neue Fix-/Folge-Tickets im Backlog desselben Projekts mit vollständigen
 Anforderungen, Validierung, `symphony-generated` und Ursprungverknüpfung anlegen.

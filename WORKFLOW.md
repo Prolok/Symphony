@@ -287,7 +287,8 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   verlangen Neustart; Details: [Agentenbindung](docs/linear-app.md#agentenbindung).
   Die Agentenbindung aktiviert unabhängig von `--yolo` gesonderte PO-Sammelläufe
   nach [WORKFLOW_YOLO_AGENT.md](WORKFLOW_YOLO_AGENT.md), einschließlich dessen
-  Mehrticket-/Statusvertrag. Die folgende Statustabelle und ihre Turn-Grenzen
+  Mehrticket-/Statusvertrag und der an den versionierten Projekt-Skill gebundenen
+  Schlussabnahme mit Prüf-/Lernbeleg. Die folgende Statustabelle und ihre Turn-Grenzen
   gelten weiterhin für reguläre Einzelläufe.
   Optional wählt `OPENCLAW_YOLO_AGENT` ausschließlich deren PO-Ausführungsweg;
   ohne Wert erfolgen keine OpenClaw-Zugriffe. Aktivierung verlangt den separaten

@@ -6,7 +6,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   alias SymphonyElixir.Linear.{Client, IssueLease, YoloAgent}
   alias SymphonyElixir.Yolo.{Admission, Completion, Group, Observation, OpenClaw, Operations}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
-  alias SymphonyElixir.Yolo.{ReviewReadiness, Scope, Store, Workspace}
+  alias SymphonyElixir.Yolo.{ReviewContract, ReviewReadiness, Scope, Store, Workspace}
 
   @spec run(String.t(), [map()], [map()], keyword()) :: term()
   def run(group, issues, project_issues, opts \\ []) do
@@ -188,7 +188,8 @@ defmodule SymphonyElixir.Yolo.Runner do
         agent_id: Config.yolo_agent_id(),
         linear_workspace_id: Config.settings!().tracker.app["workspace_id"],
         openclaw_agent_id: Config.openclaw_yolo_agent(),
-        contract_version: 1,
+        contract_version: 2,
+        review_contract: Scope.current()["review_contract"],
         workflow_file: "WORKFLOW_YOLO_AGENT.md",
         workflow_sha256: OpenClaw.digest(template),
         run_id: Scope.current()["run_id"],
@@ -206,12 +207,9 @@ defmodule SymphonyElixir.Yolo.Runner do
   end
 
   defp review_instructions(workspace) do
-    path = Path.join([workspace.path, ".codex", "skills", "sym-yolo-review", "SKILL.md"])
-
-    case File.read(path) do
-      {:ok, content} -> "\n\nProjekt-Prüfanweisung (#{path}):\n" <> content
-      {:error, :enoent} -> ""
-      {:error, reason} -> raise File.Error, reason: reason, action: "read", path: path
+    case ReviewContract.load(workspace, Scope.current()["run_id"]) do
+      %{"content" => content} -> "\n\nVersionierte Projekt-Prüfanweisung (#{workspace.path}/.codex/skills/sym-yolo-review/SKILL.md):\n" <> content
+      %{"error" => error} -> "\n\nKeine gültige Schlussabnahme möglich: #{error}. Ursache dokumentieren; bei externer Voraussetzung bestehenden BLOCKER-Pfad nutzen."
     end
   end
 

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.YoloReviewContractTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.ProjectContext
-  alias SymphonyElixir.Yolo.{ActionTool, Completion, Group, Handoff, OpenClaw, ReviewContract, Runner, Scope, Store}
+  alias SymphonyElixir.Yolo.{ActionTool, Completion, Group, Handoff, OpenClaw, Operations, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.YoloReviewFixture, as: Fixture
 
@@ -116,6 +116,41 @@ defmodule SymphonyElixir.YoloReviewContractTest do
         assert :ok = Handoff.invoke(request, ctx.opts)
         assert Completion.ready?("review", [ctx.issue])
         assert Agent.get(ctx.db, & &1.body) =~ "Prüf- und Lernbeleg (Vertrag 1)"
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "an unavailable project root cannot authorize an otherwise valid checkout", ctx do
+    assert %{"binding" => _} = ReviewContract.load(ctx.workspace, "run")
+    ProjectContext.bind(%{ctx.context | root: Path.join(ctx.root, "missing-project")})
+
+    try do
+      assert %{"error" => "yolo_review_skill_unavailable_or_unbound"} = ReviewContract.load(ctx.workspace, "run")
+    after
+      ProjectContext.bind(ctx.context)
+    end
+  end
+
+  test "a corrupt operation journal remains an error instead of authorizing acceptance", ctx do
+    Scope.with_scope(
+      "review",
+      [ctx.issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [ctx.issue.id]}))
+        request = %{"issue_id" => ctx.issue.id, "report" => "Checked", "review" => Fixture.evidence()}
+        assert :ok = ReviewContract.validate(ctx.issue, request)
+        path = Operations.path("interrupted-followup")
+        File.mkdir_p!(Path.dirname(path))
+        File.write!(path, "corrupt")
+
+        assert {:error, :yolo_operation_changed_or_corrupt} = ReviewContract.validate(ctx.issue, request)
+        # Handoff also checks journal health in its earlier admission gate.
+        assert {:error, :yolo_action_scope_changed} = Handoff.invoke(request, ctx.opts)
+        assert Agent.get(ctx.db, & &1.updates) == 0
+        refute Completion.ready?("review", [ctx.issue])
       end,
       workspace: ctx.workspace
     )

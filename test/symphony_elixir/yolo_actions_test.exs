@@ -597,6 +597,10 @@ defmodule SymphonyElixir.YoloActionsTest do
             assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [invalid]), opts())
           end
 
+          for field <- ~w(reproduction observed expected evidence rationale followup_operation_key) do
+            assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [Map.delete(finding, field)]), opts())
+          end
+
           if finding["category"] == "reusable_gap" do
             assert Map.has_key?(finding, "skill_proposal")
             assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [Map.delete(finding, "skill_proposal")]), opts())

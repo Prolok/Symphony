@@ -691,15 +691,14 @@ defmodule SymphonyElixir.StatusDashboard do
     issue_id = retry_entry.issue_id || "unknown"
     identifier = retry_entry.identifier || issue_id
     attempt = retry_entry.attempt || 0
-    due_in_ms = retry_entry.due_in_ms || 0
+    due_in_ms = retry_entry.due_in_ms
     error = format_retry_error(retry_entry.error)
 
     "│  #{colorize("↻", @ansi_orange)} " <>
       colorize("#{identifier}", @ansi_red) <>
       " " <>
       colorize("attempt=#{attempt}", @ansi_yellow) <>
-      colorize(" in ", @ansi_dim) <>
-      colorize(next_in_words(due_in_ms), @ansi_cyan) <>
+      colorize(if(is_nil(due_in_ms), do: " paused", else: " in " <> next_in_words(due_in_ms)), @ansi_cyan) <>
       error
   end
 

@@ -87,6 +87,85 @@ defmodule SymphonyElixir.LinearAppPathsTest do
     refute inspect(records) =~ "synthetic-secret"
   end
 
+  for outcome <- [:applied, :unchanged, :foreign] do
+    test "lost status response with #{outcome} state is read back without replay" do
+      Process.put(:remote_state, "original")
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+        query = payload[:query] || payload["query"]
+
+        cond do
+          query =~ "SymphonyResolveStateId" ->
+            issue = %{"state" => %{"id" => Process.get(:remote_state)}, "team" => %{"states" => %{"nodes" => [%{"id" => "state"}]}}}
+            {:ok, %{status: 200, body: %{"data" => %{"issue" => issue}}}}
+
+          query =~ "SymphonyUpdateIssueState" ->
+            send(parent, :status_write)
+            Process.put(:remote_state, %{applied: "state", unchanged: "original", foreign: "foreign"}[unquote(outcome)])
+            {:error, :timeout}
+
+          true ->
+            request(payload, headers)
+        end
+      end)
+
+      result = Tracker.update_issue_state("issue", "Planung")
+      assert_received :status_write
+      refute_received :status_write
+
+      if unquote(outcome) == :applied do
+        assert result == :ok
+        assert :ok = Tracker.update_issue_state("issue", "Planung")
+        refute_received :status_write
+      else
+        assert {:error, {:linear_api_request, :linear_app_request_unavailable}} = result
+        assert Process.get(:remote_state) == if(unquote(outcome) == :foreign, do: "foreign", else: "original")
+      end
+    end
+  end
+
+  for readback <- [:unavailable, :partial] do
+    test "#{readback} status readback stays unresolved until a complete fresh observation" do
+      Process.put(:status_applied, false)
+      Process.put(:readback_failed, false)
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+        query = payload[:query] || payload["query"]
+
+        cond do
+          query =~ "SymphonyResolveStateId" ->
+            issue = %{"state" => %{"id" => if(Process.get(:status_applied), do: "state", else: "original")}, "team" => %{"states" => %{"nodes" => [%{"id" => "state"}]}}}
+            body = %{"data" => %{"issue" => issue}}
+
+            if Process.get(:status_applied) and not Process.get(:readback_failed) do
+              Process.put(:readback_failed, true)
+
+              if unquote(readback) == :unavailable,
+                do: {:error, :timeout},
+                else: {:ok, %{status: 200, body: Map.put(body, "errors", [%{"message" => "incomplete"}])}}
+            else
+              {:ok, %{status: 200, body: body}}
+            end
+
+          query =~ "SymphonyUpdateIssueState" ->
+            send(parent, :status_write)
+            Process.put(:status_applied, true)
+            {:error, :timeout}
+
+          true ->
+            request(payload, headers)
+        end
+      end)
+
+      assert {:error, {:linear_api_request, :linear_app_request_unavailable}} = Tracker.update_issue_state("issue", "Planung")
+      assert_received :status_write
+      assert :ok = Tracker.update_issue_state("issue", "Planung")
+      refute_received :status_write
+    end
+  end
+
   test "all tool entrypoints visibly stop on missing client secret despite a personal API key" do
     previous = System.get_env("LINEAR_API_KEY")
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous) end)

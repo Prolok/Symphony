@@ -395,8 +395,11 @@ defmodule SymphonyElixir.RelayCacheTest do
     assert failed.record["pending"] == nil
     assert failed.record["dirty"] == ["issue"]
     assert failed.record["issues"] == s.record["issues"]
-    recovered = Session.tick(%{failed | fetch: s.fetch, retry_at: 0})
+    updated = Map.put(issue("2026-09-14T20:01:00Z"), "state", %{"name" => "Test (AI)"})
+    recovered = Session.tick(%{failed | fetch: fn ["issue"] -> {:ok, [updated]} end, retry_at: 0})
     assert recovered.status == :ready
+    assert recovered.record["dirty"] == []
+    assert recovered.record["issues"]["issue"] == updated
     Agent.update(c.clock, fn _ -> recovered.record["reconcile_at"] end)
     failed = Session.tick(%{recovered | snapshot: fn _ -> {:error, :incomplete_reconcile} end})
     assert failed.error == :incomplete_reconcile

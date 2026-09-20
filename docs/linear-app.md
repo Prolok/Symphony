@@ -1113,6 +1113,15 @@ wird dadurch nicht rückwirkend entfernt.
 
 ## Kommentarjournal und App-Mutationen
 
+Runtime-Statuswechsel lesen den aktuellen Status vor dem Schreiben. Ist der
+Zielstatus bereits erreicht, entfällt die Mutation. Geht ihre Transportantwort
+verloren, wird der Status einmal frisch gelesen: Nur der vollständig bestätigte
+Zielstatus zählt als Erfolg. Fehlgeschlagene oder partielle Abgleiche sowie ein
+abweichender Status bleiben Fehler; der Aufruf wiederholt keine Mutation.
+Das ist ein Zustandsabgleich, kein zusätzliches Journal oder atomarer Schutz
+gegen gleichzeitige fremde Statusänderungen. Für direkt aufgerufene
+`linear_graphql`-Mutationen gilt weiterhin der agentenseitige Abgleichvertrag.
+
 App-Kommentarschreibvorgänge und ihre Wiederaufnahme werden pro Projektjournal
 prozessübergreifend serialisiert. Jede App-Anfrage darf eine Kommentar-ID nur
 einmal verändern; mehrfache Writes derselben ID werden vor HTTP mit
@@ -1259,7 +1268,18 @@ Prozessneustarts und beide Tooltransporte; Polling und Worker-Retries der
 betroffenen App warten mindestens bis zum Ablauf. Projektzustände und private
 Credentialquellen bleiben im jeweiligen Projekt.
 Nicht erschöpfte Diagnoseheader erzeugen keine Sperre. Ein fehlgeschlagener
-Dispatch-Refresh erhält den sichtbaren Retry samt Ergebnis und IDs. Auch erfolgreiche Antworten mit bestätigtem `remaining: 0`/`0.0` setzen eine Pause.
+Dispatch-Refresh erhält den sichtbaren Retry samt Ergebnis und IDs.
+Definitive Zugriffsablehnung (401/403 ohne Rate-Limit, Auth-GraphQL-Fehler oder
+abgelehnte App-Identität/Zugangsdaten) pausiert den betroffenen Dispatch-,
+Retry- oder Abschlussabgleich ohne weiteren Timer oder Modellstart. Workspace,
+Claim und Fortsetzungskontext bleiben erhalten. Dashboard/API zeigen den Fehler
+mit der Fortsetzungsbedingung und ohne Fälligkeit. Nach Reparatur des Zugriffs
+aktiviert ein expliziter Dashboard/API-Refresh den bestehenden Retry; dieser
+prüft den Tracker frisch und pausiert bei erneuter Ablehnung wieder. Reguläre
+Polls und alte Timer aktivieren ihn nicht; ein Statuswechsel ist nicht nötig.
+Der projektweite Refresh reiht die Anfrage je Projekt ein, ohne auf beschäftigte
+Projektorchestratoren zu warten.
+Auch erfolgreiche Antworten mit bestätigtem `remaining: 0`/`0.0` setzen eine Pause.
 Request-, Endpoint- und Complexity-Budgets werden getrennt ausgewertet;
 `Retry-After` akzeptiert Sekunden oder HTTP-Datum, Resets Epoch-Millisekunden
 (kompatibel auch Epoch-Sekunden). Nur Resets tatsächlich erschöpfter Budgets und

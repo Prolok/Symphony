@@ -115,6 +115,11 @@ defmodule SymphonyElixir.RetryRefreshTest do
 
   test "completion retains active follow-up while waiting for capacity" do
     {context, issue, workspace, state} = completion_fixture(:missing)
+    context = put_in(context.settings.codex.command, "sleep 20")
+
+    if is_nil(Process.whereis(SymphonyElixir.TaskSupervisor)) do
+      start_supervised!({Task.Supervisor, name: SymphonyElixir.TaskSupervisor})
+    end
 
     ProjectContext.with_context(context, fn ->
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Test (AI)"}])
@@ -123,7 +128,15 @@ defmodule SymphonyElixir.RetryRefreshTest do
       assert File.dir?(workspace)
       assert MapSet.member?(waiting.claimed, issue.id)
       assert waiting.retry_attempts[issue.id].error == "no available orchestrator slots"
-      Process.cancel_timer(waiting.retry_attempts[issue.id].timer_ref)
+      retry = waiting.retry_attempts[issue.id]
+      assert retry.recovered_turn_context == completed.retry_attempts[issue.id].recovered_turn_context
+      assert waiting.running == %{}
+      Process.cancel_timer(retry.timer_ref)
+      assert {:noreply, resumed} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, %{waiting | max_concurrent_agents: 1})
+      assert map_size(resumed.running) == 1
+      assert resumed.running[issue.id].issue.state == "Test (AI)"
+      assert {:noreply, ^resumed} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, resumed)
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, resumed.running[issue.id].pid)
     end)
   end
 
@@ -160,7 +173,7 @@ defmodule SymphonyElixir.RetryRefreshTest do
     end
   end
 
-  for failure <- [:api, :unavailable, :rate_limit] do
+  for failure <- [:api, :unavailable, :rate_limit, :rate_limit403] do
     test "#{failure} during completion refresh retains the retry until recovery" do
       {context, issue, workspace, state} = completion_fixture(:stale)
       settings = context.settings
@@ -179,7 +192,12 @@ defmodule SymphonyElixir.RetryRefreshTest do
         else
           assert query =~ "SymphonyLinearIssuesById"
           send(parent, :completion_api_read)
-          if unquote(failure) == :unavailable, do: {:ok, %{status: 503, body: %{}}}, else: {:error, :timeout}
+
+          case unquote(failure) do
+            :unavailable -> {:ok, %{status: 503, body: %{}}}
+            :rate_limit403 -> {:ok, %{status: 403, headers: %{"retry-after" => "3600"}, body: %{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]}}}
+            _ -> {:error, :timeout}
+          end
         end
       end)
 
@@ -202,10 +220,15 @@ defmodule SymphonyElixir.RetryRefreshTest do
           assert retained.review_subagent_call_ids == retry.review_subagent_call_ids
           assert retained.review_subagent_ids == retry.review_subagent_ids
 
-          if unquote(failure) == :rate_limit do
-            assert retained.error =~ "linear_app_rate_limited"
+          if unquote(failure) in [:rate_limit, :rate_limit403] do
+            assert retained.error =~ if(unquote(failure) == :rate_limit, do: "linear_app_rate_limited", else: "rate_limited")
             assert retained.due_at_ms >= System.monotonic_time(:millisecond) + 3_590_000
-            refute_received :completion_api_read
+
+            if unquote(failure) == :rate_limit do
+              refute_received :completion_api_read
+            else
+              assert_received :completion_api_read
+            end
           else
             assert retained.error =~ if(unquote(failure) == :unavailable, do: "503", else: "linear_app_request_unavailable")
             assert_received :completion_api_read
@@ -220,6 +243,95 @@ defmodule SymphonyElixir.RetryRefreshTest do
         assert {:noreply, cleaned} = Orchestrator.handle_info({:retry_issue, issue.id, pending.retry_attempts[issue.id].retry_token}, pending)
         refute File.exists?(workspace)
         assert cleaned.retry_attempts == %{}
+      end)
+    end
+  end
+
+  for {status, mode, yolo} <- [
+        {401, :completion, false},
+        {403, :completion, true},
+        {401, :dispatch, true},
+        {403, :dispatch, false},
+        {:identity_denied, :completion, false},
+        {:graphql_auth, :dispatch, false}
+      ] do
+    test "#{status} pauses #{mode} refresh until explicit recovery with yolo=#{yolo}" do
+      {context, issue, workspace, state} = completion_fixture(:stale)
+      Application.put_env(:symphony_elixir, :yolo, unquote(yolo))
+      failing_context = put_in(context.settings.tracker.kind, "linear")
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+      Req.default_options(plug: fn conn -> Req.Test.json(conn, %{"access_token" => "synthetic-app", "token_type" => "Bearer", "expires_in" => 3600, "scope" => "read write"}) end)
+      parent = self()
+
+      Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, _ ->
+        query = payload[:query] || payload["query"]
+
+        cond do
+          query =~ "SymphonyAppIdentity" and unquote(status) == :identity_denied ->
+            send(parent, :denied_read)
+            {:ok, %{status: 403, body: %{}}}
+
+          query =~ "SymphonyAppIdentity" ->
+            app = context.settings.tracker.app
+            {:ok, %{status: 200, body: %{"data" => %{"viewer" => %{"id" => app["user_id"], "app" => true, "organization" => %{"id" => app["workspace_id"]}}}}}}
+
+          true ->
+            assert query =~ "SymphonyLinearIssuesById"
+            send(parent, :denied_read)
+
+            if unquote(status) == :graphql_auth,
+              do: {:ok, %{status: 200, body: %{"errors" => [%{"extensions" => %{"code" => "FORBIDDEN"}}]}}},
+              else: {:ok, %{status: unquote(status), body: %{}}}
+        end
+      end)
+
+      paused =
+        ProjectContext.with_context(failing_context, fn ->
+          completed = finish_worker(state, issue)
+          completed = if unquote(mode) == :dispatch, do: put_in(completed.retry_attempts[issue.id].completion_pending, false), else: completed
+          completed = %{completed | completed_states: %{}}
+          retry = completed.retry_attempts[issue.id]
+          assert {:noreply, paused} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, completed)
+          assert_received :denied_read
+          retained = paused.retry_attempts[issue.id]
+          assert retained.timer_ref == nil
+          assert retained.due_at_ms == nil
+          assert retained.error =~ "access blocked"
+          assert retained.workspace_path == workspace
+          assert retained.recovered_turn_context == retry.recovered_turn_context
+          assert retained.review_subagent_ids == retry.review_subagent_ids
+          assert MapSet.member?(paused.claimed, issue.id)
+          assert File.dir?(workspace)
+          refute Orchestrator.should_dispatch_issue_for_test(issue, paused)
+          assert {:noreply, ^paused} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, paused)
+          refute_received :denied_read
+          assert {:reply, snapshot, _} = Orchestrator.handle_call(:snapshot, self(), paused)
+          assert [%{due_in_ms: nil}] = snapshot.retrying
+          rendered = StatusDashboard.format_snapshot_content_for_test({:ok, snapshot}, 0.0)
+          assert rendered =~ "paused"
+          refute rendered =~ "in 0.000s"
+          assert {:reply, _, rechecking} = Orchestrator.handle_call(:request_refresh, self(), paused)
+          Process.cancel_timer(rechecking.tick_timer_ref)
+          retry = rechecking.retry_attempts[issue.id]
+          Process.cancel_timer(retry.timer_ref)
+          assert {:noreply, paused} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, rechecking)
+          assert_received :denied_read
+          assert paused.retry_attempts[issue.id].timer_ref == nil
+          paused
+        end)
+
+      ProjectContext.with_context(context, fn ->
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "Review"}])
+        assert {:reply, %{queued: true}, resumed} = Orchestrator.handle_call(:request_refresh, self(), paused)
+        Process.cancel_timer(resumed.tick_timer_ref)
+        retry = resumed.retry_attempts[issue.id]
+        assert is_reference(retry.timer_ref)
+        Process.cancel_timer(retry.timer_ref)
+        assert {:noreply, recovered} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, resumed)
+        assert recovered.retry_attempts == %{}
+        assert recovered.running == %{}
+        assert {:noreply, ^recovered} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, recovered)
+        if unquote(mode) == :completion, do: refute(File.exists?(workspace))
       end)
     end
   end

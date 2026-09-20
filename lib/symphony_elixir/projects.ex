@@ -110,6 +110,7 @@ defmodule SymphonyElixir.Projects do
 
   def handle_call(:request_refresh, _from, contexts) do
     SymphonyElixir.ProjectPoller.refresh()
+    Enum.each(contexts, &GenServer.cast(server(&1), :request_refresh))
     result = %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll", "reconcile"]}
     {:reply, result, contexts}
   end

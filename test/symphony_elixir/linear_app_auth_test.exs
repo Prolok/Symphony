@@ -358,6 +358,30 @@ defmodule SymphonyElixir.LinearAppAuthTest do
     refute_received {:token_issued, 2}
   end
 
+  test "identity GraphQL auth errors remain denied while temporary errors can recover", ctx do
+    for code <- ["AUTHENTICATION_ERROR", "FORBIDDEN", "UNAUTHENTICATED"], status <- [200, 400] do
+      request = fn payload, _ ->
+        assert payload.query =~ "SymphonyAppIdentity"
+        {:ok, %{status: status, body: %{"data" => %{"viewer" => nil}, "errors" => [%{"extensions" => %{"code" => code}}]}}}
+      end
+
+      assert {:error, :linear_app_identity_denied} = call(ctx, request: request)
+    end
+
+    for status <- [200, 400] do
+      request = fn payload, _ ->
+        assert payload.query =~ "SymphonyAppIdentity"
+        {:ok, %{status: status, body: %{"errors" => [%{"extensions" => %{"code" => "INTERNAL_SERVER_ERROR"}}]}}}
+      end
+
+      assert {:error, :linear_app_identity_unavailable} = call(ctx, request: request)
+    end
+
+    assert {:ok, _} = call(ctx)
+    assert_received {:token_issued, 1}
+    refute_received {:token_issued, 2}
+  end
+
   test "confirmed retry-after survives another app cache and blocks identity and token requests", ctx do
     root = Path.join([File.cwd!(), "_build", "rate-limit-#{System.unique_integer([:positive])}"])
     on_exit(fn -> File.rm_rf!(root) end)

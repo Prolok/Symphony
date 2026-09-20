@@ -1269,9 +1269,10 @@ betroffenen App warten mindestens bis zum Ablauf. Projektzustände und private
 Credentialquellen bleiben im jeweiligen Projekt.
 Nicht erschöpfte Diagnoseheader erzeugen keine Sperre. Ein fehlgeschlagener
 Dispatch-Refresh erhält den sichtbaren Retry samt Ergebnis und IDs.
-Definitive Zugriffsablehnung (401/403 ohne Rate-Limit, Auth-GraphQL-Fehler oder
-abgelehnte App-Identität/Zugangsdaten) pausiert den betroffenen Dispatch-,
-Retry- oder Abschlussabgleich ohne weiteren Timer oder Modellstart. Workspace,
+Definitive Zugriffsablehnung (401/403 ohne Rate-Limit, Auth-GraphQL-Fehler auch
+bei der Identitätsprüfung oder abgelehnte App-Identität/Zugangsdaten) pausiert
+den betroffenen Dispatch-, Retry- oder Abschlussabgleich ohne weiteren Timer
+oder Modellstart. Workspace,
 Claim und Fortsetzungskontext bleiben erhalten. Dashboard/API zeigen den Fehler
 mit der Fortsetzungsbedingung und ohne Fälligkeit. Nach Reparatur des Zugriffs
 aktiviert ein expliziter Dashboard/API-Refresh den bestehenden Retry; dieser

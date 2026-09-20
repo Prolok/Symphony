@@ -323,15 +323,23 @@ defmodule SymphonyElixir.Linear.AppAuth do
   end
 
   defp verify_viewer(body, binding, assignee) do
-    if rate_limited?(body) do
-      {:error, :linear_app_rate_limited}
-    else
-      with :ok <- match_viewer(body, binding, assignee), do: {:ok, body}
+    cond do
+      rate_limited?(body) -> {:error, :linear_app_rate_limited}
+      graphql_auth_error?(body) -> {:error, :linear_app_identity_denied}
+      true -> with :ok <- match_viewer(body, binding, assignee), do: {:ok, body}
     end
   end
 
   defp identity_error(body, fallback) do
-    if rate_limited?(body), do: {:error, :linear_app_rate_limited}, else: {:error, fallback}
+    cond do
+      rate_limited?(body) -> {:error, :linear_app_rate_limited}
+      graphql_auth_error?(body) -> {:error, :linear_app_identity_denied}
+      true -> {:error, fallback}
+    end
+  end
+
+  defp graphql_auth_error?(body) do
+    Enum.any?(Map.get(body, "errors") || [], &(get_in(&1, ["extensions", "code"]) in ["AUTHENTICATION_ERROR", "FORBIDDEN", "UNAUTHENTICATED"]))
   end
 
   defp match_viewer(%{"data" => %{"viewer" => %{"id" => user, "app" => true, "organization" => %{"id" => workspace}} = viewer}} = body, binding, assignee) do

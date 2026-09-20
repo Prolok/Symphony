@@ -253,6 +253,7 @@ defmodule SymphonyElixir.RetryRefreshTest do
         {401, :dispatch, true},
         {403, :dispatch, false},
         {:identity_denied, :completion, false},
+        {:identity_graphql_auth, :completion, true},
         {:graphql_auth, :dispatch, false}
       ] do
     test "#{status} pauses #{mode} refresh until explicit recovery with yolo=#{yolo}" do
@@ -270,6 +271,10 @@ defmodule SymphonyElixir.RetryRefreshTest do
           query =~ "SymphonyAppIdentity" and unquote(status) == :identity_denied ->
             send(parent, :denied_read)
             {:ok, %{status: 403, body: %{}}}
+
+          query =~ "SymphonyAppIdentity" and unquote(status) == :identity_graphql_auth ->
+            send(parent, :denied_read)
+            {:ok, %{status: 200, body: %{"data" => %{"viewer" => nil}, "errors" => [%{"extensions" => %{"code" => "FORBIDDEN"}}]}}}
 
           query =~ "SymphonyAppIdentity" ->
             app = context.settings.tracker.app

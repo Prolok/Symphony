@@ -34,8 +34,9 @@ Das ist ein Quellnachweis, kein Beleg für eine lokale Installation.
 | Operation | Vertrag und verwendeter Beleg |
 | --- | --- |
 | Vorprüfung | `--version`, anschließend `agents.list`; exakt konfigurierte ID erforderlich |
-| Start | `agent`: `agentId`, `sessionKey`, `idempotencyKey`, vollständige `message`, `cwd`, `timeout`, `deliver=false` |
+| Start | Externes `agent`: `agentId`, `sessionKey`, `idempotencyKey`, vollständige `message`, `timeout`, `deliver=false`; kein `cwd` oder interner/plugin-eigener Principal |
 | Annahme | Antwort `runId` gleich Auftrags-ID und `status=accepted`; noch kein Arbeitsabschluss |
+| Nichtstart | Typisierte erste Gateway-Fehlerantwort mit belegtem Vorab-Grund; eigener Ablehnungsbeleg, kein erfundenes `endedAt` |
 | Beobachtung | `agent.wait` mit derselben `runId`; `timeout` ohne Endbeleg bleibt ungeklärt |
 | Abbruch | `sessions.abort` mit Sitzungsschlüssel **und** `runId`; Bestätigung ersetzt keinen Endbeleg |
 | Ende | Passende `runId`, terminaler Status und `endedAt`; `yielded`/`pendingError` sind kein Ende |
@@ -45,6 +46,11 @@ Schemas: [Agent-RPC](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f08
 Die Zuordnung `idempotencyKey` → `runId` und die begrenzte Ergebnisvorhaltung
 sind im [Gateway-Quellcode](https://github.com/openclaw/openclaw/tree/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/agent-turn)
 geprüft. Ein abgelaufener Cache beweist keine Nichtausführung.
+
+Der [Preflight](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/agent-turn/agent-request-preflight.ts)
+reserviert `cwd` für plugin-eigene Unteragenten, obwohl das Feld im Schema steht.
+Die unveränderte Fixture unter `test/fixtures/openclaw` sichert diese Grenze mit
+Quellhash. Symphony weist das Arbeitsverzeichnis über die Werkzeugausführung nach.
 
 Fehler heißen unter anderem `openclaw_requires_linear_yolo_agent`,
 `openclaw_binary_missing`, `openclaw_gateway_unavailable`,
@@ -69,6 +75,13 @@ Sitzungstyp muss live nachgewiesen werden.
 Ein temporärer lokaler MCP-Zugang bindet Projekt, Laufgeneration und Mitglieder
 serverseitig. Der Agent ruft über sein vorhandenes `exec` das mitgelieferte
 `scripts/sym-yolo-tool.py` mit Bindungsdatei und JSON-RPC auf stdin auf.
+Das `exec`-Arbeitsverzeichnis muss der Prüfcheckout sein; der Prompt enthält
+alternativ ein gequotetes `cd -- /ABS/CHECKOUT && python3 ...`. Der Helfer misst
+physisches cwd, Git-Root, HEAD und Sauberkeit bei jedem Aufruf. Die Bridge
+vergleicht Projekt, Lauf, Sitzung, Checkout und SHA, prüft den Git-Stand selbst
+erneut und speichert den Nachweis mit dem Payloadhash vor dem Werkzeugdispatch.
+Falscher Wissensworkspace, fremde Generation, abweichende SHA und schmutziger oder
+unzugänglicher Checkout sperren den Zugriff. Eine bloße Promptbehauptung genügt nicht.
 `tools/list` und `tools/call` erreichen denselben Symphony-Dispatcher wie Codex:
 `linear_graphql`, `symphony_comments`, `symphony_yolo_action`,
 `symphony_yolo_complete` und `symphony_test`. Bestehende Frische-, Schreib- und
@@ -76,6 +89,9 @@ Testexecutorgrenzen bleiben wirksam; ein Werkzeugname allein erteilt keine
 zusätzliche Berechtigung. Nach Abbruch, Transportunsicherheit oder Wiederaufnahme
 ist die alte Schreibbindung gesperrt. Die lokale Bindungsdatei gehört nur diesem
 Lauf und enthält keine Linear-Credentials; sie darf nicht ausgegeben werden.
+Die Bridge empfängt vollständige JSON-Zeilen bis 1 MiB; ihr Empfangspuffer ist
+ebenfalls darauf begrenzt, damit größere Workpads nicht vor dem JSON-Parser
+abgeschnitten und fälschlich als ungültige Laufbindung behandelt werden.
 
 Der Betreiber muss für den gewählten Agenten prüfen und dokumentieren:
 
@@ -87,7 +103,8 @@ Der Betreiber muss für den gewählten Agenten prüfen und dokumentieren:
 - Widersprüche in Agentenanweisungen, einschließlich eines vorhandenen
   `symphony-product-owner`: Ablauf aus dem übergebenen Workflow, keine zweite
   Ticketsteuerung, keine parallelen Unteragenten, keine direkten Linear-Schreibwege,
-  kein automatisches `Review` → `Fertig`. Notwendige Anpassungen protokollieren.
+  kein automatisches `Review` → `Fertig`. Konflikte als offene Live-Abnahme
+  dokumentieren; Agentenkonfiguration und Berechtigungen bleiben unverändert.
 - LinearBridge-Mentions bleiben Beratung; allein Symphony autorisiert Aktionen.
 
 PO-/Abnahme-Checkouts liegen detached unter `workspace.root/yolo/<Gruppe>/<Lauf>`
@@ -99,7 +116,7 @@ auf der aktuellen `origin/main`-SHA. Auftragsartefakte liegen getrennt unter
 Vor Versand wird eine unveränderliche Auftragsabsicht mit Agent, Sitzung,
 Mitgliedern, Payload-Hash und Checkout/SHA synchron gespeichert. Eine Gruppe
 behält Mitgliederleases, lokale Sperren und einen gemeinsamen Kapazitätsplatz
-bis zum bestätigten externen Ende. Beim Neustart werden Reservierungen aus dem
+bis zum bestätigten externen Ende oder belegten Nichtstart. Beim Neustart werden Reservierungen aus dem
 Symphony-Journal rekonstruiert; alte Werkzeuge bekommen keine neue Schreibfreigabe.
 Die Wiederaufnahme beobachtet denselben Auftrag und fordert dessen gezielten
 Abbruch an. Sie sendet den Arbeitsauftrag **niemals erneut**.
@@ -114,6 +131,28 @@ seiner Lauf-ID abgeglichen werden. Fehlender Verlauf oder Wartezeit rechtfertige
 weder Journal-Löschung noch einen neuen Auftrag. Ist kein Endbeleg mehr verfügbar,
 bleibt eine sichtbare Betreiberklärung erforderlich.
 
+`openclaw-rpc.py` akzeptiert ausschließlich JSON-Fehler auf stdout aus dem
+geprüften CLI-Pfad: Exit 1, `ok=false`, `error.type=gateway_request_error`,
+`code=INVALID_REQUEST`, `retryable=false` und den exakten Vorab-Grund
+`cwd is reserved for plugin-owned subagent runs` oder `cwd must be absolute`.
+Die erste Antwort wird ohne `--expect-final` angefordert. Maximal 16 KiB Fehler-JSON
+werden auf Vertragsversion 1, Methode, Phase, Code, erlaubten Grund und SHA-256
+der konkreten Anfrageparameter reduziert. Zusatzfelder und stderr werden verworfen.
+Textfehler älterer CLI-Builds, allgemeines `INVALID_REQUEST`, verlorene Antworten
+und Timeouts bleiben `unknown`; daraus folgt keine Freigabe.
+
+Eine belegte Ablehnung wird `rejected`, entzieht Werkzeuge und beendet den lokalen
+Beobachter ohne `agent.wait`. Annahme-/Werkzeugbelege sperren spätere Nichtstartbefunde.
+Nichtterminale Ausführungsbelege bewahren die bestehende Werkzeugfreigabe;
+bereits entzogene Freigaben oder angeforderte Abbrüche werden dadurch nicht aufgehoben.
+Verspätete Poll-/Cancel-Antworten öffnen terminale Generationen nicht wieder.
+Vor dem Folgeauftrag wird der vollständige alte Datensatz synchron unter
+`<Gruppenjournal>.history/` archiviert; erst danach wird das aktuelle Journal atomar
+ersetzt. Ein Abbruch dazwischen lässt den alten Datensatz lesbar und den Archivschritt
+wiederholbar. Nichtstart markiert keine PO-Entscheidung als verarbeitet; der bestehende
+Retryabstand bleibt erhalten. Dashboard und Lifecycle nennen bei Unsicherheit die
+Betreiberklärung und nach Ablehnung die freigegebene Reservierung.
+
 Neue Kommentare werden vor Aktionen und Abschluss frisch abgeglichen. Entzogene
 Mitglieder verlieren ihre Schreibberechtigung; Gesamtentzug fordert Abbruch an.
 Ein externer Erfolg allein speichert keine verarbeitete Beobachtung: bestätigte
@@ -126,7 +165,99 @@ erhalten. Isoliertes Test-Cleanup verweigert das Entfernen eines Checkouts, sola
 ein externer Auftrag darauf ungeklärt ist. Ein lokaler Prozesskill gilt nie als
 OpenClaw-Abbruch. Keine automatische Bereinigung des Wissensworkspace.
 
+## Gezielte Betreiber-Recovery eines Altauftrags
+
+Nur der Betreiber importiert Originalbelege; Worker verändern weder produktive
+Journale noch laufende Tickets. Dienst und Befehl müssen den obigen Journalvertrag
+verwenden. Die operative Aktivierung bleibt separat koordiniert; OpenClaw-Konfiguration,
+Agentenrechte und Wissensworkspace bleiben unverändert. Der Befehl startet keinen
+Symphony-Dienst und sendet keinen Agentenauftrag.
+Diese explizite Betreiberaktion greift auf das ursprüngliche Gateway zu, auch
+wenn der automatische OpenClaw-Ausführungsweg inzwischen deaktiviert wurde.
+
+Der Betreiber korreliert die ursprüngliche `agent`-Anfrage und ihre konkrete
+Vorab-Ablehnung über die originale RPC-Anfragekennung. Ein zeitlich naher Logeintrag,
+fehlende Sitzung oder Timeout reicht nicht. Die Prüfunterlagen müssen aktive/fremde
+Ausführung derselben Lauf-/Sitzungsbindung ausschließen. Quellen außerhalb öffentlicher
+Logs aufbewahren; keine Credentials in das Paket kopieren. `source_file` und
+`execution_source_file` sind lokale Originalbelege bzw. der belegreferenzierende
+Betreiberbericht. Der Befehl prüft deren SHA-256; die inhaltliche Zuordnung bestätigt
+der benannte Betreiber mit diesem Paket:
+
+```json
+{
+  "version": 1,
+  "binding": {
+    "id": "ORIGINAL-RUN-ID", "group": "incoming", "project_id": "/ABS/PROJEKT",
+    "agent": "po", "linear_agent_id": "ORIGINAL-LINEAR-AGENT-ID",
+    "linear_workspace_id": "ORIGINAL-LINEAR-WORKSPACE-ID",
+    "session_id": "ORIGINAL-SESSION-KEY", "payload_sha256": "ORIGINAL-PAYLOAD-SHA256",
+    "workspace": "/ABS/ORIGINAL-PRUEFCHECKOUT", "sha": "ORIGINAL-CHECKOUT-SHA",
+    "members": [{"id": "ORIGINAL-ISSUE-ID", "identifier": "PRO-810", "state": "Backlog"}]
+  },
+  "gateway_version": "2026.9.4",
+  "request": {
+    "request_id": "ORIGINAL-RPC-ID", "method": "agent", "run_id": "ORIGINAL-RUN-ID",
+    "session_id": "ORIGINAL-SESSION-KEY", "agent": "po",
+    "payload_sha256": "ORIGINAL-PAYLOAD-SHA256", "cwd": "/ABS/ORIGINAL-PRUEFCHECKOUT"
+  },
+  "response": {
+    "request_id": "ORIGINAL-RPC-ID", "phase": "pre_acceptance",
+    "code": "INVALID_REQUEST", "reason": "cwd_reserved"
+  },
+  "execution_check": {
+    "run_id": "ORIGINAL-RUN-ID", "session_id": "ORIGINAL-SESSION-KEY",
+    "no_active_or_foreign_execution": true, "basis": "correlated_original_rejection",
+    "checked_at": "AKTUELLER-ISO8601-ZEITPUNKT-MIT-ZEITZONE"
+  },
+  "source_file": "originalbeleg.txt", "source_sha256": "64-HEX-ZEICHEN",
+  "execution_source_file": "betreiberpruefung.txt", "execution_source_sha256": "64-HEX-ZEICHEN",
+  "reviewer": "Tilo"
+}
+```
+
+`binding` enthält diese Felder vollständig und unverändert aus genau dem Originalauftrag,
+einschließlich **aller** Mitglieder. Der Originalbeleg muss den exakten Gatewaytext
+`cwd is reserved for plugin-owned subagent runs` tragen; `cwd_reserved` normalisiert
+diesen Grund. Die originale RPC-Kennung darf das OpenClaw-Format `Sequenz:UUID`
+enthalten. Keine frei erfundene oder aus gekürzten Logs ergänzte Kennung verwenden. Fehlende Korrelation hält
+die Reservierung geschlossen. Die Ausführungsprüfung darf beim ersten Anwenden
+höchstens fünf Minuten alt sein. Quellpfade beziehen sich auf das Paketverzeichnis.
+
+Aus der aktivierten Symphony-Installation mit deren ursprünglicher öffentlicher
+Projekt-/Workflow-Konfiguration ausführen:
+
+```sh
+mise exec -- mix openclaw.recover --project /ABS/PROJEKT --evidence /ABS/recovery.json
+mise exec -- mix openclaw.recover --project /ABS/PROJEKT --evidence /ABS/recovery.json --apply
+```
+
+Der erste Aufruf ist ein Trockenlauf. Beide prüfen unter derselben Journalsperre
+Generation, Bindung, fehlende Annahme-/Werkzeug-/Completion-/Aktionsbelege, den
+ursprünglichen Agenten und einen frischen `agent.wait`-Gegenbefund. Aktiver oder
+fremder Lauf, tatsächlicher Endbeleg und nicht erreichbares Gateway verweigern
+diese Nichtstart-Recovery. Ein Timeout ist nur die widerspruchsfreie Gegenprüfung;
+die Freigabe beruht auf dem korrelierten Original-Ablehnungsbeleg. Vorhandene
+Aktionsbelege derselben Mitglieder werden konservativ gesperrt.
+
+`--apply` speichert Ablehnungsbeleg, Betreiber-/Quellhashes und den vorherigen
+Fehlerzustand atomar. Der Beobachter liest das Ergebnis und endet; Mitgliederleases
+und Kapazität fallen über den bestehenden Lifecycle frei. Identisches erneutes
+Anwenden bleibt wirkungslos, auch nach einem Folgeauftrag: Das Archiv wird gelesen,
+die neue Generation bleibt unverändert. Ein geändertes Paket ist keine identische
+Wiederholung. Kein Journal-Löschen, globaler Lease-Reset, manuelles `completed`
+oder erfundenes `endedAt`.
+
+Abnahmebeleg: Quell-/Paketstand, korrelierte Originalquelle, Trockenlauf, identische
+Anwendung/Wiederholung, erhaltene Historie und anschließende reguläre Verarbeitung
+der incoming-Gruppe. Für PRO-810 bleibt dies separate Betreiberarbeit.
+
 ## Standardtests und separater Live-Nachweis
+
+Im expliziten OpenClaw-Livetest fragt der Testrunner den Linear-Abnahmestand
+höchstens alle 15 Sekunden ab (sonst 3 Sekunden), um die zusätzlichen lesenden
+Betreiberabfragen zu begrenzen. Identitätsprüfung, Fehlerklassifikation und das
+gesamte Retrybudget des Laufs bleiben unverändert. Das Intervall steht im Ergebnisbeleg.
 
 `make check`, `make all` und ExUnit verwenden keine echte OpenClaw-Installation.
 Testbuilds sperren die echte Prozessgrenze; `scripts/mix-gate` entfernt geerbte
@@ -160,14 +291,22 @@ Nach Merge kann `--source-mode merged` den tatsächlichen gemergten Stand belege
 `po_aggregation`/`po_followup` bei Bedarf ebenfalls ausdrücklich auswählen.
 
 `result.json` muss reale Agent-/Sitzungs-/Payloadbelege, tatsächliche PO-Aktionen,
-Prüf-SHA, `cleanup`, `main_preserved` und `originals_preserved` enthalten.
+Prüf-SHA, `checkout_proof` (physischer Root, saubere SHA, Projekt/Lauf/Payload),
+passenden terminalen Gatewaybeleg, `cleanup`, `main_preserved` und
+`originals_preserved` enthalten. Danach `po_incoming` mit neuer Laufkennung und
+neuem Ergebnisverzeichnis im selben Testprojekt wiederholen; zusätzlich
+`--openclaw-previous-incoming-result /ABS/BELEGE/incoming/result.json` übergeben.
+Der Runner verlangt denselben Quell-/Projektstand, einen bestandenen bereinigten
+Live-Vorläufer und neue Agentenlauf-/Sitzungskennungen. Er speichert dessen Hash
+unter `openclaw.subsequent_incoming` als Nachweis weiterer Eingangsarbeit nach Freigabe.
 Zusätzlich Gateway-/CLI-Version und Agentenanweisungsprüfung beilegen sowie die
 Fachantwort im **Review-Sitzungsschlüssel** gegen die erwartete Antwort prüfen.
 Das automatische Resultat kennzeichnet diese fachliche Betreiberbewertung als
 `operator_evidence_required`; ein technischer Pass ersetzt sie nicht.
 Simulationen und Live-Belege mit eigenem Quellstand getrennt ausweisen.
-Ohne diese positiven Belege bleibt die produktive Aktivierung offen; reguläre
-Entwicklung und Merge benötigen keine lokale OpenClaw-Installation.
+Ohne diese positiven Belege bleibt die produktive Aktivierung offen. Standardentwicklung
+benötigt keine lokale OpenClaw-Installation; ticketseitig vereinbarte Live-/Recoverygates
+bleiben vor Test-Handoff beziehungsweise Merge bindend.
 
 Bei Fehlern denselben Auftrag erhalten. Der vorhandene isolierte Runner unterstützt
 `--resume --cleanup-only` mit unveränderten Lauf-/Quellparametern; dies ist nur

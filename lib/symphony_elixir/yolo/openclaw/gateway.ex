@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @moduledoc "Gateway RPC contract verified against OpenClaw 2026.9.4; no local fallback."
   @behaviour SymphonyElixir.Yolo.OpenClaw.Adapter
+  alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Transport
 
   @impl true
@@ -31,7 +32,6 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
         "idempotencyKey" => order["id"],
         "message" => prompt,
         "deliver" => false,
-        "cwd" => order["workspace"],
         "timeout" => order["timeout_seconds"]
       },
       opts
@@ -51,16 +51,30 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   end
 
   defp rpc(method, params, opts) do
-    args = ["gateway", "call", method, "--params", Jason.encode!(params), "--json", "--timeout", "10000", "--port", "18789"]
+    raw = Jason.encode!(params)
+    args = ["gateway", "call", method, "--params", raw, "--json", "--timeout", "10000", "--port", "18789"]
 
     with {:ok, output} <- command(args, opts),
          {:ok, response} when is_map(response) <- Jason.decode(output) do
-      {:ok, response}
+      decode_response(response, method, raw)
     else
       {:error, reason} when is_atom(reason) -> {:error, reason}
       _ -> {:error, :openclaw_invalid_response}
     end
   end
+
+  defp decode_response(%{"symphony_openclaw_rejection" => 1} = proof, "agent", raw) do
+    if proof["method"] == "agent" and proof["phase"] == "pre_acceptance" and
+         proof["code"] == "INVALID_REQUEST" and proof["reason"] in ~w(cwd_reserved cwd_not_absolute) and
+         proof["request_sha256"] == OpenClaw.digest(raw) do
+      {:rejected, Map.take(proof, ~w(method phase code reason request_sha256))}
+    else
+      {:error, :openclaw_invalid_response}
+    end
+  end
+
+  defp decode_response(%{"symphony_openclaw_rejection" => _}, _, _), do: {:error, :openclaw_invalid_response}
+  defp decode_response(response, _, _), do: {:ok, response}
 
   defp command(args, opts), do: Keyword.get(opts, :transport, &Transport.command/1).(args)
 end

@@ -82,6 +82,8 @@ Betreiberübergabe vorhandener Daten.
 - `mise` ab 2026.3.17 und die installierte Toolchain aus `mise.toml`
   (Erlang/OTP 28, Elixir 1.19.5 für OTP 28)
 - Git ab 2.31, Python ab 3.11 als `python3`, Make und Codex CLI im `PATH`
+- Für die Offline-Regression der OpenClaw-Gatewayregeln: Node.js ab 18 als `node`
+  im `PATH`; eine OpenClaw-Installation ist dafür nicht erforderlich.
 - Build-Werkzeuge: unter macOS die Xcode Command Line Tools
   (`xcode-select --install`), unter Ubuntu `build-essential`. Für lokale
   Plattformtests zusätzlich zsh; sie führen die Hilfsbefehle aus Bash und

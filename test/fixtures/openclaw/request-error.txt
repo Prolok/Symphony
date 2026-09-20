@@ -1,0 +1,22 @@
+export function formatGatewayClientRequestErrorJson(
+  value: unknown,
+): GatewayClientRequestErrorJson | null {
+  if (!isGatewayClientRequestError(value)) {
+    return null;
+  }
+  const requestError = value;
+  return {
+    ok: false,
+    error: {
+      type: "gateway_request_error",
+      code: requestError.gatewayCode,
+      message: requestError.message,
+      ...(requestError.details !== undefined ? { details: requestError.details } : {}),
+      retryable: requestError.retryable,
+      ...(requestError.retryAfterMs !== undefined
+        ? { retryAfterMs: requestError.retryAfterMs }
+        : {}),
+    },
+  };
+}
+

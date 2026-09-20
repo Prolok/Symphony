@@ -133,6 +133,14 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     end
   end
 
+  test "a checkout without a bound project fails closed instead of crashing", ctx do
+    assert %{"binding" => _} = ReviewContract.load(ctx.workspace, "run")
+
+    ProjectContext.with_context(nil, fn ->
+      assert %{"error" => "yolo_review_skill_unavailable_or_unbound"} = ReviewContract.load(ctx.workspace, "run")
+    end)
+  end
+
   test "a corrupt operation journal remains an error instead of authorizing acceptance", ctx do
     Scope.with_scope(
       "review",

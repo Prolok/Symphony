@@ -1,8 +1,9 @@
 defmodule SymphonyElixir.YoloReviewContractTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.ProjectContext
-  alias SymphonyElixir.Yolo.{ActionTool, Completion, Group, Handoff, OpenClaw, Operations, ReviewContract, Runner, Scope, Store}
+  alias SymphonyElixir.Yolo.{ActionTool, Completion, Group, Handoff, OpenClaw, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
+  alias SymphonyElixir.Yolo.Operations
   alias SymphonyElixir.YoloReviewFixture, as: Fixture
 
   setup do

@@ -60,6 +60,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   @state_lookup_query """
   query SymphonyResolveStateId($issueId: String!, $stateName: String!) {
     issue(id: $issueId) {
+      state { id }
       team {
         states(filter: {name: {eq: $stateName}}, first: 1) {
           nodes {
@@ -130,15 +131,35 @@ defmodule SymphonyElixir.Linear.Adapter do
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name)
       when is_binary(issue_id) and is_binary(state_name) do
-    with {:ok, state_id} <- resolve_state_id(issue_id, state_name),
-         {:ok, response} <-
-           client_module().graphql(@update_state_mutation, %{issueId: issue_id, stateId: state_id}),
-         true <- get_in(response, ["data", "issueUpdate", "success"]) == true do
-      :ok
-    else
-      false -> {:error, :issue_update_failed}
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :issue_update_failed}
+    with {:ok, state_id, current_id} <- resolve_state_id(issue_id, state_name) do
+      if current_id == state_id do
+        :ok
+      else
+        write_issue_state(issue_id, state_name, state_id)
+      end
+    end
+  end
+
+  defp write_issue_state(issue_id, state_name, state_id) do
+    case client_module().graphql(@update_state_mutation, %{issueId: issue_id, stateId: state_id}) do
+      {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}} ->
+        :ok
+
+      {:error, {:linear_api_request, :linear_app_request_unavailable}} = error ->
+        reconcile_issue_state(issue_id, state_name, state_id, error)
+
+      {:error, _} = error ->
+        error
+
+      _ ->
+        {:error, :issue_update_failed}
+    end
+  end
+
+  defp reconcile_issue_state(issue_id, state_name, state_id, error) do
+    case resolve_state_id(issue_id, state_name) do
+      {:ok, ^state_id, ^state_id} -> :ok
+      _ -> error
     end
   end
 
@@ -195,9 +216,10 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp resolve_state_id(issue_id, state_name) do
     with {:ok, response} <-
            client_module().graphql(@state_lookup_query, %{issueId: issue_id, stateName: state_name}),
+         true <- Map.get(response, "errors", []) in [nil, []],
          state_id when is_binary(state_id) <-
            get_in(response, ["data", "issue", "team", "states", "nodes", Access.at(0), "id"]) do
-      {:ok, state_id}
+      {:ok, state_id, get_in(response, ["data", "issue", "state", "id"])}
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :state_not_found}

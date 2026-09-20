@@ -274,7 +274,37 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     assert :sys.get_state(ProjectPoller).timer_token == poll.timer_token
     send(ProjectPoller, {:poll, poll.timer_token})
     assert_receive :relay_poll, 2_000
+    worker = Projects.server(context)
+
+    paused = %{
+      attempt: 1,
+      identifier: "PRO-DENIED",
+      access_blocked: true,
+      timer_ref: nil,
+      retry_token: nil,
+      due_at_ms: nil,
+      error: "access blocked",
+      recovered_turn_context: "retained result"
+    }
+
+    :sys.replace_state(worker, &%{&1 | retry_attempts: Map.put(&1.retry_attempts, "denied", paused)})
+    :ok = :sys.suspend(worker)
+    refresh = Task.async(fn -> Projects.handle_call(:request_refresh, nil, [context]) end)
+
+    try do
+      assert {:ok, {:reply, %{queued: true}, [^context]}} = Task.yield(refresh, 500)
+    after
+      :sys.resume(worker)
+      Task.shutdown(refresh)
+    end
+
     assert %{queued: true} = Orchestrator.request_refresh()
+    retry = :sys.get_state(worker).retry_attempts["denied"]
+    assert is_reference(retry.timer_ref)
+    assert retry.recovered_turn_context == "retained result"
+    refute retry.access_blocked
+    Process.cancel_timer(retry.timer_ref)
+    :sys.replace_state(worker, &%{&1 | retry_attempts: Map.delete(&1.retry_attempts, "denied")})
     assert_receive :relay_poll, 2_000
     assert {:ok, []} = ProjectPoller.candidates(context)
     Agent.update(mode, fn _ -> :offline end)

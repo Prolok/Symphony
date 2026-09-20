@@ -1358,13 +1358,19 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
 
-        schedule_issue_retry(state, issue.id, attempt, %{
-          identifier: issue.identifier,
-          error: "dispatch refresh failed: #{inspect(reason)}",
-          worker_host: preferred_worker_host,
-          delegate_id: issue.delegate_id,
-          review_stay: review_issue_state?(issue.state)
-        })
+        schedule_refresh_retry(
+          state,
+          issue.id,
+          attempt,
+          %{
+            identifier: issue.identifier,
+            error: "dispatch refresh failed: #{inspect(reason)}",
+            worker_host: preferred_worker_host,
+            delegate_id: issue.delegate_id,
+            review_stay: review_issue_state?(issue.state)
+          },
+          reason
+        )
     end
   end
 
@@ -1674,8 +1680,9 @@ defmodule SymphonyElixir.Orchestrator do
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
     delay_ms = max(retry_delay(next_attempt, metadata), RateLimit.remaining_ms())
     old_timer = Map.get(previous_retry, :timer_ref)
-    retry_token = make_ref()
-    due_at_ms = System.monotonic_time(:millisecond) + delay_ms
+    access_blocked = Map.get(metadata, :access_blocked, false)
+    retry_token = if access_blocked, do: nil, else: make_ref()
+    due_at_ms = if access_blocked, do: nil, else: System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
@@ -1690,11 +1697,16 @@ defmodule SymphonyElixir.Orchestrator do
       Process.cancel_timer(old_timer)
     end
 
-    timer_ref = Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
+    timer_ref =
+      if access_blocked, do: nil, else: Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
 
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
-    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+    if access_blocked do
+      Logger.error("Issue access blocked issue_id=#{issue_id} issue_identifier=#{identifier} attempt=#{next_attempt}; restore access and request refresh#{error_suffix}")
+    else
+      Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+    end
 
     %{
       state
@@ -1704,6 +1716,7 @@ defmodule SymphonyElixir.Orchestrator do
             timer_ref: timer_ref,
             retry_token: retry_token,
             due_at_ms: due_at_ms,
+            access_blocked: access_blocked,
             identifier: identifier,
             error: error,
             worker_host: worker_host,
@@ -1718,6 +1731,32 @@ defmodule SymphonyElixir.Orchestrator do
           })
     }
   end
+
+  defp schedule_refresh_retry(state, issue_id, attempt, metadata, reason) do
+    metadata =
+      if access_denied?(reason) do
+        metadata
+        |> Map.put(:access_blocked, true)
+        |> Map.update!(:error, &"access blocked; restore access and request refresh: #{&1}")
+      else
+        metadata
+      end
+
+    schedule_issue_retry(state, issue_id, attempt, metadata)
+  end
+
+  defp access_denied?({:linear_api_status, _, %{classification: "rate_limited"}}), do: false
+  defp access_denied?({:linear_api_status, _, %{classification: "auth"}}), do: true
+  defp access_denied?({:linear_api_status, status, _}), do: status in [401, 403]
+  defp access_denied?({:linear_api_status, status}), do: status in [401, 403]
+  defp access_denied?({:linear_api_request, reason}), do: access_denied?(reason)
+
+  defp access_denied?({:linear_graphql_errors, errors}) do
+    codes = Enum.map(errors, &get_in(&1, ["extensions", "code"]))
+    "RATELIMITED" not in codes and Enum.any?(codes, &(&1 in ["AUTHENTICATION_ERROR", "FORBIDDEN", "UNAUTHENTICATED"]))
+  end
+
+  defp access_denied?(reason), do: reason in [:linear_app_identity_denied, :linear_app_identity_mismatch, :linear_app_credentials_denied, :missing_linear_client_secret, :linear_secret_access_denied]
 
   defp retry_attempt_state(%State{} = state, issue_id, retry_token) when is_reference(retry_token) do
     case Map.get(state.retry_attempts, issue_id) do
@@ -1751,7 +1790,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:error, reason} ->
         Logger.warning("Completion refresh failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
 
-        {:noreply, schedule_issue_retry(state, issue_id, attempt + 1, Map.put(metadata, :error, "completion refresh failed: #{inspect(reason)}"))}
+        {:noreply, schedule_refresh_retry(state, issue_id, attempt + 1, Map.put(metadata, :error, "completion refresh failed: #{inspect(reason)}"), reason)}
     end
   end
 
@@ -1766,11 +1805,12 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
 
         {:noreply,
-         schedule_issue_retry(
+         schedule_refresh_retry(
            state,
            issue_id,
            attempt + 1,
-           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
+           Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"}),
+           reason
          )}
     end
   end
@@ -2520,7 +2560,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           issue_id: issue_id,
           attempt: attempt,
-          due_in_ms: max(0, due_at_ms - now_ms),
+          due_in_ms: next_poll_in_ms(due_at_ms, now_ms),
           identifier: Map.get(retry, :identifier),
           error: Map.get(retry, :error),
           worker_host: Map.get(retry, :worker_host),
@@ -2557,6 +2597,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call(:request_refresh, _from, state) do
+    state = resume_access_blocked_retries(state)
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
     coalesced = state.poll_check_in_progress == true or already_due?
@@ -2569,6 +2610,22 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  @impl true
+  def handle_cast(:request_refresh, state) do
+    {:reply, _result, state} = handle_call(:request_refresh, nil, state)
+    {:noreply, state}
+  end
+
+  defp resume_access_blocked_retries(state) do
+    Enum.reduce(state.retry_attempts, state, fn
+      {issue_id, %{access_blocked: true} = retry}, acc ->
+        schedule_issue_retry(acc, issue_id, retry.attempt, %{retry | access_blocked: false})
+
+      _, acc ->
+        acc
+    end)
   end
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update, issue_id) do

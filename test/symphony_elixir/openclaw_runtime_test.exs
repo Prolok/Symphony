@@ -4,7 +4,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Relay.Store, as: Digest
-  alias SymphonyElixir.Yolo.{Completion, Coordinator, OpenClaw, Runner, Scope, Store}
+  alias SymphonyElixir.Yolo.{Completion, Coordinator, OpenClaw, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, Recovery, ToolBridge, Transport}
 
   setup do
@@ -98,6 +98,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     System.cmd("git", ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "skill"], cd: workspace.path)
     {sha, 0} = System.cmd("git", ["rev-parse", "HEAD"], cd: workspace.path)
     workspace = %{workspace | sha: String.trim(sha)}
+    ProjectContext.bind(%{context | root: workspace.path})
     opts = Keyword.put(opts, :workspace, fn _, _ -> {:ok, workspace} end)
 
     handler = fn
@@ -532,7 +533,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, %{"id" => "new", "state" => "accepted"}} = Journal.read("incoming")
   end
 
-  test "missing verified ownership and unreadable project skill prevent submission", %{issues: issues, context: context, opts: opts, workspace: workspace} do
+  test "missing ownership prevents submission and unreadable skill never supplies acceptance evidence", %{issues: issues, context: context, workspace: workspace} do
     ProjectContext.with_context(%{context | yolo_agent_id: nil}, fn ->
       Scope.with_scope("incoming", issues, "unverified", fn ->
         assert {:error, :openclaw_requires_verified_linear_yolo_agent} =
@@ -542,7 +543,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
     skill = Path.join(workspace.path, ".codex/skills/sym-yolo-review/SKILL.md")
     File.mkdir_p!(skill)
-    assert_raise File.Error, fn -> Runner.run("incoming", issues, issues, opts) end
+    assert %{"error" => "yolo_review_skill_unavailable_or_unbound"} = ReviewContract.load(workspace, "run")
   end
 
   test "repeated transport failures keep the same order until terminal proof and publish lifecycle events", %{issues: issues, context: context} do

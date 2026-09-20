@@ -43,6 +43,7 @@ defmodule SymphonyElixir.Yolo.Completion do
          true <- issue.in_project_scope,
          :ok <- check.(issue),
          :ok <- operations_complete(issue),
+         :ok <- review_handoff(scope, issue, opts),
          true <- Admission.eligible?(issue) or Keyword.get(opts, :handoff_completed, false) do
       # Separate journal lock: the worker retains the group and issue leases.
       IssueLease.with_journal_lock(Store.path(scope["group"]) <> ".completion", fn ->
@@ -64,6 +65,12 @@ defmodule SymphonyElixir.Yolo.Completion do
         error -> {:halt, error}
       end
     end)
+  end
+
+  defp review_handoff(scope, issue, opts) do
+    if (scope["group"] == "review" or issue.state == "Review") and issue.state != "BLOCKER" and not Keyword.get(opts, :handoff_completed, false),
+      do: {:error, :yolo_review_handoff_required},
+      else: :ok
   end
 
   defp operations_complete(issue) do

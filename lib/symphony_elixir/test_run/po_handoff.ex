@@ -14,7 +14,7 @@ defmodule SymphonyElixir.TestRun.PoHandoff do
             "Isolierte Betreibergrenze: Eine echte externe Betreiberabnahme fehlt. Sie kann in diesem Lauf nicht erbracht werden. Keine technischen Prüfungen als Ersatz ausgeben. Ursache und benötigten externen Beleg konkret dokumentieren und über symphony_yolo_action an den konfigurierten Menschen übergeben; BLOCKER erhalten. Keine neuen Tickets, keine Quelländerung."
 
           "Review" ->
-            "Fachliche Abnahme des aktuellen gemergten Dummy-Stands: Der getrennte PO-Checkout muss einen vollständigen Git-Commit als HEAD besitzen und git status --porcelain muss sauber sein. Genau diese beiden Anforderungen tatsächlich prüfen, die SHA und ausgeführten Befehle dokumentieren, dann über symphony_yolo_action an den Menschen übergeben. Der Status bleibt Review. Keine weitere Produktanforderung, keine neuen Tickets, keine Quelländerung."
+            "Fachliche Abnahme des aktuellen gemergten Dummy-Stands: Der getrennte PO-Checkout muss einen vollständigen Git-Commit als HEAD besitzen und git status --porcelain muss sauber sein. Diese beiden Anforderungen mit dem versionierten Projekt-Skill aus dem gebundenen Prüfcheckout prüfen. SHA, Skillbindung, ausgeführte Befehle und Einschränkungen gemäß WORKFLOW_YOLO_AGENT.md dokumentieren und symphony_yolo_action(kind=handoff) mit report und strukturiertem review-Beleg verwenden. Der Status bleibt Review. Keine weitere Produktanforderung, keine neuen Tickets, keine Quelländerung."
         end
 
       description = description <> knowledge_probe(fixture, plan)

@@ -2,6 +2,7 @@ defmodule SymphonyElixir.Yolo.Scope do
   @moduledoc "Runtime-owned membership of one PO session, including its bound MCP transport."
   alias SymphonyElixir.{Config, ProjectContext}
   alias SymphonyElixir.Linear.WriteContext
+  alias SymphonyElixir.Yolo.ReviewContract
 
   @spec current() :: map() | nil
   def current do
@@ -41,8 +42,12 @@ defmodule SymphonyElixir.Yolo.Scope do
 
     scope =
       case Keyword.get(opts, :workspace) do
-        %{path: path, sha: sha} -> Map.merge(scope, %{"workspace" => path, "sha" => sha, "workspace_root" => Config.settings!().workspace.root})
-        nil -> scope
+        %{path: path, sha: sha} = workspace ->
+          contract = ReviewContract.load(workspace, run_id) |> Map.delete("content")
+          Map.merge(scope, %{"workspace" => path, "sha" => sha, "workspace_root" => Config.settings!().workspace.root, "review_contract" => contract})
+
+        nil ->
+          scope
       end
 
     WriteContext.with_context(%{yolo_scope: Jason.encode!(scope), run_id: run_id, phase: "YOLO #{group}"}, callback)

@@ -1,16 +1,17 @@
 defmodule SymphonyElixir.Yolo.Handoff do
   @moduledoc "Immediate, evidenced human handoff after review or an external blocker."
   alias SymphonyElixir.{Config, Tracker, Workpad}
-  alias SymphonyElixir.Yolo.{ActionScope, API, Completion, Operations, Scope}
+  alias SymphonyElixir.Yolo.{ActionScope, API, Completion, Operations, ReviewContract, Scope}
 
   @spec invoke(map(), keyword()) :: :ok | {:error, term()}
-  def invoke(%{"issue_id" => id, "report" => report}, opts) when is_binary(report) do
+  def invoke(%{"issue_id" => id, "report" => report} = args, opts) when is_binary(report) do
     with true <- String.trim(report) != "" and Scope.member?(id),
          {:ok, [issue]} <- ActionScope.sources([id], opts),
          true <- issue.state in ["Review", "BLOCKER"],
          {:ok, pending} <- Operations.pending([id]),
          true <- pending == [] or issue.state == "BLOCKER",
-         report = report <> pending_report(pending),
+         :ok <- ReviewContract.validate(issue, args),
+         report = ReviewContract.append_report(report, if(issue.state == "Review", do: args, else: %{})) <> pending_report(pending),
          human when is_binary(human) <- Config.human_handoff_id(),
          :ok <- report(issue, report, opts),
          {:ok, [fresh]} <- ActionScope.sources([id], opts),

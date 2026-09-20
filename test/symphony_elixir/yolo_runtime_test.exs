@@ -199,7 +199,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       session: fn _, _, _, _ ->
         assert {:ok, 1} = ReviewReadiness.observe([issue, review])
         assert {:ok, 2} = ReviewReadiness.observe([review])
-        assert :ok = Completion.invoke(%{"issue_id" => review.id, "result" => "checked snapshot"}, fetch: fn _ -> {:ok, [review]} end, before_action: fn _ -> :ok end)
+        assert :ok = Completion.invoke(%{"issue_id" => review.id, "result" => "checked snapshot"}, handoff_completed: true, fetch: fn _ -> {:ok, [review]} end, before_action: fn _ -> :ok end)
         {:ok, %{session_id: "review-session"}}
       end
     ]
@@ -215,7 +215,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
                [review],
                [review],
                Keyword.put(opts, :session, fn _, _, _, _ ->
-                 assert :ok = Completion.invoke(%{"issue_id" => review.id, "result" => "new readiness"}, fetch: fn _ -> {:ok, [review]} end, before_action: fn _ -> :ok end)
+                 assert :ok = Completion.invoke(%{"issue_id" => review.id, "result" => "new readiness"}, handoff_completed: true, fetch: fn _ -> {:ok, [review]} end, before_action: fn _ -> :ok end)
                  {:ok, %{session_id: "review-again"}}
                end)
              )

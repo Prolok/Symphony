@@ -2,6 +2,7 @@ ExUnit.start()
 Code.require_file("support/snapshot_support.exs", __DIR__)
 Code.require_file("support/test_support.exs", __DIR__)
 Code.require_file("support/relay_support.exs", __DIR__)
+Code.require_file("support/yolo_review_fixture.exs", __DIR__)
 
 # Never read or modify the operator's shared app cooldowns in synthetic tests.
 rate_limit_root = Path.join([File.cwd!(), "_build", "rate-limits-#{System.pid()}"])

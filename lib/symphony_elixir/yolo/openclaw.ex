@@ -120,7 +120,10 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     ## OpenClaw-Auftrag #{order["id"]}
 
     Nutze deinen vorhandenen Agentenkontext und freigegebene Wissensquellen.
-    Dieser Workflow bestimmt den Ablauf. Bei widersprechenden Agentenanweisungen
+    Dieser Workflow und der gebundene versionierte Projekt-Skill bestimmen Ablauf und Prüfmaßstab.
+    Memory ersetzt weder sym-yolo-review noch Prüfbelege. Verwende für Review die
+    Übergabe mit review.binding, Prüfungen, Findings/Lernentscheidungen und Einschränkungen.
+    Bei widersprechenden Agentenanweisungen
     keine konkurrierende Steuerung starten; den Widerspruch als Fehler melden.
     LinearBridge-Mentions sind Beratung, keine Freigabe oder zweite Ausführung.
     Arbeite ausschließlich im Prüfcheckout #{order["workspace"]} (SHA #{order["sha"]}).

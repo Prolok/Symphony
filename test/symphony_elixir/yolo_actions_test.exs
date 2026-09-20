@@ -3,7 +3,8 @@ defmodule SymphonyElixir.YoloActionsTest do
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionScope, ActionTool, Admission, API, Followup, GeneratedLabel, Handoff, Operations}
-  alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Relations, Runner, Scope, Store}
+  alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Relations, ReviewContract, Runner, Scope, Store}
+  alias SymphonyElixir.YoloReviewFixture, as: ReviewFixture
 
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
@@ -46,7 +47,9 @@ defmodule SymphonyElixir.YoloActionsTest do
       workpads: %{}
     })
 
-    %{issues: issues, context: context, root: root}
+    workspace = ReviewFixture.install(root)
+    Process.put(:review_workspace, workspace)
+    %{issues: issues, context: context, root: root, workspace: workspace}
   end
 
   defp db, do: Process.get(:action_db)
@@ -150,7 +153,9 @@ defmodule SymphonyElixir.YoloActionsTest do
       "validation" => "- [ ] Behaviour checked"
     }
 
-  defp group(issues, fun), do: Scope.with_scope("incoming", issues, "run", fun)
+  defp group(issues, fun), do: Scope.with_scope("incoming", issues, "run", fun, workspace: Process.get(:review_workspace))
+
+  defp handoff(args, options), do: Handoff.invoke(Map.put_new(args, "review", ReviewFixture.evidence()), options)
   defp writes(name), do: Enum.filter(db().calls, &(elem(&1, 0) == name))
   defp relation(from, to), do: %{"id" => "#{from}:#{to}", "type" => "blocks", "issue" => %{"id" => from}, "relatedIssue" => %{"id" => to}}
 
@@ -246,33 +251,39 @@ defmodule SymphonyElixir.YoloActionsTest do
 
       options = Keyword.put(opts(), :query, query)
 
-      Scope.with_scope("review", [source], "run", fn ->
-        {:ok, record} = Store.read("review")
-        :ok = Store.write("review", Map.put(record, "attempt", %{"members" => [source.id]}))
+      Scope.with_scope(
+        "review",
+        [source],
+        "run",
+        fn ->
+          {:ok, record} = Store.read("review")
+          :ok = Store.write("review", Map.put(record, "attempt", %{"members" => [source.id]}))
 
-        if unquote(lost) do
-          change(&%{&1 | fail: "YoloCreate"})
-          assert {:error, :response_lost} = Followup.invoke(request, options)
-          assert {:error, :yolo_handoff_not_ready} = Handoff.invoke(%{"issue_id" => source.id, "report" => "Open fix"}, options)
-          assert {:ok, [pending]} = Derived.inspect_fixtures("probe", plan, options)
-          refute pending["complete"]
-          change(&%{&1 | fail: nil})
-        end
+          if unquote(lost) do
+            change(&%{&1 | fail: "YoloCreate"})
+            assert {:error, :response_lost} = Followup.invoke(request, options)
+            assert {:error, :yolo_handoff_not_ready} = handoff(%{"issue_id" => source.id, "report" => "Open fix"}, options)
+            assert {:ok, [pending]} = Derived.inspect_fixtures("probe", plan, options)
+            refute pending["complete"]
+            change(&%{&1 | fail: nil})
+          end
 
-        assert {:ok, created} = Followup.invoke(request, options)
-        assert db().created[created["id"]]["assignee"]["id"] == "human"
-        assert db().created[created["id"]]["delegate"]["id"] == "pai"
-        assert {:ok, [done]} = Derived.inspect_fixtures("probe", plan, options)
-        assert done["complete"]
-        assert :ok = Handoff.invoke(%{"issue_id" => source.id, "report" => "Geprüft; offener verknüpfter Fix #{created["identifier"]}"}, options)
-        assert db().issues[source.id].state == "Review"
-        assert db().issues[source.id].assignee_id == "human"
-        assert db().issues[source.id].delegate_id == nil
-        assert {:ok, [cleaned]} = Derived.inspect_fixtures("cleanup", plan, options)
-        assert cleaned["deleted"]
-        assert length(writes("YoloCreate")) == 1
-        assert length(writes("DeleteDerivedTestFixture")) == 1
-      end)
+          assert {:ok, created} = Followup.invoke(request, options)
+          assert db().created[created["id"]]["assignee"]["id"] == "human"
+          assert db().created[created["id"]]["delegate"]["id"] == "pai"
+          assert {:ok, [done]} = Derived.inspect_fixtures("probe", plan, options)
+          assert done["complete"]
+          assert :ok = handoff(%{"issue_id" => source.id, "report" => "Geprüft; offener verknüpfter Fix #{created["identifier"]}"}, options)
+          assert db().issues[source.id].state == "Review"
+          assert db().issues[source.id].assignee_id == "human"
+          assert db().issues[source.id].delegate_id == nil
+          assert {:ok, [cleaned]} = Derived.inspect_fixtures("cleanup", plan, options)
+          assert cleaned["deleted"]
+          assert length(writes("YoloCreate")) == 1
+          assert length(writes("DeleteDerivedTestFixture")) == 1
+        end,
+        workspace: ctx.workspace
+      )
     end
   end
 
@@ -315,7 +326,7 @@ defmodule SymphonyElixir.YoloActionsTest do
           assert {:error, :yolo_created_issue_changed} = Followup.invoke(request, opts())
           assert {:error, :test_derived_fixture_changed} = Derived.inspect_fixtures("probe", plan, opts())
           assert {:error, :test_derived_fixture_changed} = Derived.inspect_fixtures("cleanup", plan, opts())
-          assert {:error, :yolo_handoff_not_ready} = Handoff.invoke(%{"issue_id" => source.id, "report" => "Open fix"}, opts())
+          assert {:error, :yolo_handoff_not_ready} = handoff(%{"issue_id" => source.id, "report" => "Open fix"}, opts())
         end
 
         assert writes("YoloUpdate") == []
@@ -545,6 +556,79 @@ defmodule SymphonyElixir.YoloActionsTest do
     assert {:error, :offline} = API.query("query", %{}, query: fn _, _ -> {:error, :offline} end)
   end
 
+  test "fixture findings create distinct linked followups and only reusable gaps propose a skill", ctx do
+    source = %{hd(ctx.issues) | state: "Review"}
+
+    for finding <- ReviewFixture.findings() do
+      change(&%{&1 | issues: %{source.id => source}})
+
+      Scope.with_scope(
+        "review",
+        [source],
+        "run",
+        fn ->
+          {:ok, record} = Store.read("review")
+          :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [source.id]}))
+          evidence = Map.put(ReviewFixture.evidence(), "findings", [finding])
+          request = %{"issue_id" => source.id, "report" => finding["rationale"], "review" => evidence}
+          assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(request, opts())
+
+          followup =
+            Map.merge(args([source], "followup"), %{
+              "operation_key" => finding["followup_operation_key"],
+              "title" => finding["action"],
+              "description" => Jason.encode!(finding),
+              "validation" => finding["expected"] <> " mit reproduzierbarem Test nachweisen"
+            })
+
+          # The first creation reply is lost; the durable operation resumes without a duplicate.
+          change(&%{&1 | fail: "YoloCreate"})
+          assert {:error, :response_lost} = Followup.invoke(followup, opts())
+          assert {:error, :yolo_handoff_not_ready} = Handoff.invoke(request, opts())
+          change(&%{&1 | fail: nil})
+          assert {:ok, created} = Followup.invoke(followup, opts())
+          assert {:ok, ^created} = Followup.invoke(followup, opts())
+          assert db().created[created["id"]]["labelIds"] == ["generated"]
+          assert db().created[created["id"]]["projectId"] == source.project_id
+          assert db().created[created["id"]]["stateId"] == "Backlog"
+          assert Enum.any?(db().relations, &(&1["type"] == "related" and &1["issue"]["id"] == source.id and &1["relatedIssue"]["id"] == created["id"]))
+
+          for invalid <- [Map.delete(finding, "prereview"), Map.put(finding, "category", "unknown"), Map.put(finding, "action", "wrong"), nil] do
+            assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [invalid]), opts())
+          end
+
+          if finding["category"] == "reusable_gap" do
+            assert Map.has_key?(finding, "skill_proposal")
+            assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [Map.delete(finding, "skill_proposal")]), opts())
+
+            rejected_proposal =
+              finding
+              |> Map.delete("skill_proposal")
+              |> Map.put("action", "fix_and_regression_test")
+              |> Map.put("rationale", "Künftige Nutzung hier zu selten; gezielter Test hat das bessere Aufwand/Nutzen-Verhältnis.")
+
+            assert :ok = ReviewContract.validate(source, put_in(request, ["review", "findings"], [rejected_proposal]))
+          else
+            refute Map.has_key?(finding, "skill_proposal")
+            invalid = Map.put(finding, "skill_proposal", %{"change" => "Unbegründete Regel"})
+            assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [invalid]), opts())
+          end
+
+          assert :ok = Handoff.invoke(request, opts())
+          assert db().issues[source.id].delegate_id == nil
+          assert db().issues[source.id].state == "Review"
+          assert Group.groups([db().issues[source.id]]) == %{}
+          assert db().workpads[source.id] =~ finding["action"]
+          assert db().workpads[source.id] =~ finding["prereview"]["reason"]
+        end,
+        workspace: ctx.workspace
+      )
+    end
+
+    assert length(writes("YoloCreate")) == 3
+    assert length(writes("YoloUpdate")) == 3
+  end
+
   test "handoff keeps Review/BLOCKER, preserves workpad and stops agent ownership", %{issues: [issue | _]} do
     for state <- ["Review", "BLOCKER"] do
       source = %{issue | state: state}
@@ -553,7 +637,7 @@ defmodule SymphonyElixir.YoloActionsTest do
       group([source], fn ->
         {:ok, record} = Store.read("incoming")
         :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
-        assert :ok = Handoff.invoke(%{"issue_id" => source.id, "report" => "Tests checked; open fix PRO-99."}, opts())
+        assert :ok = handoff(%{"issue_id" => source.id, "report" => "Tests checked; open fix PRO-99."}, opts())
       end)
 
       assert db().issues[source.id].delegate_id == nil
@@ -569,16 +653,16 @@ defmodule SymphonyElixir.YoloActionsTest do
     change(&%{&1 | issues: %{issue.id => issue}})
 
     group([issue], fn ->
-      assert {:error, :new_input} = Handoff.invoke(%{"issue_id" => issue.id, "report" => "checked"}, Keyword.put(opts(), :before_action, fn _ -> {:error, :new_input} end))
+      assert {:error, :new_input} = handoff(%{"issue_id" => issue.id, "report" => "checked"}, Keyword.put(opts(), :before_action, fn _ -> {:error, :new_input} end))
       assert :ok = Operations.run("pending", args([issue], "followup"), fn _ -> :ok end)
-      assert {:error, :yolo_handoff_not_ready} = Handoff.invoke(%{"issue_id" => issue.id, "report" => "checked"}, opts())
+      assert {:error, :yolo_handoff_not_ready} = handoff(%{"issue_id" => issue.id, "report" => "checked"}, opts())
       assert writes("YoloUpdate") == []
       change(&%{&1 | issues: %{issue.id => %{issue | delegate_id: nil}}})
       assert {:error, :yolo_action_scope_changed} = ActionScope.sources([issue.id], opts())
     end)
 
     assert {:error, :yolo_action_scope_changed} = ActionScope.sources([issue.id], opts())
-    assert {:error, :invalid_yolo_handoff} = Handoff.invoke(%{}, opts())
+    assert {:error, :invalid_yolo_handoff} = handoff(%{}, opts())
     assert {:error, :invalid_yolo_followup} = Followup.invoke(%{}, opts())
     refute ActionTool.execute(%{})["success"]
     assert ActionTool.mcp_call(%{})["isError"]
@@ -686,18 +770,18 @@ defmodule SymphonyElixir.YoloActionsTest do
     change(&%{&1 | issues: %{issue.id => issue}})
 
     group([issue], fn ->
-      request = %{"kind" => "handoff", "issue_id" => issue.id, "report" => "actual evidence"}
-      assert {:error, :yolo_handoff_not_ready} = Handoff.invoke(%{request | "report" => " "}, opts())
-      assert {:error, :offline} = Handoff.invoke(request, Keyword.put(opts(), :comments, fn _ -> {:error, :offline} end))
+      request = %{"kind" => "handoff", "issue_id" => issue.id, "report" => "actual evidence", "review" => ReviewFixture.evidence()}
+      assert {:error, :yolo_handoff_not_ready} = handoff(%{request | "report" => " "}, opts())
+      assert {:error, :offline} = handoff(request, Keyword.put(opts(), :comments, fn _ -> {:error, :offline} end))
       change(&%{&1 | fail: "YoloUpdate"})
-      assert {:error, :response_lost} = Handoff.invoke(request, opts())
+      assert {:error, :response_lost} = handoff(request, opts())
       change(&%{&1 | fail: nil, issues: %{issue.id => issue}})
       {:ok, record} = Store.read("incoming")
       :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [issue.id]}))
       assert ActionTool.execute(request, opts())["success"]
       # Same report is already in the workpad; a retry must not duplicate it.
       change(&%{&1 | issues: %{issue.id => issue}})
-      assert :ok = Handoff.invoke(request, opts())
+      assert :ok = handoff(request, opts())
       assert length(String.split(db().workpads[issue.id], "### YOLO-Übergabe")) == 2
     end)
 
@@ -762,7 +846,7 @@ defmodule SymphonyElixir.YoloActionsTest do
     group([issue], fn ->
       {:ok, record} = Store.read("incoming")
       :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [issue.id]}))
-      assert :ok = Handoff.invoke(%{"issue_id" => issue.id, "report" => "Externer Zugriff fehlt; Anlage muss durch den Betreiber abgeglichen werden."}, opts())
+      assert :ok = handoff(%{"issue_id" => issue.id, "report" => "Externer Zugriff fehlt; Anlage muss durch den Betreiber abgeglichen werden."}, opts())
     end)
 
     assert db().issues[issue.id].state == "BLOCKER"

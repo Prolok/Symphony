@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
-  alias SymphonyElixir.Linear.AppAuth
+  alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryResolver, AppAuth}
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.WriteContext
 
@@ -100,6 +100,8 @@ defmodule SymphonyElixir.Linear.Client do
   user { id app }
   issue { id }
   parentId
+  isArtificialAgentSessionRoot
+  agentSession { id appUser { id } comment { id issue { id } } sourceComment { id issue { id } } issue { id } }
   editedAt
   resolvedAt
   archivedAt
@@ -134,7 +136,8 @@ defmodule SymphonyElixir.Linear.Client do
   def fetch_candidate_issues do
     tracker = Config.settings!().tracker
 
-    with {:ok, scope} <- Config.linear_scope(tracker),
+    with :ok <- AdvisoryAgents.verify(),
+         {:ok, scope} <- Config.linear_scope(tracker),
          {:ok, assignee_filter} <- routing_assignee_filter(),
          {:ok, issues} <- fetch_candidates_in_context(scope, tracker, assignee_filter),
          :ok <- validate_candidate_scope(tracker, issues) do
@@ -180,7 +183,7 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp resolved_context?(context) do
-    is_list(context.assignee_ids) and
+    is_list(context.assignee_ids) and AdvisoryAgents.verified?(context) and
       (context.settings.tracker.yolo_agent == nil or
          (is_binary(context.yolo_agent_id) and context.human_handoff_id in context.assignee_ids))
   end
@@ -199,7 +202,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp resolve_workspace_agents(contexts, users) do
     Enum.reduce_while(contexts, {:ok, []}, fn context, {:ok, resolved} ->
-      case context |> resolve_context_assignees(users) |> YoloAgent.resolve() do
+      case context |> resolve_context_assignees(users) |> YoloAgent.resolve() |> AdvisoryAgents.resolve() do
         {:ok, next} -> {:cont, {:ok, resolved ++ [next]}}
         error -> {:halt, error}
       end
@@ -306,7 +309,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp verify_workspace_agents(contexts, users) do
     result =
       Enum.reduce_while(contexts, :ok, fn context, :ok ->
-        case context |> resolve_context_assignees(users) |> YoloAgent.resolve() do
+        case context |> resolve_context_assignees(users) |> YoloAgent.resolve() |> AdvisoryAgents.resolve() do
           {:ok, _} -> {:cont, :ok}
           error -> {:halt, error}
         end
@@ -597,8 +600,15 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec fetch_issue_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
   def fetch_issue_comments(issue_id) when is_binary(issue_id) do
-    fetch_issue_comments_page(issue_id, nil, [], %{})
+    with {:ok, comments} <- fetch_issue_comments_page(issue_id, nil, [], %{}) do
+      {:ok, Enum.uniq_by(comments, &CommentVersion.key/1)}
+    end
   end
+
+  @doc "Bounded root/session lookup; incomplete metadata remains quarantined by the inbox."
+  @spec fetch_comment_thread(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def fetch_comment_thread(issue_id, comment_id),
+    do: AdvisoryResolver.fetch(issue_id, comment_id, @comment_selection)
 
   @doc "Detect visible changes during pagination; preserve observed versions without claiming a complete scan."
   @spec scan_issue_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
@@ -610,7 +620,8 @@ defmodule SymphonyElixir.Linear.Client do
 
   @doc "Continue a background scan using its freshly observed initial signal."
   @spec scan_issue_comments(String.t(), [map()]) :: {:ok, [map()]} | {:error, term()}
-  def scan_issue_comments(issue_id, before), do: scan_comment_pages(fetch_issue_comments(issue_id), issue_id, before)
+  def scan_issue_comments(issue_id, before),
+    do: scan_comment_pages(fetch_issue_comments_page(issue_id, nil, [], %{}), issue_id, before)
 
   defp scan_comment_pages({:ok, comments}, issue_id, before) do
     finish_comment_scan(comment_scan_signal(issue_id), before, before ++ comments)
@@ -621,7 +632,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp scan_comment_pages({:error, reason}, _issue_id, before), do: incomplete_comments(reason, before)
 
-  defp finish_comment_scan({:ok, signal}, signal, comments), do: {:ok, Enum.uniq_by(comments, &CommentVersion.key/1)}
+  defp finish_comment_scan({:ok, signal}, signal, comments), do: {:ok, Enum.uniq_by(comments, &CommentVersion.raw/1)}
   defp finish_comment_scan({:ok, after_scan}, _before, comments), do: incomplete_comments(:comment_scan_changed, comments ++ after_scan)
   defp finish_comment_scan({:error, {:comment_scan_incomplete, reason, observed}}, _before, comments), do: incomplete_comments(reason, comments ++ observed)
   defp finish_comment_scan({:error, reason}, _before, comments), do: incomplete_comments(reason, comments)
@@ -863,11 +874,11 @@ defmodule SymphonyElixir.Linear.Client do
       else: fetch_issue_comments_page(issue_id, cursor, comments, Map.put(seen, cursor, true))
   end
 
-  defp continue_comments(:done, _issue_id, comments, _seen), do: {:ok, Enum.uniq_by(comments, &CommentVersion.key/1)}
+  defp continue_comments(:done, _issue_id, comments, _seen), do: {:ok, Enum.uniq_by(comments, &CommentVersion.raw/1)}
   defp continue_comments({:error, reason}, _issue_id, comments, _seen), do: incomplete_comments(reason, comments)
 
   defp incomplete_comments(reason, []), do: {:error, reason}
-  defp incomplete_comments(reason, comments), do: {:error, {:comment_scan_incomplete, reason, Enum.uniq_by(comments, &CommentVersion.key/1)}}
+  defp incomplete_comments(reason, comments), do: {:error, {:comment_scan_incomplete, reason, Enum.uniq_by(comments, &CommentVersion.raw/1)}}
 
   @doc "A complete issue scan plus a direct missing entity response is required to mark deletion."
   @spec confirm_comment_absence(String.t(), String.t()) :: :deleted | {:present, map()} | {:error, term()}

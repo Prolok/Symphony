@@ -69,6 +69,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:team_key, :string)
       field(:assignee, :string)
       field(:yolo_agent, :string)
+      field(:advisory_agent_ids, {:array, :string}, default: [])
       field(:openclaw_yolo_agent, :string)
       field(:active_states, {:array, :string}, default: @default_active_states)
       field(:terminal_states, {:array, :string}, default: @default_terminal_states)
@@ -81,14 +82,31 @@ defmodule SymphonyElixir.Config.Schema do
           if is_map(app), do: Map.take(app, ~w(client_id client_secret_env workspace_id user_id allowed_issue_ids)), else: app
         end)
 
+      attrs = Map.put(attrs, "advisory_agent_ids", advisory_ids(Map.get(attrs, "advisory_agent_ids", SymphonyElixir.ProjectContext.env("LINEAR_ADVISORY_AGENT_IDS"))))
+
       schema
       |> cast(
         attrs,
-        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent openclaw_yolo_agent active_states terminal_states)a,
+        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent advisory_agent_ids openclaw_yolo_agent active_states terminal_states)a,
         empty_values: []
       )
       |> validate_inclusion(:auth_mode, ["app"])
+      |> validate_change(:advisory_agent_ids, fn field, ids ->
+        if length(ids) <= 20 and Enum.all?(ids, &match?({:ok, _}, Ecto.UUID.cast(&1))), do: [], else: [{field, "must contain at most 20 app-user UUIDs"}]
+      end)
     end
+
+    defp advisory_ids(nil), do: []
+    defp advisory_ids("$" <> name), do: advisory_ids(String.split(SymphonyElixir.ProjectContext.env(name) || "", ","))
+    defp advisory_ids(value) when is_binary(value), do: value |> String.split(",") |> advisory_ids()
+
+    defp advisory_ids(values) when is_list(values) do
+      if Enum.all?(values, &is_binary/1),
+        do: values |> Enum.map(&(String.trim(&1) |> String.downcase())) |> Enum.reject(&(&1 == "")) |> Enum.uniq(),
+        else: values
+    end
+
+    defp advisory_ids(value), do: value
   end
 
   defmodule Polling do

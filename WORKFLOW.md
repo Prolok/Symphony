@@ -962,6 +962,12 @@ Hinweise in Plan/Workpad übernehmen und den Startbeleg über `acknowledge`
 festhalten. Historie nicht als Auftragsliste wiederholen. Bereits bekannte offene
 Versionen bleiben bei der Baseline erhalten.
 
+Optional bindet `tracker.advisory_agent_ids` bzw. `LINEAR_ADVISORY_AGENT_IDS`
+Beratungs-App-User-UUIDs an das Projekt/Workspace; Änderungen verlangen Neustart.
+Belegte Beratungsstränge und ungeklärte Kandidaten bleiben vor Baseline und
+Coding-Zustellung ohne Quelltext ausgeschlossen. Bereits geladener Kontext bleibt
+erhalten; [Vertrag und Nachweis](docs/linear-app.md#beratende-agentsession-stränge).
+
 Vollständige lesbare Ack-Einträge mit Quellversion, Ergebnis, Begründung und
 gegebenenfalls Ersatzbezug bei Workpad-Updates erhalten; sie sind der idempotente
 Beleg. Keine neuen HTML-Ergebnis-Marker oder redundanten Hashes ergänzen.

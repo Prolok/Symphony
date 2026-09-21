@@ -37,7 +37,11 @@ defmodule SymphonyElixir.Linear.AppAuth do
   def validate(_tracker), do: {:error, :invalid_linear_app_configuration}
 
   defp validate_agent_human(tracker) do
-    if Map.get(tracker, :yolo_agent) != nil and not Assignees.human?(tracker.assignee, tracker.app["user_id"]), do: {:error, :linear_yolo_agent_requires_human_assignee}, else: :ok
+    cond do
+      tracker.app["user_id"] in Map.get(tracker, :advisory_agent_ids, []) -> {:error, :linear_advisory_agent_is_coding_app}
+      Map.get(tracker, :yolo_agent) != nil and not Assignees.human?(tracker.assignee, tracker.app["user_id"]) -> {:error, :linear_yolo_agent_requires_human_assignee}
+      true -> :ok
+    end
   end
 
   defp valid_assignees?(assignee, app_user) do

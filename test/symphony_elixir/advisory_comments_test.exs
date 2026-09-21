@@ -562,6 +562,63 @@ defmodule SymphonyElixir.AdvisoryCommentsTest do
     refute CommentInbox.ready?(stored)
   end
 
+  test "advisory identity transport failure stops scanning without creating a baseline", ctx do
+    System.put_env("LINEAR_ADVISORY_AGENT_IDS", @agent)
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+      assert payload["query"] =~ "SymphonyAdvisoryAgents"
+      send(self(), :advisory_identity_requested)
+      {:error, :offline}
+    end)
+
+    opts = [fetch: fn -> flunk("comments must not be fetched before advisory identity verification") end]
+    assert {:error, {:linear_api_request, :linear_app_request_unavailable}} = CommentCheckpoint.checkpoint(ctx.issue, opts)
+    assert_received :advisory_identity_requested
+    assert {:ok, stored} = CommentInbox.read(Config.settings!().tracker.app, ctx.issue)
+    assert stored["baseline"] == nil
+    assert stored["versions"] == %{}
+    refute CommentInbox.ready?(stored)
+  end
+
+  test "nested structured mentions and malformed session values stay held beside normal coding input", ctx do
+    mention = %{"type" => "doc", "content" => [%{"type" => "paragraph", "content" => [%{"type" => "userMention", "attrs" => %{"userId" => @agent}}]}]}
+    targeted = source("nested", "A1-NESTED-MENTION", ctx.issue.id) |> Map.put("bodyData", Jason.encode!(mention))
+    malformed = source("malformed", "A1-MALFORMED-SESSION", ctx.issue.id) |> Map.put("agentSession", "invalid")
+    opts = options([targeted, malformed, hd(fixture(ctx.issue.id))]) |> Keyword.put(:resolve_advisory, fn _ -> {:error, :offline} end)
+    assert {:ok, payload} = CommentCheckpoint.checkpoint(ctx.issue, opts)
+    assert_safe(payload)
+    assert Jason.encode!(payload) =~ "CODING-CONTROL-20260921"
+    assert Enum.map(payload["advisory_threads"], &{&1["comment_id"], &1["status"]}) == [{"malformed", "held"}, {"nested", "held"}]
+    assert {:ok, %{"inputs" => []}} = CommentCheckpoint.acknowledge(ctx.issue, Enum.map(payload["inputs"], &result(&1["key"])), opts)
+  end
+
+  test "corrupt persisted advisory records block delivery without resetting the journal", ctx do
+    assert {:ok, _} = CommentCheckpoint.checkpoint(ctx.issue, options(fixture(ctx.issue.id)))
+    binding = Config.settings!().tracker.app
+    assert {:ok, stored} = CommentInbox.read(binding, ctx.issue)
+    [path] = Path.wildcard(Path.join([binding["state_root"], "inputs", "*.json"]))
+    corrupt = put_in(stored, ["advisory_threads", "root"], %{"excluded" => true})
+    assert :ok = DurableState.write(path, corrupt)
+    assert {:error, :comment_inbox_corrupt} = CommentCheckpoint.checkpoint(ctx.issue, options([]))
+    assert {:error, :comment_inbox_corrupt} = CommentInbox.deliver(binding, ctx.issue, %{})
+    assert {:ok, ^corrupt} = DurableState.read(path)
+  end
+
+  test "delivery after an incomplete first scan preserves quarantine without inventing a baseline", ctx do
+    comments = fixture(ctx.issue.id)
+    opts = options(comments) |> Keyword.put(:fetch, fn -> {:error, {:comment_scan_incomplete, :offline, comments}} end)
+    assert {:error, :offline} = CommentCheckpoint.scan(ctx.issue, opts)
+    binding = Config.settings!().tracker.app
+    assert {:ok, delivered} = CommentInbox.deliver(binding, ctx.issue, %{"session_id" => "resumed"})
+    assert delivered["baseline"] == nil
+    refute CommentInbox.ready?(delivered)
+    assert_safe(CommentInbox.pending(delivered))
+    assert Enum.map(CommentInbox.pending(delivered), & &1["source"]["id"]) == ["control"]
+    assert {:ok, payload} = CommentCheckpoint.checkpoint(ctx.issue, options(comments))
+    assert_safe(payload)
+    assert Jason.encode!(payload) =~ "CODING-CONTROL-20260921"
+  end
+
   defp connection(nodes, more, cursor), do: %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => more, "endCursor" => cursor}}
 
   defp establish(issue) do

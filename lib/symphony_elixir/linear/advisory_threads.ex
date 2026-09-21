@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Linear.AdvisoryThreads do
       old = state["versions"] |> Map.values() |> Enum.map(& &1["source"]) |> Enum.reject(&Map.has_key?(previous, &1["id"]))
       records = ingest(previous, old ++ Enum.map(comments, &CommentVersion.raw/1), agents, issue)
       records = resolve(records, agents, issue, opts)
-      decisions = Map.new(records, fn {id, _} -> {id, decision(id, records, MapSet.new())} end)
+      decisions = Map.new(records, fn {id, _} -> {id, decision(id, records, %{})} end)
 
       records = Map.new(records, fn {id, record} -> {id, Map.put(record, "decision", decisions[id])} end)
       Map.put(state, "advisory_threads", records)
@@ -115,7 +115,7 @@ defmodule SymphonyElixir.Linear.AdvisoryThreads do
 
     is_binary(session["id"]) and is_binary(get_in(session, ["appUser", "id"])) and
       get_in(session, ["issue", "id"]) == issue and is_binary(root) and
-      (source["id"] == trigger or connected?(source["id"], root, records, MapSet.new())) and
+      (source["id"] == trigger or connected?(source["id"], root, records, %{})) and
       get_in(source, ["issue", "id"]) == issue and
       reference_in_issue?(session["comment"], issue) and reference_in_issue?(session["sourceComment"], issue)
   end
@@ -125,10 +125,10 @@ defmodule SymphonyElixir.Linear.AdvisoryThreads do
   defp connected?(id, id, _records, _seen), do: true
 
   defp connected?(id, root, records, seen) do
-    if MapSet.member?(seen, id) or MapSet.size(seen) >= 128 do
+    if Map.has_key?(seen, id) or map_size(seen) >= 128 do
       false
     else
-      Enum.any?(get_in(records, [id, "parents"]) || [], &connected?(&1, root, records, MapSet.put(seen, id)))
+      Enum.any?(get_in(records, [id, "parents"]) || [], &connected?(&1, root, records, Map.put(seen, id, true)))
     end
   end
 
@@ -176,9 +176,9 @@ defmodule SymphonyElixir.Linear.AdvisoryThreads do
     cond do
       is_nil(record) -> "held"
       record["excluded"] == true -> "excluded"
-      MapSet.member?(visited, id) -> "held"
-      MapSet.size(visited) >= 128 -> "held"
-      true -> inherited(record, records, MapSet.put(visited, id))
+      Map.has_key?(visited, id) -> "held"
+      map_size(visited) >= 128 -> "held"
+      true -> inherited(record, records, Map.put(visited, id, true))
     end
   end
 
@@ -196,7 +196,7 @@ defmodule SymphonyElixir.Linear.AdvisoryThreads do
   defp resolve(records, agents, issue, opts) do
     fetch = Keyword.get(opts, :resolve_advisory, fn _ -> {:error, :advisory_resolution_unavailable} end)
     now = Keyword.get(opts, :advisory_now, System.system_time(:millisecond))
-    resolve(records, agents, issue, fetch, now, MapSet.new(), 8)
+    resolve(records, agents, issue, fetch, now, %{}, 8)
   end
 
   defp resolve(records, _agents, _issue, _fetch, _now, _seen, 0), do: records
@@ -209,8 +209,8 @@ defmodule SymphonyElixir.Linear.AdvisoryThreads do
       records = Map.update(records, id, %{"parents" => [], "unclear" => true, "retry_at" => now + 30_000}, &Map.put(&1, "retry_at", now + 30_000))
 
       case fetch.(id) do
-        {:ok, %{"id" => ^id} = source} -> resolve(ingest(records, [source], agents, issue), agents, issue, fetch, now, MapSet.put(seen, id), budget - 1)
-        _ -> resolve(records, agents, issue, fetch, now, MapSet.put(seen, id), budget - 1)
+        {:ok, %{"id" => ^id} = source} -> resolve(ingest(records, [source], agents, issue), agents, issue, fetch, now, Map.put(seen, id, true), budget - 1)
+        _ -> resolve(records, agents, issue, fetch, now, Map.put(seen, id, true), budget - 1)
       end
     else
       records
@@ -220,8 +220,8 @@ defmodule SymphonyElixir.Linear.AdvisoryThreads do
   defp resolution_due?(id, records, seen, now) do
     record = records[id] || %{}
 
-    not MapSet.member?(seen, id) and (record["retry_at"] || 0) <= now and
-      decision(id, records, MapSet.new()) == "held" and
+    not Map.has_key?(seen, id) and (record["retry_at"] || 0) <= now and
+      decision(id, records, %{}) == "held" and
       (is_nil(records[id]) or record["candidate"] == true or record["unclear"] == true)
   end
 end

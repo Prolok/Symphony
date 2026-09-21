@@ -203,7 +203,7 @@ defmodule SymphonyElixir.Linear.AdvisoryThreads do
 
   defp resolve(records, agents, issue, fetch, now, seen, budget) do
     ids = Map.keys(records) ++ Enum.flat_map(Map.values(records), &(&1["parents"] || []))
-    id = ids |> Enum.uniq() |> Enum.sort() |> Enum.find(&resolution_due?(&1, records, seen, now))
+    id = ids |> Enum.uniq() |> Enum.sort_by(&{get_in(records, [&1, "retry_at"]) || 0, &1}) |> Enum.find(&resolution_due?(&1, records, seen, now))
 
     if id do
       records = Map.update(records, id, %{"parents" => [], "unclear" => true, "retry_at" => now + 30_000}, &Map.put(&1, "retry_at", now + 30_000))

@@ -26,12 +26,16 @@ defmodule SymphonyElixir.Linear.AdvisoryResolver do
     }
     """
 
-    with {:ok, %{"data" => %{"comment" => %{"id" => ^id, "issue" => %{"id" => ^issue}} = raw}} = response} <- Client.graphql(query, Map.put(cursors, :id, id)),
-         true <- response["errors"] in [nil, []] do
-      merged = merge(previous, raw)
-      continue(issue, id, selection, merged, raw, cursors, seen, budget)
-    else
-      _ -> partial(previous)
+    case Client.graphql(query, Map.put(cursors, :id, id)) do
+      {:ok, %{"data" => %{"comment" => %{"id" => ^id, "issue" => %{"id" => ^issue}} = raw}} = response} ->
+        merged = merge(previous, raw)
+
+        if response["errors"] in [nil, []],
+          do: continue(issue, id, selection, merged, raw, cursors, seen, budget),
+          else: partial(merged)
+
+      _ ->
+        partial(previous)
     end
   end
 

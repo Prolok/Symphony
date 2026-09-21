@@ -258,7 +258,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
           {:ok, Map.merge(state, %{"baseline" => baseline, "versions" => versions, "last_successful_scan" => now, "scan_error" => nil})}
 
         {:error, reason} ->
-          observe_partial(state, comments, reason, binding, opts)
+          save_partial_observations(state, observed, reason)
       end
     end
   end
@@ -268,9 +268,13 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     classify = Keyword.get(opts, :classify, &CommentJournal.classify(binding, &1))
 
     with {:ok, observed} <- classify_all(comments, classify, timestamp()) do
-      versions = observed |> Enum.reduce(state["versions"], &insert(&1, &2, false)) |> suppress(state)
-      {:save_error, Map.merge(state, %{"versions" => versions, "scan_error" => inspect(reason)}), reason}
+      save_partial_observations(state, observed, reason)
     end
+  end
+
+  defp save_partial_observations(state, observed, reason) do
+    versions = observed |> Enum.reduce(state["versions"], &insert(&1, &2, false)) |> suppress(state)
+    {:save_error, Map.merge(state, %{"versions" => versions, "scan_error" => inspect(reason)}), reason}
   end
 
   defp suppress(versions, state) do

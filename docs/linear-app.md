@@ -1238,9 +1238,12 @@ künstliche Sessionroots und strukturierte Mentions einer konfigurierten UUID
 lösen begrenzte direkte Root-/Sessionabfragen aus. Beide Sessionrelationen werden
 paginiert: maximal acht Rootauflösungen pro Scan, jeweils drei API-Seiten;
 fehlgeschlagene/unvollständige Auflösungen frühestens nach 30 Sekunden erneut.
+Das Budget gilt auch bei Scanfehlern. Fällige Roots werden nach frühester Retryfrist
+priorisiert, damit wiederholt ungeklärte Roots spätere Kandidaten nicht verdrängen.
 Alle über die Seiten beobachteten Sessionbindungen bleiben erhalten; abweichende
-Rootmetadaten erlauben keine reguläre Freigabe. Die vorhandenen Transport-,
-Rate-Limit- und Journalwege bleiben maßgeblich.
+Rootmetadaten erlauben keine reguläre Freigabe. Auch aus GraphQL-Teilantworten bleiben
+vollständig belegte Bindungen erhalten; die Antwort gilt weiterhin als unvollständig.
+Die vorhandenen Transport-, Rate-Limit- und Journalwege bleiben maßgeblich.
 Zyklen, widersprüchliche oder unvollständige Bindungen bleiben zurückgehalten;
 Zeitablauf und eine Null-Session allein geben Kandidaten nicht frei. Unabhängige
 Coding-Kommentare bleiben verfügbar. Der bestehende Hintergrundabgleich prüft

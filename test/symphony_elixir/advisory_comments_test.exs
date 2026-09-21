@@ -489,6 +489,79 @@ defmodule SymphonyElixir.AdvisoryCommentsTest do
     end
   end
 
+  @tag :review_regression
+  test "GraphQL partial errors retain observed advisory bindings before a later coding session", ctx do
+    advisory = List.last(fixture(ctx.issue.id))
+    root = Map.put(advisory, "agentSession", nil)
+    partial = root |> Map.put("agentSessions", connection([advisory["agentSession"]], false, nil)) |> Map.put("spawnedAgentSessions", nil)
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+      assert payload["query"] =~ "SymphonyAdvisoryThread"
+      {:ok, %{status: 200, body: %{"data" => %{"comment" => partial}, "errors" => [%{"message" => "spawned sessions unavailable"}]}}}
+    end)
+
+    assert {:ok, first} = CommentCheckpoint.checkpoint(ctx.issue, options([root, hd(fixture(ctx.issue.id))]))
+    assert_safe(first)
+    own = put_in(advisory, ["agentSession", "appUser", "id"], "coding-app")
+    assert {:ok, later} = CommentCheckpoint.checkpoint(ctx.issue, options([own, hd(fixture(ctx.issue.id))]))
+    assert_safe(later)
+    assert Enum.find(later["advisory_threads"], &(&1["comment_id"] == "root"))["status"] == "excluded"
+    assert Jason.encode!(later) =~ "CODING-CONTROL-20260921"
+  end
+
+  @tag :review_regression
+  test "successive polling intervals fairly resolve a normal parent behind permanently held roots", ctx do
+    root = List.last(fixture(ctx.issue.id)) |> Map.put("agentSession", nil)
+    roots = for n <- 1..8, do: Map.put(root, "id", "a#{n}")
+    parent = source("z-parent", "normaler Root", ctx.issue.id)
+    child = source("z-child", "NORMALE-FOLGEFRAGE", ctx.issue.id) |> Map.put("parentId", parent["id"])
+    comments = roots ++ [child, hd(fixture(ctx.issue.id))]
+    Process.put(:fair_lookups, [])
+
+    resolver = fn id ->
+      Process.put(:fair_lookups, Process.get(:fair_lookups) ++ [id])
+      if id == parent["id"], do: {:ok, parent}, else: {:error, :unavailable}
+    end
+
+    opts = options(comments) |> Keyword.put(:resolve_advisory, resolver)
+    assert {:ok, first} = CommentCheckpoint.checkpoint(ctx.issue, Keyword.put(opts, :advisory_now, 1_000))
+    refute Jason.encode!(first) =~ "NORMALE-FOLGEFRAGE"
+    assert length(Process.get(:fair_lookups)) == 8
+    Process.put(:fair_lookups, [])
+    next = Keyword.put(opts, :advisory_now, 31_000)
+    assert {:ok, %{"inputs" => inputs} = later} = CommentCheckpoint.checkpoint(ctx.issue, next)
+    assert "z-parent" in Process.get(:fair_lookups)
+    assert length(Process.get(:fair_lookups)) <= 8
+    assert Enum.count(inputs, &(&1["key"] == CommentVersion.key(child))) == 1
+    assert_safe(later)
+    assert {:ok, %{"inputs" => []}} = CommentCheckpoint.acknowledge(ctx.issue, Enum.map(inputs, &result(&1["key"])), next)
+    assert {:ok, %{"inputs" => []}} = CommentCheckpoint.checkpoint(ctx.issue, Keyword.put(opts, :advisory_now, 61_000))
+  end
+
+  @tag :review_regression
+  test "absence failures preserve partial observations without spending a second resolution budget", ctx do
+    missing = source("missing", "normale frühere Quelle", ctx.issue.id)
+    assert {:ok, %{"inputs" => [baseline]}} = CommentCheckpoint.checkpoint(ctx.issue, options([missing]))
+    root = List.last(fixture(ctx.issue.id)) |> Map.put("agentSession", nil)
+    roots = for n <- 1..16, do: Map.put(root, "id", "root-#{n}")
+    Process.put(:absence_lookups, 0)
+
+    resolver = fn _ ->
+      Process.put(:absence_lookups, Process.get(:absence_lookups) + 1)
+      {:error, :unavailable}
+    end
+
+    opts = options(roots) |> Keyword.merge(resolve_advisory: resolver, advisory_now: 1_000, confirm_absence: fn _ -> {:error, :absence_unavailable} end)
+    assert {:error, :absence_unavailable} = CommentCheckpoint.checkpoint(ctx.issue, opts)
+    assert Process.get(:absence_lookups) == 8
+    assert {:ok, stored} = CommentInbox.read(Config.settings!().tracker.app, ctx.issue)
+    assert stored["baseline"]["key"] == baseline["key"]
+    assert map_size(stored["versions"]) == 17
+    assert Enum.all?(stored["versions"], fn {_, version} -> not version["deleted"] end)
+    assert_safe(CommentInbox.pending(stored))
+    refute CommentInbox.ready?(stored)
+  end
+
   defp connection(nodes, more, cursor), do: %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => more, "endCursor" => cursor}}
 
   defp establish(issue) do

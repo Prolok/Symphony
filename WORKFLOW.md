@@ -225,11 +225,22 @@ Logs referenzieren. Pflichtnachweise, Quellen, Acks, Skips und auswertbare
 ### Phasenpflichten und Betreiberübergaben
 
 Jeden Pflichtnachweis in Planung/Workpad mit Aktion, Verantwortlichem
-(Worker oder Betreiber) und fälliger Phase führen; bekannte Zuständigkeit
-übernehmen. Nur ausdrücklich später fällige Punkte dürfen offen bleiben,
-vereinbarte Abnahmen nicht still verschieben. Vor Merge müssen sämtliche dafür
-erforderlichen Belege vorliegen. Fehlende materielle Entscheidungen nach `Planung`
-zurückgeben; eine bekannte Betreiberzuständigkeit ist keine neue Produktfrage.
+(Worker oder Betreiber), fälliger Phase und konkreter Entscheidungsquelle oder
+technischer Begründung führen. Eine agentenseitige Planfrist allein ist keine
+Nutzerentscheidung. Irrtümliche Frühfristen begründet korrigieren, Pflicht und
+vorhandene Belege erhalten; konkrete frühere Nutzer-/Sicherheitsfreigaben nicht
+verschieben. Bekannte Zuständigkeit übernehmen; materielle Entscheidungen nach
+`Planung` zurückgeben.
+
+Vor Merge sind erforderliche Build-/Test-/technische Review-/Mergegates und
+konkrete frühere Freigabepflichten zu erfüllen. Finale Produkt-/Zielumgebungsabnahme
+am gemergten bzw. regulär ausgelieferten Stand ist standardmäßig in `Review`
+fällig. Fehlende Installation dieses neuen Stands allein sperrt Merge nicht.
+Frühe isolierte Produkt-/Paket-/Integrationsprüfungen bleiben erforderlich;
+fehlende notwendige Testumgebung oder rote technische Gates sind keine finale
+Betriebsabnahme. `Review` ist weder `Review (AI)` noch `Freigabe Review`.
+Merge erteilt keine Deploymentfreigabe und bestätigt keine Produktabnahme.
+Später fällige Nachweise bleiben sichtbar offen, ohne falsche Häkchen.
 
 Fehlt ein fälliger Betreiberbeleg, zunächst erlaubte Diagnose, Nacharbeit und
 verfügbare gebundene Testausführung erledigen. Nur wenn danach kein zulässiger
@@ -286,9 +297,9 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   ist der erste konfigurierte Mensch in Listenreihenfolge. Bindungsänderungen
   verlangen Neustart; Details: [Agentenbindung](docs/linear-app.md#agentenbindung).
   Die Agentenbindung aktiviert unabhängig von `--yolo` gesonderte PO-Sammelläufe
-  nach [WORKFLOW_YOLO_AGENT.md](WORKFLOW_YOLO_AGENT.md), einschließlich dessen
-  Mehrticket-/Statusvertrag und der an den versionierten Projekt-Skill gebundenen
-  Schlussabnahme mit Prüf-/Lernbeleg. Die folgende Statustabelle und ihre Turn-Grenzen
+  nach [WORKFLOW_YOLO_AGENT.md](WORKFLOW_YOLO_AGENT.md), dessen Delegationsfreigabe
+  im Ticketscope sowie Mehrticket-/Statusvertrag und der an den versionierten
+  Projekt-Skill gebundenen Schlussabnahme mit Prüf-/Lernbeleg. Die folgende Statustabelle und ihre Turn-Grenzen
   gelten weiterhin für reguläre Einzelläufe.
   Optional wählt `OPENCLAW_YOLO_AGENT` ausschließlich deren PO-Ausführungsweg;
   ohne Wert erfolgen keine OpenClaw-Zugriffe. Aktivierung verlangt den separaten
@@ -767,7 +778,7 @@ Den Branch vor dem Test per Rebase gegen `origin/main` synchronisieren,
 
 ### Sonderfälle
 
-- Falls ein `Test (AI)`-Lauf sauber endet, das Issue aber fälschlich noch in `Test (AI)` steht, übernimmt Symphony den passenden Statuswechsel nach `Merge (AI)` nur als Guardrail-Fallback bei geschlossener `### Test`-Checkliste und erfüllter fälliger `### Validierung`. Nur eindeutig nach `symphony-workpad` erst in Merge fällige offene Punkte sind ausgenommen; fehlende/unbewertbare Checklisten bleiben sperrend.
+- Falls ein `Test (AI)`-Lauf sauber endet, das Issue aber fälschlich noch in `Test (AI)` steht, übernimmt Symphony den passenden Statuswechsel nach `Merge (AI)` nur als Guardrail-Fallback bei geschlossener `### Test`-Checkliste und erfüllter fälliger `### Validierung`. Nur eindeutig nach `symphony-workpad` erst in Merge oder Review fällige offene Punkte sind ausgenommen; fehlende/unbewertbare Checklisten bleiben sperrend.
 
 ## Ablauf für `Planung`
 
@@ -858,7 +869,8 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
 
 ### Abschluss und nächster Status
 
-- Nach abgeschlossenem Merge das Issue nach `Review` verschieben und den Turn beenden.
+- Nach abgeschlossenem Merge das Issue mit offenen Review-Nachweisen nach `Review`
+  verschieben und den Turn beenden; Phasenpflichten bleiben erhalten.
 - Symphony klärt nach dem Workerabschluss den Ticketzustand frisch und führt bei
   terminalem Status den bestehenden Workspace-Cleanup aus. Offene Statusklärung
   bleibt im Retry; laufende Merge-Abschlussprüfungen behalten den Workspace.

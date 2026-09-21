@@ -139,6 +139,12 @@ Lokale Issue-Leases, Service-Mutex und beide PO-Freigaben bleiben erhalten.
 
 ### Agentenbindung
 
+Die wirksame menschliche Delegation autorisiert PO-Steuerung und Aktivierung im
+Ticketscope gemäß [Laufvertrag](../WORKFLOW_YOLO_AGENT.md#laufvertrag), auch ohne
+CLI-`--yolo`. Dort sind spätere Delegation nach Anlage, aktuelle Stopps/Entzug und
+die Grenze menschlicher Eskalation geregelt; Agentenbindung und Startmodus sind
+unabhängig. Die Zuweisungsregeln für neu angelegte Followups bleiben unverändert.
+
 Der optionale lokale OpenClaw-Ausführungsweg für diese PO-Läufe ist in
 [OpenClaw-YOLO](openclaw-yolo.md) beschrieben, einschließlich Testisolation,
 Werkzeugbindung und gesondertem Aktivierungsnachweis.
@@ -348,12 +354,14 @@ unabhängig vom Profil im bestehenden Zustandsverzeichnis.
 
 ## Betreiberpflichten und Wiederaufnahme
 
-Planung ordnet jeden Pflichtnachweis einer konkreten Aktion, einer ausführenden
-Rolle und einer fälligen Phase zu. Festgelegte Zuständigkeiten werden übernommen.
-Eine bekannte spätere Betreiberpflicht lässt die lokale Umsetzung zu; eine echte
-offene Produktentscheidung wird nach `Planung` zurückgegeben. Bereits vereinbarte
-Abnahmen bleiben zu ihrer Fälligkeit bindend. Vor Merge müssen alle dafür
-erforderlichen Nachweise vorliegen, auch bei bewusstem technischem Review-Skip.
+Maßgeblich sind die [Phasenpflichten](../WORKFLOW.md#phasenpflichten-und-betreiberübergaben).
+Planung/Workpad halten Aktion, Rolle, Phase und Entscheidungsquelle oder technische
+Begründung fest. Finale Produkt-/Zielumgebungsabnahme gehört standardmäßig nach
+Merge in `Review`; das Belegformat und die strikte Rückstellung späterer Pflichten
+regelt [symphony-workpad](../.codex/skills/symphony-workpad/SKILL.md).
+Eine irrtümliche agentenseitige Frühfrist ist mit Begründung korrigierbar,
+keine Nutzerfreigabe; offene Pflicht, Quelle und technische Belege bleiben erhalten.
+Tatsächliche frühe Test-/Freigabegates bleiben bindend, auch bei technischem Review-Skip.
 
 Eine weiterhin fällige PO-Abnahme steht als offener Punkt unter `### Validierung`
 mit `; fällig: Freigabe Review`. Der automatische Review-Handoff übergibt dann
@@ -383,7 +391,8 @@ Ergebnis, Belegquelle, Geltungsbereich und Quell-/Paketstand. Ein Statuswechsel
 allein bestätigt weder Ausführung noch Abnahme. Ein Worker darf keine
 Betreiberübernahme oder erfolgreiche externe Aktion erfinden.
 
-Bei Wiederaufnahme prüft der Hauptworker diese Belege vor weiterer Phasenarbeit:
+Bei Wiederaufnahme prüft der Hauptworker zuerst die Fälligkeitsquelle und dann
+für tatsächlich fällige Pflichten diese Belege vor weiterer Phasenarbeit:
 fehlender, negativer, veralteter oder unpassender Nachweis erfüllt das Gate nicht.
 Negative Befunde im Scope zuerst korrigieren und über verfügbare gebundene
 Prüfwege erneut testen; das Gate bleibt bis zum passenden Erfolg offen. Nur ohne
@@ -410,6 +419,10 @@ Runtime-Regressionen prüfen zusätzlich den tatsächlichen Workpad-/AgentRunner
 
 | Eingabe | Erwartete Einordnung und Fortsetzung |
 | --- | --- |
+| Lokales Plugin-/Dienstpaket und technische Tests grün, finale Installation nach Merge | Technische Pipeline bis Review; offene finale Abnahme übernehmen. Kein Betriebswechsel vor Merge und kein behaupteter Live-Erfolg. |
+| Agent hat finale Zielumgebungsabnahme ohne frühe Nutzerentscheidung in Test eingeplant | Quelle prüfen, begründet nach Review korrigieren, Nachweis offen erhalten und regulär wiederaufnehmen. |
+| Notwendige Testdatenbank/Buildabhängigkeit fehlt | Technisches Gate bleibt offen; zulässige Diagnose/Startwege nutzen, sonst konkrete Betreiberübergabe. Keine Umetikettierung als finale Betriebsabnahme. |
+| In Review fehlt autorisierte Bereitstellung | Offene Review-Abnahme mit Standbezug und benötigter Aktion übergeben; kein Rücksprung zum ungemergten Testauftrag. |
 | Betreiber bereits festgelegt, Abnahme erst in Merge fällig | Keine erneute Zuständigkeitsfrage; Aktion/Phase übernehmen, aktuelle lokale Phase abschließen, Nachweis offen lassen. |
 | Lokale Tests für Paket A grün; Betreiberabnahme jetzt fällig, fehlt | Vollständige Übergabe für Paket A, ausstehende Betreiberaktion in BLOCKER; keine Abnahme behaupten. |
 | Manuell weitergeschoben, kein neuer Beleg und keine autonome Nacharbeit möglich | Übergabe erhalten, zurück nach BLOCKER; kein unveränderter Betreiberauftrag oder zusätzlicher Review. |

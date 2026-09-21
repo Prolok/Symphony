@@ -108,7 +108,7 @@ defmodule SymphonyElixir.Workpad do
     case section_body(body, section_title) do
       {:ok, section_body} ->
         cond do
-          Regex.match?(~r/^\s*[-*]\s+\[ \]\s+/m, section_body) -> :open
+          Regex.match?(~r/^\s*[-*]\s+\[ \](?:\s|$)/m, section_body) -> :open
           Regex.match?(~r/^\s*[-*]\s+\[[xX]\]\s+/m, section_body) -> :closed
           true -> :no_checklist
         end
@@ -120,16 +120,17 @@ defmodule SymphonyElixir.Workpad do
 
   def section_checklist_status(_body, _section_title), do: :missing
 
-  @doc "Evaluates test-phase validation without closing evidence explicitly due at merge."
+  @doc "Evaluates phase-specific validation without closing evidence explicitly due in a later phase."
   @spec section_checklist_status(term(), term(), term()) :: :open | :closed | :deferred | :missing | :no_checklist
-  def section_checklist_status(body, "Validierung", "Test (AI)") when is_binary(body) do
+  def section_checklist_status(body, "Validierung", phase)
+      when is_binary(body) and phase in ["Test (AI)", "Merge (AI)"] do
     case section_checklist_status(body, "Validierung") do
       :open ->
         {:ok, validation} = section_body(body, "Validierung")
 
         open_items = open_checklist_items(validation)
 
-        if open_items != [] and Enum.all?(open_items, &merge_due_item?/1), do: :deferred, else: :open
+        if open_items != [] and Enum.all?(open_items, &later_due_item?(&1, phase)), do: :deferred, else: :open
 
       status ->
         status
@@ -144,11 +145,15 @@ defmodule SymphonyElixir.Workpad do
     |> Enum.filter(&Regex.match?(~r/^\s*[-*]\s+\[ \](?:\s|$)/m, &1))
   end
 
-  defp merge_due_item?(item) do
+  defp later_due_item?(item, phase) do
     [first_line | _] = String.split(item, "\n", parts: 2)
 
     length(Regex.scan(~r/fällig\s*:/iu, item)) == 1 and
-      Regex.match?(~r/; fällig: Merge \(AI\)\s*$/u, first_line)
+      case Regex.run(~r/; fällig: (Merge \(AI\)|Review)\s*$/u, first_line, capture: :all_but_first) do
+        ["Review"] -> true
+        ["Merge (AI)"] -> phase == "Test (AI)"
+        _ -> false
+      end
   end
 
   @spec review_handoff_status(term()) :: review_handoff_status()

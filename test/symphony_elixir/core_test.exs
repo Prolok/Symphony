@@ -502,7 +502,8 @@ defmodule SymphonyElixir.CoreTest do
 
     assert test_skill =~ "offenen fälligen Validierungspunkten"
     assert test_skill =~ "fehlender/unbewertbarer Pflichtcheckliste"
-    assert test_skill =~ "Explizit später fällige Nachweise"
+    assert test_skill =~ "Eindeutig erst in Merge oder Review fällige Nachweise"
+    assert test_skill =~ "bleiben bindend offen"
 
     assert test_skill =~ "im selben Turn weiterarbeiten"
 
@@ -9753,6 +9754,10 @@ defmodule SymphonyElixir.CoreTest do
         ### Test
 
         - [ ] Handoff-Checkliste abschließen
+
+        ### Validierung
+
+        - [ ] Finale Installation; fällig: Review
         """
       )
 
@@ -9801,7 +9806,7 @@ defmodule SymphonyElixir.CoreTest do
           "- [ ] Paketabnahme; fällig: Merge (AI)\n### Test\n- [x] Testlauf abgeschlossen\n"
       )
 
-      for {due, index} <- Enum.with_index(["Test (AI)", "Freigabe Review", "unbekannt", "Test (AI); fällig: Merge (AI)"]) do
+      for {due, index} <- Enum.with_index(["Test (AI)", "Review (AI)", "Freigabe Review", "unbekannt", "Review; fällig: Review", "Test (AI); fällig: Merge (AI)"]) do
         run_case.(
           "issue-test-due-validation-#{index}",
           "MT-TEST-DUE-#{index}",
@@ -9813,6 +9818,7 @@ defmodule SymphonyElixir.CoreTest do
 
           - [x] Lokale Teilprüfungen bestanden
           - [ ] Betreiber: Testumgebung bestätigen; fällig: #{due}
+          - [ ] Betreiber: Finale Installation; fällig: Review
 
           ### Test
 
@@ -12488,6 +12494,11 @@ defmodule SymphonyElixir.CoreTest do
           """
           ## Symphony Workpad
 
+          ### Validierung
+
+          - [x] Synthetisches Dienstpaket: isolierter Build und technische Tests grün
+          - [ ] Betreiber: Finale Installation/Produktabnahme am gemergten Paket; Quelle: Phasenvertrag; fällig: Review
+
           ### Verlauf
 
           - 2026-05-29 18:18:00 CEST - Merge-Evidenz: PR #42 gemergt, Merge-Commit `abc1234`.
@@ -12520,9 +12531,13 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
+      original_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
       assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
       assert_receive {:memory_tracker_state_update, "issue-merge-evidence-handoff", "Review"}
       assert "Review" == Agent.get(state_agent, & &1)
+      assert Application.get_env(:symphony_elixir, :memory_tracker_comments) == original_comments
+      [body] = original_comments[issue.id]
+      assert Workpad.section_checklist_status(body, "Validierung", "Review") == :open
     after
       restore_app_env(:memory_tracker_comments, previous_memory_comments)
       restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
@@ -12530,124 +12545,134 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner hands off clean Test AI with future operator evidence and historical skipped review still open" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-agent-runner-test-merge-handoff-#{System.unique_integer([:positive])}"
-      )
+  for due_phase <- ["Merge (AI)", "Review"] do
+    @due_phase due_phase
+    test "agent runner hands off clean Test AI with #{@due_phase} evidence and historical skipped review still open" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-agent-runner-test-merge-handoff-#{System.unique_integer([:positive])}"
+        )
 
-    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
-    previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
+      previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+      previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
 
-    try do
-      template_repo = Path.join(test_root, "source")
-      workspace_root = Path.join(test_root, "workspaces")
-      codex_binary = Path.join(test_root, "fake-codex")
+      try do
+        template_repo = Path.join(test_root, "source")
+        workspace_root = Path.join(test_root, "workspaces")
+        codex_binary = Path.join(test_root, "fake-codex")
 
-      File.mkdir_p!(template_repo)
-      File.write!(Path.join(template_repo, "README.md"), "# test")
+        File.mkdir_p!(template_repo)
+        File.write!(Path.join(template_repo, "README.md"), "# test")
 
-      File.write!(codex_binary, """
-      #!/bin/sh
-      count=0
+        File.write!(codex_binary, """
+        #!/bin/sh
+        count=0
 
-      while IFS= read -r _line; do
-        count=$((count + 1))
-        case "$count" in
-          1)
-            printf '%s\\n' '{"id":1,"result":{}}'
-            ;;
-          2)
-            ;;
-          3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-test-clean"}}}'
-            ;;
-          4)
-            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-test-clean"}}}'
-            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-test-clean","turn":{"id":"turn-test-clean"}}}'
-            ;;
-        esac
-      done
-      """)
+        while IFS= read -r _line; do
+          count=$((count + 1))
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              ;;
+            3)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-test-clean"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-test-clean"}}}'
+              printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-test-clean","turn":{"id":"turn-test-clean"}}}'
+              ;;
+          esac
+        done
+        """)
 
-      File.chmod!(codex_binary, 0o755)
+        File.chmod!(codex_binary, 0o755)
 
-      write_workflow_file!(Workflow.workflow_file_path(),
-        tracker_kind: "memory",
-        workspace_root: workspace_root,
-        hook_after_create:
-          ~s(git init -b main . && git config user.name "Test User" && git config user.email "test@example.com" && cp #{Path.join(template_repo, "README.md")} README.md && git add README.md && git commit -m initial),
-        codex_command: "#{codex_binary} app-server",
-        max_turns: 3
-      )
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_kind: "memory",
+          workspace_root: workspace_root,
+          hook_after_create:
+            ~s(git init -b main . && git config user.name "Test User" && git config user.email "test@example.com" && cp #{Path.join(template_repo, "README.md")} README.md && git add README.md && git commit -m initial),
+          codex_command: "#{codex_binary} app-server",
+          max_turns: 3
+        )
 
-      {:ok, state_agent} = Agent.start_link(fn -> "Test (AI)" end)
-      parent = self()
+        {:ok, state_agent} = Agent.start_link(fn -> "Test (AI)" end)
+        parent = self()
 
-      recipient =
-        spawn(fn ->
-          review_handoff_test_recipient(parent, state_agent)
-        end)
+        recipient =
+          spawn(fn ->
+            review_handoff_test_recipient(parent, state_agent)
+          end)
 
-      Application.put_env(:symphony_elixir, :memory_tracker_recipient, recipient)
+        Application.put_env(:symphony_elixir, :memory_tracker_recipient, recipient)
 
-      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
-        "issue-test-clean-handoff" => [
-          """
-          ## Symphony Workpad
+        Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+          "issue-test-clean-handoff" => [
+            """
+            ## Symphony Workpad
 
-          ### Validierung
+            ### Validierung
 
-          - [x] Ticketseitige Validierung abgeschlossen
-          - [ ] Betreiber: Paketabnahme für denselben Stand; fällig: Merge (AI)
+            - [x] Ticketseitige Validierung abgeschlossen
+            - [ ] Betreiber: Paketabnahme für denselben Stand; Quelle: synthetischer Phasenvertrag; fällig: #{@due_phase}
 
-          ### Review
+            ### Review
 
-          - [ ] Historischer Review: bewusst übersprungen; Quelle: synthetische Nutzeranweisung, Geltungsbereich: übergebener Stand
+            - [ ] Historischer Review: bewusst übersprungen; Quelle: synthetische Nutzeranweisung, Geltungsbereich: übergebener Stand
 
-          ### Test
+            ### Test
 
-          - [x] Testlauf abgeschlossen
-          """
-        ]
-      })
+            - [x] Testlauf abgeschlossen
+            """
+          ]
+        })
 
-      state_fetcher = fn [_issue_id] ->
-        current_state = Agent.get(state_agent, & &1)
+        state_fetcher = fn [_issue_id] ->
+          current_state = Agent.get(state_agent, & &1)
 
-        {:ok,
-         [
-           %Issue{
-             id: "issue-test-clean-handoff",
-             identifier: "MT-TEST-CLEAN",
-             title: "Test handoff clean",
-             description: "Advance to merge when tests need no fixes",
-             state: current_state
-           }
-         ]}
+          {:ok,
+           [
+             %Issue{
+               id: "issue-test-clean-handoff",
+               identifier: "MT-TEST-CLEAN",
+               title: "Test handoff clean",
+               description: "Advance to merge when tests need no fixes",
+               state: current_state
+             }
+           ]}
+        end
+
+        issue = %Issue{
+          id: "issue-test-clean-handoff",
+          identifier: "MT-TEST-CLEAN",
+          title: "Test handoff clean",
+          description: "Advance to merge when tests need no fixes",
+          state: "Test (AI)",
+          url: "https://example.org/issues/MT-TEST-CLEAN",
+          labels: []
+        }
+
+        original_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
+        assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+        assert_receive {:memory_tracker_state_update, "issue-test-clean-handoff", "Merge (AI)"}
+        assert "Merge (AI)" == Agent.get(state_agent, & &1)
+        [workpad] = Application.get_env(:symphony_elixir, :memory_tracker_comments)["issue-test-clean-handoff"]
+        assert Workpad.section_checklist_status(workpad, "Validierung") == :open
+        assert Workpad.section_checklist_status(workpad, "Review") == :open
+        assert Application.get_env(:symphony_elixir, :memory_tracker_comments) == original_comments
+
+        assert Workpad.section_checklist_status(workpad, "Validierung", "Merge (AI)") ==
+                 if(@due_phase == "Review", do: :deferred, else: :open)
+
+        assert Workpad.section_checklist_status(workpad, "Validierung", "Review") == :open
+      after
+        restore_app_env(:memory_tracker_comments, previous_memory_comments)
+        restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+        File.rm_rf(test_root)
       end
-
-      issue = %Issue{
-        id: "issue-test-clean-handoff",
-        identifier: "MT-TEST-CLEAN",
-        title: "Test handoff clean",
-        description: "Advance to merge when tests need no fixes",
-        state: "Test (AI)",
-        url: "https://example.org/issues/MT-TEST-CLEAN",
-        labels: []
-      }
-
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
-      assert_receive {:memory_tracker_state_update, "issue-test-clean-handoff", "Merge (AI)"}
-      assert "Merge (AI)" == Agent.get(state_agent, & &1)
-      [workpad] = Application.get_env(:symphony_elixir, :memory_tracker_comments)["issue-test-clean-handoff"]
-      assert Workpad.section_checklist_status(workpad, "Validierung") == :open
-      assert Workpad.section_checklist_status(workpad, "Review") == :open
-    after
-      restore_app_env(:memory_tracker_comments, previous_memory_comments)
-      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
-      File.rm_rf(test_root)
     end
   end
 

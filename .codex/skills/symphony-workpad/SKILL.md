@@ -78,17 +78,24 @@ widersprüchlich war.
 ## Pflichtnachweise und Übergaben
 
 - Jeden Validierungspunkt mit Aktion, ausführendem Verantwortlichen und fälliger
-  Phase führen. Später fällige Nachweise offen lassen; `[x]` setzt einen passenden
-  Beleg voraus. Keine stillschweigende Verschiebung vereinbarter Fälligkeiten.
+  Phase samt Entscheidungsquelle/technischer Begründung gemäß `WORKFLOW.md`,
+  „Phasenpflichten und Betreiberübergaben“, führen. Später fällige Nachweise offen
+  lassen; `[x]` setzt einen passenden Beleg voraus. Irrtümliche agentenseitige
+  Frühfristen begründet korrigieren, keine tatsächliche frühe Freigabe verschieben.
+  Bei Wiederaufnahme/Verdichtung Quelle, offene Pflicht und aktuelle technische
+  Belege erhalten.
 - Eine weiterhin fällige PO-Abnahme in `### Validierung` als offenen Punkt mit
   `; fällig: Freigabe Review` führen. Auch der automatische No-Findings-Handoff
   erhält dann das manuelle Gate; autorisierte Skip-Labels und `--yolo` gelten weiter.
-- Für offene Validierung erst in `Merge (AI)` jeden Punkt auf einer eigenen Zeile
-  mit dem eindeutigen Suffix `; fällig: Merge (AI)` schreiben, ohne Backticks oder
-  weitere Fälligkeitsangaben. Der Test-Handoff erkennt nur dieses spätere Gate;
-  er schließt den Punkt nicht. Unzugeordnete, aktuelle, überfällige, unbekannte
-  oder mehrdeutige Einträge sperren weiterhin. `### Test` und `### Review` haben
-  keine solche Ausnahme; vor Merge müssen alle dafür erforderlichen Belege da sein.
+- Für spätere offene Validierung jeden Punkt auf einer eigenen Zeile mit genau
+  einem abschließenden Suffix `; fällig: Merge (AI)` oder `; fällig: Review`
+  schreiben, ohne Backticks oder weitere Fälligkeitsangaben auch in Folgezeilen.
+  In Test sind beide später, in Merge nur Review; in Review ist Review fällig.
+  Rückstellung schließt keinen Punkt. Unzugeordnete, aktuelle, überfällige,
+  unbekannte oder mehrdeutige Einträge sperren weiterhin, auch neben späteren
+  Punkten. `### Test` und die technische `### Review`-Checkliste haben keine
+  solche Ausnahme. Finale Produktabnahme unter `### Validierung` führen;
+  `Review (AI)` und `Freigabe Review` sind keine Aliase für `Review`.
 - Eine fällige Betreiberübergabe im selben Workpad enthält konkrete Aktion,
   zuständige Rolle, Quell-/Paketstand (bei offenen Änderungen HEAD plus Diffbezug),
   bereits bestandene lokale Prüfungen, fehlende externe Nachweise und genaue

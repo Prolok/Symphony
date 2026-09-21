@@ -98,6 +98,13 @@ Die Bridge empfängt vollständige JSON-Zeilen bis 1 MiB; ihr Empfangspuffer ist
 ebenfalls darauf begrenzt, damit größere Workpads nicht vor dem JSON-Parser
 abgeschnitten und fälschlich als ungültige Laufbindung behandelt werden.
 
+Delegationsfreigabe und Eskalationsgrenze gelten ausführungswegneutral gemäß
+[PO-Laufvertrag](../WORKFLOW_YOLO_AGENT.md#laufvertrag); der CLI-Modus ist keine
+zusätzliche Aktivierungsfreigabe. Finale Produktabnahme folgt den
+[Phasenpflichten](../WORKFLOW.md#phasenpflichten-und-betreiberübergaben).
+Der ausdrücklich geforderte Live-Nachweis vor Aktivierung dieses optionalen
+Ausführungswegs bleibt ein eigenständiges früheres Gate.
+
 Der Betreiber muss für den gewählten Agenten prüfen und dokumentieren:
 
 - Vorhandenes lokales `exec` und Python 3; Zugriff auf den Symphony-Helfer,
@@ -313,8 +320,10 @@ Das automatische Resultat kennzeichnet diese fachliche Betreiberbewertung als
 `operator_evidence_required`; ein technischer Pass ersetzt sie nicht.
 Simulationen und Live-Belege mit eigenem Quellstand getrennt ausweisen.
 Ohne diese positiven Belege bleibt die produktive Aktivierung offen. Standardentwicklung
-benötigt keine lokale OpenClaw-Installation; ticketseitig vereinbarte Live-/Recoverygates
-bleiben vor Test-Handoff beziehungsweise Merge bindend.
+benötigt keine lokale OpenClaw-Installation. Ticketseitige Live-/Recoverygates
+bleiben vor Test-Handoff beziehungsweise Merge bindend, soweit sie gemäß den
+[Phasenpflichten](../WORKFLOW.md#phasenpflichten-und-betreiberübergaben)
+ausdrücklich dort fällig sind.
 
 Bei Fehlern denselben Auftrag erhalten. Der vorhandene isolierte Runner unterstützt
 `--resume --cleanup-only` mit unveränderten Lauf-/Quellparametern; dies ist nur

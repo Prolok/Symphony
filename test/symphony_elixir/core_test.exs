@@ -502,7 +502,8 @@ defmodule SymphonyElixir.CoreTest do
 
     assert test_skill =~ "offenen fälligen Validierungspunkten"
     assert test_skill =~ "fehlender/unbewertbarer Pflichtcheckliste"
-    assert test_skill =~ "Explizit später fällige Nachweise"
+    assert test_skill =~ "Eindeutig erst in Merge oder Review fällige Nachweise"
+    assert test_skill =~ "bleiben bindend offen"
 
     assert test_skill =~ "im selben Turn weiterarbeiten"
 

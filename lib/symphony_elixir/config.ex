@@ -185,10 +185,14 @@ defmodule SymphonyElixir.Config do
 
     if(tracker.yolo_agent, do: {identity, tracker.yolo_agent}, else: identity)
     |> then(fn binding -> if tracker.openclaw_yolo_agent, do: {binding, tracker.openclaw_yolo_agent}, else: binding end)
+    |> advisory_binding(tracker.advisory_agent_ids)
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
   end
+
+  defp advisory_binding(binding, []), do: binding
+  defp advisory_binding(binding, ids), do: {binding, ids}
 
   @spec settings!() :: Schema.t()
   def settings! do

@@ -9,6 +9,7 @@ defmodule SymphonyElixir.TestSupport do
     "LINEAR_TEAM_KEY",
     "SYMPHONY_LINEAR_SECRET_ACCESS",
     "LINEAR_YOLO_AGENT",
+    "LINEAR_ADVISORY_AGENT_IDS",
     "OPENCLAW_YOLO_AGENT"
   ]
 

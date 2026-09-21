@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.Linear.CommentInbox do
   @moduledoc "Project-local, restartable input versions, serialized with the existing host journal lock."
 
-  alias SymphonyElixir.Linear.{CommentJournal, CommentVersion, DurableState, IssueLease}
+  alias SymphonyElixir.Linear.{AdvisoryThreads, CommentJournal, CommentVersion, DurableState, IssueLease}
 
   @open ~w(recognized delivered)
   @outcomes ["übernommen", "Rückfrage", "nicht anwendbar", "ersetzt"]
@@ -40,9 +40,19 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
   defp background_fresh?(state, opts) do
     case background_cache(state, opts) do
-      %{"checked_at" => checked} when is_integer(checked) -> clock(opts) < checked + opts[:background_interval]
-      _ -> false
+      %{"checked_at" => checked} when is_integer(checked) ->
+        interval = background_interval(state, opts)
+        clock(opts) < checked + interval
+
+      _ ->
+        false
     end
+  end
+
+  defp background_interval(state, opts) do
+    if AdvisoryThreads.unresolved?(state),
+      do: Keyword.get(opts, :advisory_interval, opts[:background_interval]),
+      else: opts[:background_interval]
   end
 
   defp background_cache(state, opts) do
@@ -65,7 +75,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     cache = background_cache(state, opts)
     now = clock(opts)
 
-    if unchanged_signal?(signal, cache, now, opts) do
+    if not AdvisoryThreads.unresolved?(state) and unchanged_signal?(signal, cache, now, opts) do
       {:ok, put_in(state, ["background", "checked_at"], now)}
     else
       result =
@@ -95,7 +105,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
         _ -> []
       end
 
-    {:error, {:comment_scan_incomplete, reason, Enum.uniq_by(observed ++ comments, &CommentVersion.key/1)}}
+    {:error, {:comment_scan_incomplete, reason, Enum.uniq_by(observed ++ comments, &CommentVersion.raw/1)}}
   end
 
   defp preserve_signal_observations(_signal, result), do: result
@@ -135,7 +145,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
   defp valid_state?(state) do
     is_map(state["versions"]) and Enum.all?(state["versions"], &valid_stored_version?/1) and
-      valid_baseline?(state["baseline"])
+      valid_baseline?(state["baseline"]) and AdvisoryThreads.valid_state?(state)
   end
 
   defp valid_baseline?(nil), do: true
@@ -158,9 +168,24 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   def deliver(binding, issue, context, opts \\ []) do
     transaction(binding, issue, opts, fn state ->
       versions = Map.new(state["versions"], fn {key, version} -> {key, delivered(version, context)} end)
-      baseline = if state["baseline"], do: delivered(state["baseline"], context)
+      baseline = deliver_baseline(state, context)
       {:ok, %{state | "versions" => versions, "baseline" => baseline}}
     end)
+  end
+
+  defp deliver_baseline(%{"baseline" => nil}, _context), do: nil
+  defp deliver_baseline(%{"baseline" => %{"status" => "processed"} = baseline}, _context), do: baseline
+
+  defp deliver_baseline(state, context) do
+    baseline = state["baseline"]
+
+    previous_ids =
+      if baseline["status"] in ["delivered", "processed"],
+        do: Map.get(baseline, "delivered_source_ids", Enum.map(baseline["sources"], & &1["id"])),
+        else: []
+
+    ids = baseline["sources"] |> Enum.filter(&baseline_source?(state, &1)) |> Enum.map(& &1["id"])
+    baseline |> delivered(context) |> Map.put("delivered_source_ids", Enum.uniq(previous_ids ++ ids))
   end
 
   @doc "Persist business results only after the callback confirms their workpad write."
@@ -177,13 +202,21 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
   @spec pending(map()) :: [map()]
   def pending(state) do
-    (List.wrap(state["baseline"]) ++ Map.values(state["versions"]))
+    baseline = if state["baseline"], do: Map.update!(state["baseline"], "sources", &Enum.filter(&1, fn source -> baseline_source?(state, source) end))
+
+    (List.wrap(baseline) ++ Map.values(state["versions"]))
     |> Enum.filter(&(&1["status"] in @open))
+    |> Enum.reject(&(&1["advisory_suppressed"] == true))
     |> Enum.sort_by(&{&1["observed_at"], &1["key"]})
   end
 
   @spec ready?(map()) :: boolean()
   def ready?(state), do: not is_nil(state["last_successful_scan"]) and is_nil(state["scan_error"]) and pending(state) == []
+
+  defp baseline_source?(state, source) do
+    status = get_in(state, ["versions", CommentVersion.key(source), "status"])
+    AdvisoryThreads.eligible?(state, source) and status not in ["recognized", "delivered", "processed"]
+  end
 
   defp transaction(binding, issue, opts, callback) do
     IssueLease.with_journal_lock(path(binding, issue), fn ->
@@ -208,14 +241,16 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   defp persist(binding, issue, state, opts), do: Keyword.get(opts, :writer, &DurableState.write/2).(path(binding, issue), state)
 
   defp observe(state, comments, binding, opts) do
+    state = AdvisoryThreads.observe(state, comments, opts)
     now = timestamp()
     classify = Keyword.get(opts, :classify, &CommentJournal.classify(binding, &1))
 
     with {:ok, observed} <- classify_all(comments, classify, now) do
       baseline? = is_nil(state["baseline"])
-      versions = Enum.reduce(observed, state["versions"], &insert(&1, &2, baseline?))
+      versions = Enum.reduce(observed, state["versions"], &insert(&1, &2, baseline? and AdvisoryThreads.eligible?(state, &1["source"])))
+      versions = suppress(versions, state)
       ids = MapSet.new(observed, & &1["source"]["id"])
-      baseline = state["baseline"] || baseline(observed, now)
+      baseline = state["baseline"] || baseline(Enum.filter(observed, &baseline_source?(state, &1["source"])), now)
 
       case check_absent(versions, ids, baseline, opts) do
         {:ok, versions} ->
@@ -229,16 +264,38 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   end
 
   defp observe_partial(state, comments, reason, binding, opts) do
+    state = AdvisoryThreads.observe(state, comments, opts)
     classify = Keyword.get(opts, :classify, &CommentJournal.classify(binding, &1))
 
     with {:ok, observed} <- classify_all(comments, classify, timestamp()) do
-      versions = Enum.reduce(observed, state["versions"], &insert(&1, &2, false))
+      versions = observed |> Enum.reduce(state["versions"], &insert(&1, &2, false)) |> suppress(state)
       {:save_error, Map.merge(state, %{"versions" => versions, "scan_error" => inspect(reason)}), reason}
     end
   end
 
+  defp suppress(versions, state) do
+    Map.new(versions, fn {key, version} ->
+      suppressed = not AdvisoryThreads.eligible?(state, version["source"])
+      version = release_historical(version, state["baseline"], suppressed)
+      {key, if(suppressed, do: Map.put(version, "advisory_suppressed", true), else: Map.delete(version, "advisory_suppressed"))}
+    end)
+  end
+
+  defp release_historical(%{"advisory_suppressed" => true, "status" => "historical"} = version, baseline, false) do
+    represented = baseline["status"] == "recognized" or historically_delivered?(version, baseline)
+    status = if version["origin"] in ["human", "changed_app_output", "unknown"], do: "recognized", else: "context"
+    if represented, do: version, else: Map.put(version, "status", status)
+  end
+
+  defp release_historical(version, _baseline, _suppressed), do: version
+
+  defp historically_delivered?(version, baseline) do
+    ids = Map.get(baseline || %{}, "delivered_source_ids", Enum.map(baseline["sources"] || [], & &1["id"]))
+    baseline["status"] in ["delivered", "processed"] and version["source"]["id"] in ids
+  end
+
   defp classify_all(comments, classify, now) do
-    Enum.reduce_while(comments, {:ok, []}, fn comment, {:ok, acc} ->
+    Enum.reduce_while(Enum.uniq_by(comments, &CommentVersion.key/1), {:ok, []}, fn comment, {:ok, acc} ->
       raw = CommentVersion.raw(comment)
 
       case classify.(raw) do
@@ -305,7 +362,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   end
 
   defp maybe_insert_deletion(versions, version, baseline) do
-    delivered? = version["status"] in ["delivered", "processed"] or (version["status"] == "historical" and baseline["status"] in ["delivered", "processed"])
+    delivered? = version["status"] in ["delivered", "processed"] or (version["status"] == "historical" and historically_delivered?(version, baseline))
 
     if delivered? and version["origin"] in ["human", "changed_app_output", "unknown"] do
       source = Map.put(version["source"], "deleted", true)
@@ -319,6 +376,8 @@ defmodule SymphonyElixir.Linear.CommentInbox do
         "observed_at" => timestamp(),
         "previous_result" => version["result"]
       }
+
+      deletion = if version["advisory_suppressed"], do: Map.put(deletion, "advisory_suppressed", true), else: deletion
 
       insert(deletion, versions, false)
     else
@@ -338,6 +397,8 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   end
 
   defp mark_deleted_source(source, ids), do: if(MapSet.member?(ids, source["id"]), do: Map.put(source, "deleted", true), else: source)
+
+  defp delivered(%{"advisory_suppressed" => true} = version, _context), do: version
 
   defp delivered(%{"status" => status} = version, context) when status in @open do
     version |> Map.put("status", "delivered") |> Map.put("delivery", context) |> Map.put_new("delivered_at", timestamp())

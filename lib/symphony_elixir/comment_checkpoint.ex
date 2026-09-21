@@ -6,6 +6,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
   alias SymphonyElixir.Yolo.Scope, as: YoloScope
 
   alias SymphonyElixir.{Config, Dialog, ProjectContext, Tracker, Workpad}
+  alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryThreads}
   alias SymphonyElixir.Linear.{Client, CommentInbox, CommentVersion, Issue, WriteContext}
 
   @spec active?(map()) :: boolean()
@@ -21,7 +22,13 @@ defmodule SymphonyElixir.CommentCheckpoint do
   def scan(issue, opts \\ []) do
     opts = Keyword.put_new(opts, :journal_request, &journal_request/1)
     opts = Keyword.put_new(opts, :confirm_absence, &Client.confirm_comment_absence(issue.id, &1))
-    result = CommentInbox.scan(app_binding(), issue, Keyword.get(opts, :fetch, fn -> Client.scan_issue_comments(issue.id) end), opts)
+    opts = Keyword.put_new(opts, :advisory_agent_ids, Config.settings!().tracker.advisory_agent_ids)
+    opts = Keyword.put_new(opts, :resolve_advisory, &Client.fetch_comment_thread(issue.id, &1))
+
+    result =
+      with :ok <- AdvisoryAgents.verify() do
+        CommentInbox.scan(app_binding(), issue, Keyword.get(opts, :fetch, fn -> Client.scan_issue_comments(issue.id) end), opts)
+      end
 
     case result do
       {:ok, state} ->
@@ -57,6 +64,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
       opts
       |> Keyword.put(:background_key, key)
       |> Keyword.put(:background_interval, if(opts[:relay_epoch], do: 604_800_000, else: background_interval_ms()))
+      |> Keyword.put(:advisory_interval, background_interval_ms())
       |> Keyword.put_new(:signal, fn -> Client.comment_scan_signal(issue.id) end)
       |> Keyword.put_new(:fetch_after_signal, &Client.scan_issue_comments(issue.id, &1))
 
@@ -149,6 +157,8 @@ defmodule SymphonyElixir.CommentCheckpoint do
          Rufe `symphony_comments` (operation `checkpoint`) nach Meilensteinen und vor Handoffs auf.
          Fachliche Ergebnisse werden durch `acknowledge` im einen Workpad gespeichert; Empfang allein erledigt nichts.
          Technische Review-Subagenten erhalten diesen ungefilterten Kontext nicht. Laufende Turns bleiben ununterbrochen.
+         advisory_threads enthält nur IDs/Status zurückgehaltener Quellen; previously_delivered bezeichnet ihren früheren Zustellstatus.
+         Bereits geladener Kontext ist nicht rückwirkend entfernbar. Diese Quellen werden nicht erneut als Coding-Anweisungen zugestellt.
          """}
       end
     else
@@ -283,7 +293,15 @@ defmodule SymphonyElixir.CommentCheckpoint do
     |> Enum.join("\n")
   end
 
-  defp payload(state), do: %{"last_successful_scan" => state["last_successful_scan"], "scan_error" => state["scan_error"], "inputs" => CommentInbox.pending(state)}
+  defp payload(state) do
+    payload = %{"last_successful_scan" => state["last_successful_scan"], "scan_error" => state["scan_error"], "inputs" => CommentInbox.pending(state)}
+
+    case AdvisoryThreads.diagnostics(state) do
+      [] -> payload
+      diagnostics -> Map.put(payload, "advisory_threads", diagnostics)
+    end
+  end
+
   defp app_binding, do: Config.settings!().tracker.app
 
   defp allowed_issue?(id), do: is_nil(app_binding()["allowed_issue_ids"]) or id in app_binding()["allowed_issue_ids"]

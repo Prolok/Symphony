@@ -1212,6 +1212,89 @@ Baseline. Der Worker erhält sie einmal zur Übernahme noch offener Hinweise;
 bereits zuvor erkannte offene Versionen bleiben erhalten. Manuelle Gates und
 Dialog-AI werden durch diesen Eingang nicht dispatcht.
 
+### Beratende AgentSession-Stränge
+
+Linear repräsentiert AgentActivities selbst im Kommentar-API-Modell: auslösende
+Mentions, menschliche Popup-Folgefragen und Antwortspiegel können über
+`issue.comments` erscheinen. Die UI-Trennung ist deshalb keine Coding-Grenze.
+Die Bridge soll keine zusätzlichen `commentCreate`-Spiegel erzeugen; bestehende
+Providerrepräsentationen werden nicht gelöscht. Symphony trennt am Kommentareingang.
+
+`tracker.advisory_agent_ids` nimmt eine Liste stabiler App-User-UUIDs oder eine
+kommagetrennte Zeichenfolge an, auch `$LINEAR_ADVISORY_AGENT_IDS`. Ohne expliziten
+Workflowwert gilt die gleichnamige öffentliche Projektvariable; Standard ist `[]`.
+Werte werden getrimmt, dedupliziert und auf höchstens 20 UUIDs begrenzt.
+Die gebundene App prüft Appstatus, Aktivität und Workspacezugehörigkeit; ihre
+eigene Coding-App-ID ist unzulässig. Namen, Textmuster, YOLO-Auswahl und bloße
+App-Autorenschaft begründen keinen Ausschluss. Vorhandene Konfiguration wird um
+diesen Wert ergänzt, nicht ersetzt. Projekt-/Workerbindung und Hintergrundcache
+berücksichtigen die Auswahl; Änderungen benötigen Neustart, ein abgelehnter
+Reload erhält den bisherigen Kontext. Andere Projekte behalten ihre Auswahl.
+
+Der vollständige Scan sammelt Sessionmetadaten über alle Seiten. Eine belegte
+`agentSession.appUser.id` bindet Root und gegebenenfalls `sourceComment` an das
+gescannte Issue; Nachkommen folgen transitiv über `parentId`. Fehlende Roots,
+künstliche Sessionroots und strukturierte Mentions einer konfigurierten UUID
+lösen begrenzte direkte Root-/Sessionabfragen aus. Beide Sessionrelationen werden
+paginiert: maximal acht Rootauflösungen pro Scan, jeweils drei API-Seiten;
+fehlgeschlagene/unvollständige Auflösungen frühestens nach 30 Sekunden erneut.
+Alle über die Seiten beobachteten Sessionbindungen bleiben erhalten; abweichende
+Rootmetadaten erlauben keine reguläre Freigabe. Die vorhandenen Transport-,
+Rate-Limit- und Journalwege bleiben maßgeblich.
+Zyklen, widersprüchliche oder unvollständige Bindungen bleiben zurückgehalten;
+Zeitablauf und eine Null-Session allein geben Kandidaten nicht frei. Unabhängige
+Coding-Kommentare bleiben verfügbar. Der bestehende Hintergrundabgleich prüft
+ungeklärte Stränge erneut, auch wenn das letzte Kommentarsignal unverändert ist.
+
+Die projektlokale Inbox speichert Zuordnung und Quarantäne ohne zusätzlichen
+Quelltext unter derselben Journal-Sperre. Sie bewertet neue Metadaten auch bei
+unverändertem Body/Zeitstempel, erhält Kommentarversionen und Acks und entfernt
+Beratung vor neuer Baseline und jeder Zustellung. Altbaselines werden für die
+Ausgabe gefiltert; gespeicherte Historie und Sessiondateien bleiben erhalten.
+Bekannte Beratung bleibt über Edit, Auflösen, Root-Löschung und Prozessneustart
+ausgeschlossen. Filterung gilt nicht als Löschung. Ein zunächst zurückgehaltener
+normaler Kommentar wird nach belegter Klärung regulär zugestellt; bestätigte
+Quellversionen bleiben bestätigt. Bereits geladener Modellkontext lässt sich
+nicht rückwirkend entfernen. `advisory_threads` im Checkpoint meldet nur IDs,
+`held`/`excluded` und `previously_delivered`, ohne Beratungstext erneut auszugeben.
+Letzteres bezeichnet den protokollierten Zustellstatus, keinen Nachweis über den
+tatsächlich geladenen Modellkontext.
+
+Die synthetische Regression läuft mit:
+
+```sh
+./scripts/mix-gate test test/symphony_elixir/advisory_comments_test.exs test/symphony_elixir/advisory_config_test.exs
+```
+
+Für die reale tilor-Abnahme lädt Pai als Betreiber den Kandidaten in den bereits
+freigegebenen authentisierten Scanner für das ausschließlich synthetische
+PRI-169. Keine Worker-, Gateway- oder Relaystarts und keine Linear-Schreibmutation.
+Der Helfer `scripts/advisory-isolation.exs` ergänzt diesen bestehenden Scanner;
+er richtet keinen Zugang ein und wird vom Worker nicht live gestartet. Im
+verifizierten tilor-Projektkontext mit dessen öffentlicher Beratungs-ID:
+
+```elixir
+Code.require_file("scripts/advisory-isolation.exs", candidate_root)
+# issue_id: interne UUID von PRI-169; probe_root: neuer, separater Report-/Journalroot.
+AdvisoryIsolationProbe.run(issue_id, Path.join(probe_root, "baseline"), :baseline)
+AdvisoryIsolationProbe.run(issue_id, Path.join(probe_root, "incremental"), :incremental)
+# In einem neuen Scannerprozess mit derselben Kandidaten-/Projektbindung:
+AdvisoryIsolationProbe.run(issue_id, Path.join(probe_root, "baseline"), :resume)
+AdvisoryIsolationProbe.run(issue_id, Path.join(probe_root, "incremental"), :resume)
+```
+
+Der Helfer verwendet den echten `Client.scan_issue_comments`, die zentrale Inbox
+und die ausgelieferte Baseline/Eingangsliste. Er verlangt null `A1-`-Marker,
+genau eine Coding-Kontrolle vor dem lokalen Probe-Ack und keine erneute offene
+Eingabe danach oder beim Neustart. Fehlschläge sind keine Abnahme. Pai hält
+Quell-SHA und gegebenenfalls Diff-/Paketdigest, die wirksame öffentliche
+Workspace-/Projekt-/App-Bindung, getrennte Journale und alle vier Ergebnisse
+im Ticketbeleg fest. Diese Prüfung ist vor Merge fällig; die kontrollierte
+Betriebsübernahme nach Merge erhält laufende Jobs und dokumentiert die Grenze
+bereits geladenen Kontexts.
+
+### Journal und Zustellung
+
 Unter dem vorhandenen projektlokalen `state_root/inputs/` hält `DurableState`
 pro Issue die Bindung, beobachtete Quellversionen (auch aus Vor-/Nachscan-Signalen), Baseline, letzten vollständigen
 Abruf, Scanfehler und Zustände `recognized`, `delivered`, `processed` fest.

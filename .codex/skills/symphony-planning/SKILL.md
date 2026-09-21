@@ -32,8 +32,11 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
   verpflichtend übernommen.
 - Bei App-Dateien oder App-Verhalten passende Runtime-Validierung einplanen.
 - Jeden Pflichtnachweis mit konkreter Aktion, Verantwortlichem (Worker oder
-  Betreiber) und fälliger Phase zuordnen. Bereits festgelegte Zuständigkeit
-  übernehmen, nicht erneut erfragen. Bekannte spätere Betreiberpflichten
+  Betreiber), fälliger Phase und konkreter Entscheidungsquelle/technischer
+  Begründung gemäß `WORKFLOW.md`, „Phasenpflichten und Betreiberübergaben“,
+  zuordnen. Agentenfristen sind keine Nutzerentscheidung; finale Produktabnahme
+  standardmäßig nach Merge in `Review`, frühe technische Gates bleiben erhalten.
+  Bereits festgelegte Zuständigkeit übernehmen, nicht erneut erfragen. Bekannte spätere Betreiberpflichten
   verhindern keine autonome lokale Umsetzung; fehlende materielle Entscheidungen
   bleiben Klärungsbedarf. Vereinbarte Fälligkeiten nicht still verschieben.
   Belegformat und Übergabe: `symphony-workpad` sowie
@@ -63,6 +66,9 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
 - Verpflichtende Ticketvorgaben nicht eigenmächtig entfernen oder abschwächen.
   Spätere belegte menschliche Gateentscheidungen gemäß `symphony-workpad`
   übernehmen; überholte Beschreibungs-/Workpad-Defaults widerrufen sie nicht.
+  Irrtümliche agentenseitige Frühfristen mit Quelle begründet korrigieren und
+  offene Nachweise erhalten. Für delegierte PO-Arbeit gilt die Freigabe aus
+  `WORKFLOW_YOLO_AGENT.md`, keine zusätzliche Aktivierungsforderung erzeugen.
 - Keinen Scope erfinden oder erweitern. Die gleiche Wesentlichkeitsschwelle gilt
   für spätere Plananpassungen; behebbare Fehler lösen Nacharbeit in der aktuellen
   Phase aus. Fehlender positiver Beleg sperrt das Gate, nicht die Fehlerkorrektur.

@@ -44,7 +44,9 @@ Status-/BLOCKER-Weg gemäß aufrufendem Workflow verwenden.
 
 Wenn alle Schritte sauber sind, `### Test` und die jetzt fälligen Punkte in
 `### Validierung` abhaken, nach `Merge (AI)` verschieben und den Turn beenden.
-Explizit später fällige Nachweise gemäß `symphony-workpad` bleiben bindend offen.
+Eindeutig erst in Merge oder Review fällige Nachweise gemäß `symphony-workpad`
+bleiben bindend offen. Die finale Produktabnahme folgt den Phasenpflichten in
+`WORKFLOW.md`; fehlende notwendige Testumgebung bleibt ein technisches Gate.
 Bei offener `### Test`-Checkliste, offenen fälligen Validierungspunkten oder
 fehlender/unbewertbarer Pflichtcheckliste im selben Turn weiterarbeiten oder
 eine fällige Betreiberübergabe gemäß Workflow ausführen. Bei

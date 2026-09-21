@@ -7,6 +7,28 @@ AI-Ticketphasen mit ihren unveränderten Pflichtgates.
 
 ## Laufvertrag
 
+Eine aktuell wirksame menschliche Delegation an den konfigurierten Agenten ist
+die Freigabe für PO-Prüfung, Planung, Aktivierung nach `Todo (AI)` und weitere
+Bearbeitung im vereinbarten Ticketscope, unabhängig vom CLI-Startmodus `--yolo`.
+Kein zusätzliches OK oder Freigabekommentar. Eine spätere Delegation ersetzt
+ältere agentenseitige Anlagevorbehalte wie „zunächst Backlog“; aktuelle menschliche
+Stopps, Scopegrenzen und Delegationsentzug bleiben bindend. Ohne wirksame
+Delegation keine Selbstautorisierung.
+
+Routinefragen, Reihenfolge, Prüfstrategie und im Scope lösbare Fehler autonom
+entscheiden bzw. in die passende reguläre Phase zurückführen; Annahme/Entscheidung
+knapp im Workpad belegen. Menschliche Eskalation nur für eine notwendige
+strategische Entscheidung außerhalb des delegierten Ziels/Scopes oder eine nach
+Nutzung zulässiger Möglichkeiten autonom unlösbare externe Voraussetzung.
+Vorhandene Rechte prüfen/nutzen, keine zusätzlichen Rechte selbst vergeben oder
+Zugriffskontrollen umgehen. Ursache, versuchte Lösung, Empfehlung und genau
+benötigte menschliche Aktion dokumentieren. Regulärer Abschlussbericht und
+menschliche Schlussübergabe bleiben erforderlich; Coding-Scope erteilt keine
+pauschale Deployment- oder Rechteänderungsfreigabe. Planung, PreReview,
+unabhängiger technischer Review, Test, sicherer Merge und ausdrücklich geforderte
+Sondergates bleiben erhalten; menschliche Routinegates nutzen die bestehende
+YOLO-/Skip-Behandlung.
+
 - Bearbeite nur die aufgeführten Mitglieder; weitere Projektarbeit dient als
   Kontext für Abhängigkeiten. Linear-Zugriff ausschließlich über die gebundenen
   Tools. Menschlicher Delegationsentzug beendet die Betreuung dieses Tickets.
@@ -37,7 +59,10 @@ AI-Ticketphasen mit ihren unveränderten Pflichtgates.
   Stand berücksichtigen und für den regulären Ticketworker erhalten.
 - Fehler, Rate-Limits, unvollständige Antworten und fehlende Belege sind keine
   leeren Bestände und keine bestandenen Prüfungen. Teilfortschritt konkret
-  dokumentieren. Unveränderte externe Voraussetzungen nicht erneut testen.
+  dokumentieren. Temporäre Fehler über die begrenzten Retry-/Wiederaufnahmewege
+  aus `symphony-linear` behandeln; keine Endlosschleifen oder automatische
+  menschliche Übergabe bei jedem Fehler. Unabhängig ausführbare Mitglieder
+  weiterbearbeiten. Unveränderte externe Voraussetzungen nicht erneut testen.
 
 ## Eingangsgruppe: Backlog, Todo und Definiert
 
@@ -68,13 +93,18 @@ Technische Pflichtgates und `Requires Manual Review` bleiben wirksam.
 
 ## BLOCKER
 
-Prüfe Ursache und Fortschritt. Löse autonom bearbeitbare Ursachen oder führe in
-die passende Phase zurück. Ist eine externe Voraussetzung unverändert oder ein
-Problem nicht autonom lösbar, dokumentiere Ursache und genaue menschliche Aktion,
-setze den konfigurierten ersten menschlichen Assignee und entferne die
-Agentdelegation. Der Status bleibt `BLOCKER`, solange die Ursache besteht.
-Diese Übergabe beendet die Betreuung und das Warten der Schlussabnahme darauf.
-Betreiberbelege niemals fingieren oder auf eine spätere Phase verschieben.
+Prüfe Ursache, Fortschritt und Fälligkeitsquelle gemäß `WORKFLOW.md`,
+„Phasenpflichten und Betreiberübergaben“, bereits in Eingang und Planung.
+Eine allein agentenseitig vorgezogene finale Schlussabnahme begründet nach
+`Review` einordnen und regulär wiederaufnehmen; offene Pflicht und technische
+Belege erhalten. Tatsächlich fällige technische/externe Pflichten und konkrete
+frühere Freigaben nicht eigenmächtig verschieben oder Belege fingieren.
+Löse autonom bearbeitbare Ursachen oder führe in die passende Phase zurück.
+Nur an der Eskalationsgrenze des Laufvertrags Ursache/Versuche/Empfehlung und
+menschliche Aktion übergeben, den konfigurierten ersten menschlichen Assignee
+setzen und die Agentdelegation entfernen. Der Status bleibt `BLOCKER`, solange
+die Ursache besteht. Diese Übergabe beendet die Betreuung und das Warten der
+Schlussabnahme darauf.
 
 ## Review: gemeinsame fachliche Schlussabnahme
 
@@ -82,6 +112,12 @@ Symphony startet diesen Lauf erst ohne weitere erwartete delegierte Arbeit.
 Prüfe diese Voraussetzung vor Entscheidungen erneut; Fehler sind kein Beleg
 für einen leeren Bestand. Übergebene BLOCKER, verworfene/abgebrochene Tickets
 und abgeschlossene Aggregationsursprünge zählen nicht als erwartete Arbeit.
+
+Übernimm die offenen Review-Nachweise gemäß den Phasenpflichten in `WORKFLOW.md`.
+Fehlt die autorisierte Betriebsbereitstellung, bleibt dies eine offene
+Review-Abnahme mit konkreter Einschränkung und benötigter Betreiberaktion;
+kein rückwirkender Testauftrag am ungemergten Stand. Verfügbare Prüfungen
+abschließen und den bestehenden Schlussübergabe-/Finding-Pfad nutzen.
 
 Prüfe den dokumentierten gemergten Stand anhand der Anforderungen aller
 Review-Mitglieder und ihres gemeinsamen End-to-End-Verhaltens. Verbindlicher

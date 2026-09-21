@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.YoloActionsTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.Linear.WriteContext
+  alias SymphonyElixir.Linear.{CommentActionGuard, WriteContext}
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionScope, ActionTool, Admission, API, Followup, GeneratedLabel, Handoff, Operations}
   alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Relations, ReviewContract, Runner, Scope, Store}
@@ -68,6 +68,11 @@ defmodule SymphonyElixir.YoloActionsTest do
   defp respond("DeleteDerivedTestFixture", _, %{"id" => id}) do
     change(&%{&1 | created: Map.delete(&1.created, id)})
     ok("issueDelete", %{"success" => true})
+  end
+
+  defp respond("SymphonyCommentAction", _, %{"id" => id}) do
+    states = Enum.map(["Todo (AI)", "In Arbeit (AI)", "Test (AI)"], &%{"id" => &1, "name" => &1})
+    ok("issue", %{"id" => id, "team" => %{"states" => connection(states)}})
   end
 
   defp respond("YoloStates", _, _), do: ok("team", %{"states" => connection(Enum.map(["Backlog", "Umsetzungsticket erstellt", "Todo (AI)"], &%{"id" => &1, "name" => &1}))})
@@ -514,6 +519,170 @@ defmodule SymphonyElixir.YoloActionsTest do
     end)
   end
 
+  # Scripted PO sessions exercise prompt delivery, fresh action guards, persisted
+  # decisions and real status/handoff tools. They do not evaluate model reasoning
+  # or claim a live installation. No production policy engine is added for tests.
+  test "delegated PO decisions activate after an old creation caveat and retain real escalation boundaries", ctx do
+    cases = [
+      {:delegation, "Backlog", "Agent bei Anlage: zunächst Backlog; keine Umsetzung aus reiner Anlage ableiten."},
+      {:routine, "Planung", "Routinefrage im Scope: Reihenfolge der isolierten Paketprüfungen wählen."},
+      {:early_acceptance, "BLOCKER", "Agentenplan verlangt finale Installation vor Merge; keine frühe Nutzerfreigabe vorgeschrieben."},
+      {:strategy, "BLOCKER", "Zielkonflikt außerhalb des delegierten Scopes: neues Produkt statt Paketkorrektur."},
+      {:access, "BLOCKER", "Notwendige Testdatenbank unerreichbar; erlaubter Startpfad und gebundener Testaufruf scheitern ohne Betreiberrecht."},
+      {:stop, "Backlog", "Mensch aktuell: Stopp, dieses Ticket nicht aktivieren."}
+    ]
+
+    for yolo <- [false, true], {scenario, state, description} <- cases do
+      ProjectContext.bind(%{ctx.context | yolo: yolo})
+      source = %{hd(ctx.issues) | id: "#{scenario}-#{yolo}", state: state, description: description, labels: [~s(skip "freigabe implementierung"), ~s(skip "freigabe review")]}
+
+      due = if scenario == :early_acceptance, do: "Test (AI)", else: "Review"
+
+      initial =
+        "## Symphony Workpad\n\n### Validierung\n- [x] Isolierter Pakettest grün; Stand: abc1234\n" <>
+          "- [ ] Betreiber: finale Installation; Quelle: Agentenplan ohne Nutzerentscheidung; fällig: #{due}\n" <>
+          if(scenario == :access, do: "- [ ] Notwendige Testdatenbank bereitstellen; Quelle: Integrationstest benötigt DB; fällig: Test (AI)\n", else: "")
+
+      change(&%{&1 | issues: %{source.id => source}, workpads: %{source.id => initial}, calls: []})
+      group_name = Group.name(source)
+
+      input = %{
+        "origin" => "human",
+        "key" => "delegation-#{source.id}",
+        "body" => if(scenario == :stop, do: description, else: "Spätere menschliche Delegation: Ticket im beschriebenen Scope bearbeiten.")
+      }
+
+      session = fn _, prompt, _, _ ->
+        assert prompt =~ description
+        assert prompt =~ input["body"]
+        assert prompt =~ ~s("yolo": #{yolo})
+        assert prompt =~ "Eine spätere Delegation ersetzt"
+        assert prompt =~ "aktuelle menschliche"
+        assert prompt =~ "strategische Entscheidung außerhalb"
+        assert prompt =~ "Tatsächlich fällige technische/externe Pflichten"
+
+        case scenario do
+          :delegation ->
+            report = "Aktivierung freigegeben durch spätere menschliche Delegation; alter Agenten-Anlagevorbehalt ersetzt."
+            assert :ok = opts()[:workpad].(source.id, initial <> "\n### Entscheidung\n" <> report)
+            assert :ok = guarded_po_update(source, "Todo (AI)")
+            assert :ok = Completion.invoke(%{"issue_id" => source.id, "result" => report}, opts())
+
+          :routine ->
+            report = "Routine autonom entschieden: Paketbuild vor Integration; Scope unverändert."
+            assert :ok = opts()[:workpad].(source.id, initial <> "\n### Entscheidung\n" <> report)
+            assert :ok = guarded_po_update(source, "In Arbeit (AI)")
+            assert :ok = Completion.invoke(%{"issue_id" => source.id, "result" => report}, opts())
+
+          :early_acceptance ->
+            report = "Phasenkorrektur: reine Agentenfrist ersetzt gemäß WORKFLOW-Phasenpflichten; finale Installation erst am gemergten Stand."
+            corrected = String.replace(initial, "fällig: Test (AI)", "fällig: Review") <> "\n### Entscheidung\n" <> report
+            assert :ok = opts()[:workpad].(source.id, corrected)
+            assert :ok = guarded_po_update(source, "Test (AI)")
+            assert :ok = Completion.invoke(%{"issue_id" => source.id, "result" => report}, opts())
+
+          reason when reason in [:strategy, :access] ->
+            report =
+              if reason == :strategy do
+                "Strategische Scopeentscheidung erforderlich. Anforderungen und bestätigtes Ziel geprüft; Empfehlung: Paketkorrektur beibehalten. Mensch muss einen abweichenden Produktumfang ausdrücklich entscheiden."
+              else
+                "Ausstehende Betreiberaktion: Testdatenbank für abc1234 bereitstellen. Erlaubter Start und Testexecutor versucht, Bereitstellungsrecht fehlt. Empfehlung: bestehende Testlaufzeit herstellen und Erreichbarkeit bestätigen; Fortsetzung Test (AI)."
+              end
+
+            assert :ok = Handoff.invoke(%{"issue_id" => source.id, "report" => report}, opts())
+
+          :stop ->
+            # The newly delivered stop first prevents a write. After recording
+            # its decision the member may complete, but must remain inactive.
+            stop_guard = fn _ -> {:error, :human_stop_pending} end
+            assert {:error, :human_stop_pending} = guarded_po_update(source, "Todo (AI)", stop_guard)
+            report = "Aktueller menschlicher Stopp übernommen; keine Aktivierung."
+            assert :ok = opts()[:workpad].(source.id, initial <> "\n### Entscheidung\n" <> report)
+            assert :ok = Completion.invoke(%{"issue_id" => source.id, "result" => report}, opts())
+        end
+
+        {:ok, %{session_id: "po-decision-#{source.id}"}}
+      end
+
+      runner_opts =
+        Keyword.merge(opts(),
+          lease: fn _, fun -> fun.() end,
+          scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
+          workspace: fn _, _ -> {:ok, ctx.workspace} end,
+          unchanged: fn _ -> true end,
+          checkpoint: fn _ -> {:ok, %{"inputs" => [input]}} end,
+          session: session
+        )
+
+      assert :ok = Runner.run(group_name, [source], [source], runner_opts)
+      actual = db().issues[source.id]
+      body = db().workpads[source.id]
+      assert body =~ "- [x] Isolierter Pakettest grün; Stand: abc1234"
+      assert body =~ "- [ ] Betreiber: finale Installation"
+      assert body =~ "Quelle: Agentenplan ohne Nutzerentscheidung"
+
+      case scenario do
+        :delegation ->
+          assert actual.state == "Todo (AI)"
+          assert actual.delegate_id == "pai"
+          assert body =~ "Anlagevorbehalt ersetzt"
+
+        :routine ->
+          assert actual.state == "In Arbeit (AI)"
+
+        :early_acceptance ->
+          assert actual.state == "Test (AI)"
+          assert body =~ "Phasenkorrektur"
+          assert SymphonyElixir.Workpad.section_checklist_status(body, "Validierung", "Test (AI)") == :deferred
+          assert SymphonyElixir.Workpad.section_checklist_status(body, "Validierung", "Review") == :open
+
+        reason when reason in [:strategy, :access] ->
+          assert actual.state == "BLOCKER"
+          assert actual.delegate_id == nil
+          assert actual.assignee_id == "human"
+          assert body =~ "Empfehlung:"
+
+          if reason == :access do
+            assert SymphonyElixir.Workpad.section_checklist_status(body, "Validierung", "Test (AI)") == :open
+          end
+
+        :stop ->
+          assert actual.state == "Backlog"
+          assert writes("YoloUpdate") == []
+      end
+
+      {:ok, record} = Store.read(group_name)
+      assert is_binary(record["attempt"]["completed"][source.id])
+      refute Enum.any?(writes("YoloUpdate"), fn {_, vars} -> vars["input"]["stateId"] == "Fertig" end)
+    end
+  end
+
+  test "missing or withdrawn delegation cannot activate despite an old agent caveat", ctx do
+    for revoked <- [false, true] do
+      source = %{hd(ctx.issues) | description: "Agent: zunächst Backlog", delegate_id: if(revoked, do: "pai")}
+      change(&%{&1 | issues: %{source.id => source}, calls: []})
+
+      group([source], fn ->
+        if revoked, do: change(&put_in(&1, [:issues, source.id, Access.key(:delegate_id)], nil))
+        assert {:error, :yolo_delegation_changed} = guarded_po_update(source, "Todo (AI)")
+      end)
+
+      assert db().issues[source.id].state == "Backlog"
+      assert writes("YoloUpdate") == []
+    end
+  end
+
+  defp guarded_po_update(source, target, guard \\ fn _ -> :ok end) do
+    payload = %{
+      "query" => "mutation($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+      "variables" => %{"id" => source.id, "input" => %{"stateId" => target}}
+    }
+
+    with :ok <- CommentActionGuard.check(payload, query: &query/2, fetch_issue: opts()[:fetch], guard: guard) do
+      API.update(source.id, %{stateId: target}, opts())
+    end
+  end
+
   test "follow-up assignment matrix is identical in regular and PO workers", %{issues: [issue | _], context: context} do
     for yolo <- [false, true], agent <- [nil, "pai"], po <- [false, true] do
       ProjectContext.bind(%{context | yolo_agent_id: agent, yolo: yolo})
@@ -636,12 +805,19 @@ defmodule SymphonyElixir.YoloActionsTest do
   test "handoff keeps Review/BLOCKER, preserves workpad and stops agent ownership", %{issues: [issue | _]} do
     for state <- ["Review", "BLOCKER"] do
       source = %{issue | state: state}
-      change(&%{&1 | issues: %{source.id => source}})
+
+      original =
+        "## Symphony Workpad\n\nExisting evidence\n\n### Validierung\n" <>
+          "- [x] Technische Tests grün; Stand: abc1234\n" <>
+          "- [ ] Betreiber: finale Installation; Quelle: Phasenvertrag; fällig: Review\n"
+
+      change(&%{&1 | issues: %{source.id => source}, workpads: %{source.id => original}})
 
       group([source], fn ->
         {:ok, record} = Store.read("incoming")
         :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
-        assert :ok = handoff(%{"issue_id" => source.id, "report" => "Tests checked; open fix PRO-99."}, opts())
+        evidence = Map.put(ReviewFixture.evidence(), "limitations", ["Finale Installation am gemergten Stand fehlt; autorisierte Betreiberbereitstellung erforderlich."])
+        assert :ok = handoff(%{"issue_id" => source.id, "report" => "Tests checked; open fix PRO-99. Finale Installation offen.", "review" => evidence}, opts())
       end)
 
       assert db().issues[source.id].delegate_id == nil
@@ -649,6 +825,9 @@ defmodule SymphonyElixir.YoloActionsTest do
       assert db().issues[source.id].state == state
       assert db().workpads[source.id] =~ "Existing evidence"
       assert db().workpads[source.id] =~ "open fix PRO-99"
+      assert db().workpads[source.id] =~ original
+      assert SymphonyElixir.Workpad.section_checklist_status(db().workpads[source.id], "Validierung", "Review") == :open
+      assert Group.groups([db().issues[source.id]]) == %{}
     end
   end
 

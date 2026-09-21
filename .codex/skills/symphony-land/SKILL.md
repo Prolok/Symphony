@@ -33,7 +33,10 @@ einschließlich Betreiberbelegen auf Ergebnis, Scope und Stand prüfen. Ohne pas
 und gebundene Prüfwege nutzen; nur ohne autonomen Fortsetzungsweg eine bestehende
 Betreiberübergabe erhalten und gemäß Workflow nach `BLOCKER` zurückgeben. Fehlt aktuelle lokale Test-Evidenz, nach `Test (AI)`
 übergeben; ein Review-Skip ersetzt weder Tests noch das GitHub-Approval-Gate
-`Requires Manual Review`.
+`Requires Manual Review`. Erst in Review fällige Nachweise bleiben offen und
+sperren Merge nicht; gemäß den Phasenpflichten in `WORKFLOW.md` ist der Merge
+weder Deploymentfreigabe noch Produktabnahme. Diese Pflichten nach erfolgreichem
+Merge mit Standbezug in die Review-Übergabe übernehmen.
 
 1. PR-/Remote-Preflight ausführen: aktueller Branch muss
    `symphony/<IssueId>` sein, `origin/<branch>` muss existieren, eine offene PR

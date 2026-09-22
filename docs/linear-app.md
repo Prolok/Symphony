@@ -143,7 +143,8 @@ Die wirksame menschliche Delegation autorisiert PO-Steuerung und Aktivierung im
 Ticketscope gemäß [Laufvertrag](../WORKFLOW_YOLO_AGENT.md#laufvertrag), auch ohne
 CLI-`--yolo`. Dort sind spätere Delegation nach Anlage, aktuelle Stopps/Entzug und
 die Grenze menschlicher Eskalation geregelt; Agentenbindung und Startmodus sind
-unabhängig. Die Zuweisungsregeln für neu angelegte Followups bleiben unverändert.
+unabhängig. Neu angelegte Followups übernehmen die konfigurierte Agentenbindung
+ebenfalls unabhängig von `--yolo`.
 
 Der optionale lokale OpenClaw-Ausführungsweg für diese PO-Läufe ist in
 [OpenClaw-YOLO](openclaw-yolo.md) beschrieben, einschließlich Testisolation,
@@ -210,10 +211,14 @@ Status-Rundläufe und Neustarts erzeugen keine erneute Zustellung unveränderter
 Arbeit. Inhalt, externe Kommentare und wirksame Abhängigkeiten bestimmen die
 nächste fachliche Version. Vollständig paginierte Relationsabfragen beobachten
 Vorgängerzustände auch ohne Änderung am Ursprung. Geblocktes Backlog bleibt
-unbewertet; zusammenhängende Reviewketten warten auf sämtliche Folgefixes und
+unbewertet; frische Abhängigkeiten sperren auch Aktionen eines bereits laufenden
+PO-Turns, wenn das Backlog-Ticket inzwischen blockiert wurde. Zusammenhängende Reviewketten warten auf sämtliche Folgefixes und
 externe Vorgänger. Unabhängige Arbeit erzeugt keine globale Review-Warteschleife.
 Beobachtete Blockierung und erneute Freigabe werden je Mitglied und Phase
 dauerhaft gezählt; auch ein identischer freier Endstand erlaubt genau eine neue Bewertung.
+Ein belegter lokaler App-Server-Fehler vor `turn/start` gibt den Zustellversuch
+für einen technischen Retry frei. Unklare oder bereits gestartete Turns bleiben
+reserviert.
 Fehler-/Teilresultate erhalten
 ihren Lauf-/Sessionbezug. Der Sammelvertrag steht in
 [WORKFLOW_YOLO_AGENT.md](../WORKFLOW_YOLO_AGENT.md).
@@ -234,9 +239,17 @@ journalisierten Ursprünge gezielt nach. Nur unveränderte, weiterhin delegierte
 Ursprünge nehmen diese Operation wieder auf; das neue Ticket bleibt bis zum
 bestätigten Operationsabschluss gesperrt. Daraus entsteht keine neue Arbeit
 für sonstige abgeschlossene Tickets.
+Offene PO-Anlagen werden unter Gruppen-/Ticketleases direkt aus diesem Journal
+fortgesetzt, ohne unveränderte Modellaufträge erneut zuzustellen. Aktive oder
+unklar angenommene externe Aufträge sperren die Recovery; ausdrücklich eskalierte
+Operationen des abgeschlossenen Warteentscheids bleiben beim Betreiber.
 
 Die Review-Warteentscheidung entsteht ohne Modelllauf. Agentendelegierte Tickets
 gehen nach Merge in `Yolo Review`; nur dort führt der PO die Schlussabnahme aus.
+Ein lokal vorhandener ungeprüfter Merge-Dateistand sperrt bereits diesen Eintritt:
+Das Ticket bleibt in `Merge (AI)` für den regulären Test-Rücklauf. Auch die
+Schlussübergabe verweigert einen inzwischen veränderten regulären Workspace,
+ohne die Einbahnregel von `Yolo Review` aufzuheben.
 Interne Kanten vollständig gemergter Reviewketten bleiben erhalten. Vor Start
 und Aktionen werden Mitglieder, Abhängigkeiten und Kommentare erneut geprüft.
 Für Folgefixes erzeugt `blocks_origins=true` zusätzlich zu `related` die echte
@@ -247,6 +260,9 @@ Tickets. Keine Gegenkante und kein Freitext als Blockierungsersatz.
 Status und Delegation bleiben erhalten. Erfolgreiches `kind=handoff` verlangt
 erledigte Vorgänger, bestandene Prüfungen, geschlossene Pflichtnachweise und
 Merge-Evidenz. Es setzt `Review` mit menschlicher Zuständigkeit und ohne Agent.
+Nach bestätigtem Abschluss bereinigt der PO-Pfad den regulären Issue-Workspace;
+der Abnahmecheckout bleibt separat. Reservierte Routine-Testworkspaces bleiben
+ausschließlich dem gebundenen Test-Cleanup vorbehalten.
 Rücksprünge aus `Yolo Review` nach BLOCKER oder Coding sowie direktes Fertig sind
 gesperrt. Externe Voraussetzungen werden mit `kind=escalate` dort übergeben.
 Ausdrücklich eskalierte offene Anlageoperationen erlauben den Laufabschluss als

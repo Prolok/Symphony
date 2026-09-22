@@ -60,6 +60,16 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   @spec unblocked?(map()) :: boolean()
   def unblocked?(issue), do: is_list(issue.blocked_by) and Enum.all?(issue.blocked_by, &terminal?/1)
 
+  @doc "Recheck Backlog blocking at the action boundary, including predecessor-only changes."
+  @spec actionable([map()], keyword()) :: :ok | {:error, term()}
+  def actionable(issues, opts) do
+    backlog = Enum.filter(issues, &(&1.state == "Backlog" and YoloAgent.delegated?(&1)))
+
+    with {:ok, fresh} <- refresh(backlog, opts) do
+      if Enum.all?(fresh, &unblocked?/1), do: :ok, else: {:error, :yolo_backlog_blocked}
+    end
+  end
+
   @spec review_members([map()]) :: [map()]
   def review_members(issues) do
     candidates = Enum.filter(issues, &(&1.state == "Yolo Review" and Admission.eligible?(&1) and not Admission.needed?(&1)))

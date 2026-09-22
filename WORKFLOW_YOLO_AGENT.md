@@ -248,6 +248,8 @@ vor dem Modellaufruf. Unveränderte Tickets, Status-Rundläufe, Gruppenwechsel,
 eigene Workpad-Ausgaben und Neustarts erzeugen keine erneuten Aufträge. Neue
 Inhalte, externe Kommentare oder wirksame Kettenänderungen erlauben neue Arbeit.
 Zustellung ist kein Abschlussbeleg; offene Entscheidungen bleiben sichtbar.
+Offene journalisierte Anlagen setzt Symphony unter den bestehenden Leases ohne
+erneute Modellzustellung fort; ausdrücklich eskalierte Operationen bleiben offen.
 Unklare OpenClaw-Annahme bleibt reserviert, ein belegter Nichtstart darf denselben
 technischen Retrypfad nutzen. Keine Ersatzanlage oder eigene Neuzustellung.
 

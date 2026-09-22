@@ -3,7 +3,7 @@ defmodule SymphonyElixir.YoloReviewContractTest do
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionTool, Completion, Group, Handoff, OpenClaw, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
-  alias SymphonyElixir.Yolo.Operations
+  alias SymphonyElixir.Yolo.{Operations, Recovery}
   alias SymphonyElixir.YoloReviewFixture, as: Fixture
 
   setup do
@@ -208,6 +208,36 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     )
   end
 
+  @tag :review_regression
+  test "confirmed terminal acceptance cleans only the regular issue workspace", ctx do
+    {:ok, regular} = Workspace.create_for_issue(ctx.issue)
+    File.write!(Path.join(regular, "retained.txt"), "regular workspace")
+    Fixture.git(regular, ["init", "--quiet"])
+    Fixture.git(regular, ["add", "retained.txt"])
+    Fixture.git(regular, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--quiet", "-m", "validated"])
+
+    Scope.with_scope(
+      "review",
+      [ctx.issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [ctx.issue.id]}))
+        request = %{"issue_id" => ctx.issue.id, "report" => "Accepted", "review" => Fixture.evidence()}
+        File.write!(Path.join(regular, "retained.txt"), "unvalidated merge change")
+        assert {:error, :merge_workspace_requires_test} = Handoff.invoke(request, ctx.opts)
+        assert File.dir?(regular)
+        assert Agent.get(ctx.db, & &1.updates) == 0
+        Fixture.git(regular, ["checkout", "--", "retained.txt"])
+        assert :ok = Handoff.invoke(request, ctx.opts)
+        assert Agent.get(ctx.db, & &1.issue.state) == "Review"
+        refute File.exists?(regular)
+        assert File.dir?(ctx.workspace.path)
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
   test "a missing review contract permits only an explicit escalation without leaving Yolo Review", ctx do
     File.rm!(Path.join(ctx.workspace.path, ".codex/skills/sym-yolo-review/SKILL.md"))
 
@@ -270,6 +300,7 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     assert {:ok, record} = Store.read("review")
     assert record["attempt"]["session_id"] == "escalated-session"
     assert record["error"] == nil
+    assert :ok = Recovery.resume(%Orchestrator.State{}, [ctx.issue], query: fn _, _ -> flunk("an escalated operation must remain reserved") end)
     assert %{issue: %{state: "Yolo Review", delegate_id: "pai"}, updates: 0} = Agent.get(ctx.db, & &1)
     assert {:error, :yolo_group_changed} = Runner.run("review", [ctx.issue], [ctx.issue], opts)
 

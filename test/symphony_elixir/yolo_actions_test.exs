@@ -4,6 +4,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionScope, ActionTool, Admission, API, Followup, GeneratedLabel, Handoff, Operations}
   alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Relations, ReviewContract, Runner, Scope, Store}
+  alias SymphonyElixir.Yolo.{Delivery, Observation}
   alias SymphonyElixir.YoloReviewFixture, as: ReviewFixture
 
   setup do
@@ -192,6 +193,42 @@ defmodule SymphonyElixir.YoloActionsTest do
   defp handoff(args, options), do: Handoff.invoke(Map.put_new(args, "review", ReviewFixture.evidence()), options)
   defp writes(name), do: Enum.filter(db().calls, &(elem(&1, 0) == name))
   defp relation(from, to), do: %{"id" => "#{from}:#{to}", "type" => "blocks", "issue" => %{"id" => from}, "relatedIssue" => %{"id" => to}}
+
+  @tag :review_regression
+  test "a backlog dependency added during the turn blocks actions using fresh relations", %{issues: [issue, blocker | _]} do
+    group([issue], fn ->
+      change(&%{&1 | relations: [relation(blocker.id, issue.id)]})
+      options = Keyword.delete(opts(), :dependencies)
+      assert {:error, :yolo_backlog_blocked} = ActionScope.sources([issue.id], options)
+      assert {:error, :yolo_backlog_blocked} = Followup.invoke(args([issue]), options)
+      assert writes("YoloCreate") == []
+
+      mutation = %{"query" => "mutation { issueUpdate(id: \"#{issue.id}\", input: {stateId: \"Test (AI)\"}) { success } }"}
+      guard_opts = [query: &query/2, fetch_issue: options[:fetch], guard: fn _ -> :ok end]
+      assert {:error, :yolo_backlog_blocked} = CommentActionGuard.check(mutation, guard_opts)
+      change(&%{&1 | issues: Map.put(&1.issues, blocker.id, %{blocker | state: "Review"})})
+      assert {:ok, [_]} = ActionScope.sources([issue.id], options)
+      assert :ok = CommentActionGuard.check(mutation, guard_opts)
+    end)
+  end
+
+  @tag :review_regression
+  test "poll resumes a delivered creation intent without another model delivery", %{issues: [_backlog, issue | _]} do
+    issue = %{issue | labels: [~s(skip "freigabe implementierung"), ~s(skip "freigabe review")]}
+    change(&%{&1 | issues: Map.put(&1.issues, issue.id, issue), fail: "YoloCreate"})
+    group([issue], fn -> assert {:error, :response_lost} = Followup.invoke(args([issue], "followup"), opts()) end)
+    scan = fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end
+    {:ok, observed, _} = Observation.capture([issue], %{}, scan: scan)
+    assert :ok = Delivery.reserve("incoming", "original-run", observed)
+    change(&%{&1 | fail: nil})
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    options = Keyword.merge(opts(), scan: scan, lease: fn _, fun -> fun.() end, start: fn _, _ -> flunk("must not redeliver the model assignment") end)
+    tick(state, [issue], options)
+    assert {:ok, []} = Operations.pending([issue.id])
+    assert length(writes("YoloCreate")) == 1
+    tick(state, [issue], options)
+    assert length(writes("YoloCreate")) == 1
+  end
 
   test "aggregation preserves requirements and both dependency directions independent of start mode", %{issues: issues} do
     change(&%{&1 | relations: [relation("predecessor", hd(issues).id), relation(List.last(issues).id, "successor"), relation(hd(issues).id, List.last(issues).id)]})

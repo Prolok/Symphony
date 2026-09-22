@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.Yolo.Handoff do
   @moduledoc "Evidenced acceptance or durable waiting without leaving Yolo Review prematurely."
-  alias SymphonyElixir.{Config, TestRun, Tracker, Workpad}
+  alias SymphonyElixir.{Config, RoutineTest, TestRun, Tracker, Workpad, Workspace}
   alias SymphonyElixir.Yolo.{ActionScope, API, Completion, Dependencies, Escalation, Operations}
-  alias SymphonyElixir.Yolo.{ReviewContract, Scope, Store}
+  alias SymphonyElixir.Yolo.{MergeReadiness, ReviewContract, Scope, Store}
 
   @authorization {__MODULE__, :issue}
 
@@ -62,11 +62,19 @@ defmodule SymphonyElixir.Yolo.Handoff do
          :ok <- acceptance(fresh, args, opts),
          {:ok, input} <- handoff_input(fresh, human, opts),
          :ok <- update(fresh, input, opts) do
-      Completion.invoke(%{"issue_id" => issue.id, "result" => report}, Keyword.put(opts, :handoff_completed, true))
+      with :ok <- Completion.invoke(%{"issue_id" => issue.id, "result" => report}, Keyword.put(opts, :handoff_completed, true)) do
+        cleanup(issue)
+      end
     else
       {:error, _} = error -> error
       _ -> {:error, :yolo_handoff_not_ready}
     end
+  end
+
+  defp cleanup(issue) do
+    if issue.state == "Yolo Review" and not RoutineTest.manages_project?(),
+      do: Workspace.remove_issue_workspaces(issue.identifier),
+      else: :ok
   end
 
   defp attempt_available(id) do
@@ -87,6 +95,7 @@ defmodule SymphonyElixir.Yolo.Handoff do
          true <- Enum.all?(review["findings"], &(&1["category"] == "new_requirement")),
          {:ok, [fresh]} <- Dependencies.refresh([issue], opts),
          true <- Dependencies.unblocked?(fresh),
+         :ok <- MergeReadiness.check(issue),
          {:ok, comments} <- Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1).(issue.id),
          {:ok, workpad} <- Workpad.find_comment(comments),
          true <- Workpad.merge_handoff_status(comments) == :ready or TestRun.review_fixture?(issue.id),

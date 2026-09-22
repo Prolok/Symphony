@@ -679,6 +679,29 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, :yolo_state_corrupt} = run_group("incoming", issues, issues)
   end
 
+  @tag :review_regression
+  test "a proven local pre-turn failure releases delivery but an uncertain turn does not", %{issues: issues, root: root} do
+    opts = [
+      fetch: fn _ -> {:ok, issues} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{}} end
+    ]
+
+    # The real AppServer rejects this path before creating a thread or turn.
+    assert {:error, {:invalid_workspace_cwd, _, _, _}} = run_group("incoming", issues, issues, opts)
+    assert {:ok, record} = Store.read("incoming")
+    assert (record["deliveries"] || %{}) == %{}
+
+    opts = Keyword.put(opts, :session, fn _, _, _, _ -> {:error, :response_lost_after_submission} end)
+    assert {:error, :response_lost_after_submission} = run_group("incoming", issues, issues, opts)
+    assert {:ok, record} = Store.read("incoming")
+    assert map_size(record["deliveries"]) == length(issues)
+    assert {:error, :yolo_group_changed} = run_group("incoming", issues, issues, opts)
+  end
+
   test "dispatch receipts survive member changes, no-op exits, status roundtrips and restart", %{issues: [first, second | _]} do
     alias SymphonyElixir.Yolo.Delivery
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
@@ -885,5 +908,24 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       assert {:error, reason} = CommentActionGuard.check(mutation, query: query, fetch_issue: fn _ -> {:ok, [issue]} end)
       assert reason == if(target == "Review", do: :yolo_review_handoff_required, else: :yolo_review_monotone)
     end
+  end
+
+  @tag :review_regression
+  test "dirty merge is rejected before entering the monotone acceptance phase", %{issues: [issue | _], root: root, context: context} do
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "regular")))
+    issue = %{issue | state: "Merge (AI)"}
+    {:ok, workspace} = Workspace.create_for_issue(issue)
+    System.cmd("git", ["init", "--quiet", workspace])
+    File.write!(Path.join(workspace, "dirty.txt"), "changed in merge")
+    mutation = %{"query" => "mutation { issueUpdate(id: \"#{issue.id}\", input: {stateId: \"target\"}) { success } }"}
+
+    query = fn _, _ ->
+      {:ok, %{"data" => %{"issue" => %{"id" => issue.id, "team" => %{"states" => %{"nodes" => [%{"id" => "target", "name" => "Yolo Review"}], "pageInfo" => %{"hasNextPage" => false}}}}}}}
+    end
+
+    options = [query: query, fetch_issue: fn _ -> {:ok, [issue]} end, guard: fn _ -> :ok end]
+    assert {:error, :merge_workspace_requires_test} = CommentActionGuard.check(mutation, options)
+    File.rm!(Path.join(workspace, "dirty.txt"))
+    assert :ok = CommentActionGuard.check(mutation, options)
   end
 end

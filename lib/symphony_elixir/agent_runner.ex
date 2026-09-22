@@ -1181,7 +1181,7 @@ defmodule SymphonyElixir.AgentRunner do
          worker_host
        ) do
     if merge_codex_state?(started_issue.state) and
-         normalize_issue_state(issue.state) in ["review", "yolo review"] do
+         normalize_issue_state(issue.state) == "review" do
       case merge_workspace_rerun_status(workspace, worker_host) do
         :rerun ->
           Logger.warning("Redirecting dirty merge handoff to test rerun: #{issue_context(issue)} previous_state=#{inspect(started_issue.state)} current_state=#{inspect(issue.state)}")

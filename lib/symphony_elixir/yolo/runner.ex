@@ -160,7 +160,8 @@ defmodule SymphonyElixir.Yolo.Runner do
 
     case Config.openclaw_yolo_agent() do
       nil ->
-        with :ok <- opts[:before_delivery].(), do: Keyword.get(opts, :session, &AppServer.run/4).(workspace.path, prompt, lead, on_message: on_message)
+        with :ok <- opts[:before_delivery].(),
+             do: Keyword.get(opts, :session, &AppServer.run/4).(workspace.path, prompt, lead, on_message: on_message, on_session_start_failure: opts[:delivery_rejected])
 
       _ ->
         OpenClaw.run(workspace, prompt, issues, run_id, opts)

@@ -6,7 +6,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   alias SymphonyElixir.Yolo.{Admission, Completion, Delivery, Dependencies, Group, Observation, Operations}
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Journal
-  alias SymphonyElixir.Yolo.{ReviewReadiness, Runner, Store}
+  alias SymphonyElixir.Yolo.{Recovery, ReviewReadiness, Runner, Store}
 
   @spec tick(map(), [map()], keyword()) :: map()
   def tick(state, issues, opts \\ []) do
@@ -22,6 +22,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
       case Dependencies.refresh(issues, opts) do
         {:ok, issues} ->
+          :ok = Recovery.resume(state, issues, opts)
           {issues, state} = admit(issues, state, opts)
           schedule_groups(state, issues, opts)
 

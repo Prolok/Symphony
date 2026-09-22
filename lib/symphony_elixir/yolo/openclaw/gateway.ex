@@ -43,7 +43,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
 
   @spec history(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def history(order, opts) do
-    rpc("chat.history", %{"agentId" => order["agent"], "sessionKey" => order["session_id"], "offset" => 0, "limit" => 200, "maxBytes" => 262_144}, opts)
+    rpc("chat.history", %{"agentId" => order["agent"], "sessionKey" => order["session_id"], "offset" => 0, "limit" => 200, "maxBytes" => 1_048_576}, opts)
   end
 
   @impl true

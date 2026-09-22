@@ -342,7 +342,7 @@ jede Quelldatei maximal 1 MiB. Beim erstmaligen Anwenden darf `checked_at` weder
 in der Zukunft noch mehr als fünf Minuten zurückliegen. Unter der Journalsperre
 werden aktuelle Originalbindung, fehlender flüchtiger Endbeleg (`agent.wait`)
 und eine direkte frische `chat.history`-Antwort geprüft. Dieser eine Historyabruf
-ist auf 200 Nachrichten, 256 KiB angeforderte Historybytes und den bestehenden
+ist auf 200 Nachrichten, 1 MiB angeforderte Historybytes und den bestehenden
 RPC-/Transporttimeout (10/15 Sekunden) begrenzt. Er fragt die **aktuelle** Sitzung
 des originalen Agentenschlüssels ab; eine inzwischen ersetzte Sitzung verweigert
 den Abschluss. Identität, Lifecycle und terminaler Nachrichtendigest müssen

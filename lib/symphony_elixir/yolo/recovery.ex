@@ -43,8 +43,9 @@ defmodule SymphonyElixir.Yolo.Recovery do
 
   defp escalated?(intent, record) do
     Enum.any?(intent["request"]["origin_ids"], fn id ->
-      is_binary(get_in(record, ["attempt", "completed", id])) and
-        intent["key"] in (get_in(record, ["attempt", "escalated_operations", id]) || [])
+      intent["key"] in (get_in(record, ["escalated_operations", id]) || []) or
+        (is_binary(get_in(record, ["attempt", "completed", id])) and
+           intent["key"] in (get_in(record, ["attempt", "escalated_operations", id]) || []))
     end)
   end
 

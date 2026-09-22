@@ -379,7 +379,12 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     assert {:ok, record} = Store.read("review")
     assert record["attempt"]["session_id"] == "escalated-session"
     assert record["error"] == nil
+    assert record["escalated_operations"][ctx.issue.id] == [pending["key"]]
     assert :ok = Recovery.resume(%Orchestrator.State{}, [ctx.issue], query: fn _, _ -> flunk("an escalated operation must remain reserved") end)
+    # A later independent group attempt must not erase the durable operation hold.
+    assert :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "independent", "members" => ["another-issue"], "completed" => %{}}))
+    assert :ok = Recovery.resume(%Orchestrator.State{}, [ctx.issue], lease: fn _, _ -> flunk("another group attempt must not release an escalated operation") end)
+    assert :ok = Store.write("review", record)
     assert %{issue: %{state: "Yolo Review", delegate_id: "pai"}, updates: 0} = Agent.get(ctx.db, & &1)
     assert {:error, :yolo_group_changed} = Runner.run("review", [ctx.issue], [ctx.issue], opts)
 

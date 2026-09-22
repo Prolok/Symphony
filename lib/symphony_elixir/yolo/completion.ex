@@ -112,6 +112,8 @@ defmodule SymphonyElixir.Yolo.Completion do
          true <- id in ids and attempt["id"] in [nil, Scope.current()["run_id"]] do
       attempt = Map.put(attempt, "completed", Map.put(attempt["completed"] || %{}, id, result))
       attempt = Map.put(attempt, "escalated_operations", Map.put(attempt["escalated_operations"] || %{}, id, escalated))
+      held = Enum.uniq((get_in(record, ["escalated_operations", id]) || []) ++ escalated)
+      record = Map.put(record, "escalated_operations", Map.put(record["escalated_operations"] || %{}, id, held))
       Store.write(group, Map.put(record, "attempt", attempt))
     else
       {:error, _} = error -> error

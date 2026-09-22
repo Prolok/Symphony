@@ -243,7 +243,9 @@ Merge erteilt keine Deploymentfreigabe und bestätigt keine Produktabnahme.
 Später fällige Nachweise bleiben sichtbar offen, ohne falsche Häkchen.
 
 Fehlt ein fälliger Betreiberbeleg, zunächst erlaubte Diagnose, Nacharbeit und
-verfügbare gebundene Testausführung erledigen. Nur wenn danach kein zulässiger
+verfügbare gebundene Testausführung erledigen. Ein beauftragter Betreiberagent
+übernimmt vorhandene autorisierte Testbereitstellung und Prüfung selbst;
+Workerbeschränkungen allein erzeugen keine neue menschliche Freigabepflicht. Nur wenn danach kein zulässiger
 autonomer Fortsetzungsweg bleibt, im einen Workpad Aktion, Rolle, Quell-/Paketstand, bestandene lokale Prüfungen, fehlende
 externe Belege und Fortsetzungsphase übergeben; nach `BLOCKER` wechseln und den
 Turn beenden. Das gilt auch für externe Testvoraussetzungen. Kein erfundener

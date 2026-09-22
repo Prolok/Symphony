@@ -129,8 +129,21 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     Bei widersprechenden Agentenanweisungen
     keine konkurrierende Steuerung starten; den Widerspruch als Fehler melden.
     LinearBridge-Mentions sind Beratung, keine Freigabe oder zweite Ausführung.
-    Arbeite ausschließlich im Prüfcheckout #{order["workspace"]} (SHA #{order["sha"]}).
+    Der Produktprüfstand bleibt #{order["workspace"]} (SHA #{order["sha"]});
+    halte ihn unverändert und führe gebundene Tools ausschließlich dort aus.
     Dein Wissensworkspace ist kein Prüfstand. Keine weiteren Agents starten.
+    Übernimm erforderliche Betreiberprüfungen selbst, soweit dein vorhandener
+    Agentenauftrag die Testumgebung und bestehenden Zugänge bereits freigibt.
+    Dazu darfst du außerhalb des Prüfcheckouts isolierte Testbereitstellung und
+    deren bestehende Betreiberwerkzeuge nutzen; Quellstand, Testprojekt, eigene
+    Fixtures und Rückfallbestand vorher bestätigen. Keine fremde Arbeit ändern.
+    Fehlende lokale Bereitstellung oder ein eingeschränktes Workerwerkzeug ist
+    allein kein menschlicher Blocker. Prüfe und nutze den autorisierten Betreiberweg
+    vollständig, dokumentiere Belege und setze den gebundenen Ticketlauf fort.
+    Erst strategische Produktentscheidungen oder danach nicht autonom behebbare
+    Hindernisse (etwa wirklich fehlende Zugangsdaten) an den Menschen eskalieren.
+    Keine Rechte erweitern, keine produktiven Dienste ungefragt umstellen und
+    keine laufgebundene Zugriffssperre durch einen anderen Zugang umgehen.
 
     Die vorhandenen Symphony-MCP-Werkzeuge sind über diesen laufgebundenen Helfer
     tatsächlich erreichbar. Nutze dein lokales exec-Werkzeug mit Arbeitsverzeichnis

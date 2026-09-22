@@ -454,8 +454,14 @@ setzen dieselbe Sperre. Aktivierte Testfälle injizieren Antworten und verwenden
 temporäre Bindungen, lokale Sockets sowie simulierte Prozesse, keine persönlichen
 Agentendateien/Gateways. Ein fehlendes Binary überspringt keinen Test.
 
-Vor **erstmaliger produktiver Aktivierung** führt Tilo außerhalb der Gates einen
-Live-Nachweis auf seinem Rechner aus. Es gelten vollständig die Voraussetzungen
+Vor **erstmaliger produktiver Aktivierung** führt die autorisierte Betreiberrolle
+außerhalb der Gates einen Live-Nachweis aus. Ein bereits dafür beauftragter
+OpenClaw-Agent übernimmt Bereitstellung, Prüfung und belegte Fortsetzung autonom;
+keine zusätzliche persönliche Bedienung oder Abnahme verlangen. Fehlende lokale
+Testbereitstellung ist bei vorhandener Freigabe und Zugängen selbst zu beheben.
+Nur strategische Entscheidungen oder nach Prüfung der zulässigen Wege nicht
+behebbare Hindernisse werden an den Menschen eskaliert. Der Produktprüfcheckout
+bleibt unverändert, gebundene Ticketzugriffe und technische Gates bleiben erhalten. Es gelten vollständig die Voraussetzungen
 des [isolierten Testbetriebs](linear-app.md#isolierter-testbetrieb): eigenes
 freigegebenes Manifest für `Prolok/symphony-test`, disjunkter Projektbereich,
 exklusive Entscheidungshoheit, Testtickets und dokumentierter Quellstand.

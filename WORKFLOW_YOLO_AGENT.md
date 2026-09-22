@@ -52,6 +52,14 @@ YOLO-/Skip-Behandlung.
   Journalisierte Aggregationsursprünge können dafür im Eingangslauf bereits
   `Umsetzungsticket erstellt` sein: nur die offene Operation unverändert
   abschließen, diese Ursprünge nicht erneut fachlich bewerten oder umplanen.
+- Bei einem OpenClaw-Agenten mit vorhandenem Betreiberauftrag gehören erforderliche
+  isolierte Produktprüfungen und selbst lösbare Testbereitstellung zur autonomen
+  Bearbeitung. Vorhandene Freigabe, Zugänge, Testprojekt und Rückfallbestand prüfen;
+  bestehende Betreiberwerkzeuge außerhalb des unveränderten Prüfcheckouts nutzen.
+  Rollenbeschränkungen des Coding-Workers oder ein fehlender lokaler Executor sind
+  allein kein menschlicher Blocker. Gebundene Tickettools bleiben ausschließlich
+  im Prüfcheckout; keine Ersatzbindung oder Rechteerweiterung. Ohne Betreibermandat
+  keine Betriebsfreigabe erfinden. Konkrete menschliche Stopps bleiben wirksam.
 - Der eigene Checkout liegt unter dem Workspace-Root. Die angegebene SHA ist
   der zu prüfende Stand. Keine Ticket-Hooks, Ticketbranches oder Bereinigung von
   Ursprungworktrees auf diesen Sammellauf übertragen; keine Quelländerungen,
@@ -106,7 +114,10 @@ Eine allein agentenseitig vorgezogene finale Schlussabnahme begründet nach
 `Review` einordnen und regulär wiederaufnehmen; offene Pflicht und technische
 Belege erhalten. Tatsächlich fällige technische/externe Pflichten und konkrete
 frühere Freigaben nicht eigenmächtig verschieben oder Belege fingieren.
-Löse autonom bearbeitbare Ursachen oder führe in die passende Phase zurück.
+Löse autonom bearbeitbare Ursachen einschließlich autorisierter Betreiberprüfungen
+vollständig; danach Belege prüfen und in die passende Phase zurückführen. Eine
+fehlende Testbereitstellung nicht ungeprüft als fehlende Freigabe an den Menschen
+weiterreichen. Die Agentdelegation während eigener Nacharbeit erhalten.
 Nur an der Eskalationsgrenze des Laufvertrags Ursache/Versuche/Empfehlung und
 menschliche Aktion übergeben, den konfigurierten ersten menschlichen Assignee
 setzen und die Agentdelegation entfernen. Der Status bleibt `BLOCKER`, solange
@@ -127,9 +138,11 @@ Kanten erhalten und die gemeinsame Prüfung beginnt. Unabhängige Projektarbeit
 sperrt sie nicht. Vor Entscheidungen Kette und Mergebelege frisch bestätigen;
 Vorgänger vor den abhängigen Ursprüngen abschließen. Teilübergaben erhalten.
 
-Offene Abnahmen sind hier fällig. Fehlende autorisierte Bereitstellung bleibt
-eine offene Pflicht in `Yolo Review`. Verfügbare Prüfungen abschließen, Ursache
-und konkreten Lösungsvorschlag festhalten und `kind=escalate` verwenden. Das
+Offene Abnahmen sind hier fällig. Autorisierte Bereitstellung und Betreiberprüfungen
+mit vorhandenen Zugängen selbst ausführen; fehlende Nachweise bleiben bis dahin
+eine offene Pflicht in `Yolo Review`. Nur eine echte strategische Entscheidung
+oder nach Nutzung dieser Wege nicht autonom lösbare Voraussetzung mit Ursache
+und konkretem Lösungsvorschlag über `kind=escalate` übergeben. Das
 beendet diesen Lauf als Warteentscheidung, ohne Erfolg oder Statuswechsel zu
 behaupten. Unveränderte Hindernisse lösen keinen weiteren Auftrag aus.
 

@@ -834,6 +834,41 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     {evidence, Keyword.merge(opts, sources: %{"source" => bytes, "execution_source" => bytes}, history: fn _ -> {:ok, history} end)}
   end
 
+  test "conversation history releases only after the correlated terminal record", %{issues: issues, opts: opts} do
+    order = executed_order(issues, opts)
+    {_, recovery_opts} = package = terminal_evidence(order)
+    history = Jason.decode!(recovery_opts[:sources]["source"])
+    [terminal] = history["messages"]
+    user = %{"role" => "user", "content" => "Process the assigned tickets"}
+    progress = terminal |> put_in(["__openclaw", "id"], "progress-message") |> put_in(["__openclaw", "runTerminal"], false)
+    pending = Map.merge(history, %{"messages" => [user, progress], "totalMessages" => 2})
+    {pending_evidence, pending_opts} = replace_terminal_history(package, pending)
+
+    assert {:error, :openclaw_terminal_record_invalid} = Recovery.resolve(pending_evidence, true, pending_opts)
+    assert {:ok, ^order} = Journal.read("incoming")
+    assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+
+    complete = Map.merge(history, %{"messages" => [user, progress, terminal], "totalMessages" => 3})
+    {evidence, recovery_opts} = replace_terminal_history(package, complete)
+    assert {:ok, finished} = Recovery.resolve(evidence, true, recovery_opts)
+    assert finished["state"] == "completed"
+    assert finished["terminal"]["messageId"] == "original-message"
+    assert finished["terminal"]["endedAt"] == 2000
+    assert :ok = Journal.member_available(hd(issues).id)
+  end
+
+  test "unsupported evidence versions keep executed orders reserved without gateway reads", %{issues: issues, opts: opts} do
+    order = executed_order(issues, opts)
+    {evidence, recovery_opts} = terminal_evidence(order)
+    recovery_opts = Keyword.merge(recovery_opts, status: fn _ -> flunk("invalid version must not poll") end, history: fn _ -> flunk("invalid version must not read history") end)
+
+    for changed <- [Map.delete(evidence, "version"), Map.put(evidence, "version", 3), Map.put(evidence, "version", "2")] do
+      assert {:error, :openclaw_recovery_evidence_invalid} = Recovery.resolve(changed, true, recovery_opts)
+      assert {:ok, ^order} = Journal.read("incoming")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    end
+  end
+
   test "terminal originals reject incomplete, nonterminal, foreign and active history", %{issues: issues, opts: opts} do
     order = executed_order(issues, opts)
     {evidence, recovery_opts} = package = terminal_evidence(order)

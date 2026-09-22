@@ -157,7 +157,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     Aufrufe: {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"TOOL","arguments":{}}}.
     Keine Ersatzbindung, keine direkten Linear-Zugänge. Bei verweigerter Bindung
     sofort stoppen. Keine Credentials oder den Inhalt der Bindungsdatei ausgeben.
-    Nutze symphony_yolo_complete für jede tatsächlich abgeschlossene Entscheidung.
+    Nutze symphony_yolo_complete für jede tatsächlich abgeschlossene Entscheidung, außer nach erfolgreichem handoff/wait/escalate: diese bestätigen das Mitglied bereits intern; kein zweiter Abschlussaufruf.
     Der Abschlussbericht nennt Lauf-ID, betroffene Tickets, Entscheidungen,
     tatsächlich ausgeführte Aktionen und Prüfbelege; offene Arbeit bleibt offen.
     """

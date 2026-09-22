@@ -113,6 +113,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         assert order["state"] == "intent"
         assert order["payload_sha256"] == OpenClaw.digest(params["message"])
         assert params["message"] =~ "Übernimm erforderliche Betreiberprüfungen selbst"
+        assert params["message"] =~ "diese bestätigen das Mitglied bereits intern; kein zweiter Abschlussaufruf"
         assert params["message"] =~ "isolierte Testbereitstellung"
         assert params["message"] =~ "Keine Ersatzbindung, keine direkten Linear-Zugänge"
         refute params["message"] =~ "Arbeite ausschließlich im Prüfcheckout"

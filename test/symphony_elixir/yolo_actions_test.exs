@@ -130,7 +130,9 @@ defmodule SymphonyElixir.YoloActionsTest do
 
   defp respond("YoloRelation", _, %{"input" => input}) do
     edge = %{"id" => input["id"], "type" => input["type"], "issue" => %{"id" => input["issueId"]}, "relatedIssue" => %{"id" => input["relatedIssueId"]}}
-    change(&%{&1 | relations: &1.relations ++ [edge]})
+    # Linear keeps one relation for an unordered pair: blocks replaces related.
+    pair = Enum.sort([input["issueId"], input["relatedIssueId"]])
+    change(&%{&1 | relations: Enum.reject(&1.relations, fn r -> Enum.sort([r["issue"]["id"], r["relatedIssue"]["id"]]) == pair end) ++ [edge]})
     ok("issueRelationCreate", %{"success" => true, "issueRelation" => edge})
   end
 
@@ -827,7 +829,8 @@ defmodule SymphonyElixir.YoloActionsTest do
           assert db().created[created["id"]]["labelIds"] == ["generated"]
           assert db().created[created["id"]]["projectId"] == source.project_id
           assert db().created[created["id"]]["stateId"] == "Backlog"
-          assert Enum.any?(db().relations, &(&1["type"] == "related" and &1["issue"]["id"] == source.id and &1["relatedIssue"]["id"] == created["id"]))
+          related? = Enum.any?(db().relations, &(&1["type"] == "related" and &1["issue"]["id"] == source.id and &1["relatedIssue"]["id"] == created["id"]))
+          assert related? == (finding["category"] == "new_requirement")
 
           for invalid <- [Map.delete(finding, "prereview"), Map.put(finding, "category", "unknown"), Map.put(finding, "action", "wrong"), nil] do
             assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [invalid]), opts())
@@ -1213,7 +1216,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   test "derived follow-up assignment follows bound start mode and never authorizes child starts", ctx do
     alias SymphonyElixir.TestRun.Derived
     [issue | _] = ctx.issues
-    {plan, _} = derived_run(ctx.context, ctx.root, [issue], "po_followup", true)
+    {plan, _} = derived_run(ctx.context, ctx.root, [issue], "po_followup", false)
 
     group([issue], fn ->
       assert {:ok, created} = Followup.invoke(Map.put(args([issue], "followup"), "blocks_origins", true), opts())
@@ -1222,6 +1225,16 @@ defmodule SymphonyElixir.YoloActionsTest do
       assert {:ok, [receipt]} = Derived.inspect_fixtures("probe", plan, opts())
       assert receipt["complete"]
       relations = db().relations
+      assert Enum.all?(relations, &(&1["type"] == "blocks"))
+      # Resuming a pre-fix journal must not replace the real dependency with
+      # related, even temporarily, or create another issue/relation.
+      assert {:ok, [intent]} = Operations.related([issue.id])
+      legacy = %{intent | "done" => false, "relations" => [Relations.edge(issue.id, created["id"], "related") | intent["relations"]]}
+      assert :ok = Operations.save(legacy)
+      writes_before = writes("YoloRelation")
+      assert {:ok, ^created} = Followup.invoke(Map.put(args([issue], "followup"), "blocks_origins", true), opts())
+      assert writes("YoloRelation") == writes_before
+      assert db().relations == relations
       change(&%{&1 | relations: Enum.reject(relations, fn relation -> relation["type"] == "blocks" end)})
       assert {:ok, [missing_link]} = Derived.inspect_fixtures("probe", plan, opts())
       refute missing_link["complete"]

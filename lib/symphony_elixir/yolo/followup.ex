@@ -131,7 +131,7 @@ defmodule SymphonyElixir.Yolo.Followup do
       related = Enum.map(issues, &Relations.edge(&1.id, intent["issue_id"], "related"))
       blocked = Enum.map(request["blocked_by"] || [], &Relations.edge(&1, intent["issue_id"], "blocks"))
       fixes = if request["blocks_origins"] == true, do: Enum.map(issues, &Relations.edge(intent["issue_id"], &1.id, "blocks")), else: []
-      intent = Map.merge(intent, %{"input" => input, "relations" => Enum.uniq(related ++ transferred ++ blocked ++ fixes), "sources" => Map.new(issues, &{&1.id, source(&1)})})
+      intent = Map.merge(intent, %{"input" => input, "relations" => effective_relations(related ++ transferred ++ blocked ++ fixes), "sources" => Map.new(issues, &{&1.id, source(&1)})})
       with :ok <- Operations.save(intent), do: {:ok, intent}
     else
       {:error, _} = error -> error
@@ -189,9 +189,21 @@ defmodule SymphonyElixir.Yolo.Followup do
   defp verify_created(_, _, _), do: {:error, :yolo_created_issue_unconfirmed}
 
   defp link(intent, opts) do
-    with :ok <- Relations.validate(intent["relations"], opts) do
-      Enum.reduce_while(intent["relations"], :ok, fn edge, _ -> relation_result(guarded_relation(intent, edge, opts)) end)
+    edges = effective_relations(intent["relations"])
+
+    with :ok <- Relations.validate(edges, opts) do
+      Enum.reduce_while(edges, :ok, fn edge, _ -> relation_result(guarded_relation(intent, edge, opts)) end)
     end
+  end
+
+  defp effective_relations(edges) do
+    # Linear stores one relation per pair; keep the directed dependency, including
+    # when resuming an older intent that still planned a redundant related edge.
+    blocked_pairs = for edge <- edges, edge["type"] == "blocks", into: MapSet.new(), do: Enum.sort([edge["issueId"], edge["relatedIssueId"]])
+
+    edges
+    |> Enum.reject(&(&1["type"] == "related" and MapSet.member?(blocked_pairs, Enum.sort([&1["issueId"], &1["relatedIssueId"]]))))
+    |> Enum.uniq()
   end
 
   defp relation_result(:ok), do: {:cont, :ok}

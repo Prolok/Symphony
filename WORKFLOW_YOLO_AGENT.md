@@ -43,7 +43,9 @@ YOLO-/Skip-Behandlung.
   ausführen. Vor Aktionen und Abschluss erneut einen Checkpoint abrufen.
 - Schreibe die konkrete Entscheidung und tatsächlich erhobene Belege ins
   jeweilige Workpad. Rufe nach abgeschlossener Bearbeitung jedes Mitglieds
-  `symphony_yolo_complete` mit dessen ID und einem knappen Ergebnis auf. Ein
+  `symphony_yolo_complete` mit dessen ID und einem knappen Ergebnis auf.
+  Erfolgreiches `handoff`, `wait` oder `escalate` bestätigt das Mitglied bereits;
+  danach keinen zweiten Abschlussaufruf senden. Ein
   normaler Sitzungsabschluss allein bestätigt keine Bearbeitung.
   Offene Anlageoperationen sperren die Bestätigung und den Sammelabschluss;
   nimm sie mit demselben Auftrag wieder auf. Eine belegte menschliche
@@ -214,8 +216,10 @@ die Review-Übergabe nicht; echte BLOCKER-Berichte bleiben ohne Abnahmebeleg mö
 
 Bei abnahmesperrenden Findings Fix-Tickets im Backlog desselben Projekts mit
 Anforderungen, Validierung, `symphony-generated` und Ursprungverknüpfung anlegen.
-`blocks_origins=true` erzeugt zusätzlich die gerichtete Linear-Relation
-**Folgefix blockiert Ursprung**. Keine Gegenkante, kein Text als Relationsersatz.
+`blocks_origins=true` erzeugt die gerichtete Linear-Relation
+**Folgefix blockiert Ursprung** statt einer einfachen Related-Kante zwischen
+demselben Paar; Herkunft bleibt auch im Ticket verlinkt. Keine Gegenkante,
+kein Text als Relationsersatz.
 Nach bestätigter Anlage und Verknüpfung `kind=wait` mit Prüf-/Lernbeleg aufrufen;
 Ursprung und Delegation bleiben in `Yolo Review`. Sobald auch der Fix dort ankommt,
 prüft der nächste Lauf die gesamte Kette erneut. Weitere Findings dürfen die

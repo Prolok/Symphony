@@ -27,7 +27,8 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
 
     for foreign <- ["agent:other:main", "agent:po-other:main"] do
       ProjectContext.with_context(%ProjectContext{env: %{"OPENCLAW_YOLO_NOTIFY_SESSION" => foreign}}, fn ->
-        assert {:error, :openclaw_normal_channel_unavailable} = Gateway.destination("po", transport: fn _ -> flunk("foreign session must not be queried") end)
+        deny = fn _ -> flunk("foreign session must not be queried") end
+        assert {:error, :openclaw_normal_channel_unavailable} = Gateway.destination("po", transport: deny)
       end)
     end
   end

@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @moduledoc "Gateway RPC contract verified against OpenClaw 2026.9.4; no local fallback."
   @behaviour SymphonyElixir.Yolo.OpenClaw.Adapter
-  alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.ProjectContext
+  alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Transport
 
   @impl true

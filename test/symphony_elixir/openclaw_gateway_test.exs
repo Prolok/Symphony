@@ -100,5 +100,12 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
     end
 
     assert {:error, :openclaw_normal_channel_unavailable} = Gateway.destination("po", transport: missing)
+
+    offline = fn
+      ["gateway", "call", "sessions.list" | _] -> {:error, :openclaw_unavailable}
+      args -> transport.(args)
+    end
+
+    assert {:error, :openclaw_unavailable} = Gateway.destination("po", transport: offline)
   end
 end

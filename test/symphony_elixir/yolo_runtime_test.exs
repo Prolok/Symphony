@@ -6,6 +6,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Observation, Operations, Scope, Store}
+  alias SymphonyElixir.Yolo.OpenClaw.Journal
 
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
@@ -41,6 +42,42 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
   defp inbox(versions \\ %{}), do: %{"versions" => versions, "last_successful_scan" => "now", "scan_error" => nil}
   defp scan(_), do: {:ok, inbox()}
+
+  test "public defaults preserve empty reads and admitted issues, and reject corrupt dispatch", %{issues: [issue | _]} do
+    assert {:ok, []} = Yolo.Dependencies.refresh([])
+    assert {:ok, ^issue} = Yolo.Admission.prepare(issue)
+    path = Journal.path("incoming")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "corrupt")
+    assert {:error, :openclaw_journal_corrupt} = Yolo.Delivery.reconcile("incoming")
+    assert {:error, :openclaw_journal_corrupt} = Yolo.Runner.run("incoming", [issue], [issue])
+  end
+
+  test "failed and malformed dependency snapshots cannot become actionable", %{issues: [issue | _]} do
+    assert {:error, :offline} = Yolo.Dependencies.refresh([issue], query: fn _, _ -> {:error, :offline} end)
+
+    query = fn _, _ ->
+      {:ok, %{"data" => %{"issue" => %{"inverseRelations" => %{"nodes" => [%{"id" => "missing-type"}], "pageInfo" => %{"hasNextPage" => false}}}}}}
+    end
+
+    assert {:error, :yolo_dependencies_incomplete} = Yolo.Dependencies.actionable([issue], query: query)
+  end
+
+  test "an unavailable configured merge worker cannot authorize acceptance", %{issues: [issue | _], context: context, root: root} do
+    path = System.get_env("PATH")
+    ssh = Path.join(root, "ssh")
+    File.write!(ssh, "#!/bin/sh\nprintf 'unavailable fixture worker\\n'\nexit 75\n")
+    File.chmod!(ssh, 0o755)
+    System.put_env("PATH", root <> ":" <> path)
+    ProjectContext.bind(put_in(context.settings.worker.ssh_hosts, ["fixture-worker"]))
+
+    try do
+      assert {:error, {:workspace_presence_failed, "fixture-worker", 75, output}} = Yolo.MergeReadiness.check(issue)
+      assert output =~ "unavailable fixture worker"
+    after
+      System.put_env("PATH", path)
+    end
+  end
 
   test "blocked backlog waits and only Yolo Review enters acceptance", %{issues: [issue | _]} do
     blocked = %{issue | blocked_by: [%{id: "fix", state: "In Arbeit (AI)"}]}
@@ -230,6 +267,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     assert {:error, :yolo_group_changed} = run_group("review", [review], [review], opts)
     {:ok, readiness} = Store.read("review-readiness")
+    :ok = Store.write("review-readiness", Map.put(readiness, "members", %{"review:broken" => nil}))
+    assert {:error, :yolo_readiness_corrupt} = ReviewReadiness.epoch("review")
     :ok = Store.write("review-readiness", Map.put(readiness, "members", %{("review:" <> review.id) => %{"ready" => false, "generation" => "corrupt"}}))
     assert {:error, :yolo_readiness_corrupt} = Observation.capture([review], %{}, scan: &scan/1)
     :ok = Store.write("review-readiness", Map.put(readiness, "epoch", "corrupt"))
@@ -631,6 +670,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert :ok = Yolo.Operations.run("pending", %{"origin_ids" => [hd(issues).id], "title" => "recover exact action"}, fn _ -> :ok end)
 
     for result <- [{:error, :offline}, {:ok, []}] do
+      # Each case starts from the same pre-delivery journal; an actual uncertain
+      # dispatch remains reserved, as the assertions below verify.
+      File.rm(Store.path("incoming"))
       Process.put(:after_turn, false)
 
       opts = [
@@ -648,7 +690,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       ]
 
       assert {:error, _} = run_group("incoming", issues, issues, opts)
-      assert {:ok, %{"processed" => nil}} = Store.read("incoming")
+      assert {:ok, %{"processed" => nil, "deliveries" => deliveries}} = Store.read("incoming")
+      assert map_size(deliveries) == length(issues)
     end
   end
 
@@ -908,6 +951,25 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       assert {:error, reason} = CommentActionGuard.check(mutation, query: query, fetch_issue: fn _ -> {:ok, [issue]} end)
       assert reason == if(target == "Review", do: :yolo_review_handoff_required, else: :yolo_review_monotone)
     end
+  end
+
+  test "an unchanged review still checks comments and delegated merge requires Yolo Review", %{issues: [issue | _]} do
+    mutation = %{"query" => "mutation { issueUpdate(id: \"#{issue.id}\", input: {stateId: \"target\"}) { success } }"}
+
+    query = fn target ->
+      fn _, _ ->
+        {:ok, %{"data" => %{"issue" => %{"id" => issue.id, "team" => %{"states" => %{"nodes" => [%{"id" => "target", "name" => target}], "pageInfo" => %{"hasNextPage" => false}}}}}}}
+      end
+    end
+
+    review = %{issue | state: "Yolo Review"}
+
+    Scope.with_scope("review", [review], "run", fn ->
+      assert {:error, :new_comment} = CommentActionGuard.check(mutation, query: query.("Yolo Review"), fetch_issue: fn _ -> {:ok, [review]} end, guard: fn _ -> {:error, :new_comment} end)
+    end)
+
+    merged = %{issue | state: "Merge (AI)"}
+    assert {:error, :delegated_merge_requires_yolo_review} = CommentActionGuard.check(mutation, query: query.("Review"), fetch_issue: fn _ -> {:ok, [merged]} end)
   end
 
   @tag :review_regression

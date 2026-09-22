@@ -1216,11 +1216,16 @@ defmodule SymphonyElixir.YoloActionsTest do
     {plan, _} = derived_run(ctx.context, ctx.root, [issue], "po_followup", true)
 
     group([issue], fn ->
-      assert {:ok, created} = Followup.invoke(args([issue], "followup"), opts())
+      assert {:ok, created} = Followup.invoke(Map.put(args([issue], "followup"), "blocks_origins", true), opts())
       assert db().created[created["id"]]["delegateId"] == "pai"
       assert db().created[created["id"]]["assigneeId"] == "human"
       assert {:ok, [receipt]} = Derived.inspect_fixtures("probe", plan, opts())
       assert receipt["complete"]
+      relations = db().relations
+      change(&%{&1 | relations: Enum.reject(relations, fn relation -> relation["type"] == "blocks" end)})
+      assert {:ok, [missing_link]} = Derived.inspect_fixtures("probe", plan, opts())
+      refute missing_link["complete"]
+      change(&%{&1 | relations: relations})
       refute SymphonyElixir.TestRun.start_allowed?(%{issue | id: created["id"], state: "Backlog"})
       assert {:error, :test_derived_fixture_changed} = Followup.invoke(%{args([issue], "followup") | "operation_key" => "second"}, opts())
     end)
@@ -1408,6 +1413,8 @@ defmodule SymphonyElixir.YoloActionsTest do
                end)
 
       assert length(Config.allowed_issue_ids()) == 2
+      File.write!(Operations.path("foreign-fix"), "corrupt")
+      assert Config.allowed_issue_ids() == [source.id]
     end)
   end
 end

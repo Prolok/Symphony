@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.YoloReviewContractTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionTool, Completion, Group, Handoff, OpenClaw, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
@@ -203,6 +204,84 @@ defmodule SymphonyElixir.YoloReviewContractTest do
         request = %{"issue_id" => ctx.issue.id, "report" => "Checked", "review" => Fixture.evidence()}
         assert {:error, :yolo_attempt_unavailable} = Handoff.invoke(request, ctx.opts)
         assert %{issue: %{state: "Yolo Review", delegate_id: "pai"}, updates: 0} = Agent.get(ctx.db, & &1)
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "waiting requires a confirmed dependency and preserves lookup failures", ctx do
+    Scope.with_scope(
+      "review",
+      [ctx.issue],
+      "run",
+      fn ->
+        request = %{"kind" => "wait", "issue_id" => ctx.issue.id, "report" => "Waiting", "review" => Fixture.evidence()}
+        assert {:error, :yolo_wait_requires_dependency} = Handoff.invoke(request, ctx.opts)
+
+        dependencies = fn
+          [] -> {:ok, []}
+          [_] -> {:error, :offline}
+        end
+
+        assert {:error, :offline} = Handoff.invoke(request, Keyword.put(ctx.opts, :dependencies, dependencies))
+        assert Agent.get(ctx.db, & &1.updates) == 0
+        refute Completion.ready?("review", [ctx.issue])
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "a state change while recording acceptance prevents the terminal update", ctx do
+    Scope.with_scope(
+      "review",
+      [ctx.issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [ctx.issue.id]}))
+        request = %{"issue_id" => ctx.issue.id, "report" => "Checked", "review" => Fixture.evidence()}
+        workpad = fn _, body -> Agent.update(ctx.db, &%{&1 | body: body, issue: %{&1.issue | state: "BLOCKER"}}) end
+        assert {:error, :yolo_handoff_not_ready} = Handoff.invoke(request, Keyword.put(ctx.opts, :workpad, workpad))
+        assert Agent.get(ctx.db, & &1.updates) == 0
+        refute Completion.ready?("review", [ctx.issue])
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "authorized handoff still requires the freshly confirmed status and ownership", ctx do
+    Scope.with_scope(
+      "review",
+      [ctx.issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [ctx.issue.id]}))
+        request = %{"issue_id" => ctx.issue.id, "report" => "Checked", "review" => Fixture.evidence()}
+
+        for {response, reason} <- [{{:ok, %{"data" => %{"issueUpdate" => %{"success" => true, "issue" => %{"id" => ctx.issue.id}}}}}, :yolo_handoff_unconfirmed}, {{:error, :offline}, :offline}] do
+          query = fn
+            document, %{input: _} ->
+              assert document =~ "mutation YoloUpdate"
+              mutation = %{"query" => "mutation { issueUpdate(id: \"#{ctx.issue.id}\", input: {stateId: \"target\"}) { success } }"}
+
+              states = fn _, _ ->
+                {:ok, %{"data" => %{"issue" => %{"id" => ctx.issue.id, "team" => %{"states" => %{"nodes" => [%{"id" => "target", "name" => "Review"}], "pageInfo" => %{"hasNextPage" => false}}}}}}}
+              end
+
+              assert :ok = CommentActionGuard.check(mutation, query: states, fetch_issue: ctx.opts[:fetch], guard: fn _ -> :ok end)
+              response
+
+            document, variables ->
+              ctx.opts[:query].(document, variables)
+          end
+
+          assert {:error, ^reason} = Handoff.invoke(request, Keyword.put(ctx.opts, :query, query))
+          refute Handoff.authorized?(ctx.issue.id)
+          refute Completion.ready?("review", [ctx.issue])
+        end
+
+        assert Agent.get(ctx.db, & &1.issue) == ctx.issue
       end,
       workspace: ctx.workspace
     )

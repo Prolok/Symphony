@@ -3,6 +3,26 @@ defmodule SymphonyElixir.TestSupportTest do
 
   alias SymphonyElixir.TestSupport
 
+  test "fixture isolation clears and restores inherited OpenClaw notification sessions" do
+    key = "OPENCLAW_YOLO_NOTIFY_SESSION"
+    previous = System.get_env(key)
+    on_exit(fn -> restore_env(key, previous) end)
+
+    for inherited <- ["agent:synthetic:main", nil] do
+      restore_env(key, inherited)
+      snapshot = TestSupport.scrub_symphony_runtime_env()
+
+      try do
+        assert System.get_env(key) == nil
+        System.put_env(key, "agent:fixture:main")
+      after
+        TestSupport.restore_env_snapshot(snapshot)
+      end
+
+      assert System.get_env(key) == inherited
+    end
+  end
+
   test "fixture isolation clears inherited Linear agent selection and restores set and unset values" do
     previous_agent = System.get_env("LINEAR_YOLO_AGENT")
     on_exit(fn -> restore_env("LINEAR_YOLO_AGENT", previous_agent) end)

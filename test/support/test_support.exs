@@ -10,7 +10,8 @@ defmodule SymphonyElixir.TestSupport do
     "SYMPHONY_LINEAR_SECRET_ACCESS",
     "LINEAR_YOLO_AGENT",
     "LINEAR_ADVISORY_AGENT_IDS",
-    "OPENCLAW_YOLO_AGENT"
+    "OPENCLAW_YOLO_AGENT",
+    "OPENCLAW_YOLO_NOTIFY_SESSION"
   ]
 
   # Script fixtures always use the system shell and system utilities. Python is

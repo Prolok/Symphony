@@ -252,9 +252,10 @@ Schlussübergabe verweigert einen inzwischen veränderten regulären Workspace,
 ohne die Einbahnregel von `Yolo Review` aufzuheben.
 Interne Kanten vollständig gemergter Reviewketten bleiben erhalten. Vor Start
 und Aktionen werden Mitglieder, Abhängigkeiten und Kommentare erneut geprüft.
-Für Folgefixes erzeugt `blocks_origins=true` zusätzlich zu `related` die echte
-Kante Fix → Ursprung; `blocked_by` bezeichnet weiterhin Vorgänger des neuen
-Tickets. Keine Gegenkante und kein Freitext als Blockierungsersatz.
+Für Folgefixes erzeugt `blocks_origins=true` die echte Blocks-Kante Fix → Ursprung
+statt `related` zwischen demselben Ticketpaar; die Herkunft bleibt im Tickettext
+verlinkt. `blocked_by` bezeichnet weiterhin Vorgänger des neuen Tickets.
+Keine Gegenkante und kein Freitext als Blockierungsersatz.
 
 `kind=wait` beendet den Lauf nach bestätigter Fixanlage mit Prüf-/Lernbeleg;
 Status und Delegation bleiben erhalten. Erfolgreiches `kind=handoff` verlangt

@@ -378,6 +378,9 @@ Bei belegter Annahme oder Ausführung lautet `missing_evidence` auf
 `terminal_or_pre_acceptance_original_required`, damit die bestehende
 Vorab-Ablehnungs-Recovery sichtbar bleibt. Die Anzeige ersetzt keinen Beleg und
 macht den Betreiberimport nicht zur Voraussetzung regulärer Terminalantworten.
+Abbruchanforderungen und nachträglich beobachtete Annahme/Ausführung aktualisieren
+die Anzeige auch bei weiteren Timeouts ohne Endbeleg. Unveränderte Beobachtungen
+erzeugen keine zusätzlichen Ereignisse.
 `counts.running` zählt aktive Einträge, `reserved` reservierte Ticketeinträge,
 `reserved_slots` eindeutige reservierte Gruppenplätze. Die Liste `running` enthält
 aus Kompatibilitätsgründen weiterhin alle Belegungen; Konsumenten müssen das

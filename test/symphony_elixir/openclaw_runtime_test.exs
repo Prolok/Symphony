@@ -592,6 +592,67 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert_receive {:aborted, ^id}
   end
 
+  for trigger <- [:message, :deadline] do
+    @tag cancel_trigger: trigger
+    test "#{trigger} cancellation publishes a reservation despite repeated wait timeouts", %{issues: issues, opts: opts, cancel_trigger: trigger} do
+      handler = fn
+        "agent", params ->
+          if trigger == :message, do: send(self(), :openclaw_cancel)
+          %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+        "sessions.abort", _ ->
+          %{"ok" => true}
+
+        "agent.wait", _ ->
+          %{"status" => "timeout"}
+      end
+
+      wait = fn _ ->
+        count = Process.get(:reservation_polls, 0)
+        Process.put(:reservation_polls, count + 1)
+        if count == 2, do: throw(:still_reserved)
+      end
+
+      opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: wait, recipient: self(), openclaw_timeout_seconds: if(trigger == :deadline, do: -1, else: 3600))
+      assert catch_throw(Runner.run("incoming", issues, issues, opts)) == :still_reserved
+      assert {:ok, %{"state" => "cancel_pending", "writable" => false} = order} = Journal.read("incoming")
+      assert_receive {:yolo_event, "incoming", %{external: %{reserved: true, execution_state: "cancel_pending"}} = message}
+      assert message.external == OpenClaw.observation(order)
+      assert message.external.missing_evidence == "terminal_original_required"
+      refute_receive {:yolo_event, "incoming", %{external: %{reserved: true}}}
+
+      run = %{pid: self(), ids: Enum.map(issues, & &1.id), issues: issues, started_at: DateTime.utc_now(), event: %{}}
+      entries = %{"incoming" => run} |> Coordinator.event("incoming", message) |> Coordinator.entries()
+      assert Enum.all?(entries, &(&1.external.reserved and &1.turn_count == 0))
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    end
+  end
+
+  for status <- ~w(accepted running) do
+    test "late #{status} evidence updates the displayed recovery requirement once", %{issues: issues, opts: opts} do
+      status = unquote(status)
+
+      handler = fn
+        "agent", _ -> {:error, :connection_lost}
+        "agent.wait", %{"runId" => id} -> %{"runId" => id, "status" => status}
+      end
+
+      wait = fn _ ->
+        count = Process.get(:evidence_polls, 0)
+        Process.put(:evidence_polls, count + 1)
+        if count == 2, do: throw(:still_reserved)
+      end
+
+      opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: wait, recipient: self())
+      assert catch_throw(Runner.run("incoming", issues, issues, opts)) == :still_reserved
+      assert_receive {:yolo_event, "incoming", %{external: %{missing_evidence: "terminal_or_pre_acceptance_original_required"}}}
+      assert_receive {:yolo_event, "incoming", %{external: %{reserved: true, missing_evidence: "terminal_original_required"}} = message}
+      assert {:ok, order} = Journal.read("incoming")
+      assert message.external == OpenClaw.observation(order)
+      refute_receive {:yolo_event, "incoming", %{external: %{missing_evidence: "terminal_original_required"}}}
+    end
+  end
+
   test "journal replacement during observation cannot overwrite the new order even on cancellation", %{issues: issues, opts: opts} do
     handler = fn
       "agent", params ->

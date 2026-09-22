@@ -225,15 +225,19 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     end
   end
 
-  defp observe_failure(%{"id" => id} = order, {:ok, %{"runId" => id} = reply}, _opts) do
+  defp observe_failure(%{"id" => id} = order, {:ok, %{"runId" => id} = reply}, opts) do
     if is_number(reply["startedAt"]) or reply["status"] in ~w(accepted running) do
       # Observed execution rules out non-start recovery, but does not change
       # existing authority or overwrite a concurrent cancellation/transport loss.
       changes = %{"acceptance_observed" => true, "execution_observed" => is_number(reply["startedAt"]) or reply["status"] == "running"}
 
       case Journal.update(order, changes) do
-        {:ok, updated} -> updated
-        _ -> order
+        {:ok, updated} ->
+          observation_event(order, updated, :observation_updated, opts)
+          updated
+
+        _ ->
+          order
       end
     else
       order
@@ -255,8 +259,12 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
   defp cancel(order, adapter, opts) do
     case Journal.update(order, %{"cancel_requested" => true, "writable" => false, "state" => "cancel_pending"}) do
-      {:ok, updated} -> abort_external(updated, adapter, opts)
-      _ -> %{order | "writable" => false}
+      {:ok, updated} ->
+        observation_event(order, updated, :cancel_requested, opts)
+        abort_external(updated, adapter, opts)
+
+      _ ->
+        %{order | "writable" => false}
     end
   end
 
@@ -294,6 +302,10 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   end
 
   def terminal(_, _), do: :pending
+
+  defp observation_event(previous, current, event, opts) do
+    if observation(previous) != observation(current), do: event(current, event, opts)
+  end
 
   defp event(order, event, opts) do
     Enum.each(order["members"], fn member ->

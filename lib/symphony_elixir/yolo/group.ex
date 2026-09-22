@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.Yolo.Group do
   @moduledoc "Project/agent PO groups; incoming states share one lock and one decision."
-  alias SymphonyElixir.{Dialog, Yolo.Admission, Yolo.Operations}
+  alias SymphonyElixir.{Dialog, Yolo.Admission, Yolo.Dependencies, Yolo.Operations}
   alias SymphonyElixir.Linear.YoloAgent
 
-  @terminal ["Fertig", "Abgebrochen", "Verworfen", "Duplicate", "Umsetzungsticket erstellt"]
+  @terminal ["Review", "Fertig", "Abgebrochen", "Verworfen", "Duplicate", "Umsetzungsticket erstellt"]
 
   @spec name(map()) :: String.t() | nil
   def name(issue) do
@@ -13,7 +13,7 @@ defmodule SymphonyElixir.Yolo.Group do
         "Planung" -> "planning"
         "In Arbeit" -> "in_progress"
         "BLOCKER" -> "blocker"
-        "Review" -> "review"
+        "Yolo Review" -> "review"
         _ -> recovery_group(issue)
       end
     end
@@ -23,12 +23,13 @@ defmodule SymphonyElixir.Yolo.Group do
 
   @spec expected?(map()) :: boolean()
   def expected?(issue) do
-    YoloAgent.delegated?(issue) and issue.state not in ["Review" | @terminal] and not Dialog.state?(issue.state)
+    YoloAgent.delegated?(issue) and issue.state not in ["Yolo Review" | @terminal] and not Dialog.state?(issue.state)
   end
 
   @spec groups([map()]) :: map()
   def groups(issues) do
-    waiting? = Enum.any?(issues, &expected?/1)
+    reviews = Dependencies.review_members(issues)
+    issues = Enum.reject(issues, &(&1.state == "Backlog" and not Dependencies.unblocked?(&1)))
     pending = issues |> Enum.filter(&(Admission.eligible?(&1) and Admission.needed?(&1))) |> Enum.map(&name/1)
 
     issues
@@ -36,7 +37,8 @@ defmodule SymphonyElixir.Yolo.Group do
     |> Enum.group_by(&name/1)
     |> Map.delete(nil)
     |> Map.drop(pending)
-    |> then(fn groups -> if waiting?, do: Map.delete(groups, "review"), else: groups end)
+    |> Map.delete("review")
+    |> then(fn groups -> if reviews == [], do: groups, else: Map.put(groups, "review", reviews) end)
   end
 
   @spec terminal?(map()) :: boolean()

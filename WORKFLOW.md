@@ -235,7 +235,7 @@ verschieben. Bekannte Zuständigkeit übernehmen; materielle Entscheidungen nach
 Vor Merge sind erforderliche Build-/Test-/technische Review-/Mergegates und
 konkrete frühere Freigabepflichten zu erfüllen. Finale Produkt-/Zielumgebungsabnahme
 am gemergten bzw. regulär ausgelieferten Stand ist standardmäßig in `Review`
-fällig. Fehlende Installation dieses neuen Stands allein sperrt Merge nicht.
+fällig, bei Agentdelegation bereits in `Yolo Review`. Fehlende Installation dieses neuen Stands allein sperrt Merge nicht.
 Frühe isolierte Produkt-/Paket-/Integrationsprüfungen bleiben erforderlich;
 fehlende notwendige Testumgebung oder rote technische Gates sind keine finale
 Betriebsabnahme. `Review` ist weder `Review (AI)` noch `Freigabe Review`.
@@ -243,7 +243,9 @@ Merge erteilt keine Deploymentfreigabe und bestätigt keine Produktabnahme.
 Später fällige Nachweise bleiben sichtbar offen, ohne falsche Häkchen.
 
 Fehlt ein fälliger Betreiberbeleg, zunächst erlaubte Diagnose, Nacharbeit und
-verfügbare gebundene Testausführung erledigen. Nur wenn danach kein zulässiger
+verfügbare gebundene Testausführung erledigen. Ein beauftragter Betreiberagent
+übernimmt vorhandene autorisierte Testbereitstellung und Prüfung selbst;
+Workerbeschränkungen allein erzeugen keine neue menschliche Freigabepflicht. Nur wenn danach kein zulässiger
 autonomer Fortsetzungsweg bleibt, im einen Workpad Aktion, Rolle, Quell-/Paketstand, bestandene lokale Prüfungen, fehlende
 externe Belege und Fortsetzungsphase übergeben; nach `BLOCKER` wechseln und den
 Turn beenden. Das gilt auch für externe Testvoraussetzungen. Kein erfundener
@@ -413,8 +415,8 @@ lesen.
   Anforderungen/Validierung, aktuellem Ursprung und stabilem `operation_key`
   erstellen. Der gebundene Pfad bestätigt `symphony-generated`, dasselbe
   Projekt, Backlog und `related`; `blocked_by` nennt vorausgehende Arbeit.
-  Mit `--yolo` und Agentenkonfiguration erhalten sie Agent und konfigurierten
-  Menschen, sonst keine dieser Zuweisungen. Unklare Schreibausgänge mit derselben
+  Mit Agentenkonfiguration erhalten sie unabhängig von `--yolo` Agent und
+  konfigurierten Menschen, sonst keine dieser Zuweisungen. Unklare Schreibausgänge mit derselben
   Operation abgleichen; ohne bestätigte Labels/Links keinen Erfolg melden.
 - Nutze den blocked-access escape hatch nur für echte externe Blocker (fehlende erforderliche Tools/Auth), nachdem dokumentierte Fallbacks ausgeschöpft wurden.
 
@@ -483,9 +485,10 @@ bleiben wirksam; ein Review-Skip ersetzt keinen Betreiberbeleg.
 | `Review (AI)` | Ja | Vor `symphony-review` `symphony-pull` ausführen; beim ersten Eintritt offene Workspace-Änderungen einmalig mit einem issue-bezogenen Autocommit sichern. Abschlussstatus nach Review-Ergebnis sowie `--yolo` oder `Skip "Freigabe Review"`. | `Freigabe Review` |
 | `Freigabe Review` | Nein | Manueller Freigabepunkt der reviewten Version vor dem Test-/Merge-Zyklus; ohne Skip-Label keine weitere automatische Aktion. | Warten auf menschliches Verschieben |
 | `Test (AI)` | Ja | Branch vor den Tests per `symphony-pull` auf den späteren PR-Merge-Stand synchronisieren und danach `symphony-test` ausführen. | `Merge (AI)` |
-| `Merge (AI)` | Ja | Merge-Ablauf mit `symphony-land` ausführen; automatische Commits sind hier zulässig. Wenn Pull, Konfliktlösung oder andere Merge-Dateiänderungen neue Änderungen erzeugen oder übernehmen, nach `Test (AI)` zurückspringen. Wenn `Requires Manual Review` ohne gültiges GitHub-Approval blockiert oder der aktuelle Linear-Labelstand nicht verifizierbar ist, nach `BLOCKER` verschieben. | `Review`; bei Merge-Dateiänderungen `Test (AI)`; bei fehlendem gültigem Manual-Review-Approval oder nicht verifizierbarem Labelstand `BLOCKER` |
+| `Merge (AI)` | Ja | Merge-Ablauf mit `symphony-land` ausführen; automatische Commits sind hier zulässig. Wenn Pull, Konfliktlösung oder andere Merge-Dateiänderungen neue Änderungen erzeugen oder übernehmen, nach `Test (AI)` zurückspringen. Wenn `Requires Manual Review` ohne gültiges GitHub-Approval blockiert oder der aktuelle Linear-Labelstand nicht verifizierbar ist, nach `BLOCKER` verschieben. | Bei Agentdelegation `Yolo Review`, sonst `Review`; bei Merge-Dateiänderungen `Test (AI)`; bei fehlendem gültigem Manual-Review-Approval oder nicht verifizierbarem Labelstand `BLOCKER` |
 | `BLOCKER` | Nein | Hindernis ohne zulässigen autonomen Fortsetzungsweg; keine weitere automatische Aktion, bis ein Mensch das Problem löst und das Ticket weiter verschiebt. | Warten auf menschliches Verschieben |
 | `Abbruch (AI)` | Ja | Laufende Arbeit sofort abbrechen und Cleanup ausführen. | `Abgebrochen` |
+| `Yolo Review` | PO-Sonderlauf | Schlussabnahme agentendelegierter gemergter Tickets samt Folgefixkette nach `WORKFLOW_YOLO_AGENT.md`; kein regulärer Codingstart, nur geprüfter Abschluss nach `Review`. | `Review` mit entfernter Delegation |
 | `Review` | Nein | Terminaler Übergabestatus nach dem Merge; keine weitere automatische Aktion, manuelles Verschieben nach `Fertig` bleibt beim Benutzer. | - |
 | `Fertig` | Nein | Terminaler Status; keine weitere Aktion erforderlich. | - |
 | `Abgebrochen` | Nein | Terminaler Status nach explizitem Abbruch; keine weitere Aktion erforderlich. | - |
@@ -512,6 +515,7 @@ bleiben wirksam; ein Review-Skip ersetzt keinen Betreiberbeleg.
    - `Test (AI)` -> Ablauf `Test (AI)` ausführen.
    - `Abbruch (AI)` -> Ablauf `Abbruch (AI)` ausführen.
    - `Merge (AI)` -> Ablauf `Merge (AI)` ausführen.
+   - `Yolo Review` -> nur gebundener PO-Sammellauf nach `WORKFLOW_YOLO_AGENT.md`; keinen regulären Einzellauf starten.
    - `Review` -> nichts tun und beenden.
    - `Fertig` -> nichts tun und beenden.
    - `Abgebrochen` -> nichts tun und beenden.
@@ -862,15 +866,17 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
    Shell-/Mix-Fallback im App-Modus.
    Der injizierte `SYMPHONY_ISSUE_LABELS_JSON`-Snapshot ersetzt keinen Live-Lookup.
 
-10. Nach erfolgreichem PR-Merge dokumentiere vor jedem Abschluss nach `Review`
+10. Nach erfolgreichem PR-Merge dokumentiere vor jedem Abschluss nach `Review` oder `Yolo Review`
    eine eindeutige `Merge-Evidenz` im Workpad-Verlauf: PR-Nummer oder PR-URL,
    gemergter Zustand und Merge-Commit-SHA müssen enthalten sein.
 11. Falls ein erneuter Pull/Rebase, die Konfliktlösung, Review-Feedback, ein CI-Fix oder eine andere Handlung in `Merge (AI)` zu Dateiänderungen führt oder Dateiänderungen übernimmt, committe diese mit `<Issue-Key> Merge (AI) Autocommit` plus kurzem Body, pushe sie, verschiebe das Issue nach `Test (AI)` und beende den Turn, damit die Tests auf dem neuen Stand in einer neuen Codex-Session erneut durchlaufen.
 
 ### Abschluss und nächster Status
 
-- Nach abgeschlossenem Merge das Issue mit offenen Review-Nachweisen nach `Review`
-  verschieben und den Turn beenden; Phasenpflichten bleiben erhalten.
+- Nach abgeschlossenem Merge die Delegation frisch prüfen: mit Agentdelegation
+  nach `Yolo Review`, sonst nach `Review`; Turn beenden. Das gilt auch für den
+  Guardrail-Fallback. Offene Abnahmen bleiben im Workpad, technische Gates
+  und Merge-Evidenz bleiben unverändert erforderlich.
 - Symphony klärt nach dem Workerabschluss den Ticketzustand frisch und führt bei
   terminalem Status den bestehenden Workspace-Cleanup aus. Offene Statusklärung
   bleibt im Retry; laufende Merge-Abschlussprüfungen behalten den Workspace.
@@ -878,14 +884,14 @@ Den Merge-Ablauf mit `symphony-land` abschließen, erforderliche Auto-Commits in
 - Ein normal beendeter Hauptturn alleine belegt keinen abgeschlossenen Merge.
   Falls das Issue nach einem sauber beendeten `Merge (AI)`-Turn noch in
   `Merge (AI)` steht, darf Symphony nur mit eindeutiger Workpad-`Merge-Evidenz`
-  als Guardrail-Fallback nach `Review` wechseln; ohne diese Evidenz bleibt das
+  als Guardrail-Fallback zum oben bestimmten Übergabestatus wechseln; ohne diese Evidenz bleibt das
   Issue aktiv.
 - Bei `agent.max_turns` dokumentiere offene Abweichungen im Workpad und stoppe
   ohne Statuswechsel; `agent.max_turns` ist kein normaler Phasenabschluss.
 
 ### Sonderfälle
 
-- Wenn der Skill den Status bereits zulässig nach `Test (AI)` oder `Review`
+- Wenn der Skill den Status bereits zulässig nach `Test (AI)`, `Yolo Review` oder `Review`
   geändert hat, endet der Turn an dieser Statusgrenze. Wenn der Status nicht
   geändert wurde und keine `Merge-Evidenz` vorhanden ist, weiterarbeiten oder
   einen echten Blocker dokumentieren.

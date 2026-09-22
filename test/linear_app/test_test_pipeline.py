@@ -44,7 +44,7 @@ class PipelinePlan(unittest.TestCase):
     def test_plan_preserves_every_gate_and_restricts_exact_fixture_ids(self):
         plan = self.module.prepare(self.args)
         overlay = Path(plan['workflow']).read_text()
-        added = '    allowed_issue_ids: ' + json.dumps(self.args.issue_id) + '\n'
+        added = '    allowed_issue_ids: ' + json.dumps(self.args.issue_id) + '\n    allow_yolo_followup_ids: true\n'
         self.assertEqual(overlay.replace(added, ''), self.workflow)
         self.assertEqual(plan['issue_ids'], self.args.issue_id)
         self.assertEqual(plan['acceptance'], 'pending_operator_evidence')

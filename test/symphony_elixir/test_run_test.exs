@@ -1573,10 +1573,12 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:ok, prepared} = TestRun.execute("prepare")
     assert length(prepared["fixtures"]) == 3
     members = Enum.filter(prepared["fixtures"], & &1["po_handoff"])
-    assert Enum.sort(Enum.map(members, & &1["initial_state"])) == ["BLOCKER", "Review"]
+    assert Enum.sort(Enum.map(members, & &1["initial_state"])) == ["BLOCKER", "Yolo Review"]
     System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
     assert {:ok, bound} = TestRun.bind_contexts(contexts)
     assert length(Enum.find(bound, &(&1.name == context.name)).settings.tracker.app["allowed_issue_ids"]) == 3
+    for member <- members, do: assert(TestRun.review_fixture?(member["id"]))
+    refute TestRun.review_fixture?("foreign")
 
     for member <- members do
       issue = %Issue{id: member["id"], state: member["initial_state"], delegate_id: "fixture-agent"}
@@ -1585,7 +1587,7 @@ defmodule SymphonyElixir.TestRunTest do
       refute TestRun.start_allowed?(%{issue | delegate_id: nil})
 
       ProjectContext.with_context(context, fn ->
-        group = if member["initial_state"] == "Review", do: "review", else: "blocker"
+        group = if member["initial_state"] == "Yolo Review", do: "review", else: "blocker"
         {:ok, record} = YoloStore.read(group)
         assert {:ok, ^member} = PoHandoff.probe(%{}, member)
 
@@ -1602,8 +1604,16 @@ defmodule SymphonyElixir.TestRunTest do
 
         node = %{"state" => %{"name" => member["initial_state"]}, "assignee" => %{"id" => @human}, "delegate" => %{"id" => "fixture-agent"}}
         assert {:ok, ^member} = PoHandoff.probe(node, member)
-        assert {:ok, checked} = PoHandoff.probe(Map.put(node, "delegate", nil), member)
+        assert {:ok, checked} = PoHandoff.probe(node |> Map.put("delegate", nil) |> put_in(["state", "name"], if(member["initial_state"] == "Yolo Review", do: "Review", else: "BLOCKER")), member)
         assert checked["handoff_receipt"]["sha"] == "merged-sha"
+
+        if member["initial_state"] == "Yolo Review" do
+          waiting = Map.put(member, "po_followup", true)
+          assert {:ok, waited} = PoHandoff.probe(node, waiting)
+          assert waited["handoff_receipt"]["sha"] == "merged-sha"
+          assert {:ok, ^waiting} = PoHandoff.probe(Map.put(node, "delegate", nil), waiting)
+        end
+
         File.write!(YoloStore.path(group), "corrupt")
         assert {:error, :yolo_state_corrupt} = PoHandoff.probe(node, member)
       end)
@@ -1611,6 +1621,7 @@ defmodule SymphonyElixir.TestRunTest do
 
     assert {:ok, cleaned} = TestRun.execute("cleanup")
     assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+    refute TestRun.review_fixture?(hd(members)["id"])
   end
 
   test "mixed PO scenario reserves exactly three project members and a separate bootstrap", ctx do
@@ -1944,7 +1955,7 @@ defmodule SymphonyElixir.TestRunTest do
   defp respond_query("query TestScenarioStates" <> _, _variables, %{failure: :states_transport} = state), do: {{:error, :offline}, state}
 
   defp respond_query("query TestScenarioStates" <> _, variables, state) do
-    names = ["Todo (AI)", "Planung (AI)", "Backlog", "Todo", "Definiert", "BLOCKER", "Review", "Verworfen", "Umsetzungsticket erstellt"]
+    names = ["Todo (AI)", "Planung (AI)", "Backlog", "Todo", "Definiert", "BLOCKER", "Yolo Review", "Review", "Verworfen", "Umsetzungsticket erstellt"]
     nodes = Enum.map(names, &%{"id" => &1, "name" => &1})
 
     result =
@@ -2046,7 +2057,9 @@ defmodule SymphonyElixir.TestRunTest do
             "nodes" => [
               %{
                 "id" => "team",
-                "states" => %{"nodes" => Enum.map(["Todo (AI)", "Backlog", "Todo", "Definiert", "BLOCKER", "Review"], &%{"id" => if(&1 == "Todo (AI)", do: "todo", else: &1), "name" => &1})}
+                "states" => %{
+                  "nodes" => Enum.map(["Todo (AI)", "Backlog", "Todo", "Definiert", "BLOCKER", "Yolo Review", "Review"], &%{"id" => if(&1 == "Todo (AI)", do: "todo", else: &1), "name" => &1})
+                }
               }
             ]
           }

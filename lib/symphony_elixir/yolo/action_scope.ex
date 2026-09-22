@@ -2,7 +2,7 @@ defmodule SymphonyElixir.Yolo.ActionScope do
   @moduledoc "Fresh ownership and comment authorization shared by PO actions and ordinary follow-ups."
   alias SymphonyElixir.{CommentCheckpoint, Config, Tracker}
   alias SymphonyElixir.Linear.WriteContext
-  alias SymphonyElixir.Yolo.{Admission, Scope}
+  alias SymphonyElixir.Yolo.{Admission, Dependencies, Scope}
 
   @spec sources([String.t()], keyword()) :: {:ok, [map()]} | {:error, term()}
   def sources(ids, opts) do
@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Yolo.ActionScope do
          {:ok, issues} <- fetch.(ids),
          true <- Enum.sort(Enum.map(issues, & &1.id)) == Enum.sort(ids),
          true <- Enum.all?(issues, &authorized?/1),
+         :ok <- Dependencies.actionable(issues, opts),
          :ok <- check(issues, opts) do
       {:ok, issues}
     else
@@ -23,7 +24,7 @@ defmodule SymphonyElixir.Yolo.ActionScope do
   defp bound?(id), do: Scope.member?(id) or (is_nil(Scope.current()) and WriteContext.current()["issue_id"] == id)
 
   defp authorized?(issue) do
-    allowed = Config.settings!().tracker.app["allowed_issue_ids"]
+    allowed = Config.allowed_issue_ids()
 
     issue.in_project_scope and issue.assigned_to_worker and (is_nil(allowed) or issue.id in allowed) and
       if Scope.current(), do: Admission.eligible?(issue), else: CommentCheckpoint.active?(issue)

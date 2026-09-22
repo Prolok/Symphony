@@ -89,11 +89,14 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     order = Map.put(order, "payload_sha256", digest(payload))
 
     with :ok <- File.write(Path.join(Path.dirname(bridge.descriptor), "request.md"), payload),
-         :ok <- Journal.write(order) do
+         :ok <- Journal.write(order),
+         :ok <- Keyword.get(opts, :before_delivery, fn -> :ok end).() do
       event(order, :submitted, opts)
       # The intent is durable BEFORE invoking any external submission. Even a
       # transport failure leaves this exact run reserved until terminal proof.
       changes = acceptance(adapter.submit(order, payload, opts), order)
+
+      if changes["state"] == "rejected", do: Keyword.get(opts, :delivery_rejected, fn -> :ok end).()
 
       with {:ok, order} <- Journal.update(order, changes) do
         event(order, :acceptance, opts)
@@ -126,8 +129,21 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     Bei widersprechenden Agentenanweisungen
     keine konkurrierende Steuerung starten; den Widerspruch als Fehler melden.
     LinearBridge-Mentions sind Beratung, keine Freigabe oder zweite Ausführung.
-    Arbeite ausschließlich im Prüfcheckout #{order["workspace"]} (SHA #{order["sha"]}).
+    Der Produktprüfstand bleibt #{order["workspace"]} (SHA #{order["sha"]});
+    halte ihn unverändert und führe gebundene Tools ausschließlich dort aus.
     Dein Wissensworkspace ist kein Prüfstand. Keine weiteren Agents starten.
+    Übernimm erforderliche Betreiberprüfungen selbst, soweit dein vorhandener
+    Agentenauftrag die Testumgebung und bestehenden Zugänge bereits freigibt.
+    Dazu darfst du außerhalb des Prüfcheckouts isolierte Testbereitstellung und
+    deren bestehende Betreiberwerkzeuge nutzen; Quellstand, Testprojekt, eigene
+    Fixtures und Rückfallbestand vorher bestätigen. Keine fremde Arbeit ändern.
+    Fehlende lokale Bereitstellung oder ein eingeschränktes Workerwerkzeug ist
+    allein kein menschlicher Blocker. Prüfe und nutze den autorisierten Betreiberweg
+    vollständig, dokumentiere Belege und setze den gebundenen Ticketlauf fort.
+    Erst strategische Produktentscheidungen oder danach nicht autonom behebbare
+    Hindernisse (etwa wirklich fehlende Zugangsdaten) an den Menschen eskalieren.
+    Keine Rechte erweitern, keine produktiven Dienste ungefragt umstellen und
+    keine laufgebundene Zugriffssperre durch einen anderen Zugang umgehen.
 
     Die vorhandenen Symphony-MCP-Werkzeuge sind über diesen laufgebundenen Helfer
     tatsächlich erreichbar. Nutze dein lokales exec-Werkzeug mit Arbeitsverzeichnis
@@ -141,7 +157,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     Aufrufe: {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"TOOL","arguments":{}}}.
     Keine Ersatzbindung, keine direkten Linear-Zugänge. Bei verweigerter Bindung
     sofort stoppen. Keine Credentials oder den Inhalt der Bindungsdatei ausgeben.
-    Nutze symphony_yolo_complete für jede tatsächlich abgeschlossene Entscheidung.
+    Nutze symphony_yolo_complete für jede tatsächlich abgeschlossene Entscheidung, außer nach erfolgreichem handoff/wait/escalate: diese bestätigen das Mitglied bereits intern; kein zweiter Abschlussaufruf.
     Der Abschlussbericht nennt Lauf-ID, betroffene Tickets, Entscheidungen,
     tatsächlich ausgeführte Aktionen und Prüfbelege; offene Arbeit bleibt offen.
     """

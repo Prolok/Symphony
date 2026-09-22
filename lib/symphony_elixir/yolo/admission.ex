@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Yolo.Admission do
 
   alias SymphonyElixir.{Config, ProjectContext, Tracker}
   alias SymphonyElixir.Linear.{Client, IssueLease, YoloAgent}
-  alias SymphonyElixir.Yolo.Operations, as: Operations
+  alias SymphonyElixir.Yolo.{Dependencies, Operations}
 
   @labels [~s(Skip "Freigabe Implementierung"), ~s(Skip "Freigabe Review")]
 
@@ -28,7 +28,8 @@ defmodule SymphonyElixir.Yolo.Admission do
     query = Keyword.get(opts, :query, &Client.graphql/2)
 
     with {:ok, [current]} <- fetch.([issue.id]),
-         true <- eligible?(current),
+         {:ok, [current]} <- Dependencies.refresh([current], opts),
+         true <- eligible?(current) and (current.state != "Backlog" or Dependencies.unblocked?(current)),
          {:ok, current} <- complete_labels(current, query),
          {:ok, ids} <- missing_labels(current, query),
          :ok <- update(current, ids, query),
@@ -87,7 +88,7 @@ defmodule SymphonyElixir.Yolo.Admission do
   @spec eligible?(map()) :: boolean()
   def eligible?(issue) do
     context = ProjectContext.current()
-    ids = context.settings.tracker.app["allowed_issue_ids"]
+    ids = Config.allowed_issue_ids()
 
     Operations.target_ready?(issue.id) and issue.in_project_scope and YoloAgent.delegated?(issue) and issue.project_context_id == context.id and
       issue.workspace_id == context.settings.tracker.app["workspace_id"] and

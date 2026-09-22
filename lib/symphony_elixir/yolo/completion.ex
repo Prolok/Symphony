@@ -42,12 +42,12 @@ defmodule SymphonyElixir.Yolo.Completion do
          {:ok, [issue]} <- fetch.([id]),
          true <- issue.in_project_scope,
          :ok <- check.(issue),
-         :ok <- operations_complete(issue),
+         :ok <- completion_operations(issue, opts),
          :ok <- review_handoff(scope, issue, opts),
          true <- Admission.eligible?(issue) or Keyword.get(opts, :handoff_completed, false) do
       # Separate journal lock: the worker retains the group and issue leases.
       IssueLease.with_journal_lock(Store.path(scope["group"]) <> ".completion", fn ->
-        complete(scope["group"], id, result)
+        complete(scope["group"], id, result, escalation_keys(opts))
       end)
     else
       {:error, _} = error -> error
@@ -57,37 +57,63 @@ defmodule SymphonyElixir.Yolo.Completion do
 
   def invoke(_, _), do: {:error, :invalid_yolo_completion}
 
+  defp escalation_keys(opts) do
+    if opts[:unresolved_escalation] == true and opts[:review_waiting] == true,
+      do: Keyword.get(opts, :escalated_operations, []),
+      else: []
+  end
+
+  defp completion_operations(issue, opts), do: operations_complete(issue, escalation_keys(opts))
+
   @spec verify_operations([map()]) :: :ok | {:error, term()}
   def verify_operations(issues) do
     Enum.reduce_while(issues, :ok, fn issue, _ ->
-      case operations_complete(issue) do
+      case operations_complete(issue, recorded_escalation(issue)) do
         :ok -> {:cont, :ok}
         error -> {:halt, error}
       end
     end)
   end
 
+  defp recorded_escalation(%{state: "Yolo Review", id: id}) do
+    scope = Scope.current()
+
+    with %{"group" => group, "run_id" => run_id} <- scope,
+         {:ok, %{"attempt" => attempt}} when is_map(attempt) <- Store.read(group),
+         true <- attempt["id"] == run_id and is_binary(attempt["completed"][id]) do
+      get_in(attempt, ["escalated_operations", id]) || []
+    else
+      _ -> []
+    end
+  end
+
+  defp recorded_escalation(_issue), do: []
+
   defp review_handoff(scope, issue, opts) do
-    if (scope["group"] == "review" or issue.state == "Review") and issue.state != "BLOCKER" and not Keyword.get(opts, :handoff_completed, false),
+    if (scope["group"] == "review" or issue.state == "Yolo Review") and not Keyword.get(opts, :review_waiting, false) and not Keyword.get(opts, :handoff_completed, false),
       do: {:error, :yolo_review_handoff_required},
       else: :ok
   end
 
-  defp operations_complete(issue) do
+  defp operations_complete(issue, escalated) do
     with {:ok, pending} <- Operations.pending([issue.id]) do
       # A human owns the explicitly handed-off BLOCKER, including its unresolved
       # intents. The handoff report records these instead of claiming success.
       handed_off? = issue.state == "BLOCKER" and is_nil(issue.delegate_id) and is_binary(Config.human_handoff_id()) and issue.assignee_id == Config.human_handoff_id()
 
-      if pending == [] or handed_off?, do: :ok, else: {:error, {:yolo_operations_pending, Enum.map(pending, & &1["key"])}}
+      waiting? = issue.state == "Yolo Review" and Enum.all?(pending, &(&1["key"] in escalated))
+      if pending == [] or handed_off? or waiting?, do: :ok, else: {:error, {:yolo_operations_pending, Enum.map(pending, & &1["key"])}}
     end
   end
 
-  defp complete(group, id, result) do
+  defp complete(group, id, result, escalated) do
     with {:ok, record} <- Store.read(group),
          %{"members" => ids} = attempt <- record["attempt"],
          true <- id in ids and attempt["id"] in [nil, Scope.current()["run_id"]] do
       attempt = Map.put(attempt, "completed", Map.put(attempt["completed"] || %{}, id, result))
+      attempt = Map.put(attempt, "escalated_operations", Map.put(attempt["escalated_operations"] || %{}, id, escalated))
+      held = Enum.uniq((get_in(record, ["escalated_operations", id]) || []) ++ escalated)
+      record = Map.put(record, "escalated_operations", Map.put(record["escalated_operations"] || %{}, id, held))
       Store.write(group, Map.put(record, "attempt", attempt))
     else
       {:error, _} = error -> error

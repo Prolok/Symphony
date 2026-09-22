@@ -411,6 +411,41 @@ Der bestehende gebundene Routineexecutor ersetzt dieses Szenario nur, wenn er
 genau diese Nachweise unterstützt. Fehlende fällige Testbereitstellung wird im
 Workpad als Betreiberpflicht übergeben, ohne neue persönliche Nutzerabnahme.
 
+## Seltene Eskalationen
+
+`kind=escalate` erhält `Yolo Review` und beendet den Lauf als Warteentscheidung.
+BLOCKER-Übergaben vor der Schlussphase bleiben möglich. Der strukturierte
+`escalation`-Beleg enthält `cause`, `attempts`, `proposal` und `decision`.
+Nur bei aktiviertem OpenClaw wird eine Nachricht versandt. Der Adapter fragt
+`sessions.list` für exakt `agent:<konfigurierter-agent>:main` ab und verwendet
+nur dessen vorhandenen `deliveryContext` (Kanal, Empfänger, optional Konto/Thread).
+Liegt der normale Gesprächskanal in einer eigenen Sitzung, kann der Betreiber
+projektspezifisch `OPENCLAW_YOLO_NOTIFY_SESSION` auf deren vorhandenen vollständigen
+Sitzungsschlüssel setzen. Die Sitzung muss zum selben konfigurierten Agenten
+gehören; die Zustellroute wird weiterhin ausschließlich aus dieser einen
+Gateway-Sitzung gelesen. Es gibt keine automatische Auswahl aus fremden Gruppen
+oder Threads und keinen frei eingegebenen Kanal-/Empfängerersatz.
+Kein frei gewählter Empfänger und kein Ersatzkanal; fehlende/mehrdeutige Route
+bleibt ein konkreter Fehler. Gewöhnliche PO-Aufträge behalten `deliver=false`.
+
+Die Nachricht enthält Ticketlink, Ursache, Versuche, Lösungsvorschlag und
+benötigte Entscheidung. Eine dauerhafte Vorschlags-ID bindet den genauen Inhalt
+an Ticket und Agent. Vor `send` wird die Absicht samt Route gespeichert, danach
+nur ein bestätigtes `messageId` als Versandbeleg. Ein verlorener Ausgang wird
+nicht erneut versandt, auch nach Neustart oder Ablauf fremder Dedup-Caches.
+Ein identischer bestätigter Vorschlag ist wirkungslos. Versandbestätigung ist
+kein Beleg für menschliches Lesen oder Zustimmung. Ein OK im normalen Kanal
+bezieht sich ausschließlich auf diesen Vorschlag; der bestehende OpenClaw-Agent
+muss die konkrete menschliche Entscheidung am Ticket nachvollziehbar festhalten.
+Symphony führt keine Aktion aufgrund eines unkorrelierten OK aus und erteilt
+keine zusätzliche Zugangs-/Deploymentfreigabe.
+
+Schnittstellenbeleg am unterstützten Tag: [sessions.list-Schema](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/sessions-list.ts),
+[gespeicherte Zustellroute](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/session-utils.types.ts),
+[SendParamsSchema](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/agent.ts).
+Der Livebeleg prüft normale Route, Empfang und konkrete Vorschlagskorrelation;
+Fixtures belegen nur die technische Bindung und Wiederholungssperre.
+
 ## Standardtests und separater Live-Nachweis
 
 Im expliziten OpenClaw-Livetest fragt der Testrunner den Linear-Abnahmestand
@@ -425,8 +460,14 @@ setzen dieselbe Sperre. Aktivierte Testfälle injizieren Antworten und verwenden
 temporäre Bindungen, lokale Sockets sowie simulierte Prozesse, keine persönlichen
 Agentendateien/Gateways. Ein fehlendes Binary überspringt keinen Test.
 
-Vor **erstmaliger produktiver Aktivierung** führt Tilo außerhalb der Gates einen
-Live-Nachweis auf seinem Rechner aus. Es gelten vollständig die Voraussetzungen
+Vor **erstmaliger produktiver Aktivierung** führt die autorisierte Betreiberrolle
+außerhalb der Gates einen Live-Nachweis aus. Ein bereits dafür beauftragter
+OpenClaw-Agent übernimmt Bereitstellung, Prüfung und belegte Fortsetzung autonom;
+keine zusätzliche persönliche Bedienung oder Abnahme verlangen. Fehlende lokale
+Testbereitstellung ist bei vorhandener Freigabe und Zugängen selbst zu beheben.
+Nur strategische Entscheidungen oder nach Prüfung der zulässigen Wege nicht
+behebbare Hindernisse werden an den Menschen eskaliert. Der Produktprüfcheckout
+bleibt unverändert, gebundene Ticketzugriffe und technische Gates bleiben erhalten. Es gelten vollständig die Voraussetzungen
 des [isolierten Testbetriebs](linear-app.md#isolierter-testbetrieb): eigenes
 freigegebenes Manifest für `Prolok/symphony-test`, disjunkter Projektbereich,
 exklusive Entscheidungshoheit, Testtickets und dokumentierter Quellstand.
@@ -495,5 +536,5 @@ Folgefehler, wiederkehrende Fehlerklassen und unnötige Wiederholungen. Gewollte
 Nicht-YOLO-Freigaben zählen nicht als Störung. Künftige Skillverbesserungen nur bei
 wiederverwendbarer Prüflücke und positivem Aufwand/Nutzen über reguläre Fix-/PR-
 Verfahren vorschlagen; Einzelregressionen und neue Anforderungen getrennt behandeln.
-Fixes erhalten ihre eigene Pipeline/Abnahme; der Ursprung wird nach bestätigten
-Folgeanlagen sofort an den Menschen übergeben und dafür nicht erneut abgenommen.
+Fixes erhalten ihre eigene Pipeline. Der Ursprung wartet in Yolo Review, bis
+sämtliche Folgefixes gemeinsam geprüft sind; erst dann Review ohne Delegation.

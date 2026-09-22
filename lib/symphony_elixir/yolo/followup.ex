@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Yolo.Followup do
 
   @spec invoke(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def invoke(%{"kind" => kind, "origin_ids" => ids} = args, opts) when kind in ["aggregate", "followup"] and is_list(ids) do
-    request = Map.take(args, ~w(kind origin_ids operation_key title description validation blocked_by)) |> Map.update!("origin_ids", &Enum.sort(Enum.uniq(&1)))
+    request = Map.take(args, ~w(kind origin_ids operation_key title description validation blocked_by blocks_origins)) |> Map.update!("origin_ids", &Enum.sort(Enum.uniq(&1)))
 
     with true <- Derived.allowed?(request),
          true <- valid_request?(args),
@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Yolo.Followup do
     blocked = args["blocked_by"] || []
 
     Enum.all?(strings, &(is_binary(&1) and String.trim(&1) != "")) and
+      is_boolean(Map.get(args, "blocks_origins", false)) and
       Enum.all?(args["origin_ids"], &is_binary/1) and is_list(blocked) and Enum.all?(blocked, &is_binary/1)
   end
 
@@ -109,7 +110,7 @@ defmodule SymphonyElixir.Yolo.Followup do
   defp prepare(intent, [lead | _] = issues, opts) do
     request = intent["request"]
     aggregate? = request["kind"] == "aggregate"
-    assigned? = aggregate? or (Config.yolo?() and is_binary(Config.yolo_agent_id()))
+    assigned? = aggregate? or is_binary(Config.yolo_agent_id())
 
     with true <- not assigned? or is_binary(Config.human_handoff_id()),
          {:ok, state} <- API.state(lead.team_id, "Backlog", opts),
@@ -129,7 +130,8 @@ defmodule SymphonyElixir.Yolo.Followup do
 
       related = Enum.map(issues, &Relations.edge(&1.id, intent["issue_id"], "related"))
       blocked = Enum.map(request["blocked_by"] || [], &Relations.edge(&1, intent["issue_id"], "blocks"))
-      intent = Map.merge(intent, %{"input" => input, "relations" => Enum.uniq(related ++ transferred ++ blocked), "sources" => Map.new(issues, &{&1.id, source(&1)})})
+      fixes = if request["blocks_origins"] == true, do: Enum.map(issues, &Relations.edge(intent["issue_id"], &1.id, "blocks")), else: []
+      intent = Map.merge(intent, %{"input" => input, "relations" => effective_relations(related ++ transferred ++ blocked ++ fixes), "sources" => Map.new(issues, &{&1.id, source(&1)})})
       with :ok <- Operations.save(intent), do: {:ok, intent}
     else
       {:error, _} = error -> error
@@ -187,9 +189,21 @@ defmodule SymphonyElixir.Yolo.Followup do
   defp verify_created(_, _, _), do: {:error, :yolo_created_issue_unconfirmed}
 
   defp link(intent, opts) do
-    with :ok <- Relations.validate(intent["relations"], opts) do
-      Enum.reduce_while(intent["relations"], :ok, fn edge, _ -> relation_result(guarded_relation(intent, edge, opts)) end)
+    edges = effective_relations(intent["relations"])
+
+    with :ok <- Relations.validate(edges, opts) do
+      Enum.reduce_while(edges, :ok, fn edge, _ -> relation_result(guarded_relation(intent, edge, opts)) end)
     end
+  end
+
+  defp effective_relations(edges) do
+    # Linear stores one relation per pair; keep the directed dependency, including
+    # when resuming an older intent that still planned a redundant related edge.
+    blocked_pairs = for edge <- edges, edge["type"] == "blocks", into: MapSet.new(), do: Enum.sort([edge["issueId"], edge["relatedIssueId"]])
+
+    edges
+    |> Enum.reject(&(&1["type"] == "related" and MapSet.member?(blocked_pairs, Enum.sort([&1["issueId"], &1["relatedIssueId"]]))))
+    |> Enum.uniq()
   end
 
   defp relation_result(:ok), do: {:cont, :ok}

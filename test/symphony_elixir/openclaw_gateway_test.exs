@@ -3,6 +3,36 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
 
+  test "an explicit existing normal-channel session stays bound to the configured agent" do
+    alias SymphonyElixir.ProjectContext
+    key = "agent:po:slack:channel:normal"
+    route = %{"channel" => "slack", "to" => "channel:normal", "accountId" => "po"}
+
+    transport = fn
+      ["--version"] ->
+        {:ok, "2026.9.4"}
+
+      ["gateway", "call", "agents.list" | _] ->
+        {:ok, ~s({"agents":[{"id":"po"}]})}
+
+      ["gateway", "call", "sessions.list", "--params", raw | _] ->
+        assert Jason.decode!(raw)["search"] == key
+        {:ok, Jason.encode!(%{"sessions" => [%{"key" => key, "deliveryContext" => route}]})}
+    end
+
+    ProjectContext.with_context(%ProjectContext{env: %{"OPENCLAW_YOLO_NOTIFY_SESSION" => key}}, fn ->
+      assert {:ok, destination} = Gateway.destination("po", transport: transport)
+      assert destination == Map.put(route, "sessionKey", key)
+    end)
+
+    for foreign <- ["agent:other:main", "agent:po-other:main"] do
+      ProjectContext.with_context(%ProjectContext{env: %{"OPENCLAW_YOLO_NOTIFY_SESSION" => foreign}}, fn ->
+        deny = fn _ -> flunk("foreign session must not be queried") end
+        assert {:error, :openclaw_normal_channel_unavailable} = Gateway.destination("po", transport: deny)
+      end)
+    end
+  end
+
   test "external submission passes the actual upstream cwd preflight without plugin identity" do
     probe = fn params ->
       {output, 0} = System.cmd("node", ["test/fixtures/openclaw/preflight.cjs", Jason.encode!(params)])
@@ -45,6 +75,48 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
 
       assert {:error, :openclaw_invalid_response} = Gateway.submit(order, "workflow", transport: transport)
     end
+  end
+
+  test "escalations resolve only the bound normal session and send with a stable key" do
+    route = %{"channel" => "signal", "to" => "human", "accountId" => "account"}
+
+    transport = fn
+      ["--version"] ->
+        {:ok, "OpenClaw 2026.9.4"}
+
+      ["gateway", "call", "agents.list" | _] ->
+        {:ok, Jason.encode!(%{"agents" => [%{"id" => "po"}]})}
+
+      ["gateway", "call", "sessions.list", "--params", raw | _] ->
+        assert Jason.decode!(raw)["agentId"] == "po"
+        {:ok, Jason.encode!(%{"sessions" => [%{"key" => "agent:po:main", "deliveryContext" => route}, %{"key" => "agent:other:main", "deliveryContext" => %{"to" => "foreign"}}]})}
+
+      ["gateway", "call", "send", "--params", raw | _] ->
+        params = Jason.decode!(raw)
+        assert params["to"] == "human"
+        assert params["idempotencyKey"] == "proposal-id"
+        assert params["message"] == "concrete proposal"
+        refute Map.has_key?(params, "deliver")
+        {:ok, Jason.encode!(%{"messageId" => "message", "channel" => "signal"})}
+    end
+
+    assert {:ok, destination} = Gateway.destination("po", transport: transport)
+    assert destination == Map.put(route, "sessionKey", "agent:po:main")
+    assert {:ok, %{"messageId" => "message"}} = Gateway.notify(Map.put(destination, "idempotencyKey", "proposal-id"), "concrete proposal", transport: transport)
+
+    missing = fn
+      ["gateway", "call", "sessions.list" | _] -> {:ok, Jason.encode!(%{"sessions" => []})}
+      args -> transport.(args)
+    end
+
+    assert {:error, :openclaw_normal_channel_unavailable} = Gateway.destination("po", transport: missing)
+
+    offline = fn
+      ["gateway", "call", "sessions.list" | _] -> {:error, :openclaw_unavailable}
+      args -> transport.(args)
+    end
+
+    assert {:error, :openclaw_unavailable} = Gateway.destination("po", transport: offline)
   end
 
   test "operator history countercheck is bounded and reads the current original agent session" do

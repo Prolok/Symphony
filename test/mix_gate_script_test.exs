@@ -41,6 +41,7 @@ defmodule MixGateScriptTest do
     printf 'codex_command=%s\\n' "${SYMPHONY_CODEX_COMMAND-unset}"
     printf 'linear_yolo_agent=%s\\n' "${LINEAR_YOLO_AGENT-unset}"
     printf 'openclaw_yolo_agent=%s\\n' "${OPENCLAW_YOLO_AGENT-unset}"
+    printf 'openclaw_notify_session=%s\\n' "${OPENCLAW_YOLO_NOTIFY_SESSION-unset}"
     printf 'secret_access=%s\\n' "${SYMPHONY_LINEAR_SECRET_ACCESS-unset}"
     printf 'mix_deps=%s\\n' "${MIX_DEPS_PATH-unset}"
     printf 'mix_build_root=%s\\n' "${MIX_BUILD_ROOT-unset}"
@@ -66,6 +67,7 @@ defmodule MixGateScriptTest do
         {"SYMPHONY_CODEX_COMMAND", "false"},
         {"LINEAR_YOLO_AGENT", "synthetic-inherited-linear-agent"},
         {"OPENCLAW_YOLO_AGENT", "synthetic-inherited-openclaw-agent"},
+        {"OPENCLAW_YOLO_NOTIFY_SESSION", "agent:synthetic:main"},
         {"SYMPHONY_LINEAR_SECRET_ACCESS", "denied"},
         {"MIX_DEPS_PATH", "/tmp/wrong-deps"},
         {"MIX_BUILD_ROOT", "/tmp/wrong-build"},
@@ -91,6 +93,7 @@ defmodule MixGateScriptTest do
     assert output =~ "codex_command=unset"
     assert output =~ "linear_yolo_agent=unset"
     assert output =~ "openclaw_yolo_agent=unset"
+    assert output =~ "openclaw_notify_session=unset"
     assert output =~ "secret_access=denied"
     assert output =~ "mix_deps=unset"
     assert output =~ "mix_build_root=unset"

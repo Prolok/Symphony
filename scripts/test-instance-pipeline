@@ -65,7 +65,7 @@ def prepare(args):
     marker = '    user_id: $LINEAR_APP_USER_ID\n'
     if workflow.count(marker) != 1 or 'allowed_issue_ids:' in workflow:
         raise ValueError('unsupported_workflow_binding')
-    scoped = workflow.replace(marker, marker + '    allowed_issue_ids: ' + json.dumps(ids) + '\n', 1)
+    scoped = workflow.replace(marker, marker + '    allowed_issue_ids: ' + json.dumps(ids) + '\n    allow_yolo_followup_ids: true\n', 1)
     output.mkdir(parents=True, mode=0o700)
     path = output / 'WORKFLOW.md'
     path.write_text(scoped)

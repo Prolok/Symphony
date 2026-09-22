@@ -4,6 +4,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionScope, ActionTool, Admission, API, Followup, GeneratedLabel, Handoff, Operations}
   alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Relations, ReviewContract, Runner, Scope, Store}
+  alias SymphonyElixir.Yolo.{Delivery, Observation}
   alias SymphonyElixir.YoloReviewFixture, as: ReviewFixture
 
   setup do
@@ -52,6 +53,9 @@ defmodule SymphonyElixir.YoloActionsTest do
     %{issues: issues, context: context, root: root, workspace: workspace}
   end
 
+  defp run_group(group, issues, project, options), do: Runner.run(group, issues, project, Keyword.put_new(options, :dependencies, &{:ok, &1}))
+  defp tick(state, issues, options), do: Coordinator.tick(state, issues, Keyword.put_new(options, :dependencies, &{:ok, &1}))
+
   defp db, do: Process.get(:action_db)
   defp change(fun), do: Process.put(:action_db, fun.(db()))
   defp connection(nodes), do: %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}
@@ -75,7 +79,7 @@ defmodule SymphonyElixir.YoloActionsTest do
     ok("issue", %{"id" => id, "team" => %{"states" => connection(states)}})
   end
 
-  defp respond("YoloStates", _, _), do: ok("team", %{"states" => connection(Enum.map(["Backlog", "Umsetzungsticket erstellt", "Todo (AI)"], &%{"id" => &1, "name" => &1}))})
+  defp respond("YoloStates", _, _), do: ok("team", %{"states" => connection(Enum.map(["Backlog", "Umsetzungsticket erstellt", "Todo (AI)", "Review"], &%{"id" => &1, "name" => &1}))})
   defp respond("YoloGeneratedLabel", _, _), do: ok("issueLabels", connection(db().labels))
 
   defp respond("YoloGeneratedLabelCreate", _, %{"input" => input}) do
@@ -112,9 +116,23 @@ defmodule SymphonyElixir.YoloActionsTest do
     ok("issue", %{if(inverse, do: "inverseRelations", else: "relations") => connection(nodes)})
   end
 
+  defp respond("YoloBlockers", _, %{"id" => id}) do
+    nodes =
+      for relation <- db().relations, relation["type"] == "blocks" and relation["relatedIssue"]["id"] == id do
+        predecessor = relation["issue"]["id"]
+        state = if db().issues[predecessor], do: db().issues[predecessor].state, else: db().created[predecessor]["state"]["name"]
+        type = if state in ["Review", "Fertig"], do: "completed", else: "started"
+        Map.put(relation, "issue", %{"id" => predecessor, "identifier" => predecessor, "state" => %{"name" => state, "type" => type}})
+      end
+
+    ok("issue", %{"inverseRelations" => connection(nodes)})
+  end
+
   defp respond("YoloRelation", _, %{"input" => input}) do
     edge = %{"id" => input["id"], "type" => input["type"], "issue" => %{"id" => input["issueId"]}, "relatedIssue" => %{"id" => input["relatedIssueId"]}}
-    change(&%{&1 | relations: &1.relations ++ [edge]})
+    # Linear keeps one relation for an unordered pair: blocks replaces related.
+    pair = Enum.sort([input["issueId"], input["relatedIssueId"]])
+    change(&%{&1 | relations: Enum.reject(&1.relations, fn r -> Enum.sort([r["issue"]["id"], r["relatedIssue"]["id"]]) == pair end) ++ [edge]})
     ok("issueRelationCreate", %{"success" => true, "issueRelation" => edge})
   end
 
@@ -137,10 +155,24 @@ defmodule SymphonyElixir.YoloActionsTest do
 
   defp opts do
     [
+      dependencies: &{:ok, &1},
       query: &query/2,
       fetch: fn ids -> {:ok, Enum.flat_map(ids, fn id -> if db().issues[id], do: [db().issues[id]], else: [] end)} end,
       before_action: fn _ -> :ok end,
-      comments: fn id -> {:ok, [%{id: "workpad", body: Map.get(db().workpads, id, "## Symphony Workpad\n\nExisting evidence")}]} end,
+      comments: fn id ->
+        {:ok,
+         [
+           %{
+             id: "workpad",
+             body:
+               Map.get(
+                 db().workpads,
+                 id,
+                 "## Symphony Workpad\n\n### Validierung\n\n- [x] Synthetic acceptance\n\n### Verlauf\n\nMerge-Evidenz: PR #1 MERGED, Merge-Commit: #{String.duplicate("a", 40)}"
+               )
+           }
+         ]}
+      end,
       workpad: fn id, body ->
         change(&%{&1 | workpads: Map.put(&1.workpads, id, body)})
         :ok
@@ -163,6 +195,42 @@ defmodule SymphonyElixir.YoloActionsTest do
   defp handoff(args, options), do: Handoff.invoke(Map.put_new(args, "review", ReviewFixture.evidence()), options)
   defp writes(name), do: Enum.filter(db().calls, &(elem(&1, 0) == name))
   defp relation(from, to), do: %{"id" => "#{from}:#{to}", "type" => "blocks", "issue" => %{"id" => from}, "relatedIssue" => %{"id" => to}}
+
+  @tag :review_regression
+  test "a backlog dependency added during the turn blocks actions using fresh relations", %{issues: [issue, blocker | _]} do
+    group([issue], fn ->
+      change(&%{&1 | relations: [relation(blocker.id, issue.id)]})
+      options = Keyword.delete(opts(), :dependencies)
+      assert {:error, :yolo_backlog_blocked} = ActionScope.sources([issue.id], options)
+      assert {:error, :yolo_backlog_blocked} = Followup.invoke(args([issue]), options)
+      assert writes("YoloCreate") == []
+
+      mutation = %{"query" => "mutation { issueUpdate(id: \"#{issue.id}\", input: {stateId: \"Test (AI)\"}) { success } }"}
+      guard_opts = [query: &query/2, fetch_issue: options[:fetch], guard: fn _ -> :ok end]
+      assert {:error, :yolo_backlog_blocked} = CommentActionGuard.check(mutation, guard_opts)
+      change(&%{&1 | issues: Map.put(&1.issues, blocker.id, %{blocker | state: "Review"})})
+      assert {:ok, [_]} = ActionScope.sources([issue.id], options)
+      assert :ok = CommentActionGuard.check(mutation, guard_opts)
+    end)
+  end
+
+  @tag :review_regression
+  test "poll resumes a delivered creation intent without another model delivery", %{issues: [_backlog, issue | _]} do
+    issue = %{issue | labels: [~s(skip "freigabe implementierung"), ~s(skip "freigabe review")]}
+    change(&%{&1 | issues: Map.put(&1.issues, issue.id, issue), fail: "YoloCreate"})
+    group([issue], fn -> assert {:error, :response_lost} = Followup.invoke(args([issue], "followup"), opts()) end)
+    scan = fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end
+    {:ok, observed, _} = Observation.capture([issue], %{}, scan: scan)
+    assert :ok = Delivery.reserve("incoming", "original-run", observed)
+    change(&%{&1 | fail: nil})
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    options = Keyword.merge(opts(), scan: scan, lease: fn _, fun -> fun.() end, start: fn _, _ -> flunk("must not redeliver the model assignment") end)
+    tick(state, [issue], options)
+    assert {:ok, []} = Operations.pending([issue.id])
+    assert length(writes("YoloCreate")) == 1
+    tick(state, [issue], options)
+    assert length(writes("YoloCreate")) == 1
+  end
 
   test "aggregation preserves requirements and both dependency directions independent of start mode", %{issues: issues} do
     change(&%{&1 | relations: [relation("predecessor", hd(issues).id), relation(List.last(issues).id, "successor"), relation(hd(issues).id, List.last(issues).id)]})
@@ -234,7 +302,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   for prefix <- ["backslash-", "inline-link-"], lost <- [false, true] do
     test "#{prefix}follow-up with lost reply=#{lost} completes creation, handoff and cleanup once", ctx do
       alias SymphonyElixir.TestRun.Derived
-      source = %{hd(ctx.issues) | state: "Review", url: "https://linear.app/test/issue/PRO-0"}
+      source = %{hd(ctx.issues) | state: "Yolo Review", url: "https://linear.app/test/issue/PRO-0"}
       change(&%{&1 | issues: %{source.id => source}})
       {plan, _} = derived_run(ctx.context, ctx.root, [source], "po_followup", true)
       original = File.read!("test/fixtures/linear_markdown/#{unquote(prefix)}intent.md")
@@ -295,7 +363,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   for prefix <- ["backslash-", "inline-link-"] do
     test "changed #{prefix}requirements refuse creation confirmation, probe, handoff and cleanup", ctx do
       alias SymphonyElixir.TestRun.Derived
-      source = %{hd(ctx.issues) | state: "Review", url: "https://linear.app/test/issue/PRO-0"}
+      source = %{hd(ctx.issues) | state: "Yolo Review", url: "https://linear.app/test/issue/PRO-0"}
       change(&%{&1 | issues: %{source.id => source}})
       {plan, _} = derived_run(ctx.context, ctx.root, [source], "po_followup", true)
       original = File.read!("test/fixtures/linear_markdown/#{unquote(prefix)}intent.md")
@@ -398,7 +466,7 @@ defmodule SymphonyElixir.YoloActionsTest do
               end
             )
 
-          assert :ok = Runner.run("incoming", members, all, run_opts)
+          assert :ok = run_group("incoming", members, all, run_opts)
           send(parent, :aggregation_recovered)
         end
       )
@@ -411,16 +479,16 @@ defmodule SymphonyElixir.YoloActionsTest do
 
     for update <- [fn issue -> %{issue | delegate_id: nil} end, fn issue -> %{issue | description: "human edit"} end] do
       change(&%{&1 | issues: Map.new(closed, fn {id, issue} -> {id, update.(issue)} end)})
-      Coordinator.tick(state, [target], blocked)
+      tick(state, [target], blocked)
     end
 
     change(&%{&1 | issues: closed})
-    Coordinator.tick(state, [target], Keyword.put(blocked, :fetch, fn _ -> {:error, :offline} end))
+    tick(state, [target], Keyword.put(blocked, :fetch, fn _ -> {:error, :offline} end))
     {:ok, record} = Store.read("incoming")
     :ok = Store.write("incoming", Map.put(record, "retry_at", System.system_time(:millisecond) + 30_000))
-    Coordinator.tick(state, [target], Keyword.put(blocked, :fetch, fn _ -> flunk("retry cooldown") end))
+    tick(state, [target], Keyword.put(blocked, :fetch, fn _ -> flunk("retry cooldown") end))
     :ok = Store.write("incoming", record)
-    Coordinator.tick(state, [target], options)
+    tick(state, [target], options)
     assert_receive :aggregation_recovered
     assert Operations.target_ready?(target_id)
     assert length(writes("YoloCreate")) == 1
@@ -614,7 +682,7 @@ defmodule SymphonyElixir.YoloActionsTest do
           session: session
         )
 
-      assert :ok = Runner.run(group_name, [source], [source], runner_opts)
+      assert :ok = run_group(group_name, [source], [source], runner_opts)
       actual = db().issues[source.id]
       body = db().workpads[source.id]
       assert body =~ "- [x] Isolierter Pakettest grün; Stand: abc1234"
@@ -696,8 +764,8 @@ defmodule SymphonyElixir.YoloActionsTest do
         assert response["success"]
         id = Jason.decode!(response["output"])["issue"]["id"]
         created = db().created[id]
-        assert created["delegateId"] == if(yolo and agent, do: agent)
-        assert created["assigneeId"] == if(yolo and agent, do: "human")
+        assert created["delegateId"] == agent
+        assert created["assigneeId"] == if(agent, do: "human")
         assert created["stateId"] == "Backlog"
       end
 
@@ -726,7 +794,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   end
 
   test "fixture findings create distinct linked followups and only reusable gaps propose a skill", ctx do
-    source = %{hd(ctx.issues) | state: "Review"}
+    source = %{hd(ctx.issues) | state: "Yolo Review"}
 
     for finding <- ReviewFixture.findings() do
       change(&%{&1 | issues: %{source.id => source}})
@@ -745,6 +813,7 @@ defmodule SymphonyElixir.YoloActionsTest do
           followup =
             Map.merge(args([source], "followup"), %{
               "operation_key" => finding["followup_operation_key"],
+              "blocks_origins" => finding["category"] != "new_requirement",
               "title" => finding["action"],
               "description" => Jason.encode!(finding),
               "validation" => finding["expected"] <> " mit reproduzierbarem Test nachweisen"
@@ -760,7 +829,8 @@ defmodule SymphonyElixir.YoloActionsTest do
           assert db().created[created["id"]]["labelIds"] == ["generated"]
           assert db().created[created["id"]]["projectId"] == source.project_id
           assert db().created[created["id"]]["stateId"] == "Backlog"
-          assert Enum.any?(db().relations, &(&1["type"] == "related" and &1["issue"]["id"] == source.id and &1["relatedIssue"]["id"] == created["id"]))
+          related? = Enum.any?(db().relations, &(&1["type"] == "related" and &1["issue"]["id"] == source.id and &1["relatedIssue"]["id"] == created["id"]))
+          assert related? == (finding["category"] == "new_requirement")
 
           for invalid <- [Map.delete(finding, "prereview"), Map.put(finding, "category", "unknown"), Map.put(finding, "action", "wrong"), nil] do
             assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [invalid]), opts())
@@ -787,10 +857,19 @@ defmodule SymphonyElixir.YoloActionsTest do
             assert {:error, :yolo_review_evidence_invalid} = Handoff.invoke(put_in(request, ["review", "findings"], [invalid]), opts())
           end
 
-          assert :ok = Handoff.invoke(request, opts())
-          assert db().issues[source.id].delegate_id == nil
-          assert db().issues[source.id].state == "Review"
-          assert Group.groups([db().issues[source.id]]) == %{}
+          if finding["category"] == "new_requirement" do
+            assert :ok = Handoff.invoke(request, opts())
+            assert db().issues[source.id].delegate_id == nil
+            assert db().issues[source.id].state == "Review"
+          else
+            waiting = %{source | blocked_by: [%{id: created["id"], state: "Backlog"}]}
+            change(&%{&1 | issues: Map.put(&1.issues, source.id, waiting)})
+            assert :ok = Handoff.invoke(Map.put(request, "kind", "wait"), opts())
+            assert db().issues[source.id].delegate_id == "pai"
+            assert db().issues[source.id].state == "Yolo Review"
+            assert Enum.any?(db().relations, &(&1["type"] == "blocks" and &1["issue"]["id"] == created["id"] and &1["relatedIssue"]["id"] == source.id))
+          end
+
           assert db().workpads[source.id] =~ finding["action"]
           assert db().workpads[source.id] =~ finding["prereview"]["reason"]
         end,
@@ -799,11 +878,11 @@ defmodule SymphonyElixir.YoloActionsTest do
     end
 
     assert length(writes("YoloCreate")) == 3
-    assert length(writes("YoloUpdate")) == 3
+    assert length(writes("YoloUpdate")) == 1
   end
 
-  test "handoff keeps Review/BLOCKER, preserves workpad and stops agent ownership", %{issues: [issue | _]} do
-    for state <- ["Review", "BLOCKER"] do
+  test "external acceptance waits in Yolo Review while a BLOCKER handoff ends agent ownership", %{issues: [issue | _]} do
+    for state <- ["Yolo Review", "BLOCKER"] do
       source = %{issue | state: state}
 
       original =
@@ -817,22 +896,26 @@ defmodule SymphonyElixir.YoloActionsTest do
         {:ok, record} = Store.read("incoming")
         :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
         evidence = Map.put(ReviewFixture.evidence(), "limitations", ["Finale Installation am gemergten Stand fehlt; autorisierte Betreiberbereitstellung erforderlich."])
-        assert :ok = handoff(%{"issue_id" => source.id, "report" => "Tests checked; open fix PRO-99. Finale Installation offen.", "review" => evidence}, opts())
+        kind = if state == "Yolo Review", do: "escalate", else: "handoff"
+        escalation = %{"cause" => "Installation fehlt", "attempts" => "Lokale Tests bestanden", "proposal" => "Gemergten Stand bereitstellen", "decision" => "Bereitstellung bestätigen"}
+
+        assert :ok =
+                 handoff(%{"kind" => kind, "issue_id" => source.id, "report" => "Tests checked; open fix PRO-99. Finale Installation offen.", "review" => evidence, "escalation" => escalation}, opts())
       end)
 
-      assert db().issues[source.id].delegate_id == nil
+      assert db().issues[source.id].delegate_id == if(state == "Yolo Review", do: "pai")
       assert db().issues[source.id].assignee_id == "human"
       assert db().issues[source.id].state == state
       assert db().workpads[source.id] =~ "Existing evidence"
       assert db().workpads[source.id] =~ "open fix PRO-99"
+      assert db().workpads[source.id] =~ "Gemergten Stand bereitstellen"
       assert db().workpads[source.id] =~ original
       assert SymphonyElixir.Workpad.section_checklist_status(db().workpads[source.id], "Validierung", "Review") == :open
-      assert Group.groups([db().issues[source.id]]) == %{}
     end
   end
 
   test "pending creations, new comments and withdrawn ownership block handoff", %{issues: [issue | _]} do
-    issue = %{issue | state: "Review"}
+    issue = %{issue | state: "Yolo Review"}
     change(&%{&1 | issues: %{issue.id => issue}})
 
     group([issue], fn ->
@@ -949,15 +1032,19 @@ defmodule SymphonyElixir.YoloActionsTest do
   end
 
   test "handoff records no success on lost update, missing report or state changes", %{issues: [issue | _]} do
-    issue = %{issue | state: "Review"}
+    issue = %{issue | state: "Yolo Review"}
     change(&%{&1 | issues: %{issue.id => issue}})
 
     group([issue], fn ->
       request = %{"kind" => "handoff", "issue_id" => issue.id, "report" => "actual evidence", "review" => ReviewFixture.evidence()}
       assert {:error, :yolo_handoff_not_ready} = handoff(%{request | "report" => " "}, opts())
       assert {:error, :offline} = handoff(request, Keyword.put(opts(), :comments, fn _ -> {:error, :offline} end))
+      {:ok, record} = Store.read("incoming")
+      :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [issue.id]}))
       change(&%{&1 | fail: "YoloUpdate"})
-      assert {:error, :response_lost} = handoff(request, opts())
+      assert :ok = handoff(request, opts())
+      assert db().issues[issue.id].state == "Review"
+      assert db().issues[issue.id].delegate_id == nil
       change(&%{&1 | fail: nil, issues: %{issue.id => issue}})
       {:ok, record} = Store.read("incoming")
       :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [issue.id]}))
@@ -1129,14 +1216,29 @@ defmodule SymphonyElixir.YoloActionsTest do
   test "derived follow-up assignment follows bound start mode and never authorizes child starts", ctx do
     alias SymphonyElixir.TestRun.Derived
     [issue | _] = ctx.issues
-    {plan, _} = derived_run(ctx.context, ctx.root, [issue], "po_followup", true)
+    {plan, _} = derived_run(ctx.context, ctx.root, [issue], "po_followup", false)
 
     group([issue], fn ->
-      assert {:ok, created} = Followup.invoke(args([issue], "followup"), opts())
+      assert {:ok, created} = Followup.invoke(Map.put(args([issue], "followup"), "blocks_origins", true), opts())
       assert db().created[created["id"]]["delegateId"] == "pai"
       assert db().created[created["id"]]["assigneeId"] == "human"
       assert {:ok, [receipt]} = Derived.inspect_fixtures("probe", plan, opts())
       assert receipt["complete"]
+      relations = db().relations
+      assert Enum.all?(relations, &(&1["type"] == "blocks"))
+      # Resuming a pre-fix journal must not replace the real dependency with
+      # related, even temporarily, or create another issue/relation.
+      assert {:ok, [intent]} = Operations.related([issue.id])
+      legacy = %{intent | "done" => false, "relations" => [Relations.edge(issue.id, created["id"], "related") | intent["relations"]]}
+      assert :ok = Operations.save(legacy)
+      writes_before = writes("YoloRelation")
+      assert {:ok, ^created} = Followup.invoke(Map.put(args([issue], "followup"), "blocks_origins", true), opts())
+      assert writes("YoloRelation") == writes_before
+      assert db().relations == relations
+      change(&%{&1 | relations: Enum.reject(relations, fn relation -> relation["type"] == "blocks" end)})
+      assert {:ok, [missing_link]} = Derived.inspect_fixtures("probe", plan, opts())
+      refute missing_link["complete"]
+      change(&%{&1 | relations: relations})
       refute SymphonyElixir.TestRun.start_allowed?(%{issue | id: created["id"], state: "Backlog"})
       assert {:error, :test_derived_fixture_changed} = Followup.invoke(%{args([issue], "followup") | "operation_key" => "second"}, opts())
     end)
@@ -1243,5 +1345,89 @@ defmodule SymphonyElixir.YoloActionsTest do
     end
 
     assert {:error, :yolo_page_incomplete} = API.pages("query", %{}, ["items"], query: fn _, _ -> ok("items", nil) end)
+  end
+
+  test "a confirmed fix blocks its origin until both are jointly reviewed, with predecessor-first handoff", ctx do
+    alias SymphonyElixir.Yolo.Dependencies
+    source = %{hd(ctx.issues) | state: "Yolo Review", labels: [~s(skip "freigabe implementierung"), ~s(skip "freigabe review")]}
+    change(&%{&1 | issues: %{source.id => source}})
+    options = Keyword.delete(opts(), :dependencies)
+    request = Map.put(args([source], "followup"), "blocks_origins", true)
+    finding = hd(ReviewFixture.findings()) |> Map.put("followup_operation_key", request["operation_key"])
+
+    Scope.with_scope(
+      "review",
+      [source],
+      "first",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "first", "members" => [source.id]}))
+        assert {:ok, created} = Followup.invoke(request, options)
+        assert {:ok, ^created} = Followup.invoke(request, options)
+        assert length(writes("YoloCreate")) == 1
+        {:ok, [blocked]} = Dependencies.refresh([source], options)
+        assert Group.groups([blocked]) == %{}
+        evidence = Map.put(ReviewFixture.evidence(), "findings", [finding])
+        assert :ok = Handoff.invoke(%{"kind" => "wait", "issue_id" => source.id, "report" => "Fix erforderlich", "review" => evidence}, options)
+        assert db().issues[source.id].state == "Yolo Review"
+        assert db().issues[source.id].delegate_id == "pai"
+      end,
+      workspace: ctx.workspace
+    )
+
+    [{fix_id, _}] = Map.to_list(db().created)
+    fix = %{source | id: fix_id, identifier: "PRO-99"}
+    change(&%{&1 | issues: Map.put(&1.issues, fix_id, fix)})
+    {:ok, [source, fix]} = Dependencies.refresh([source, fix], options)
+    assert Group.groups([source, fix])["review"] == [fix, source]
+
+    Scope.with_scope(
+      "review",
+      [source, fix],
+      "second",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "second", "members" => [source.id, fix.id]}))
+        handoff = fn id -> Handoff.invoke(%{"kind" => "handoff", "issue_id" => id, "report" => "Gemeinsam geprüft", "review" => ReviewFixture.evidence()}, options) end
+        assert {:error, :yolo_acceptance_incomplete} = handoff.(source.id)
+        assert :ok = handoff.(fix.id)
+        assert db().issues[fix.id].state == "Review"
+        assert db().issues[fix.id].delegate_id == nil
+        assert :ok = handoff.(source.id)
+        assert db().issues[source.id].state == "Review"
+        assert db().issues[source.id].delegate_id == nil
+        assert Completion.ready?("review", [source, fix])
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "only confirmed own acceptance fixes extend an explicitly enabled isolated pipeline", ctx do
+    source = %{hd(ctx.issues) | state: "In Arbeit (AI)"}
+    change(&%{&1 | issues: %{source.id => source}})
+    request = Map.put(args([source], "followup"), "blocks_origins", true)
+    context = ctx.context
+    context = put_in(context.settings.tracker.app["allowed_issue_ids"], [source.id])
+    ProjectContext.bind(context)
+
+    WriteContext.with_context(%{issue_id: source.id}, fn ->
+      assert {:ok, created} = Followup.invoke(request, opts())
+      assert Config.allowed_issue_ids() == [source.id]
+      context = put_in(context.settings.tracker.app["allow_yolo_followup_ids"], true)
+      ProjectContext.bind(context)
+      assert Config.allowed_issue_ids() == [source.id]
+      context = %{context | test_instance: %{"name" => "own-pipeline"}}
+      ProjectContext.bind(context)
+      assert Enum.sort(Config.allowed_issue_ids()) == Enum.sort([source.id, created["id"]])
+
+      assert :ok =
+               Operations.run("foreign-fix", %{"kind" => "followup", "blocks_origins" => true, "origin_ids" => ["foreign"]}, fn intent ->
+                 Operations.save(Map.merge(intent, %{"done" => true, "input" => %{"id" => intent["issue_id"]}}))
+               end)
+
+      assert length(Config.allowed_issue_ids()) == 2
+      File.write!(Operations.path("foreign-fix"), "corrupt")
+      assert Config.allowed_issue_ids() == [source.id]
+    end)
   end
 end

@@ -147,11 +147,10 @@ defmodule SymphonyElixir.TestRun.Derived do
     with {:ok, intent} <- DurableState.read(Operations.path(receipt["key"])),
          {:ok, labels} <- API.labels(issue["id"], opts),
          {:ok, relations} <- Relations.read(issue["id"], opts) do
-      links = for r <- relations, r["type"] == "related", id <- [get_in(r, ["issue", "id"]), get_in(r, ["relatedIssue", "id"])], do: id
-
       complete =
         intent["done"] == true and intent["issue_id"] == issue["id"] and
-          Enum.all?(receipt["input"]["labelIds"], fn id -> Enum.any?(labels, &(&1["id"] == id)) end) and Enum.all?(receipt["origins"], &(&1 in links))
+          Enum.all?(receipt["input"]["labelIds"], fn id -> Enum.any?(labels, &(&1["id"] == id)) end) and
+          acceptance_links?(intent, relations)
 
       {:ok, Map.merge(receipt, %{"complete" => complete, "issue" => issue, "relations" => relations})}
     end
@@ -171,6 +170,17 @@ defmodule SymphonyElixir.TestRun.Derived do
       {:error, _} = error -> error
       _ -> {:error, :test_derived_cleanup_unconfirmed}
     end
+  end
+
+  defp acceptance_links?(%{"request" => %{"blocks_origins" => true}} = intent, relations) do
+    Enum.all?(intent["request"]["origin_ids"], fn id ->
+      Enum.any?(relations, &(&1["type"] == "blocks" and get_in(&1, ["issue", "id"]) == intent["issue_id"] and get_in(&1, ["relatedIssue", "id"]) == id))
+    end)
+  end
+
+  defp acceptance_links?(intent, relations) do
+    links = for r <- relations, r["type"] == "related", id <- [get_in(r, ["issue", "id"]), get_in(r, ["relatedIssue", "id"])], do: id
+    Enum.all?(intent["request"]["origin_ids"], &(&1 in links))
   end
 
   defp directory(plan), do: Path.join([TestInstance.state_root(), "runs", plan["run_id"], "derived"])

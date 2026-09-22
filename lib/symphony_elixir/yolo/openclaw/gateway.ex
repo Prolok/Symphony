@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @moduledoc "Gateway RPC contract verified against OpenClaw 2026.9.4; no local fallback."
   @behaviour SymphonyElixir.Yolo.OpenClaw.Adapter
+  alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Transport
 
@@ -54,6 +55,26 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
       _ -> {:error, :openclaw_abort_unconfirmed}
     end
   end
+
+  @spec destination(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def destination(agent, opts) do
+    key = ProjectContext.env("OPENCLAW_YOLO_NOTIFY_SESSION") || "agent:#{agent}:main"
+
+    with true <- String.starts_with?(key, "agent:#{agent}:") and byte_size(key) <= 256,
+         :ok <- preflight(agent, opts),
+         {:ok, %{"sessions" => sessions}} when is_list(sessions) <- rpc("sessions.list", %{"agentId" => agent, "search" => key, "limit" => 100}, opts),
+         [session] <- Enum.filter(sessions, &(&1["key"] == key)),
+         %{"channel" => channel, "to" => to} = route <- session["deliveryContext"],
+         true <- is_binary(channel) and channel not in ["", "webchat", "internal"] and is_binary(to) and to != "" do
+      {:ok, route |> Map.take(~w(channel to accountId threadId)) |> Map.put("sessionKey", key)}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :openclaw_normal_channel_unavailable}
+    end
+  end
+
+  @spec notify(map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def notify(destination, message, opts), do: rpc("send", Map.put(destination, "message", message), opts)
 
   defp rpc(method, params, opts) do
     raw = Jason.encode!(params)

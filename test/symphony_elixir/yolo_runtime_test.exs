@@ -6,6 +6,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Observation, Operations, Scope, Store}
+  alias SymphonyElixir.Yolo.OpenClaw.Journal
 
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
@@ -36,16 +37,71 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     %{context: context, root: root, issues: issues}
   end
 
+  defp tick(state, issues, opts), do: Coordinator.tick(state, issues, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
+  defp run_group(group, issues, project, opts \\ []), do: Yolo.Runner.run(group, issues, project, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
+
   defp inbox(versions \\ %{}), do: %{"versions" => versions, "last_successful_scan" => "now", "scan_error" => nil}
   defp scan(_), do: {:ok, inbox()}
 
-  test "incoming statuses share a group; only delegated expected work blocks review", %{issues: [first | _] = issues} do
+  test "public defaults preserve empty reads and admitted issues, and reject corrupt dispatch", %{issues: [issue | _]} do
+    assert {:ok, []} = Yolo.Dependencies.refresh([])
+    assert {:ok, ^issue} = Yolo.Admission.prepare(issue)
+    path = Journal.path("incoming")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "corrupt")
+    assert {:error, :openclaw_journal_corrupt} = Yolo.Delivery.reconcile("incoming")
+    assert {:error, :openclaw_journal_corrupt} = Yolo.Runner.run("incoming", [issue], [issue])
+  end
+
+  test "failed and malformed dependency snapshots cannot become actionable", %{issues: [issue | _]} do
+    assert {:error, :offline} = Yolo.Dependencies.refresh([issue], query: fn _, _ -> {:error, :offline} end)
+
+    query = fn _, _ ->
+      {:ok, %{"data" => %{"issue" => %{"inverseRelations" => %{"nodes" => [%{"id" => "missing-type"}], "pageInfo" => %{"hasNextPage" => false}}}}}}
+    end
+
+    assert {:error, :yolo_dependencies_incomplete} = Yolo.Dependencies.actionable([issue], query: query)
+  end
+
+  test "an unavailable configured merge worker cannot authorize acceptance", %{issues: [issue | _], context: context, root: root} do
+    path = System.get_env("PATH")
+    ssh = Path.join(root, "ssh")
+    File.write!(ssh, "#!/bin/sh\nprintf 'unavailable fixture worker\\n'\nexit 75\n")
+    File.chmod!(ssh, 0o755)
+    System.put_env("PATH", root <> ":" <> path)
+    ProjectContext.bind(put_in(context.settings.worker.ssh_hosts, ["fixture-worker"]))
+
+    try do
+      assert {:error, {:workspace_presence_failed, "fixture-worker", 75, output}} = Yolo.MergeReadiness.check(issue)
+      assert output =~ "unavailable fixture worker"
+    after
+      System.put_env("PATH", path)
+    end
+  end
+
+  test "blocked backlog waits and only Yolo Review enters acceptance", %{issues: [issue | _]} do
+    blocked = %{issue | blocked_by: [%{id: "fix", state: "In Arbeit (AI)"}]}
+    assert Group.groups([blocked]) == %{}
+    assert Group.groups([%{blocked | blocked_by: [%{id: "fix", state: "Review"}]}])["incoming"] != nil
+    assert Group.name(%{issue | state: "Review"}) == nil
+    assert Group.name(%{issue | state: "Yolo Review"}) == "review"
+  end
+
+  test "a merged review chain is ready while an unfinished fix blocks its entire chain", %{issues: [issue | _]} do
+    origin = %{issue | state: "Yolo Review", blocked_by: [%{id: "fix", state: "Yolo Review"}]}
+    fix = %{issue | id: "fix", state: "Yolo Review"}
+    assert Group.groups([origin, fix])["review"] == [fix, origin]
+    unfinished = %{fix | blocked_by: [%{id: "external", state: "Test (AI)"}]}
+    refute Map.has_key?(Group.groups([origin, unfinished]), "review")
+  end
+
+  test "incoming statuses share a group; unrelated work does not block review", %{issues: [first | _] = issues} do
     assert Group.groups(issues) == %{"incoming" => issues}
-    review = %{first | id: "review", state: "Review"}
+    review = %{first | id: "review", state: "Yolo Review"}
     assert Group.groups([review]) == %{"review" => [review]}
-    assert Group.groups([first, review]) == %{"incoming" => [first]}
+    assert Group.groups([first, review]) == %{"incoming" => [first], "review" => [review]}
     foreign = %{first | id: "foreign", assignee_id: "foreign", assigned_to_worker: false, state: "In Arbeit (AI)"}
-    assert Group.groups([foreign, review]) == %{}
+    assert Group.groups([foreign, review]) == %{"review" => [review]}
 
     for state <- ["Fertig", "Abgebrochen", "Verworfen", "Duplicate", "Umsetzungsticket erstellt", "Todo (Dialog-AI)"] do
       assert Group.groups([%{first | state: state}, review])["review"] == [review]
@@ -92,28 +148,28 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       {:ok, spawn(fn -> receive do: (:stop -> :ok) end)}
     end
 
-    running = Coordinator.tick(state, issues, scan: &scan/1, start: start)
+    running = tick(state, issues, scan: &scan/1, start: start)
     assert_receive {:start, "incoming"}
     assert map_size(running.yolo_runs) == 1
     assert length(Coordinator.entries(running.yolo_runs)) == 3
-    assert Coordinator.tick(running, issues, scan: &scan/1, start: start).yolo_runs == running.yolo_runs
+    assert tick(running, issues, scan: &scan/1, start: start).yolo_runs == running.yolo_runs
     refute_receive {:start, _}
     transitioned = [%{hd(issues) | state: "In Arbeit (AI)"} | tl(issues)]
-    retained = Coordinator.tick(running, transitioned, scan: &scan/1, start: start)
+    retained = tick(running, transitioned, scan: &scan/1, start: start)
     assert MapSet.member?(retained.claimed, hd(issues).id)
     assert retained.yolo_runs == running.yolo_runs
     refute_receive {:start, _}
     pid = running.yolo_runs["incoming"].pid
     ref = Process.monitor(pid)
-    assert Coordinator.tick(running, [], scan: &scan/1, start: start).yolo_runs == %{}
+    assert tick(running, [], scan: &scan/1, start: start).yolo_runs == %{}
     assert_receive {:DOWN, ^ref, :process, ^pid, _}
     busy = %{state | claimed: MapSet.new([hd(issues).id])}
-    assert Coordinator.tick(busy, issues, scan: &scan/1, start: start).yolo_runs == %{}
+    assert tick(busy, issues, scan: &scan/1, start: start).yolo_runs == %{}
     refute_receive {:start, _}
   end
 
   test "review comment create edit delete and replay have exact scan and session counts", %{issues: [issue | _]} do
-    review = %{issue | state: "Review"}
+    review = %{issue | state: "Yolo Review"}
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
     Process.put(:review_counts, %{scans: 0, sessions: 0})
     Process.put(:review_versions, %{})
@@ -132,33 +188,33 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     for {epoch, key, deleted} <- [{1, "human:create", false}, {2, "human:edit", false}, {3, "human:delete", true}] do
       Process.put(:review_versions, %{"comment" => %{"key" => key, "origin" => "human", "deleted" => deleted}})
       changed = %{review | last_comment_signal: %{relay_epoch: epoch}}
-      Coordinator.tick(state, [changed], opts)
+      tick(state, [changed], opts)
       assert Process.get(:review_counts) == %{scans: epoch, sessions: epoch}
       # Persist the observation acknowledged by a completed run, then recreate
       # the in-memory orchestrator and replay the exact relay notification.
       {:ok, record} = Store.read("review")
       :ok = Store.write("review", Map.put(record, "processed", Observation.fingerprint(record["observations"])))
-      for _ <- 1..3, do: Coordinator.tick(%{state | yolo_runs: %{}}, [changed], opts)
+      for _ <- 1..3, do: tick(%{state | yolo_runs: %{}}, [changed], opts)
       assert Process.get(:review_counts) == %{scans: epoch, sessions: epoch}
     end
 
     own = %{review | last_comment_signal: %{relay_epoch: 4}}
     Process.put(:review_versions, Map.put(Process.get(:review_versions), "own", %{"key" => "own:edit", "origin" => "own", "deleted" => false}))
-    Coordinator.tick(state, [own], opts)
+    tick(state, [own], opts)
     assert Process.get(:review_counts) == %{scans: 4, sessions: 3}
 
     {:ok, before_failure} = Store.read("review")
 
     for error <- [:rate_limited, :incomplete_pagination] do
       failing = Keyword.put(opts, :scan, fn _ -> {:error, error} end)
-      Coordinator.tick(state, [%{own | last_comment_signal: %{relay_epoch: 5}}], failing)
+      tick(state, [%{own | last_comment_signal: %{relay_epoch: 5}}], failing)
       assert Store.read("review") == {:ok, before_failure}
       assert Process.get(:review_counts) == %{scans: 4, sessions: 3}
     end
   end
 
-  test "observed waiting work reopens an unchanged previously processed review after restart", %{issues: [issue | _]} do
-    review = %{issue | id: "review", state: "Review"}
+  test "unrelated waiting work does not reopen a processed review after restart", %{issues: [issue | _]} do
+    review = %{issue | id: "review", state: "Yolo Review"}
     expected = %{issue | state: "In Arbeit (AI)"}
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
     {:ok, observations, fingerprint} = Observation.capture([review], %{}, scan: &scan/1)
@@ -173,18 +229,18 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       end
     ]
 
-    for _ <- 1..3, do: assert(Coordinator.tick(state, [review], opts).yolo_runs == %{})
+    for _ <- 1..3, do: assert(tick(state, [review], opts).yolo_runs == %{})
     refute_receive {:started, _}
-    for _ <- 1..3, do: assert(Coordinator.tick(state, [expected, review], opts).yolo_runs == %{})
+    for _ <- 1..3, do: assert(tick(state, [expected, review], opts).yolo_runs == %{})
     refute_receive {:started, _}
     # No in-memory predecessor is passed, as on service restart.
-    assert Coordinator.tick(state, [review], opts).yolo_runs == %{}
-    assert_receive {:started, "review"}
+    assert tick(state, [review], opts).yolo_runs == %{}
+    refute_receive {:started, "review"}
   end
 
   test "waiting changes during a review remain open and corrupt readiness cannot start", %{issues: [issue | _], root: root} do
     alias SymphonyElixir.Yolo.ReviewReadiness
-    review = %{issue | state: "Review"}
+    review = %{issue | state: "Yolo Review"}
     assert {:ok, 0} = ReviewReadiness.observe([review])
 
     opts = [
@@ -204,31 +260,24 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       end
     ]
 
-    assert :ok = Yolo.Runner.run("review", [review], [review], opts)
+    assert :ok = run_group("review", [review], [review], opts)
     assert {:ok, record} = Store.read("review")
     assert record["processed_epoch"] == 0
     assert {:ok, 2} = ReviewReadiness.epoch("review")
 
-    assert :ok =
-             Yolo.Runner.run(
-               "review",
-               [review],
-               [review],
-               Keyword.put(opts, :session, fn _, _, _, _ ->
-                 assert :ok = Completion.invoke(%{"issue_id" => review.id, "result" => "new readiness"}, handoff_completed: true, fetch: fn _ -> {:ok, [review]} end, before_action: fn _ -> :ok end)
-                 {:ok, %{session_id: "review-again"}}
-               end)
-             )
-
-    assert {:error, :yolo_group_changed} = Yolo.Runner.run("review", [review], [review], opts)
+    assert {:error, :yolo_group_changed} = run_group("review", [review], [review], opts)
     {:ok, readiness} = Store.read("review-readiness")
+    :ok = Store.write("review-readiness", Map.put(readiness, "members", %{"review:broken" => nil}))
+    assert {:error, :yolo_readiness_corrupt} = ReviewReadiness.epoch("review")
+    :ok = Store.write("review-readiness", Map.put(readiness, "members", %{("review:" <> review.id) => %{"ready" => false, "generation" => "corrupt"}}))
+    assert {:error, :yolo_readiness_corrupt} = Observation.capture([review], %{}, scan: &scan/1)
     :ok = Store.write("review-readiness", Map.put(readiness, "epoch", "corrupt"))
     assert {:error, :yolo_readiness_corrupt} = ReviewReadiness.epoch("review")
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
-    assert Coordinator.tick(state, [review], start: fn _, _ -> flunk("corrupt readiness") end).yolo_runs == %{}
+    assert tick(state, [review], start: fn _, _ -> flunk("corrupt readiness") end).yolo_runs == %{}
     File.write!(Store.path("review-readiness"), "corrupt")
     assert {:error, :yolo_state_corrupt} = ReviewReadiness.observe([review])
-    assert {:error, :yolo_state_corrupt} = Yolo.Runner.run("review", [review], [review], opts)
+    assert {:error, :yolo_state_corrupt} = run_group("review", [review], [review], opts)
   end
 
   test "member checkpoints extend only the runtime-bound group and still reject revoked delegation", %{issues: [first, second | _] = issues} do
@@ -278,7 +327,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       recipient: self()
     ]
 
-    assert :ok = Yolo.Runner.run("incoming", issues, issues, opts)
+    assert :ok = run_group("incoming", issues, issues, opts)
     assert_receive {:yolo_event, "incoming", %{session_id: "shared-session"}}
     assert {:ok, completed} = Store.read("incoming")
     assert completed["processed"] == fingerprint
@@ -331,7 +380,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         session: fn _, _, _, _ -> flunk("changed group must not launch") end
       ]
 
-      assert {:error, reason} = Yolo.Runner.run("incoming", issues, issues, opts)
+      assert {:error, reason} = run_group("incoming", issues, issues, opts)
       assert reason == if(change == :offline, do: :offline, else: :yolo_launch_changed)
       assert {:ok, %{"processed" => nil}} = Store.read("incoming")
       refute Enum.any?(issues, &Process.get({:leased, &1.id}))
@@ -343,7 +392,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     for fresh <- [[first, first, first], [%{first | id: "unleased"} | tl(issues)]] do
       assert {:error, :yolo_group_changed} =
-               Yolo.Runner.run("incoming", issues, issues,
+               run_group("incoming", issues, issues,
                  lease: fn _, callback -> callback.() end,
                  fetch: fn _ -> {:ok, fresh} end,
                  workspace: fn _, _ -> flunk("no checkout for unleased members") end
@@ -363,7 +412,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       session: fn _, _, _, _ -> {:ok, %{session_id: "incomplete"}} end
     ]
 
-    assert {:error, :yolo_group_incomplete_or_workspace_changed} = Yolo.Runner.run("incoming", issues, issues, opts)
+    assert {:error, :yolo_group_incomplete_or_workspace_changed} = run_group("incoming", issues, issues, opts)
     assert {:ok, record} = Store.read("incoming")
     assert record["processed"] == nil
     assert record["retry_at"] > System.system_time(:millisecond)
@@ -385,7 +434,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       {:error, :capacity}
     end
 
-    Coordinator.tick(state, issues, scan: fn _ -> flunk("unchanged poll must use cached observations") end, start: start)
+    tick(state, issues, scan: fn _ -> flunk("unchanged poll must use cached observations") end, start: start)
     assert_receive :scheduled
 
     opts = [
@@ -406,14 +455,14 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       end
     ]
 
-    assert {:error, {:yolo_operations_pending, ["unfinished"]}} = Yolo.Runner.run("incoming", issues, issues, opts)
+    assert {:error, {:yolo_operations_pending, ["unfinished"]}} = run_group("incoming", issues, issues, opts)
     assert {:ok, failed} = Store.read("incoming")
     assert failed["processed"] == fingerprint
     assert failed["retry_at"] > System.system_time(:millisecond)
     assert {:ok, [intent]} = Operations.pending(ids)
     :ok = Operations.save(Map.put(intent, "done", true))
     :ok = Store.write("incoming", %{failed | "retry_at" => nil})
-    Coordinator.tick(state, issues, start: start)
+    tick(state, issues, start: start)
     refute_receive :scheduled
   end
 
@@ -427,7 +476,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     end)
 
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
-    assert Coordinator.tick(state, issues, start: fn _, _ -> flunk("corrupt operation") end).yolo_runs == %{}
+    assert tick(state, issues, start: fn _, _ -> flunk("corrupt operation") end).yolo_runs == %{}
   end
 
   test "incomplete admission blocks the entire incoming group, and retry can admit it", %{issues: [first | rest]} do
@@ -436,9 +485,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Group.groups([missing | rest]) == %{}
     assert Group.terminal?(%{first | state: "Verworfen"})
     opts = [prepare: fn _ -> {:error, :offline} end, start: fn _, _ -> flunk("partial group") end]
-    assert Coordinator.tick(state, [missing | rest], opts).yolo_runs == %{}
+    assert tick(state, [missing | rest], opts).yolo_runs == %{}
     opts = [prepare: fn _ -> {:ok, first} end, scan: &scan/1, start: fn _, _ -> {:error, :capacity} end]
-    assert Coordinator.tick(state, [missing | rest], opts).yolo_runs == %{}
+    assert tick(state, [missing | rest], opts).yolo_runs == %{}
   end
 
   test "scheduler preserves waits, errors, events and uses actual shared worker capacity", %{issues: issues, context: context} do
@@ -447,14 +496,14 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     {:ok, observations, fingerprint} = Observation.capture(issues, %{}, scan: &scan/1)
     {:ok, record} = Store.read("incoming")
     :ok = Store.write("incoming", Map.merge(record, %{"observations" => observations, "processed" => fingerprint}))
-    assert Coordinator.tick(state, issues, start: no_start).yolo_runs == %{}
+    assert tick(state, issues, start: no_start).yolo_runs == %{}
     :ok = Store.write("incoming", Map.put(record, "retry_at", System.system_time(:millisecond) + 30_000))
-    assert Coordinator.tick(state, issues, start: no_start).yolo_runs == %{}
+    assert tick(state, issues, start: no_start).yolo_runs == %{}
     File.write!(Store.path("incoming"), "corrupt")
     assert {:error, :yolo_state_corrupt} = Store.read("incoming")
-    assert Coordinator.tick(state, issues, start: no_start).yolo_runs == %{}
+    assert tick(state, issues, start: no_start).yolo_runs == %{}
     :ok = Store.write("incoming", record)
-    assert Coordinator.tick(state, issues, scan: fn _ -> {:error, :offline} end, start: no_start).yolo_runs == %{}
+    assert tick(state, issues, scan: fn _ -> {:error, :offline} end, start: no_start).yolo_runs == %{}
     assert {:ok, %{}, _} = Observation.capture([], %{})
 
     parent = self()
@@ -467,7 +516,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
 
     for external <- [false, true] do
-      running = Coordinator.tick(%{state | external_poll: external}, issues, scan: &scan/1, runner: runner)
+      running = tick(%{state | external_poll: external}, issues, scan: &scan/1, runner: runner)
       assert_receive {:worker_context, id}
       assert id == context.id
       updated = Coordinator.event(running.yolo_runs, "incoming", %{session_id: "shared", workspace_path: "checkout"})
@@ -518,7 +567,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   end
 
   test "waiting review performs no session or scans and starts when the last delegated blocker leaves", %{issues: [issue | _]} do
-    review = %{issue | state: "Review", id: "review"}
+    review = %{issue | state: "Yolo Review", id: "review", blocked_by: [%{id: "blocker", state: "BLOCKER"}]}
     blocker = %{issue | state: "BLOCKER", id: "blocker", assignee_id: "remote", assigned_to_worker: false}
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
     parent = self()
@@ -534,17 +583,18 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       end
     ]
 
-    for _ <- 1..3, do: assert(Coordinator.tick(state, [review, blocker], opts).yolo_runs == %{})
+    for _ <- 1..3, do: assert(tick(state, [review, blocker], opts).yolo_runs == %{})
     refute_receive :scanned
     refute_receive {:start, _}
-    Coordinator.tick(state, [review, %{blocker | delegate_id: nil}], opts)
+    tick(state, [%{review | blocked_by: [%{id: "blocker", state: "Review"}]}, %{blocker | state: "Review", delegate_id: nil}], opts)
     assert_receive :scanned
     assert_receive {:start, "review"}
   end
 
   test "review requires a complete fresh project before checkout and again immediately before session", %{issues: [issue | _], root: root} do
-    review = %{issue | state: "Review"}
+    review = %{issue | state: "Yolo Review"}
     expected = %{issue | id: "new-work"}
+    blocked = %{review | blocked_by: [%{id: expected.id, state: expected.state}]}
 
     base = [
       fetch: fn _ -> {:ok, [review]} end,
@@ -556,8 +606,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       session: fn _, _, _, _ -> flunk("no session while work or failed query exists") end
     ]
 
-    for answer <- [{:ok, [review, expected]}, {:error, :rate_limited}] do
-      assert {:error, _} = Yolo.Runner.run("review", [review], [], Keyword.put(base, :project, fn -> answer end))
+    for answer <- [{:ok, [blocked, expected]}, {:error, :rate_limited}] do
+      assert {:error, _} = run_group("review", [review], [], Keyword.put(base, :project, fn -> answer end))
       assert {:ok, %{"processed" => nil}} = Store.read("review")
     end
 
@@ -566,10 +616,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     changed = fn ->
       count = Process.get(:project_checks)
       Process.put(:project_checks, count + 1)
-      {:ok, if(count == 0, do: [review], else: [review, expected])}
+      {:ok, if(count == 0, do: [review], else: [blocked, expected])}
     end
 
-    assert {:error, :yolo_review_waiting} = Yolo.Runner.run("review", [review], [], Keyword.put(base, :project, changed))
+    assert {:error, :yolo_review_waiting} = run_group("review", [review], [], Keyword.put(base, :project, changed))
     assert Process.get(:project_checks) == 2
   end
 
@@ -599,7 +649,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       session: session
     ]
 
-    assert :ok = Yolo.Runner.run("incoming", issues, issues, opts)
+    assert :ok = run_group("incoming", issues, issues, opts)
     {:ok, record} = Store.read("incoming")
     {:ok, _, original} = Observation.capture(issues, %{}, scan: &scan/1)
     refute record["processed"] == original
@@ -620,6 +670,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert :ok = Yolo.Operations.run("pending", %{"origin_ids" => [hd(issues).id], "title" => "recover exact action"}, fn _ -> :ok end)
 
     for result <- [{:error, :offline}, {:ok, []}] do
+      # Each case starts from the same pre-delivery journal; an actual uncertain
+      # dispatch remains reserved, as the assertions below verify.
+      File.rm(Store.path("incoming"))
       Process.put(:after_turn, false)
 
       opts = [
@@ -636,8 +689,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         end
       ]
 
-      assert {:error, _} = Yolo.Runner.run("incoming", issues, issues, opts)
-      assert {:ok, %{"processed" => nil}} = Store.read("incoming")
+      assert {:error, _} = run_group("incoming", issues, issues, opts)
+      assert {:ok, %{"processed" => nil, "deliveries" => deliveries}} = Store.read("incoming")
+      assert map_size(deliveries) == length(issues)
     end
   end
 
@@ -660,11 +714,280 @@ defmodule SymphonyElixir.YoloRuntimeTest do
           [before_action: fn _ -> {:error, :offline} end],
           [session: fn _, _, _, _ -> {:error, :offline} end]
         ] do
-      assert {:error, _} = Yolo.Runner.run("incoming", issues, issues, Keyword.merge(defaults, override))
+      assert {:error, _} = run_group("incoming", issues, issues, Keyword.merge(defaults, override))
       assert {:ok, %{"processed" => nil}} = Store.read("incoming")
     end
 
     File.write!(Store.path("incoming"), "corrupt")
-    assert {:error, :yolo_state_corrupt} = Yolo.Runner.run("incoming", issues, issues)
+    assert {:error, :yolo_state_corrupt} = run_group("incoming", issues, issues)
+  end
+
+  @tag :review_regression
+  test "a proven local pre-turn failure releases delivery but an uncertain turn does not", %{issues: issues, root: root} do
+    opts = [
+      fetch: fn _ -> {:ok, issues} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{}} end
+    ]
+
+    # The real AppServer rejects this path before creating a thread or turn.
+    assert {:error, {:invalid_workspace_cwd, _, _, _}} = run_group("incoming", issues, issues, opts)
+    assert {:ok, record} = Store.read("incoming")
+    assert (record["deliveries"] || %{}) == %{}
+
+    opts = Keyword.put(opts, :session, fn _, _, _, _ -> {:error, :response_lost_after_submission} end)
+    assert {:error, :response_lost_after_submission} = run_group("incoming", issues, issues, opts)
+    assert {:ok, record} = Store.read("incoming")
+    assert map_size(record["deliveries"]) == length(issues)
+    assert {:error, :yolo_group_changed} = run_group("incoming", issues, issues, opts)
+  end
+
+  test "dispatch receipts survive member changes, no-op exits, status roundtrips and restart", %{issues: [first, second | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    start = fn group, _ ->
+      {:ok, record} = Store.read(group)
+      :ok = Delivery.reserve(group, "started", record["observations"])
+      send(self(), :dispatched)
+      {:error, :session_exited_without_decision}
+    end
+
+    opts = [scan: &scan/1, start: start]
+    tick(state, [first], opts)
+    assert_receive :dispatched
+    tick(state, [first], opts)
+    refute_receive :dispatched
+    tick(state, [%{first | state: "Todo"}], opts)
+    refute_receive :dispatched
+    tick(state, [first, second], opts)
+    assert_receive :dispatched
+    {:ok, record} = Store.read("incoming")
+    {:ok, observed, _} = Observation.capture([first, second], %{}, scan: &scan/1)
+    assert Delivery.pending([first, second], observed, record) == []
+    for members <- [[first], [second], [second, first]], do: tick(state, members, opts)
+    refute_receive :dispatched
+    tick(state, [%{first | description: "changed requirement"}], opts)
+    assert_receive :dispatched
+    tick(state, [%{first | description: "changed requirement"}], opts)
+    refute_receive :dispatched
+  end
+
+  test "unchanged legacy completions survive migration and group membership changes", %{issues: [first, second | _]} do
+    alias SymphonyElixir.Relay.Store, as: Digest
+    alias SymphonyElixir.Yolo.Delivery
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    legacy_issue = Map.take(first, [:id, :title, :description, :state, :assignee_id, :delegate_id, :blocked_by, :project_id, :team_id]) |> Map.put(:labels, [])
+    legacy = %{first.id => %{"signal" => "old", "semantic" => Digest.digest({legacy_issue, []})}}
+    {:ok, record} = Store.read("incoming")
+    :ok = Store.write("incoming", Map.merge(record, %{"observations" => legacy, "processed" => Observation.fingerprint(legacy)}))
+
+    start = fn group, _ ->
+      {:ok, record} = Store.read(group)
+      {:ok, observations, _} = Observation.capture([first, second], %{}, scan: &scan/1)
+      send(self(), {:pending, Delivery.pending([first, second], observations, record)})
+      {:error, :not_started}
+    end
+
+    opts = [scan: &scan/1, start: start]
+    tick(state, [first], opts)
+    refute_receive {:pending, _}
+    tick(state, [first, second], opts)
+    assert_receive {:pending, [^second]}
+    {:ok, record} = Store.read("incoming")
+    {:ok, changed, _} = Observation.capture([%{first | title: "Changed"}], %{}, scan: &scan/1)
+    assert Delivery.pending([first], changed, record) == [first]
+  end
+
+  test "fresh predecessor status alone unlocks backlog exactly once and errors stay closed", %{issues: [issue | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    Process.put(:predecessor, "Test (AI)")
+    dependencies = fn members -> {:ok, Enum.map(members, &%{&1 | blocked_by: [%{id: "fix", state: Process.get(:predecessor)}]})} end
+
+    opts = [
+      dependencies: dependencies,
+      scan: &scan/1,
+      start: fn group, _ ->
+        {:ok, record} = Store.read(group)
+        :ok = Delivery.reserve(group, "run", record["observations"])
+        send(self(), :dispatched)
+        {:error, :done}
+      end
+    ]
+
+    for _ <- 1..3, do: tick(state, [issue], opts)
+    refute_receive :dispatched
+    Process.put(:predecessor, "Review")
+    tick(state, [issue], opts)
+    assert_receive :dispatched
+    for _ <- 1..3, do: tick(state, [issue], opts)
+    refute_receive :dispatched
+    tick(state, [issue], Keyword.put(opts, :dependencies, fn _ -> {:error, :partial_relations} end))
+    refute_receive :dispatched
+
+    removed = Keyword.put(opts, :dependencies, &{:ok, &1})
+    tick(state, [issue], removed)
+    assert_receive :dispatched
+    tick(state, [issue], removed)
+    refute_receive :dispatched
+    Process.put(:predecessor, "Test (AI)")
+    tick(state, [issue], opts)
+    refute_receive :dispatched
+    Process.put(:predecessor, "Review")
+    tick(state, [issue], opts)
+    assert_receive :dispatched
+    tick(state, [issue], opts)
+    refute_receive :dispatched
+  end
+
+  for state_name <- ["Backlog", "Yolo Review"] do
+    test "observed blocking and release reopen #{state_name} once even when the final snapshot repeats", %{issues: [issue | _]} do
+      alias SymphonyElixir.Yolo.Delivery
+      issue = %{issue | state: unquote(state_name), blocked_by: [%{id: "fix", state: "Review"}]}
+      state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+      opts = [
+        scan: &scan/1,
+        start: fn group, _ ->
+          {:ok, record} = Store.read(group)
+          :ok = Delivery.reserve(group, "run", record["observations"])
+          send(self(), :dispatched)
+          {:error, :session_exited_without_decision}
+        end
+      ]
+
+      tick(state, [issue], opts)
+      assert_receive :dispatched
+      tick(state, [issue], opts)
+      refute_receive :dispatched
+      blocked = %{issue | blocked_by: [%{id: "fix", state: "Test (AI)"}]}
+      for _ <- 1..2, do: tick(state, [blocked], opts)
+      refute_receive :dispatched
+      # All runtime state is fresh; the observed wait must survive in the journal.
+      tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [issue], opts)
+      assert_receive :dispatched
+      for _ <- 1..2, do: tick(state, [issue], opts)
+      refute_receive :dispatched
+    end
+  end
+
+  test "a released chain is redelivered together without repeating an unrelated review", %{issues: [issue | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    origin = %{issue | state: "Yolo Review", blocked_by: [%{id: "fix", state: "Yolo Review"}]}
+    fix = %{issue | id: "fix", state: "Yolo Review", blocked_by: [%{id: "external", state: "Review"}]}
+    unrelated = %{issue | id: "unrelated", state: "Yolo Review"}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: &scan/1,
+      runner: fn group, members, _ ->
+        {:ok, record} = Store.read(group)
+        ids = Enum.map(members, & &1.id)
+        :ok = Delivery.reserve(group, "run", Map.take(record["observations"], ids))
+        send(self(), {:dispatched, ids})
+      end,
+      start: fn _, callback ->
+        callback.()
+        {:error, :session_exited}
+      end
+    ]
+
+    tick(state, [origin, fix, unrelated], opts)
+    assert_receive {:dispatched, ["fix", "member0", "unrelated"]}
+    tick(state, [origin, %{fix | blocked_by: [%{id: "external", state: "Test (AI)"}]}, unrelated], opts)
+    refute_receive {:dispatched, _}
+    tick(state, [origin, fix, unrelated], opts)
+    assert_receive {:dispatched, ["fix", "member0"]}
+    tick(state, [origin, fix, unrelated], opts)
+    refute_receive {:dispatched, _}
+  end
+
+  test "dependency reads require complete pagination and actual predecessor states" do
+    alias SymphonyElixir.Yolo.Dependencies
+    node = fn id, state -> %{"id" => id, "type" => "blocks", "issue" => %{"id" => id, "identifier" => id, "state" => %{"name" => state, "type" => "started"}}} end
+
+    query = fn _, %{after: cursor} ->
+      {nodes, page} =
+        if cursor == nil do
+          {[node.("b", "Yolo Review")], %{"hasNextPage" => true, "endCursor" => "next"}}
+        else
+          {[node.("a", "Test (AI)")], %{"hasNextPage" => false}}
+        end
+
+      {:ok, %{"data" => %{"issue" => %{"inverseRelations" => %{"nodes" => nodes, "pageInfo" => page}}}}}
+    end
+
+    assert {:ok, [%{id: "a", state: "Test (AI)"}, %{id: "b", state: "Yolo Review"}]} = Dependencies.blockers("origin", query: query)
+
+    for response <- [%{"nodes" => [], "pageInfo" => %{"hasNextPage" => true}}, %{"nodes" => [%{"id" => "bad", "type" => "blocks"}], "pageInfo" => %{"hasNextPage" => false}}] do
+      assert {:error, _} = Dependencies.blockers("origin", query: fn _, _ -> {:ok, %{"data" => %{"issue" => %{"inverseRelations" => response}}}} end)
+    end
+  end
+
+  test "review dependency components reject cycles and unrelated work cannot deadlock a chain", %{issues: [issue | _]} do
+    a = %{issue | id: "a", state: "Yolo Review", blocked_by: [%{id: "b", state: "Yolo Review"}]}
+    b = %{issue | id: "b", state: "Yolo Review", blocked_by: [%{id: "c", state: "Yolo Review"}]}
+    c = %{issue | id: "c", state: "Yolo Review"}
+    backlog = %{issue | id: "later", blocked_by: [%{id: "a", state: "Yolo Review"}]}
+    assert Group.groups([a, backlog, c, b]) == %{"review" => [c, b, a]}
+    assert Group.groups([a, b, %{c | blocked_by: [%{id: "a", state: "Yolo Review"}]}]) == %{}
+    assert Group.groups([a, b, %{c | blocked_by: [%{id: "external", state: "BLOCKER"}]}]) == %{}
+  end
+
+  test "Yolo Review raw transitions cannot bypass acceptance or go backwards", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review"}
+
+    for target <- ["BLOCKER", "Fertig", "Test (AI)", "Review"] do
+      mutation = %{"query" => "mutation { issueUpdate(id: \"#{issue.id}\", input: {stateId: \"target\"}) { success } }"}
+
+      query = fn _, _ ->
+        {:ok, %{"data" => %{"issue" => %{"id" => issue.id, "team" => %{"states" => %{"nodes" => [%{"id" => "target", "name" => target}], "pageInfo" => %{"hasNextPage" => false}}}}}}}
+      end
+
+      assert {:error, reason} = CommentActionGuard.check(mutation, query: query, fetch_issue: fn _ -> {:ok, [issue]} end)
+      assert reason == if(target == "Review", do: :yolo_review_handoff_required, else: :yolo_review_monotone)
+    end
+  end
+
+  test "an unchanged review still checks comments and delegated merge requires Yolo Review", %{issues: [issue | _]} do
+    mutation = %{"query" => "mutation { issueUpdate(id: \"#{issue.id}\", input: {stateId: \"target\"}) { success } }"}
+
+    query = fn target ->
+      fn _, _ ->
+        {:ok, %{"data" => %{"issue" => %{"id" => issue.id, "team" => %{"states" => %{"nodes" => [%{"id" => "target", "name" => target}], "pageInfo" => %{"hasNextPage" => false}}}}}}}
+      end
+    end
+
+    review = %{issue | state: "Yolo Review"}
+
+    Scope.with_scope("review", [review], "run", fn ->
+      assert {:error, :new_comment} = CommentActionGuard.check(mutation, query: query.("Yolo Review"), fetch_issue: fn _ -> {:ok, [review]} end, guard: fn _ -> {:error, :new_comment} end)
+    end)
+
+    merged = %{issue | state: "Merge (AI)"}
+    assert {:error, :delegated_merge_requires_yolo_review} = CommentActionGuard.check(mutation, query: query.("Review"), fetch_issue: fn _ -> {:ok, [merged]} end)
+  end
+
+  @tag :review_regression
+  test "dirty merge is rejected before entering the monotone acceptance phase", %{issues: [issue | _], root: root, context: context} do
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "regular")))
+    issue = %{issue | state: "Merge (AI)"}
+    {:ok, workspace} = Workspace.create_for_issue(issue)
+    System.cmd("git", ["init", "--quiet", workspace])
+    File.write!(Path.join(workspace, "dirty.txt"), "changed in merge")
+    mutation = %{"query" => "mutation { issueUpdate(id: \"#{issue.id}\", input: {stateId: \"target\"}) { success } }"}
+
+    query = fn _, _ ->
+      {:ok, %{"data" => %{"issue" => %{"id" => issue.id, "team" => %{"states" => %{"nodes" => [%{"id" => "target", "name" => "Yolo Review"}], "pageInfo" => %{"hasNextPage" => false}}}}}}}
+    end
+
+    options = [query: query, fetch_issue: fn _ -> {:ok, [issue]} end, guard: fn _ -> :ok end]
+    assert {:error, :merge_workspace_requires_test} = CommentActionGuard.check(mutation, options)
+    File.rm!(Path.join(workspace, "dirty.txt"))
+    assert :ok = CommentActionGuard.check(mutation, options)
   end
 end

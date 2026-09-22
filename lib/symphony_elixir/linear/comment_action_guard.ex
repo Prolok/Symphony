@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Linear.CommentActionGuard do
   @moduledoc "Fresh comment checks on Symphony's existing forward state action path."
   alias SymphonyElixir.Linear.YoloAgent, as: YoloAgent
+  alias SymphonyElixir.Yolo.{Dependencies, Handoff, MergeReadiness}
   alias SymphonyElixir.Yolo.Scope, as: YoloScope
 
   alias SymphonyElixir.{CommentCheckpoint, Config}
@@ -32,14 +33,14 @@ defmodule SymphonyElixir.Linear.CommentActionGuard do
 
   defp check_update(%{"state_id" => nil, "id" => id}, opts) do
     fetch = Keyword.get(opts, :fetch_issue, &Client.fetch_issue_states_by_ids/1)
-    guard = Keyword.get(opts, :guard, &CommentCheckpoint.before_action/1)
+    guard = action_guard(opts)
     with {:ok, [issue]} <- fetch.([id]), do: authorize_group(issue, id, guard)
   end
 
   defp check_update(update, opts) do
     query = Keyword.get(opts, :query, &Client.graphql/2)
     fetch = Keyword.get(opts, :fetch_issue, &Client.fetch_issue_states_by_ids/1)
-    guard = Keyword.get(opts, :guard, &CommentCheckpoint.before_action/1)
+    guard = action_guard(opts)
 
     with {:ok, response} <- query.(@query, %{id: update["id"]}),
          true <- Map.get(response, "errors", []) in [nil, []],
@@ -53,7 +54,30 @@ defmodule SymphonyElixir.Linear.CommentActionGuard do
     end
   end
 
-  defp authorize(issue, id, target, guard) do
+  defp action_guard(opts) do
+    guard = Keyword.get(opts, :guard, &CommentCheckpoint.before_action/1)
+    fn issue -> with :ok <- guard.(issue), do: Dependencies.actionable([issue], opts) end
+  end
+
+  defp authorize(%{state: "Yolo Review"} = issue, id, target, guard) do
+    cond do
+      target == "Yolo Review" -> authorize_group(issue, id, guard)
+      target != "Review" -> {:error, :yolo_review_monotone}
+      not Handoff.authorized?(id) -> {:error, :yolo_review_handoff_required}
+      true -> authorize_group(issue, id, guard)
+    end
+  end
+
+  defp authorize(%{state: "Merge (AI)"} = issue, _id, "Review", _guard) when is_binary(issue.delegate_id),
+    do: {:error, :delegated_merge_requires_yolo_review}
+
+  defp authorize(%{state: "Merge (AI)"} = issue, id, "Yolo Review", guard) do
+    with :ok <- MergeReadiness.check(issue), do: authorize_active(issue, id, "Yolo Review", guard)
+  end
+
+  defp authorize(issue, id, target, guard), do: authorize_active(issue, id, target, guard)
+
+  defp authorize_active(issue, id, target, guard) do
     if YoloScope.current() do
       authorize_group(issue, id, guard)
     else
@@ -75,7 +99,7 @@ defmodule SymphonyElixir.Linear.CommentActionGuard do
   end
 
   defp allowed_issue?(id) do
-    case Config.settings!().tracker.app["allowed_issue_ids"] do
+    case Config.allowed_issue_ids() do
       nil -> true
       ids -> id in ids
     end

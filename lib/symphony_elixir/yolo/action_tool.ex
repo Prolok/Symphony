@@ -13,19 +13,24 @@ defmodule SymphonyElixir.Yolo.ActionTool do
         "additionalProperties" => false,
         "required" => ["kind"],
         "properties" => %{
-          "kind" => %{"type" => "string", "enum" => ["aggregate", "followup", "handoff"]},
+          "kind" => %{"type" => "string", "enum" => ["aggregate", "followup", "handoff", "wait", "escalate"]},
           "origin_ids" => %{"type" => "array", "items" => %{"type" => "string"}},
           "operation_key" => %{"type" => "string"},
           "title" => %{"type" => "string"},
           "description" => %{"type" => "string"},
           "validation" => %{"type" => "string"},
+          "blocks_origins" => %{"type" => "boolean", "description" => "The follow-up blocks acceptance of its origins; creates real directed Linear dependencies."},
           "blocked_by" => %{"type" => "array", "items" => %{"type" => "string"}},
           "issue_id" => %{"type" => "string"},
           "report" => %{"type" => "string"},
+          "escalation" => %{
+            "type" => "object",
+            "description" => "Required for escalation: cause, attempts, proposal, decision. The configured normal channel receives this exact proposal with a correlation ID."
+          },
           "review" => %{
             "type" => "object",
             "description" =>
-              "Review handoff evidence per WORKFLOW_YOLO_AGENT.md: binding, checks, findings with learning decisions, limitations, decision. Required for Review; copy binding from review_contract."
+              "Yolo Review evidence per WORKFLOW_YOLO_AGENT.md: binding, checks, findings with learning decisions, limitations, decision. Copy binding from review_contract; unavailable contracts permit only escalation."
           }
         }
       }
@@ -36,7 +41,7 @@ defmodule SymphonyElixir.Yolo.ActionTool do
   def execute(args, opts \\ []) do
     result =
       case args do
-        %{"kind" => "handoff"} -> Handoff.invoke(args, opts)
+        %{"kind" => kind} when kind in ["handoff", "wait", "escalate"] -> Handoff.invoke(args, opts)
         _ -> Followup.invoke(args, opts)
       end
 

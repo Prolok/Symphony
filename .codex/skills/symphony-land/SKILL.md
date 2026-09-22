@@ -116,7 +116,8 @@ Merge mit Standbezug in die Review-Übergabe übernehmen.
    Nur dessen bestätigtes `MERGED`-Ergebnis mit `mergeCommit.oid` ist Evidenz.
 11. Nach erfolgreichem Merge vor jedem Statuswechsel im Workpad-Verlauf eine
     eindeutige Zeile im Format `Merge-Evidenz: PR #<nummer> gemergt,
-    Merge-Commit <sha>.` dokumentieren.
+    Merge-Commit <sha>.` dokumentieren. Delegation frisch lesen und bei Agent
+    nach `Yolo Review`, sonst nach `Review` übergeben; Turn beenden.
 
 `gh pr merge` nicht direkt aus dem Workflow heraus aufrufen; nutze diesen Skill
 und bevorzugt den Watch-Helper.
@@ -203,7 +204,7 @@ wenn seit der letzten Anfrage neue Commits entstanden sind.
 
 Den Hauptturn erst final beenden, wenn der PR-Merge nachweislich abgeschlossen
 ist und die `Merge-Evidenz` im Workpad steht, ein zulässiger Statuswechsel nach
-`Test (AI)` oder `Review` erfolgt ist oder ein echter Blocker dokumentiert ist.
+`Test (AI)`, `Yolo Review` oder `Review` erfolgt ist oder ein echter Blocker dokumentiert ist.
 Ohne diese Evidenz keinen normalen Abschluss behaupten und den Hauptturn nicht
 final beenden; im selben Turn die Merge-/Watch-Schleife fortsetzen oder einen
 echten Blocker dokumentieren. Bei `agent.max_turns` Abweichungen dokumentieren

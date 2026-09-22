@@ -19,7 +19,7 @@ defmodule SymphonyElixir.YoloReviewFixture do
       "binding" => Scope.current()["review_contract"]["binding"],
       "checks" => [%{"name" => "CSV fixture comparison", "result" => "passed", "evidence" => "Synthetic fixture input equals expected output"}],
       "findings" => [],
-      "limitations" => ["Simulierte Agentenprüfung, keine Live-Abnahme"],
+      "limitations" => [],
       "decision" => "Prüfbeleg übergeben; Review bleibt menschlich"
     }
   end

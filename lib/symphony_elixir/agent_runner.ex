@@ -1181,7 +1181,7 @@ defmodule SymphonyElixir.AgentRunner do
          worker_host
        ) do
     if merge_codex_state?(started_issue.state) and
-         normalize_issue_state(issue.state) == normalize_issue_state(@merge_handoff_state_name) do
+         normalize_issue_state(issue.state) == "review" do
       case merge_workspace_rerun_status(workspace, worker_host) do
         :rerun ->
           Logger.warning("Redirecting dirty merge handoff to test rerun: #{issue_context(issue)} previous_state=#{inspect(started_issue.state)} current_state=#{inspect(issue.state)}")
@@ -1683,8 +1683,12 @@ defmodule SymphonyElixir.AgentRunner do
   defp state_changed_during_turn?(_started_issue, _current_issue), do: false
 
   defp resolve_next_handoff_state(%Issue{} = issue) do
-    Workflow.resolve_next_status(issue.state, Issue.label_names(issue)) ||
-      default_next_handoff_state(issue.state)
+    if merge_codex_state?(issue.state) do
+      if is_binary(issue.delegate_id), do: "Yolo Review", else: @merge_handoff_state_name
+    else
+      Workflow.resolve_next_status(issue.state, Issue.label_names(issue)) ||
+        default_next_handoff_state(issue.state)
+    end
   end
 
   defp resolve_review_handoff_state(%Issue{} = issue, :no_findings, workspace, worker_host) do

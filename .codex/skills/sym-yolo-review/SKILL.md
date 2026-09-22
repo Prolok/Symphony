@@ -53,9 +53,9 @@ Abschnitt „Isolierter Testbetrieb“.
 | Start, Discovery, Testisolation | `bootstrap` | Eigene Todo-Fixture erreicht Planung mit echter regulärer Session; Isolation und Cleanup bestätigt. Kein vollständiger Implementierungs-/Mergebeleg. |
 | Agentendelegation oder Relay-Verarbeitung | `delegation` | Zuweisung/Entzug nur über `delegateId`, Mensch unverändert; Relay-Cursor und Ticket-Epoche fortgeschritten. Kein Ersatz durch Vollsnapshot. |
 | Gemeinsamer PO-Eingang | `po_incoming` | Drei eigene Eingangsmitglieder in einer PO-Session begründet abgeschlossen, Zuständigkeit/Skip-Labels und Checkout-SHA belegt; keine Aggregation oder Reviewabnahme. |
-| Externer BLOCKER und Freigabe wartender Reviews | `po_handoff` | BLOCKER wird übergeben, Review danach geprüft; echte Sessions, Status erhalten, Delegation entfernt und Cleanup bestätigt. Kein Fixdurchlauf. |
+| Externer BLOCKER und Schlussübergabe | `po_handoff` | BLOCKER wird übergeben, Yolo Review geprüft; echte Sessions, Review erreicht, Delegation entfernt und Cleanup bestätigt. Kein Fixdurchlauf. |
 | Aggregationsanlage, Links oder Ursprungabschluss | `po_aggregation` | Genau ein verknüpftes Aggregationsticket, Links vor Ursprungabschluss bestätigt; betroffene Zuweisungsvarianten mit/ohne `--yolo` prüfen. Endet bei Anlage/Übergabe. |
-| Findings, Fixanlage oder sofortige Reviewübergabe | `po_followup` | Genau ein verknüpftes Fix-Ticket, Ursprung sofort an Menschen übergeben; betroffene Zuweisungsvarianten mit/ohne `--yolo` prüfen. Kein Warten auf Fix und kein Fix-/Mergebeleg. |
+| Findings, Fixanlage oder Warten in Yolo Review | `po_followup` | Genau ein verknüpftes Fix-Ticket, Folgefix blockiert Ursprung in Yolo Review; betroffene Zuweisungsvarianten mit/ohne `--yolo` prüfen. Belegtes Warten, kein Fix-/Mergebeleg. |
 
 Bei einem reinen Retry-/Cleanup-Diff zunächst die Status-/Wiederaufnahmefälle aus
 `retry_refresh_test.exs` wählen. Die obigen PO-Szenarien werden nur bei zusätzlicher
@@ -110,7 +110,7 @@ Belege dürfen mit ihrer Grenze übernommen werden; kein Ausbau des Testsystems.
 
 Pro Finding Reproduktion, Ist/Soll und Beleg dokumentieren. Mit damaligem Wissen
 bewerten, ob eine kostengünstige Erkennung in PreReview möglich war; Ursache
-und Maßnahme gemäß `WORKFLOW_YOLO_AGENT.md`, „Review: gemeinsame fachliche
+und Maßnahme gemäß `WORKFLOW_YOLO_AGENT.md`, „Yolo Review: gemeinsame fachliche
 Schlussabnahme“, begründen. Für Symphony insbesondere:
 
 - Einzelne Status-/Retry-Regressionsvariante: `regression` →
@@ -138,10 +138,12 @@ Einschränkungen und Folgeentscheidung im vereinbarten Berichtsweg festhalten.
 Nicht ausgeführte Prüfungen als Einschränkung, nicht als Pass ausweisen.
 
 Im Sammellauf Findings über `symphony_yolo_action` als verknüpfte Folge-Tickets
-mit stabilen Operationsschlüsseln erfassen. Nach bestätigter Anlage/Verknüpfung
-die Ursprünge sofort mit `kind=handoff`, lesbarem `report` und strukturiertem
-`review`-Beleg gemäß gemeinsamem Vertrag an den Menschen übergeben; dabei
-`review_contract.binding` unverändert übernehmen. Review erhalten, Delegation
-entfernen, keine Nachprüfung des Ursprungs. Außerhalb des Sammellaufs den
-autorisierten Berichts-/Korrekturweg nutzen. Geprüfte Erfolge und ausgelagerte
-Mängel unterscheiden; vollständige Fehlerfreiheit ist kein Abschlusskriterium.
+mit stabilen Operationsschlüsseln erfassen. Abnahmesperrende Fixes mit
+`blocks_origins=true` verknüpfen und `kind=wait` mit lesbarem Bericht und
+strukturiertem Prüf-/Lernbeleg abschließen; Ursprung bleibt in `Yolo Review`.
+Nach Merge sämtlicher Folgefixes gemeinsam prüfen und Vorgänger zuerst nach
+`Review` übergeben. Nur bestandene Abnahme entfernt die Delegation. Externe
+Hindernisse über `kind=escalate` melden, ohne die Schlussphase zu verlassen.
+`review_contract.binding` unverändert übernehmen. Neue Anforderungen außerhalb
+des Abnahmescopes begründet getrennt führen. Außerhalb des Sammellaufs den
+autorisierten Berichts-/Korrekturweg nutzen.

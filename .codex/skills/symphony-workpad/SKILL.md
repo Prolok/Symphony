@@ -88,9 +88,11 @@ widersprüchlich war.
   `; fällig: Freigabe Review` führen. Auch der automatische No-Findings-Handoff
   erhält dann das manuelle Gate; autorisierte Skip-Labels und `--yolo` gelten weiter.
 - Für spätere offene Validierung jeden Punkt auf einer eigenen Zeile mit genau
-  einem abschließenden Suffix `; fällig: Merge (AI)` oder `; fällig: Review`
+  einem abschließenden Suffix `; fällig: Merge (AI)` , `; fällig: Yolo Review` oder `; fällig: Review`
   schreiben, ohne Backticks oder weitere Fälligkeitsangaben auch in Folgezeilen.
-  In Test sind beide später, in Merge nur Review; in Review ist Review fällig.
+  In Test sind diese später, in Merge nur die Schlussabnahmen; in Yolo Review
+  sind die übernommenen Abnahmen fällig. Für Tickets ohne Agent bleibt Review
+  die Schlussphase.
   Rückstellung schließt keinen Punkt. Unzugeordnete, aktuelle, überfällige,
   unbekannte oder mehrdeutige Einträge sperren weiterhin, auch neben späteren
   Punkten. `### Test` und die technische `### Review`-Checkliste haben keine

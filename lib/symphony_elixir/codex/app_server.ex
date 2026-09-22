@@ -36,12 +36,18 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, Keyword.put(opts, :issue, issue)) do
-      try do
-        run_turn(session, prompt, issue, opts)
-      after
-        stop_session(session)
-      end
+    case start_session(workspace, Keyword.put(opts, :issue, issue)) do
+      {:ok, session} ->
+        try do
+          run_turn(session, prompt, issue, opts)
+        after
+          stop_session(session)
+        end
+
+      {:error, _} = error ->
+        # No turn/start request was sent. A caller may release its delivery
+        # intent only on this proven pre-turn failure, never on a run_turn error.
+        with :ok <- Keyword.get(opts, :on_session_start_failure, fn -> :ok end).(), do: error
     end
   end
 

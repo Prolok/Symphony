@@ -263,8 +263,8 @@ class Run:
         states = ["Todo (AI)"] + {
             "po_incoming": ["Backlog", "Todo", "Definiert"],
             "po_aggregation": ["Backlog", "Todo", "Definiert"],
-            "po_handoff": ["BLOCKER", "Review"],
-            "po_followup": ["Review"],
+            "po_handoff": ["BLOCKER", "Yolo Review"],
+            "po_followup": ["Yolo Review"],
         }.get(scenario, [])
         expected = {(project, state) for project in projects for state in states}
         if (not isinstance(fixtures, list) or not projects or len(fixtures) != len(expected)
@@ -452,7 +452,7 @@ class Run:
                             self.result["sessions"] = sessions
                         if self.args.scenario in ("po_handoff", "po_followup"):
                             po = [f for f in probed if f.get("po_handoff")]
-                            if {f["initial_state"] for f in po} != ({"BLOCKER", "Review"} if self.args.scenario == "po_handoff" else {"Review"}) or len(po) != (2 if self.args.scenario == "po_handoff" else 1):
+                            if {f["initial_state"] for f in po} != ({"BLOCKER", "Yolo Review"} if self.args.scenario == "po_handoff" else {"Yolo Review"}) or len(po) != (2 if self.args.scenario == "po_handoff" else 1):
                                 raise RunFailure("po_handoff_membership_unconfirmed")
                             for fixture in po:
                                 receipt = fixture.get("handoff_receipt", {})

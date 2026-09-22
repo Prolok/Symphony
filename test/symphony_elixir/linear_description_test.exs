@@ -2,6 +2,25 @@ defmodule SymphonyElixir.LinearDescriptionTest do
   use ExUnit.Case, async: true
   alias SymphonyElixir.Linear.Description
 
+  test "Linear heading gaps and immediate lazy list continuation preserve a follow-up description" do
+    expected = "## Ziel\nDokumentation ergänzen.\n\n## Ist\nBefund:\n- Datei fehlt.\nAbnahme bleibt offen.\n\n## Soll\n1. Datei anlegen."
+    actual = "## Ziel\n\nDokumentation ergänzen.\n\n## Ist\n\nBefund:\n\n* Datei fehlt.\n  Abnahme bleibt offen.\n\n## Soll\n\n1. Datei anlegen."
+    assert Description.equivalent?(expected, actual)
+    assert Description.equivalent?(actual, expected)
+
+    for changed <- [
+          String.replace(actual, "## Ziel", "### Ziel"),
+          String.replace(actual, "bleibt offen", "ist erledigt"),
+          String.replace(actual, "  Abnahme", "\n  Abnahme"),
+          String.replace(actual, "  Abnahme", "  - Abnahme")
+        ] do
+      refute Description.equivalent?(expected, changed)
+    end
+
+    refute Description.equivalent?("- ## Titel\nText", "- ## Titel\n  Text")
+    refute Description.equivalent?("```\n## Titel\nText\n```", "```\n## Titel\n\nText\n```")
+  end
+
   test "PRO-808 original journal and returned inline link preserve the same requirement" do
     expected = File.read!("test/fixtures/linear_markdown/inline-link-intent.md")
     actual = File.read!("test/fixtures/linear_markdown/inline-link-returned.md")

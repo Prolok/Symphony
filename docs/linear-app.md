@@ -143,7 +143,8 @@ Die wirksame menschliche Delegation autorisiert PO-Steuerung und Aktivierung im
 Ticketscope gemäß [Laufvertrag](../WORKFLOW_YOLO_AGENT.md#laufvertrag), auch ohne
 CLI-`--yolo`. Dort sind spätere Delegation nach Anlage, aktuelle Stopps/Entzug und
 die Grenze menschlicher Eskalation geregelt; Agentenbindung und Startmodus sind
-unabhängig. Die Zuweisungsregeln für neu angelegte Followups bleiben unverändert.
+unabhängig. Neu angelegte Followups übernehmen die konfigurierte Agentenbindung
+ebenfalls unabhängig von `--yolo`.
 
 Der optionale lokale OpenClaw-Ausführungsweg für diese PO-Läufe ist in
 [OpenClaw-YOLO](openclaw-yolo.md) beschrieben, einschließlich Testisolation,
@@ -204,16 +205,27 @@ projektgebundenen App-Zustand in `yolo/`. Relay-Signale entscheiden, ob Kommenta
 frisch eingelesen werden müssen. Bestätigte eigene Kommentare und Skip-Labels
 erzeugen keine neuen fachlichen Beobachtungen. Ein reguläres Turn-Ende ersetzt
 keine `symphony_yolo_complete`-Bestätigung; Änderungen während des Turns bleiben
-gegenüber dem eingefrorenen Ausgangsstand offen. Der beobachtete Wechsel zwischen
-weiterer erwarteter Arbeit und freier Schlussabnahme wird separat dauerhaft
-gespeichert; auch ein unverändertes zuvor bearbeitetes Review wird nach dem
-Wegfall der letzten weiteren Arbeit erneut bewertet. Fehler-/Teilresultate erhalten
+gegenüber dem eingefrorenen Ausgangsstand offen. Pro Mitglied und fachlicher Phase
+wird bereits die Zustellung dauerhaft gespeichert. Gruppenbeitritt/-austritt,
+Status-Rundläufe und Neustarts erzeugen keine erneute Zustellung unveränderter
+Arbeit. Inhalt, externe Kommentare und wirksame Abhängigkeiten bestimmen die
+nächste fachliche Version. Vollständig paginierte Relationsabfragen beobachten
+Vorgängerzustände auch ohne Änderung am Ursprung. Geblocktes Backlog bleibt
+unbewertet; frische Abhängigkeiten sperren auch Aktionen eines bereits laufenden
+PO-Turns, wenn das Backlog-Ticket inzwischen blockiert wurde. Zusammenhängende Reviewketten warten auf sämtliche Folgefixes und
+externe Vorgänger. Unabhängige Arbeit erzeugt keine globale Review-Warteschleife.
+Beobachtete Blockierung und erneute Freigabe werden je Mitglied und Phase
+dauerhaft gezählt; auch ein identischer freier Endstand erlaubt genau eine neue Bewertung.
+Ein belegter lokaler App-Server-Fehler vor `turn/start` gibt den Zustellversuch
+für einen technischen Retry frei. Unklare oder bereits gestartete Turns bleiben
+reserviert.
+Fehler-/Teilresultate erhalten
 ihren Lauf-/Sessionbezug. Der Sammelvertrag steht in
 [WORKFLOW_YOLO_AGENT.md](../WORKFLOW_YOLO_AGENT.md).
 
 PO-Anlagen und Übergaben verwenden `symphony_yolo_action`. Der gemeinsame
-Folgeticketpfad steht auch regulären Workern zur Verfügung: `--yolo` plus
-Agentenkonfiguration setzt Agent und ersten konfigurierten Menschen, sonst
+Folgeticketpfad steht auch regulären Workern zur Verfügung: Agentenkonfiguration
+setzt unabhängig von `--yolo` Agent und ersten konfigurierten Menschen, sonst
 entsteht das Backlog-Ticket ohne beide Zuweisungen. Aggregation übernimmt die
 Delegation unabhängig vom Startmodus. Das dauerhafte Journal `yolo-actions/`
 reserviert die ID vor Anlage und erhält den genauen Auftrag, Anforderungen und
@@ -227,15 +239,38 @@ journalisierten Ursprünge gezielt nach. Nur unveränderte, weiterhin delegierte
 Ursprünge nehmen diese Operation wieder auf; das neue Ticket bleibt bis zum
 bestätigten Operationsabschluss gesperrt. Daraus entsteht keine neue Arbeit
 für sonstige abgeschlossene Tickets.
+Offene PO-Anlagen werden unter Gruppen-/Ticketleases direkt aus diesem Journal
+fortgesetzt, ohne unveränderte Modellaufträge erneut zuzustellen. Aktive oder
+unklar angenommene externe Aufträge sperren die Recovery; ausdrücklich eskalierte
+Operationen des abgeschlossenen Warteentscheids bleiben beim Betreiber.
 
-Die Review-Warteentscheidung entsteht ohne Codex-Lauf aus dem vollständigen
-Relay-Bestand. Unmittelbar vor einem tatsächlichen Reviewstart wird dieser
-Bestand nochmals vollständig frisch geprüft. Bei Entzug eines Gruppenmitglieds
-bleiben die anderen bearbeitbar; jeder weitere Mitgliedsschreibzugriff prüft
-Zuständigkeit und Kommentare erneut. Review-/BLOCKER-Übergabe hält tatsächliche
-Prüfergebnisse und offene Fixes im Workpad, erhält den Status und entfernt die
-Delegation. Der Symphony-Zusatz steht in
-[Symphony-Schlussabnahme](../.codex/skills/sym-yolo-review/SKILL.md).
+Die Review-Warteentscheidung entsteht ohne Modelllauf. Agentendelegierte Tickets
+gehen nach Merge in `Yolo Review`; nur dort führt der PO die Schlussabnahme aus.
+Ein lokal vorhandener ungeprüfter Merge-Dateistand sperrt bereits diesen Eintritt:
+Das Ticket bleibt in `Merge (AI)` für den regulären Test-Rücklauf. Auch die
+Schlussübergabe verweigert einen inzwischen veränderten regulären Workspace,
+ohne die Einbahnregel von `Yolo Review` aufzuheben.
+Interne Kanten vollständig gemergter Reviewketten bleiben erhalten. Vor Start
+und Aktionen werden Mitglieder, Abhängigkeiten und Kommentare erneut geprüft.
+Für Folgefixes erzeugt `blocks_origins=true` zusätzlich zu `related` die echte
+Kante Fix → Ursprung; `blocked_by` bezeichnet weiterhin Vorgänger des neuen
+Tickets. Keine Gegenkante und kein Freitext als Blockierungsersatz.
+
+`kind=wait` beendet den Lauf nach bestätigter Fixanlage mit Prüf-/Lernbeleg;
+Status und Delegation bleiben erhalten. Erfolgreiches `kind=handoff` verlangt
+erledigte Vorgänger, bestandene Prüfungen, geschlossene Pflichtnachweise und
+Merge-Evidenz. Es setzt `Review` mit menschlicher Zuständigkeit und ohne Agent.
+Nach bestätigtem Abschluss bereinigt der PO-Pfad den regulären Issue-Workspace;
+der Abnahmecheckout bleibt separat. Reservierte Routine-Testworkspaces bleiben
+ausschließlich dem gebundenen Test-Cleanup vorbehalten.
+Rücksprünge aus `Yolo Review` nach BLOCKER oder Coding sowie direktes Fertig sind
+gesperrt. Externe Voraussetzungen werden mit `kind=escalate` dort übergeben.
+Ausdrücklich eskalierte offene Anlageoperationen erlauben den Laufabschluss als
+belegtes Warten; ihre Anlage/Links bleiben offen. Der Beleg gilt nur für die
+benannten Operationen dieses Laufs, nicht für später hinzugekommene Anlagen.
+Der normale BLOCKER-Pfad vor dieser Schlussphase bleibt erhalten.
+Details: [Symphony-Schlussabnahme](../.codex/skills/sym-yolo-review/SKILL.md) und
+[OpenClaw-Eskalation](openclaw-yolo.md#seltene-eskalationen).
 
 Unvollständige lokale YOLO-Anlageoperationen sperren den Start ihres Zieltickets
 bis zur bestätigten Verknüpfung und zum Ursprungabschluss. Externe BLOCKER dürfen
@@ -357,7 +392,7 @@ unabhängig vom Profil im bestehenden Zustandsverzeichnis.
 Maßgeblich sind die [Phasenpflichten](../WORKFLOW.md#phasenpflichten-und-betreiberübergaben).
 Planung/Workpad halten Aktion, Rolle, Phase und Entscheidungsquelle oder technische
 Begründung fest. Finale Produkt-/Zielumgebungsabnahme gehört standardmäßig nach
-Merge in `Review`; das Belegformat und die strikte Rückstellung späterer Pflichten
+Merge in `Review`, bei Agentdelegation in `Yolo Review`; das Belegformat und die strikte Rückstellung späterer Pflichten
 regelt [symphony-workpad](../.codex/skills/symphony-workpad/SKILL.md).
 Eine irrtümliche agentenseitige Frühfrist ist mit Begründung korrigierbar,
 keine Nutzerfreigabe; offene Pflicht, Quelle und technische Belege bleiben erhalten.
@@ -881,8 +916,8 @@ legt keine Teamstatus an. Fixture-/Sessionmengen richten sich nach dem Szenario:
 | --- | --- | --- |
 | bootstrap / delegation | 1 Todo (AI) | 1 reguläre Session |
 | po_incoming / po_aggregation | 1 Todo (AI), Backlog, Todo, Definiert | 1 reguläre und 1 gemeinsame PO-Session |
-| po_handoff | 1 Todo (AI), BLOCKER, Review | 1 reguläre, 1 BLOCKER- und 1 Review-Session |
-| po_followup | 1 Todo (AI), Review | 1 reguläre und 1 Review-Session |
+| po_handoff | 1 Todo (AI), BLOCKER, Yolo Review | 1 reguläre, 1 BLOCKER- und 1 Review-Session |
+| po_followup | 1 Todo (AI), Yolo Review | 1 reguläre und 1 Review-Session |
 
 Der begleitende reguläre Bootstrap erhält in PO-Szenarien keine Delegation;
 er zählt nicht zur weiteren erwarteten YOLO-Arbeit. Alle IDs und Rollen müssen
@@ -917,13 +952,15 @@ Recovery erhalten; das Cleanup meldet einen Fehler. Das Szenario ersetzt weder
 Aggregation/Relationsübernahme noch Folge-Ticket- oder gemeinsame Reviewbelege.
 
 `--scenario po_handoff` verwendet genau drei eigene IDs: einen regulären
-Bootstrap sowie einen delegierten BLOCKER und ein delegiertes Review im selben
+Bootstrap sowie einen delegierten BLOCKER und ein delegiertes Yolo Review im selben
 `symphony-test`.
 Der BLOCKER beschreibt einen erforderlichen externen Betreiberbeleg und wird
-begründet an den Menschen übergeben. Dadurch wird das unveränderte Review frei;
-es prüft den sauberen separaten Checkout und dessen vollständige gemergte SHA.
+begründet an den Menschen übergeben. Die unabhängige Yolo-Review-Fixture prüft den sauberen separaten Checkout und dessen vollständige gemergte SHA.
 Erfolg verlangt beide tatsächlichen Sessions, ausdrückliche Mitgliedsbelege,
-entfernte Delegation bei erhaltenem Status und bestätigtes Cleanup. Weitere
+entfernte Delegation, BLOCKER-Erhalt beziehungsweise Abschluss nach Review und
+bestätigtes Cleanup. Die explizit registrierte Übergabefixture prüft den
+Abnahmetransport am gebundenen Checkout, keinen Implementierungsmerge; sie
+benötigt und erzeugt keine erfundene PR-Merge-Evidenz. Weitere
 Implementierungsphasen, Aggregationen und neue Folge-Tickets sind in diesen
 begrenzten Szenarien gesperrt; sie brauchen eigene registrierte Testszenarien.
 Dieser Pass wäre keine vollständige Featureabnahme oder Fix-Ticket-Abnahme.
@@ -932,13 +969,13 @@ Dieser Pass wäre keine vollständige Featureabnahme oder Fix-Ticket-Abnahme.
 in einer Sitzung und genau ein journalisiertes Aggregationsticket. Anforderungen,
 `symphony-generated`, menschliche Zuständigkeit, Delegation und sämtliche
 Ursprunglinks werden bestätigt, bevor die Ursprünge abgeschlossen werden.
-`--scenario po_followup` prüft ein eigenes Review-Ticket mit einer tatsächlich
-fehlenden Dokumentationsdatei, genau ein verknüpftes Fix-Ticket und die sofortige
-menschliche Übergabe. Mit `--yolo` erhält der Fix den konfigurierten Menschen
-und Agenten, ohne den Schalter bleiben beide leer. Der Startmodus gehört zum
+`--scenario po_followup` prüft ein eigenes Yolo-Review-Ticket mit einer tatsächlich
+fehlenden Dokumentationsdatei, genau ein verknüpftes Fix-Ticket, dessen echte
+Blockierung des Ursprungs und eine Warteentscheidung in Yolo Review. Der Fix
+erhält den konfigurierten Menschen und Agenten auch ohne `--yolo`. Der Startmodus gehört zum
 Laufplan und darf bei Wiederaufnahme nicht geändert werden.
 
-Diese beiden begrenzten Szenarien enden bei Anlage/Übergabe. Abgeleitete IDs werden
+Diese beiden begrenzten Szenarien enden bei Anlage/Ursprungabschluss bzw. Warten. Abgeleitete IDs werden
 vor dem ersten Schreibversuch in separaten Laufbelegen registriert und beim Probe-
 und Cleanup-Pfad einbezogen; sie erweitern **nicht** die Startfreigabe der
 Testinstanz. Eine zweite Anlage, fremde Ursprünge oder Abhängigkeiten werden
@@ -951,7 +988,7 @@ Für diesen Gesamtweg ergänzt `scripts/test-instance-pipeline` einen begrenzten
 Betreiberstart mit ausdrücklich angegebenen eigenen Ticket-UUIDs. Er verwendet
 die PRO-736-Projektprüfung, gemeinsame Exklusivsperre und Prozessbereinigung.
 Ein separates Workflow-Abbild unter `_build/` ergänzt ausschließlich
-`tracker.app.allowed_issue_ids`; alle regulären Phasen, Hooks, Tests, Skills und
+`tracker.app.allowed_issue_ids` und `allow_yolo_followup_ids: true`; alle regulären Phasen, Hooks, Tests, Skills und
 Merge-Gates bleiben erhalten. Es gibt keine Bootstrap-Phasensperre. Der bereits
 gebaute, quellgebundene Kandidat startet über `mise exec -- bin/symphony`;
 Hauptcheckout und Hauptinstanz werden nicht aktualisiert. Dieses Betreiberwerkzeug
@@ -984,13 +1021,17 @@ ist kein zusätzlicher Workerzugriff auf private Konfiguration oder Linear.
    Workpads, Sessions, Prüfungen und GitHub-PR beobachten. Merge-Commit-SHA und
    fachlichen Reviewcheckout belegen. Keine Statussprünge zum Vortäuschen des
    Durchlaufs. Ein bewusst eingebrachtes, separat beschriebenes Review-Finding
-   muss ein verknüpftes Fix-Ticket erzeugen und den Ursprung sofort beim Menschen
-   in Review belassen. Neu angelegte IDs erweitern die explizite Startliste nicht
-   automatisch: Instanz kontrolliert beenden, Anlage/Links/Zuständigkeit bestätigen
-   und nur das eigene Fix-Ticket in einem neuen protokollierten Abschnitt starten.
-   Der Fix durchläuft dieselben regulären Gates und seine eigene Schlussabnahme.
-   Ohne `--yolo` bleibt der neu angelegte Fix unzugewiesen im Backlog; dessen
-   automatische Weiterbearbeitung darf dieser Gegenfall nicht behaupten.
+   muss ein Fix-Ticket mit gerichteter Blockierung des Ursprungs erzeugen; Ursprung
+   und Delegation bleiben in Yolo Review. Nur bestätigte eigene Folgefixe aus
+   abgeschlossenen Anlagejournalen erweitern transitiv die Startliste dieses
+   isolierten Pipeline-Laufs. Fremde Ursprünge, unfertige Anlagen und gewöhnliche
+   Folgetickets ohne Abnahmesperre erhalten keine Freigabe. Der Fix durchläuft
+   dieselben regulären Gates; anschließend die gemeinsame Schlussabnahme und
+   Review mit entfernter Delegation belegen, auch ohne `--yolo`. Die begrenzten
+   po_followup-Fixtures erhalten diese Erweiterung ausdrücklich nicht.
+   Zusätzlich Backlog mit echter Vorgängerrelation zurückstellen, nur den
+   Vorgänger freigeben und genau einen neuen Auftrag anhand dauerhafter
+   Zustellbelege prüfen; unveränderte Wiedervorlage/Neustart zählen null weitere.
 5. `result.json` protokolliert ausschließlich `operator_pipeline_observation`,
    beobachtete Sessions/Status/Projektbindungen und Prozessbereinigung. Es vergibt
    keinen Abnahmestatus und quittiert Daten-Cleanup nie automatisch. Betreiber

@@ -607,7 +607,7 @@ defmodule SymphonyElixir.Orchestrator do
 
           cancel_issue_workflow(state, issue)
 
-        terminal_issue_state?(issue.state, terminal_states) and pending_merge_handoff?(state, issue) ->
+        pending_merge_handoff?(state, issue) ->
           # The runner still owns its post-turn/dirty-merge checks, including
           # the exit-message drain. Preserve cleanup even if the runner fails.
           put_in(state.running[issue.id][:completion_pending], true)
@@ -652,7 +652,7 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(state.running, issue_id) do
       running_entry when is_map(running_entry) ->
         started_issue = completed_issue_for_running_entry(running_entry)
-        normalize_issue_state(started_issue.state) == "merge (ai)" and normalize_issue_state(issue_state) == "review"
+        normalize_issue_state(started_issue.state) == "merge (ai)" and normalize_issue_state(issue_state) in ["review", "yolo review"]
 
       _ ->
         false

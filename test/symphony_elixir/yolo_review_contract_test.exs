@@ -381,6 +381,9 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     assert record["error"] == nil
     assert record["escalated_operations"][ctx.issue.id] == [pending["key"]]
     assert :ok = Recovery.resume(%Orchestrator.State{}, [ctx.issue], query: fn _, _ -> flunk("an escalated operation must remain reserved") end)
+    # Older journals without the promoted durable field retain their explicit hold.
+    assert :ok = Store.write("review", Map.delete(record, "escalated_operations"))
+    assert :ok = Recovery.resume(%Orchestrator.State{}, [ctx.issue], lease: fn _, _ -> flunk("legacy escalation must remain reserved") end)
     # A later independent group attempt must not erase the durable operation hold.
     assert :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "independent", "members" => ["another-issue"], "completed" => %{}}))
     assert :ok = Recovery.resume(%Orchestrator.State{}, [ctx.issue], lease: fn _, _ -> flunk("another group attempt must not release an escalated operation") end)

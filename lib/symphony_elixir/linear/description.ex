@@ -42,9 +42,7 @@ defmodule SymphonyElixir.Linear.Description do
   # continuation immediately following a plain top-level bullet. These bounded
   # CommonMark-equivalent forms retain heading level, list nesting and content.
   defp heading_gaps([{:blank, ""} | rest]) do
-    rest = Enum.drop_while(rest, &(&1 == {:blank, ""}))
-
-    case rest do
+    case Enum.drop_while(rest, &(&1 == {:blank, ""})) do
       [{:heading, _} | _] -> heading_gaps(rest)
       _ -> [{:blank, ""} | heading_gaps(rest)]
     end

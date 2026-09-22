@@ -608,7 +608,20 @@ defmodule SymphonyElixir.TestRunTest do
   end
 
   test "managed executor drives the existing fixture lifecycle through one regular runtime", ctx do
-    {context, config, request} = routine_context(ctx)
+    checkout = Path.join([ctx.root, "review", Ecto.UUID.generate(), String.duplicate("long-checkout-", 8)])
+    File.mkdir_p!(checkout)
+    assert byte_size(checkout) > 104
+    {context, config, request} = File.cd!(checkout, fn -> routine_context(ctx) end)
+    socket = context.settings.worker.test_executor_socket
+    socket_root = Path.dirname(socket)
+    assert {:ok, ^socket} = SymphonyElixir.PathSafety.canonicalize(socket)
+    assert byte_size(socket) < 104
+    assert Bitwise.band(File.stat!(socket_root).mode, 0o777) == 0o700
+
+    other_root = File.cd!(checkout, &routine_socket_root/0)
+    refute other_root == socket_root
+    marker = Path.join(other_root, "owned-by-another-run")
+    File.write!(marker, "preserve")
     parent = self()
 
     runner = fn job, contexts, settings, _runtime, owner ->
@@ -630,6 +643,11 @@ defmodule SymphonyElixir.TestRunTest do
     assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
     assert Application.get_env(:symphony_elixir, :project_contexts) == ctx.contexts
     assert config["result_root"] != context.settings.workspace.root
+    await_routine_result(socket, request)
+    :ok = stop_supervised(SymphonyElixir.TestExecutor)
+    File.rm_rf!(socket_root)
+    refute File.exists?(socket_root)
+    assert File.read!(marker) == "preserve"
   end
 
   test "routine runtime mismatch and access failures precede fixture creation", ctx do
@@ -1371,14 +1389,13 @@ defmodule SymphonyElixir.TestRunTest do
     config =
       Map.merge(config, %{"teams" => [%{"id" => "team", "key" => "PRO"}], "scenarios" => ["bootstrap", "workflow", "failure-probe"], "timeout" => 30, "result_root" => Path.join(ctx.root, "managed")})
 
-    socket_root = Path.join(File.cwd!(), "tmp/rt-#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(socket_root) end)
+    socket_root = routine_socket_root()
     context = put_in(context.settings.worker.test_executor, config)
     context = put_in(context.settings.worker.test_executor_socket, Path.join(socket_root, "e.sock"))
     context = %{context | test_instance: nil}
     workspace = Path.join(context.settings.workspace.root, "PRO-769")
     git!(context.root, ["worktree", "add", "-qb", "symphony/PRO-769", workspace])
-    {json, 0} = System.cmd("python3", ["scripts/test-instance.py", "source", workspace])
+    {json, 0} = System.cmd("python3", [Path.expand("../../scripts/test-instance.py", __DIR__), "source", workspace])
     source = Jason.decode!(json)
     id = "33333333-3333-4333-8333-333333333333"
 
@@ -1431,6 +1448,15 @@ defmodule SymphonyElixir.TestRunTest do
 
     assert :ok = SymphonyElixir.TestExecutor.verify_target(context, config)
     {context, config, request}
+  end
+
+  defp routine_socket_root do
+    # Unix sockets need a short physical path even when the checkout or TMPDIR is long.
+    # mktemp creates a private directory exclusively across concurrent BEAM instances.
+    {directory, 0} = System.cmd("mktemp", ["-d", "/tmp/sym-rt-XXXXXXXX"])
+    {:ok, root} = SymphonyElixir.PathSafety.canonicalize(String.trim(directory))
+    on_exit(fn -> File.rm_rf!(root) end)
+    root
   end
 
   test "CLI probe preserves the app failure, stops without retry and leaves the fixture journal recoverable", ctx do

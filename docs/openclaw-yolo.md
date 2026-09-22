@@ -419,6 +419,12 @@ BLOCKER-Übergaben vor der Schlussphase bleiben möglich. Der strukturierte
 Nur bei aktiviertem OpenClaw wird eine Nachricht versandt. Der Adapter fragt
 `sessions.list` für exakt `agent:<konfigurierter-agent>:main` ab und verwendet
 nur dessen vorhandenen `deliveryContext` (Kanal, Empfänger, optional Konto/Thread).
+Liegt der normale Gesprächskanal in einer eigenen Sitzung, kann der Betreiber
+projektspezifisch `OPENCLAW_YOLO_NOTIFY_SESSION` auf deren vorhandenen vollständigen
+Sitzungsschlüssel setzen. Die Sitzung muss zum selben konfigurierten Agenten
+gehören; die Zustellroute wird weiterhin ausschließlich aus dieser einen
+Gateway-Sitzung gelesen. Es gibt keine automatische Auswahl aus fremden Gruppen
+oder Threads und keinen frei eingegebenen Kanal-/Empfängerersatz.
 Kein frei gewählter Empfänger und kein Ersatzkanal; fehlende/mehrdeutige Route
 bleibt ein konkreter Fehler. Gewöhnliche PO-Aufträge behalten `deliver=false`.
 

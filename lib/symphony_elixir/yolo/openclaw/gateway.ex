@@ -2,6 +2,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @moduledoc "Gateway RPC contract verified against OpenClaw 2026.9.4; no local fallback."
   @behaviour SymphonyElixir.Yolo.OpenClaw.Adapter
   alias SymphonyElixir.Yolo.OpenClaw
+  alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.OpenClaw.Transport
 
   @impl true
@@ -57,9 +58,10 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
 
   @spec destination(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def destination(agent, opts) do
-    key = "agent:#{agent}:main"
+    key = ProjectContext.env("OPENCLAW_YOLO_NOTIFY_SESSION") || "agent:#{agent}:main"
 
-    with :ok <- preflight(agent, opts),
+    with true <- String.starts_with?(key, "agent:#{agent}:") and byte_size(key) <= 256,
+         :ok <- preflight(agent, opts),
          {:ok, %{"sessions" => sessions}} when is_list(sessions) <- rpc("sessions.list", %{"agentId" => agent, "search" => key, "limit" => 100}, opts),
          [session] <- Enum.filter(sessions, &(&1["key"] == key)),
          %{"channel" => channel, "to" => to} = route <- session["deliveryContext"],

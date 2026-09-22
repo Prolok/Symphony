@@ -3,6 +3,35 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
 
+  test "an explicit existing normal-channel session stays bound to the configured agent" do
+    alias SymphonyElixir.ProjectContext
+    key = "agent:po:slack:channel:normal"
+    route = %{"channel" => "slack", "to" => "channel:normal", "accountId" => "po"}
+
+    transport = fn
+      ["--version"] ->
+        {:ok, "2026.9.4"}
+
+      ["gateway", "call", "agents.list" | _] ->
+        {:ok, ~s({"agents":[{"id":"po"}]})}
+
+      ["gateway", "call", "sessions.list", "--params", raw | _] ->
+        assert Jason.decode!(raw)["search"] == key
+        {:ok, Jason.encode!(%{"sessions" => [%{"key" => key, "deliveryContext" => route}]})}
+    end
+
+    ProjectContext.with_context(%ProjectContext{env: %{"OPENCLAW_YOLO_NOTIFY_SESSION" => key}}, fn ->
+      assert {:ok, destination} = Gateway.destination("po", transport: transport)
+      assert destination == Map.put(route, "sessionKey", key)
+    end)
+
+    for foreign <- ["agent:other:main", "agent:po-other:main"] do
+      ProjectContext.with_context(%ProjectContext{env: %{"OPENCLAW_YOLO_NOTIFY_SESSION" => foreign}}, fn ->
+        assert {:error, :openclaw_normal_channel_unavailable} = Gateway.destination("po", transport: fn _ -> flunk("foreign session must not be queried") end)
+      end)
+    end
+  end
+
   test "external submission passes the actual upstream cwd preflight without plugin identity" do
     probe = fn params ->
       {output, 0} = System.cmd("node", ["test/fixtures/openclaw/preflight.cjs", Jason.encode!(params)])

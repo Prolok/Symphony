@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Yolo.Followup do
 
   @spec invoke(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def invoke(%{"kind" => kind, "origin_ids" => ids} = args, opts) when kind in ["aggregate", "followup"] and is_list(ids) do
-    request = Map.take(args, ~w(kind origin_ids operation_key title description validation blocked_by)) |> Map.update!("origin_ids", &Enum.sort(Enum.uniq(&1)))
+    request = Map.take(args, ~w(kind origin_ids operation_key title description validation blocked_by blocks_origins)) |> Map.update!("origin_ids", &Enum.sort(Enum.uniq(&1)))
 
     with true <- Derived.allowed?(request),
          true <- valid_request?(args),
@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Yolo.Followup do
     blocked = args["blocked_by"] || []
 
     Enum.all?(strings, &(is_binary(&1) and String.trim(&1) != "")) and
+      is_boolean(Map.get(args, "blocks_origins", false)) and
       Enum.all?(args["origin_ids"], &is_binary/1) and is_list(blocked) and Enum.all?(blocked, &is_binary/1)
   end
 
@@ -109,7 +110,7 @@ defmodule SymphonyElixir.Yolo.Followup do
   defp prepare(intent, [lead | _] = issues, opts) do
     request = intent["request"]
     aggregate? = request["kind"] == "aggregate"
-    assigned? = aggregate? or (Config.yolo?() and is_binary(Config.yolo_agent_id()))
+    assigned? = aggregate? or is_binary(Config.yolo_agent_id())
 
     with true <- not assigned? or is_binary(Config.human_handoff_id()),
          {:ok, state} <- API.state(lead.team_id, "Backlog", opts),
@@ -129,7 +130,8 @@ defmodule SymphonyElixir.Yolo.Followup do
 
       related = Enum.map(issues, &Relations.edge(&1.id, intent["issue_id"], "related"))
       blocked = Enum.map(request["blocked_by"] || [], &Relations.edge(&1, intent["issue_id"], "blocks"))
-      intent = Map.merge(intent, %{"input" => input, "relations" => Enum.uniq(related ++ transferred ++ blocked), "sources" => Map.new(issues, &{&1.id, source(&1)})})
+      fixes = if request["blocks_origins"] == true, do: Enum.map(issues, &Relations.edge(intent["issue_id"], &1.id, "blocks")), else: []
+      intent = Map.merge(intent, %{"input" => input, "relations" => Enum.uniq(related ++ transferred ++ blocked ++ fixes), "sources" => Map.new(issues, &{&1.id, source(&1)})})
       with :ok <- Operations.save(intent), do: {:ok, intent}
     else
       {:error, _} = error -> error

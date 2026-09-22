@@ -23,7 +23,7 @@ defmodule SymphonyElixir.Yolo.ActionScope do
   defp bound?(id), do: Scope.member?(id) or (is_nil(Scope.current()) and WriteContext.current()["issue_id"] == id)
 
   defp authorized?(issue) do
-    allowed = Config.settings!().tracker.app["allowed_issue_ids"]
+    allowed = Config.allowed_issue_ids()
 
     issue.in_project_scope and issue.assigned_to_worker and (is_nil(allowed) or issue.id in allowed) and
       if Scope.current(), do: Admission.eligible?(issue), else: CommentCheckpoint.active?(issue)

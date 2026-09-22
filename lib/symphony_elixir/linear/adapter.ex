@@ -62,7 +62,7 @@ defmodule SymphonyElixir.Linear.Adapter do
     issue(id: $issueId) {
       state { id }
       team {
-        states(filter: {name: {eq: $stateName}}, first: 1) {
+        states(filter: {name: {eq: $stateName}}, first: 2) {
           nodes {
             id
           }
@@ -217,8 +217,8 @@ defmodule SymphonyElixir.Linear.Adapter do
     with {:ok, response} <-
            client_module().graphql(@state_lookup_query, %{issueId: issue_id, stateName: state_name}),
          true <- Map.get(response, "errors", []) in [nil, []],
-         state_id when is_binary(state_id) <-
-           get_in(response, ["data", "issue", "team", "states", "nodes", Access.at(0), "id"]) do
+         [%{"id" => state_id}] when is_binary(state_id) <-
+           get_in(response, ["data", "issue", "team", "states", "nodes"]) do
       {:ok, state_id, get_in(response, ["data", "issue", "state", "id"])}
     else
       {:error, reason} -> {:error, reason}

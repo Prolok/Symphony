@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   alias SymphonyElixir.Codex.AppServer, as: AppServer
   alias SymphonyElixir.{CommentCheckpoint, Config, ProjectContext, RuntimePaths, Tracker}
   alias SymphonyElixir.Linear.{Client, IssueLease, YoloAgent}
-  alias SymphonyElixir.Yolo.{Admission, Completion, Group, Observation, OpenClaw, Operations}
+  alias SymphonyElixir.Yolo.{Admission, Completion, Delivery, Dependencies, Group, Observation, OpenClaw, Operations}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{ReviewContract, ReviewReadiness, Scope, Store, Workspace}
 
@@ -16,7 +16,8 @@ defmodule SymphonyElixir.Yolo.Runner do
   end
 
   defp start_locked(group, issues, project_issues, opts) do
-    with {:ok, record} <- Store.read(group),
+    with :ok <- Delivery.reconcile(group),
+         {:ok, record} <- Store.read(group),
          {:ok, epoch} <- ReviewReadiness.epoch(group) do
       record = Map.put(record, "capture_epoch", epoch)
       run_id = Ecto.UUID.generate()
@@ -44,16 +45,22 @@ defmodule SymphonyElixir.Yolo.Runner do
     lease.(issue, fn -> with_members(rest, callback, lease) end)
   end
 
-  defp run_locked(group, issues, project_issues, run_id, record, opts) do
+  defp run_locked(group, issues, _project_issues, run_id, record, opts) do
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
          true <- Enum.sort(Enum.map(fresh, & &1.id)) == Enum.sort(Enum.map(issues, & &1.id)),
+         {:ok, fresh} <- Dependencies.refresh(fresh, opts),
+         true <- Enum.all?(fresh, &(&1.state != "Backlog" or Dependencies.unblocked?(&1))),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))),
          {:ok, observations, fingerprint} <- Observation.capture(fresh, %{}, opts),
-         {:ok, pending} <- Operations.pending(Enum.map(fresh, & &1.id)),
-         false <- pending == [] and record["processed"] == fingerprint and Map.get(record, "processed_epoch", 0) == record["capture_epoch"],
-         {:ok, project_issues} <- current_project(group, project_issues, opts) do
+         record = Delivery.migrate(record, observations),
+         {:ok, operations} <- Operations.pending(Enum.map(fresh, & &1.id)),
+         pending = Delivery.pending(fresh, observations, if(operations == [], do: record, else: Map.put(record, "processed", nil))),
+         true <- pending != [],
+         {:ok, project_issues} <- current_project(group, fresh, opts) do
+      fresh = pending
+      observations = Map.take(observations, Enum.map(fresh, & &1.id))
       execute(group, fresh, project_issues, run_id, record, observations, fingerprint, opts)
     else
       {:error, _} = error -> error
@@ -82,7 +89,8 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp execute_session(group, issues, project_issues, workspace, run_id, {record, observations, _fingerprint}, opts) do
     with {:ok, prompt} <- prompt(group, issues, project_issues, workspace, opts),
          :ok <- verify_start(group, issues, workspace, opts),
-         {:ok, result} <- run_session(workspace, prompt, issues, run_id, opts),
+         delivery_opts = Keyword.merge(opts, before_delivery: fn -> Delivery.reserve(group, run_id, observations) end, delivery_rejected: fn -> Delivery.rejected(group, run_id) end),
+         {:ok, result} <- run_session(workspace, prompt, issues, run_id, delivery_opts),
          true <- Keyword.get(opts, :unchanged, &Workspace.unchanged?/1).(workspace),
          {:ok, retained} <- retained_members(issues, opts),
          :ok <- complete_inputs(retained, opts),
@@ -92,7 +100,8 @@ defmodule SymphonyElixir.Yolo.Runner do
       # Only the frozen source is processed, never a post-turn observation.
       Store.write(
         group,
-        Map.merge(record, %{
+        Map.merge(finished, %{
+          "decisions" => Map.merge(finished["decisions"] || %{}, Map.new(observations, fn {id, data} -> {id, data["semantic"]} end)),
           "observations" => observations,
           "processed_epoch" => record["capture_epoch"],
           "processed" => observations |> Map.take(Enum.map(retained, & &1.id)) |> Observation.fingerprint(),
@@ -112,10 +121,12 @@ defmodule SymphonyElixir.Yolo.Runner do
 
     # Fetch/checkpoints and checkout creation may take time. Keep all leases held
     # and recheck the exact frozen members immediately before starting Codex.
-    with {:ok, _} <- current_project(group, [], opts),
+    with {:ok, _} <- current_project(group, issues, opts),
          true <- Keyword.get(opts, :unchanged, &Workspace.unchanged?/1).(workspace),
          {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
+         {:ok, fresh} <- Dependencies.refresh(fresh, opts),
          true <- Enum.sort_by(fresh, & &1.id) == Enum.sort_by(issues, & &1.id),
+         true <- Enum.all?(fresh, &(&1.state != "Backlog" or Dependencies.unblocked?(&1))),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))) do
       :ok
     else
@@ -124,10 +135,12 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
   end
 
-  defp current_project("review", _previous, opts) do
+  defp current_project("review", members, opts) do
     fetch = Keyword.get(opts, :project, &Client.fetch_candidate_issues/0)
 
-    with {:ok, issues} <- fetch.(), false <- Enum.any?(issues, &Group.expected?/1) do
+    with {:ok, issues} <- fetch.(),
+         {:ok, issues} <- Dependencies.refresh(issues, opts),
+         true <- Dependencies.review_ready?(members, issues) do
       {:ok, issues}
     else
       {:error, _} = error -> error
@@ -146,8 +159,11 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
 
     case Config.openclaw_yolo_agent() do
-      nil -> Keyword.get(opts, :session, &AppServer.run/4).(workspace.path, prompt, lead, on_message: on_message)
-      _ -> OpenClaw.run(workspace, prompt, issues, run_id, opts)
+      nil ->
+        with :ok <- opts[:before_delivery].(), do: Keyword.get(opts, :session, &AppServer.run/4).(workspace.path, prompt, lead, on_message: on_message)
+
+      _ ->
+        OpenClaw.run(workspace, prompt, issues, run_id, opts)
     end
   end
 
@@ -209,7 +225,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp review_instructions(workspace) do
     case ReviewContract.load(workspace, Scope.current()["run_id"]) do
       %{"content" => content} -> "\n\nVersionierte Projekt-Prüfanweisung (#{workspace.path}/.codex/skills/sym-yolo-review/SKILL.md):\n" <> content
-      %{"error" => error} -> "\n\nKeine gültige Schlussabnahme möglich: #{error}. Ursache dokumentieren; bei externer Voraussetzung bestehenden BLOCKER-Pfad nutzen."
+      %{"error" => error} -> "\n\nKeine gültige Schlussabnahme möglich: #{error}. Ursache und Lösungsvorschlag im Workpad dokumentieren und eskalieren; das Ticket bleibt in Yolo Review."
     end
   end
 

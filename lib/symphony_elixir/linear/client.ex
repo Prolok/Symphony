@@ -4,6 +4,8 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
+  alias SymphonyElixir.Yolo.Operations, as: YoloOperations
+
   alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryResolver, AppAuth}
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.WriteContext
@@ -274,7 +276,7 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp relay_candidate?(node, context) do
-    ids = context.settings.tracker.app["allowed_issue_ids"]
+    ids = ProjectContext.with_context(context, &Config.allowed_issue_ids/0)
 
     project_candidate?(node, context) and (delegated_node?(node, context) or relay_assignee_matches?(node, context)) and
       (not is_list(ids) or node["id"] in ids)
@@ -442,7 +444,7 @@ defmodule SymphonyElixir.Linear.Client do
     filter =
       scope_filter(scope)
       |> Map.put("state", %{"name" => %{"in" => candidate_state_names(tracker.active_states)}})
-      |> restrict_candidate_ids(tracker.app["allowed_issue_ids"])
+      |> restrict_candidate_ids(ProjectContext.with_context(context, &Config.allowed_issue_ids/0))
 
     yolo? = ProjectContext.with_context(context, &Config.yolo?/0)
     filter = if yolo?, do: filter, else: Map.put(filter, "assignee", Map.put(Assignees.filter(tracker.assignee), "app", %{"eq" => false}))
@@ -455,7 +457,7 @@ defmodule SymphonyElixir.Linear.Client do
       delegated =
         scope_filter(scope)
         |> Map.put("delegate", %{"id" => %{"eq" => context.yolo_agent_id}})
-        |> restrict_candidate_ids(tracker.app["allowed_issue_ids"])
+        |> restrict_candidate_ids(ProjectContext.with_context(context, &Config.allowed_issue_ids/0))
 
       %{"or" => [regular, %{"and" => Enum.map(delegated, fn {field, value} -> %{field => value} end)}]}
     else
@@ -478,7 +480,7 @@ defmodule SymphonyElixir.Linear.Client do
         {:ok, {:team, key}} -> get_in(node, ["team", "key"]) == key
       end
 
-    ids = tracker.app["allowed_issue_ids"]
+    ids = ProjectContext.with_context(context, &Config.allowed_issue_ids/0)
 
     scope_matches and (not is_list(ids) or node["id"] in ids) and
       (delegated_node?(node, context) or
@@ -528,6 +530,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec validate_candidate_scope(map(), [Issue.t()]) :: :ok | {:error, term()}
   def validate_candidate_scope(%{auth_mode: "app", app: %{"allowed_issue_ids" => ids}}, issues) when is_list(ids) do
+    ids = YoloOperations.allowed_ids(ids)
     if Enum.all?(issues, &(&1.id in ids)), do: :ok, else: {:error, :linear_app_candidate_scope_changed}
   end
 

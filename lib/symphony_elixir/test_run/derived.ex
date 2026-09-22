@@ -151,7 +151,8 @@ defmodule SymphonyElixir.TestRun.Derived do
 
       complete =
         intent["done"] == true and intent["issue_id"] == issue["id"] and
-          Enum.all?(receipt["input"]["labelIds"], fn id -> Enum.any?(labels, &(&1["id"] == id)) end) and Enum.all?(receipt["origins"], &(&1 in links))
+          Enum.all?(receipt["input"]["labelIds"], fn id -> Enum.any?(labels, &(&1["id"] == id)) end) and Enum.all?(receipt["origins"], &(&1 in links)) and
+          acceptance_links?(intent, relations)
 
       {:ok, Map.merge(receipt, %{"complete" => complete, "issue" => issue, "relations" => relations})}
     end
@@ -172,6 +173,14 @@ defmodule SymphonyElixir.TestRun.Derived do
       _ -> {:error, :test_derived_cleanup_unconfirmed}
     end
   end
+
+  defp acceptance_links?(%{"request" => %{"blocks_origins" => true}} = intent, relations) do
+    Enum.all?(intent["request"]["origin_ids"], fn id ->
+      Enum.any?(relations, &(&1["type"] == "blocks" and get_in(&1, ["issue", "id"]) == intent["issue_id"] and get_in(&1, ["relatedIssue", "id"]) == id))
+    end)
+  end
+
+  defp acceptance_links?(_, _), do: true
 
   defp directory(plan), do: Path.join([TestInstance.state_root(), "runs", plan["run_id"], "derived"])
 end

@@ -2,6 +2,8 @@ defmodule SymphonyElixir.YoloAdmissionTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.{ProjectContext, Yolo.Admission}
 
+  defp prepare(issue, opts \\ []), do: Admission.prepare(issue, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
+
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
     root = Path.dirname(Workflow.workflow_file_path())
@@ -42,10 +44,10 @@ defmodule SymphonyElixir.YoloAdmissionTest do
     end
 
     opts = [query: query, fetch: fn _ -> {:ok, [Agent.get(state, & &1)]} end]
-    assert {:ok, updated} = Admission.prepare(issue, opts)
+    assert {:ok, updated} = prepare(issue, opts)
     assert "existing" in updated.labels
     assert_receive :write
-    assert {:ok, ^updated} = Admission.prepare(issue, opts)
+    assert {:ok, ^updated} = prepare(issue, opts)
     refute_receive :write
     Agent.stop(state)
   end
@@ -55,7 +57,7 @@ defmodule SymphonyElixir.YoloAdmissionTest do
 
     for changed <- [%{issue | delegate_id: nil}, foreign, %{issue | in_project_scope: false}] do
       opts = [fetch: fn _ -> {:ok, [changed]} end, query: fn _, _ -> flunk("unexpected write") end]
-      assert {:error, :yolo_admission_changed} = Admission.prepare(issue, opts)
+      assert {:error, :yolo_admission_changed} = prepare(issue, opts)
     end
   end
 
@@ -63,11 +65,11 @@ defmodule SymphonyElixir.YoloAdmissionTest do
     for nodes <- [[], [%{"id" => "one", "name" => ~s(Skip "Freigabe Review"), "team" => nil}, %{"id" => "two", "name" => ~s(Skip "Freigabe Review"), "team" => nil}]] do
       query = fn _, _ -> {:ok, %{"data" => %{"issueLabels" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}}} end
       opts = [fetch: fn _ -> {:ok, [issue]} end, query: query]
-      assert {:error, :yolo_skip_labels_unavailable_or_ambiguous} = Admission.prepare(issue, opts)
+      assert {:error, :yolo_skip_labels_unavailable_or_ambiguous} = prepare(issue, opts)
     end
 
     opts = [fetch: fn _ -> {:ok, [issue]} end, query: fn _, _ -> {:ok, %{}} end]
-    assert {:error, :yolo_labels_incomplete} = Admission.prepare(issue, opts)
+    assert {:error, :yolo_labels_incomplete} = prepare(issue, opts)
   end
 
   test "labels beyond the candidate page are fully checked without redundant mutation", %{issue: issue} do
@@ -82,14 +84,14 @@ defmodule SymphonyElixir.YoloAdmissionTest do
     end
 
     opts = [fetch: fn _ -> {:ok, [issue]} end, query: query]
-    assert {:ok, ready} = Admission.prepare(issue, opts)
+    assert {:ok, ready} = prepare(issue, opts)
     refute Admission.needed?(ready)
-    assert {:ok, ^ready} = Admission.prepare(ready)
+    assert {:ok, ^ready} = prepare(ready)
 
     incomplete = %{"data" => %{"issue" => %{"labels" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => true}}}}}
 
     for result <- [{:error, :offline}, {:ok, %{}}, {:ok, incomplete}] do
-      assert {:error, _} = Admission.prepare(issue, Keyword.put(opts, :query, fn _, _ -> result end))
+      assert {:error, _} = prepare(issue, Keyword.put(opts, :query, fn _, _ -> result end))
     end
   end
 
@@ -107,11 +109,11 @@ defmodule SymphonyElixir.YoloAdmissionTest do
         end
       end
 
-      assert {:error, _} = Admission.prepare(issue, fetch: fn _ -> {:ok, [issue]} end, query: query)
+      assert {:error, _} = prepare(issue, fetch: fn _ -> {:ok, [issue]} end, query: query)
     end
 
     for response <- [{:error, :offline}, {:ok, %{"data" => %{"issueLabels" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => true}}}}}] do
-      assert {:error, _} = Admission.prepare(issue, fetch: fn _ -> {:ok, [issue]} end, query: fn _, _ -> response end)
+      assert {:error, _} = prepare(issue, fetch: fn _ -> {:ok, [issue]} end, query: fn _, _ -> response end)
     end
   end
 end

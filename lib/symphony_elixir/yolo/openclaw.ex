@@ -89,11 +89,14 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     order = Map.put(order, "payload_sha256", digest(payload))
 
     with :ok <- File.write(Path.join(Path.dirname(bridge.descriptor), "request.md"), payload),
-         :ok <- Journal.write(order) do
+         :ok <- Journal.write(order),
+         :ok <- Keyword.get(opts, :before_delivery, fn -> :ok end).() do
       event(order, :submitted, opts)
       # The intent is durable BEFORE invoking any external submission. Even a
       # transport failure leaves this exact run reserved until terminal proof.
       changes = acceptance(adapter.submit(order, payload, opts), order)
+
+      if changes["state"] == "rejected", do: Keyword.get(opts, :delivery_rejected, fn -> :ok end).()
 
       with {:ok, order} <- Journal.update(order, changes) do
         event(order, :acceptance, opts)

@@ -58,7 +58,7 @@ defmodule SymphonyElixir.TestRun do
           issue.state == "Todo (AI)" or
             (plan["scenario"] in ["po_incoming", "po_aggregation"] and issue.state in ["Backlog", "Todo", "Definiert"]) or
             (plan["scenario"] == "po_aggregation" and YoloOperations.recovering_origin?(issue)) or
-            (plan["scenario"] in ["po_handoff", "po_followup"] and issue.state in ["BLOCKER", "Review"])
+            (plan["scenario"] in ["po_handoff", "po_followup"] and issue.state in ["BLOCKER", "Yolo Review"])
 
         state_allowed and Delegation.start_allowed?(issue, plan, journal)
       else
@@ -592,7 +592,8 @@ defmodule SymphonyElixir.TestRun do
     cond do
       fixture["po_aggregation"] -> "Umsetzungsticket erstellt"
       fixture["po_incoming"] -> "Verworfen"
-      fixture["po_handoff"] -> fixture["initial_state"]
+      fixture["po_followup"] -> "Yolo Review"
+      fixture["po_handoff"] -> if(fixture["initial_state"] == "Yolo Review", do: "Review", else: fixture["initial_state"])
       true -> "Planung (AI)"
     end
   end
@@ -681,6 +682,18 @@ defmodule SymphonyElixir.TestRun do
     else
       {:error, _} = error -> error
       _ -> {:error, :test_runtime_query_failed}
+    end
+  end
+
+  @doc "The bounded handoff fixture checks the acceptance transport, not an implementation merge."
+  @spec review_fixture?(String.t()) :: boolean()
+  def review_fixture?(id) do
+    with "run" <- stage(),
+         {:ok, %{"scenario" => "po_handoff"} = plan} <- plan(),
+         {:ok, journal} <- journal(plan) do
+      Enum.any?(journal["fixtures"], &(&1["id"] == id and &1["po_handoff"] == true and &1["created"] == true and &1["deleted"] == false))
+    else
+      _ -> false
     end
   end
 end

@@ -100,7 +100,8 @@ defmodule SymphonyElixir.Yolo.ReviewContract do
   defp linked?(finding, operations, id) do
     Enum.any?(operations, fn operation ->
       operation["request"]["operation_key"] == finding["followup_operation_key"] and operation["done"] == true and
-        operation["request"]["kind"] == "followup" and id in (operation["request"]["origin_ids"] || [])
+        operation["request"]["kind"] == "followup" and id in (operation["request"]["origin_ids"] || []) and
+        (finding["category"] == "new_requirement" or operation["request"]["blocks_origins"] == true)
     end)
   end
 

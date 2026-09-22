@@ -3,6 +3,8 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  alias SymphonyElixir.Yolo.Operations, as: YoloOperations
+
   alias SymphonyElixir.Linear.{AppAuth, LocalState}
   alias SymphonyElixir.Linear.WriteContext
 
@@ -510,4 +512,8 @@ defmodule SymphonyElixir.Config do
   defp format_simple_config_error(other) do
     "Invalid WORKFLOW.md config: #{inspect(other)}"
   end
+
+  @doc "Effective ticket allowlist, including explicitly enabled journaled test-pipeline fixes."
+  @spec allowed_issue_ids() :: [String.t()] | nil
+  def allowed_issue_ids, do: YoloOperations.allowed_ids(settings!().tracker.app["allowed_issue_ids"])
 end

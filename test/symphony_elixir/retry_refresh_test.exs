@@ -81,23 +81,25 @@ defmodule SymphonyElixir.RetryRefreshTest do
     end)
   end
 
-  test "reconciliation preserves merge post-turn work and exit draining before terminal cleanup" do
-    {context, issue, workspace, state} = completion_fixture(:stale)
+  for handoff <- ["Review", "Yolo Review"] do
+    test "reconciliation preserves merge post-turn work and exit draining before #{handoff}" do
+      {context, issue, workspace, state} = completion_fixture(:stale)
 
-    ProjectContext.with_context(context, fn ->
-      terminal = %{issue | state: "Review"}
-      reconciled = Orchestrator.reconcile_issue_states_for_test([terminal], state)
-      assert File.dir?(workspace)
-      assert Map.has_key?(reconciled.running, issue.id)
-      assert MapSet.member?(reconciled.claimed, issue.id)
-      assert {:noreply, draining} = Orchestrator.handle_info({:DOWN, state.running[issue.id].ref, :process, self(), :normal}, reconciled)
-      Process.cancel_timer(draining.running[issue.id].exit_finalize_timer_ref)
-      assert Orchestrator.reconcile_issue_states_for_test([terminal], draining).running == draining.running
-      assert File.dir?(workspace)
-    end)
+      ProjectContext.with_context(context, fn ->
+        terminal = %{issue | state: unquote(handoff)}
+        reconciled = Orchestrator.reconcile_issue_states_for_test([terminal], state)
+        assert File.dir?(workspace)
+        assert Map.has_key?(reconciled.running, issue.id)
+        assert MapSet.member?(reconciled.claimed, issue.id)
+        assert {:noreply, draining} = Orchestrator.handle_info({:DOWN, state.running[issue.id].ref, :process, self(), :normal}, reconciled)
+        Process.cancel_timer(draining.running[issue.id].exit_finalize_timer_ref)
+        assert Orchestrator.reconcile_issue_states_for_test([terminal], draining).running == draining.running
+        assert File.dir?(workspace)
+      end)
+    end
   end
 
-  for next_state <- ["Merge (AI)", "Freigabe Implementierung", "Freigabe Review"] do
+  for next_state <- ["Merge (AI)", "Freigabe Implementierung", "Freigabe Review", "Yolo Review"] do
     test "completion preserves workspace in #{next_state}" do
       {context, issue, workspace, state} = completion_fixture(:missing)
 

@@ -79,7 +79,7 @@ defmodule SymphonyElixir.Config.Schema do
     def changeset(schema, attrs) do
       attrs =
         Map.update(attrs, "app", %{}, fn app ->
-          if is_map(app), do: Map.take(app, ~w(client_id client_secret_env workspace_id user_id allowed_issue_ids)), else: app
+          if is_map(app), do: Map.take(app, ~w(client_id client_secret_env workspace_id user_id allowed_issue_ids allow_yolo_followup_ids)), else: app
         end)
 
       attrs = Map.put(attrs, "advisory_agent_ids", advisory_ids(Map.get(attrs, "advisory_agent_ids", SymphonyElixir.ProjectContext.env("LINEAR_ADVISORY_AGENT_IDS"))))

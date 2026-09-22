@@ -84,4 +84,35 @@ defmodule SymphonyElixir.Yolo.Operations do
       end
     end)
   end
+
+  @doc "Expand an explicitly enabled isolated pipeline only through confirmed own acceptance fixes."
+  @spec allowed_ids([String.t()] | nil) :: [String.t()] | nil
+  def allowed_ids(ids) do
+    if is_list(ids) and Config.settings!().tracker.app["allow_yolo_followup_ids"] == true and not is_nil(Config.test_instance()) do
+      expand_allowed(ids)
+    else
+      ids
+    end
+  end
+
+  defp expand_allowed(ids) do
+    case related(ids) do
+      {:ok, operations} ->
+        children = operations |> Enum.filter(&owned_fix?(&1, ids)) |> Enum.map(& &1["issue_id"])
+
+        expanded = Enum.sort(Enum.uniq(ids ++ children))
+        if Enum.sort(ids) == expanded, do: expanded, else: expand_allowed(expanded)
+
+      _ ->
+        ids
+    end
+  end
+
+  defp owned_fix?(intent, ids) do
+    origins = intent["request"]["origin_ids"]
+
+    intent["done"] == true and intent["request"]["kind"] == "followup" and intent["request"]["blocks_origins"] == true and
+      is_list(origins) and origins != [] and Enum.all?(origins, &(&1 in ids)) and
+      is_map(intent["input"]) and intent["input"]["id"] == intent["issue_id"]
+  end
 end

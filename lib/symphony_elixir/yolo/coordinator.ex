@@ -3,9 +3,10 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   require Logger
   alias SymphonyElixir.{Config, ProjectContext, Tracker}
   alias SymphonyElixir.Linear.YoloAgent
-  alias SymphonyElixir.Yolo.{Admission, Completion, Group, Observation, Operations, ReviewReadiness, Runner, Store}
+  alias SymphonyElixir.Yolo.{Admission, Completion, Delivery, Dependencies, Group, Observation, Operations}
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Journal
+  alias SymphonyElixir.Yolo.{ReviewReadiness, Runner, Store}
 
   @spec tick(map(), [map()], keyword()) :: map()
   def tick(state, issues, opts \\ []) do
@@ -18,9 +19,16 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
     if is_binary(Config.yolo_agent_id()) do
       issues = recover_origins(state, issues, opts)
-      {issues, state} = admit(issues, state, opts)
 
-      schedule_groups(state, issues, opts)
+      case Dependencies.refresh(issues, opts) do
+        {:ok, issues} ->
+          {issues, state} = admit(issues, state, opts)
+          schedule_groups(state, issues, opts)
+
+        {:error, reason} ->
+          Logger.warning("YOLO dependencies unavailable project_root=#{ProjectContext.current().root} reason=#{inspect(reason)}")
+          state
+      end
     else
       state
     end
@@ -154,6 +162,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     issues =
       Enum.flat_map(issues, fn issue ->
         if Admission.eligible?(issue) and Admission.needed?(issue) and
+             (issue.state != "Backlog" or Dependencies.unblocked?(issue)) and
              not Group.terminal?(issue) and issue.id not in reserved and not Map.has_key?(state.running, issue.id) do
           [prepare_issue(issue, prepare)]
         else
@@ -183,7 +192,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
     if used < limit and not busy? and allowed? and not Map.has_key?(state.yolo_runs, group) do
       case prepare_group(group, members, opts) do
-        :run -> start(state, group, members, issues, opts)
+        {:run, pending} -> start(state, group, pending, issues, opts)
         _ -> state
       end
     else
@@ -197,13 +206,15 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp observe_group(group, members, opts) do
     with :ok <- Journal.available(group),
+         :ok <- Delivery.reconcile(group),
          {:ok, record} <- Store.read(group),
          true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
-         {:ok, observations, fingerprint} <- Observation.capture(members, record["observations"], opts),
-         {:ok, pending} <- Operations.pending(Enum.map(members, & &1.id)),
+         {:ok, observations, _fingerprint} <- Observation.capture(members, record["observations"], opts),
+         record = Delivery.migrate(record, observations),
+         {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          :ok <- Store.write(group, Map.put(record, "observations", observations)) do
-      same_epoch? = group != "review" or Map.get(record, "processed_epoch", 0) == opts[:review_epoch]
-      if pending == [] and record["processed"] == fingerprint and same_epoch?, do: :unchanged, else: :run
+      pending = Delivery.pending(members, observations, if(operations == [], do: record, else: Map.put(record, "processed", nil)))
+      if pending == [], do: :unchanged, else: {:run, pending}
     else
       {:error, reason} ->
         Logger.warning("YOLO observation failed group=#{group} reason=#{inspect(reason)}")

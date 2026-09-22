@@ -8,8 +8,8 @@ defmodule SymphonyElixir.TestRun.Scenario do
     additional =
       case plan["scenario"] do
         scenario when scenario in ["po_incoming", "po_aggregation"] -> ["Backlog", "Todo", "Definiert"]
-        "po_handoff" -> ["BLOCKER", "Review"]
-        "po_followup" -> ["Review"]
+        "po_handoff" -> ["BLOCKER", "Yolo Review"]
+        "po_followup" -> ["Yolo Review"]
         _ -> []
       end
 
@@ -53,6 +53,7 @@ defmodule SymphonyElixir.TestRun.Scenario do
 
   defp result_states(%{"scenario" => "po_incoming"}), do: ["Verworfen"]
   defp result_states(%{"scenario" => "po_aggregation"}), do: ["Umsetzungsticket erstellt"]
+  defp result_states(%{"scenario" => "po_handoff"}), do: ["Review"]
   defp result_states(%{"scenario" => "po_followup"}), do: ["Backlog"]
   defp result_states(_), do: []
 end

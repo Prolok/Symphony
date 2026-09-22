@@ -58,7 +58,7 @@ if json.loads((root/'plan.json').read_text()).get('scenario') in ('po_handoff','
     fixtures=fixtures+[
         dict(base,id='handoff-'+name,po_handoff=True,initial_state=name,
              handoff_receipt=dict(session_id='s-'+name,sha='a'*40,workspace='owned',report='actual test'))
-        for name in (('BLOCKER','Review') if json.loads((root/'plan.json').read_text()).get('scenario')=='po_handoff' else ('Review',))]
+        for name in (('BLOCKER','Yolo Review') if json.loads((root/'plan.json').read_text()).get('scenario')=='po_handoff' else ('Yolo Review',))]
     if scenario=='bad_handoff_receipt': fixtures[-1]['handoff_receipt'].pop('sha')
     if scenario=='bad_handoff_members': fixtures[-1]['initial_state']='BLOCKER'
 derived=[]

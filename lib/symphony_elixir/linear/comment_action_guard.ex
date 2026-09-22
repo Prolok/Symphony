@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Linear.CommentActionGuard do
   @moduledoc "Fresh comment checks on Symphony's existing forward state action path."
   alias SymphonyElixir.Linear.YoloAgent, as: YoloAgent
+  alias SymphonyElixir.Yolo.Handoff, as: Handoff
   alias SymphonyElixir.Yolo.Scope, as: YoloScope
 
   alias SymphonyElixir.{CommentCheckpoint, Config}
@@ -53,6 +54,18 @@ defmodule SymphonyElixir.Linear.CommentActionGuard do
     end
   end
 
+  defp authorize(%{state: "Yolo Review"} = issue, id, target, guard) do
+    cond do
+      target == "Yolo Review" -> authorize_group(issue, id, guard)
+      target != "Review" -> {:error, :yolo_review_monotone}
+      not Handoff.authorized?(id) -> {:error, :yolo_review_handoff_required}
+      true -> authorize_group(issue, id, guard)
+    end
+  end
+
+  defp authorize(%{state: "Merge (AI)"} = issue, _id, "Review", _guard) when is_binary(issue.delegate_id),
+    do: {:error, :delegated_merge_requires_yolo_review}
+
   defp authorize(issue, id, target, guard) do
     if YoloScope.current() do
       authorize_group(issue, id, guard)
@@ -75,7 +88,7 @@ defmodule SymphonyElixir.Linear.CommentActionGuard do
   end
 
   defp allowed_issue?(id) do
-    case Config.settings!().tracker.app["allowed_issue_ids"] do
+    case Config.allowed_issue_ids() do
       nil -> true
       ids -> id in ids
     end

@@ -304,7 +304,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   defp app_binding, do: Config.settings!().tracker.app
 
-  defp allowed_issue?(id), do: is_nil(app_binding()["allowed_issue_ids"]) or id in app_binding()["allowed_issue_ids"]
+  defp allowed_issue?(id), do: is_nil(Config.allowed_issue_ids()) or id in Config.allowed_issue_ids()
 
   defp last_successful_scan(issue) do
     case CommentInbox.read(app_binding(), issue) do

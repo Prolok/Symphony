@@ -7,14 +7,14 @@ defmodule SymphonyElixir.TestRun.PoHandoff do
 
   @spec fixture(map(), map()) :: map()
   def fixture(fixture, %{"scenario" => "po_handoff"} = plan) do
-    if fixture["initial_state"] in ["BLOCKER", "Review"] do
+    if fixture["initial_state"] in ["BLOCKER", "Yolo Review"] do
       description =
         case fixture["initial_state"] do
           "BLOCKER" ->
             "Isolierte Betreibergrenze: Eine echte externe Betreiberabnahme fehlt. Sie kann in diesem Lauf nicht erbracht werden. Keine technischen Prüfungen als Ersatz ausgeben. Ursache und benötigten externen Beleg konkret dokumentieren und über symphony_yolo_action an den konfigurierten Menschen übergeben; BLOCKER erhalten. Keine neuen Tickets, keine Quelländerung."
 
-          "Review" ->
-            "Fachliche Abnahme des aktuellen gemergten Dummy-Stands: Der getrennte PO-Checkout muss einen vollständigen Git-Commit als HEAD besitzen und git status --porcelain muss sauber sein. Diese beiden Anforderungen mit dem versionierten Projekt-Skill aus dem gebundenen Prüfcheckout prüfen. SHA, Skillbindung, ausgeführte Befehle und Einschränkungen gemäß WORKFLOW_YOLO_AGENT.md dokumentieren und symphony_yolo_action(kind=handoff) mit report und strukturiertem review-Beleg verwenden. Der Status bleibt Review. Keine weitere Produktanforderung, keine neuen Tickets, keine Quelländerung."
+          "Yolo Review" ->
+            "Fachliche Abnahme des aktuellen gemergten Dummy-Stands: Der getrennte PO-Checkout muss einen vollständigen Git-Commit als HEAD besitzen und git status --porcelain muss sauber sein. Diese beiden Anforderungen mit dem versionierten Projekt-Skill aus dem gebundenen Prüfcheckout prüfen. SHA, Skillbindung, ausgeführte Befehle und Einschränkungen gemäß WORKFLOW_YOLO_AGENT.md dokumentieren und symphony_yolo_action(kind=handoff) mit report und strukturiertem review-Beleg verwenden. Nach bestandener Prüfung wechselt der Status nach Review. Diese registrierte Fixture prüft den Übergabetransport, keinen Implementierungsmerge; keine Merge-Evidenz erfinden. Keine weitere Produktanforderung, keine neuen Tickets, keine Quelländerung."
         end
 
       description = description <> knowledge_probe(fixture, plan)
@@ -26,7 +26,7 @@ defmodule SymphonyElixir.TestRun.PoHandoff do
 
   def fixture(fixture, _plan), do: fixture
 
-  defp knowledge_probe(%{"initial_state" => "Review"}, %{"openclaw_knowledge_question" => question}) when is_binary(question) do
+  defp knowledge_probe(%{"initial_state" => "Yolo Review"}, %{"openclaw_knowledge_question" => question}) when is_binary(question) do
     "\nZusätzlicher OpenClaw-Wissensnachweis in genau dieser Symphony-Sitzung: " <>
       question <>
       "\nNutze ausschließlich freigegebene Wissensquellen. Nenne Antwort und Quelle im Übergabebericht; keine Secrets. " <>
@@ -47,9 +47,9 @@ defmodule SymphonyElixir.TestRun.PoHandoff do
   def probe(_, fixture), do: {:ok, fixture}
 
   defp check_receipt({:ok, %{"attempt" => %{"session_id" => session, "completed" => completed, "sha" => sha, "workspace" => path}}}, issue, fixture) do
-    if is_binary(completed[fixture["id"]]) and is_nil(issue["delegate"]) and
+    if is_binary(completed[fixture["id"]]) and ownership?(issue, fixture) and
          get_in(issue, ["assignee", "id"]) == Config.human_handoff_id() and
-         get_in(issue, ["state", "name"]) == fixture["initial_state"] do
+         get_in(issue, ["state", "name"]) == target(fixture) do
       group = if fixture["initial_state"] == "BLOCKER", do: "blocker", else: "review"
 
       receipt = %{
@@ -68,4 +68,9 @@ defmodule SymphonyElixir.TestRun.PoHandoff do
 
   defp check_receipt({:ok, _}, _issue, fixture), do: {:ok, fixture}
   defp check_receipt(error, _, _), do: error
+  defp target(%{"po_followup" => true}), do: "Yolo Review"
+  defp target(%{"initial_state" => "Yolo Review"}), do: "Review"
+  defp target(fixture), do: fixture["initial_state"]
+  defp ownership?(issue, %{"po_followup" => true}), do: get_in(issue, ["delegate", "id"]) == Config.yolo_agent_id()
+  defp ownership?(issue, _), do: is_nil(issue["delegate"])
 end

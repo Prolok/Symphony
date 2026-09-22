@@ -55,6 +55,25 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
     end
   end
 
+  @spec destination(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def destination(agent, opts) do
+    key = "agent:#{agent}:main"
+
+    with :ok <- preflight(agent, opts),
+         {:ok, %{"sessions" => sessions}} when is_list(sessions) <- rpc("sessions.list", %{"agentId" => agent, "search" => key, "limit" => 100}, opts),
+         [session] <- Enum.filter(sessions, &(&1["key"] == key)),
+         %{"channel" => channel, "to" => to} = route <- session["deliveryContext"],
+         true <- is_binary(channel) and channel not in ["", "webchat", "internal"] and is_binary(to) and to != "" do
+      {:ok, route |> Map.take(~w(channel to accountId threadId)) |> Map.put("sessionKey", key)}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :openclaw_normal_channel_unavailable}
+    end
+  end
+
+  @spec notify(map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def notify(destination, message, opts), do: rpc("send", Map.put(destination, "message", message), opts)
+
   defp rpc(method, params, opts) do
     raw = Jason.encode!(params)
     args = ["gateway", "call", method, "--params", raw, "--json", "--timeout", "10000", "--port", "18789"]

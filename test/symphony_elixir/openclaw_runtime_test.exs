@@ -7,6 +7,9 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
   alias SymphonyElixir.Yolo.{Completion, Coordinator, OpenClaw, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, Recovery, ToolBridge, Transport}
 
+  defp run_group(group, issues, project, opts), do: Runner.run(group, issues, project, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
+  defp tick(state, issues, opts), do: Coordinator.tick(state, issues, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
+
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
     root = Path.dirname(Workflow.workflow_file_path())
@@ -151,7 +154,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
     logs =
       ExUnit.CaptureLog.capture_log(fn ->
-        assert :ok = Runner.run("incoming", issues, issues, Keyword.merge(opts, transport: transport(handler), tool_opts: tool_opts))
+        assert :ok = run_group("incoming", issues, issues, Keyword.merge(opts, transport: transport(handler), tool_opts: tool_opts))
       end)
 
     assert_receive {:submitted, id}
@@ -167,14 +170,14 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, record} = Store.read("incoming")
     assert is_binary(record["processed"])
     assert map_size(record["attempt"]["completed"]) == 3
-    assert {:error, :yolo_group_changed} = Runner.run("incoming", issues, issues, opts)
+    assert {:error, :yolo_group_changed} = run_group("incoming", issues, issues, opts)
   end
 
   test "preflight failures retain every member's issue and session context", %{issues: issues, context: context, opts: opts} do
     logs =
       ExUnit.CaptureLog.capture_log(fn ->
         assert {:error, :openclaw_binary_missing} =
-                 Runner.run("incoming", issues, issues, Keyword.put(opts, :transport, fn _ -> {:error, :openclaw_binary_missing} end))
+                 run_group("incoming", issues, issues, Keyword.put(opts, :transport, fn _ -> {:error, :openclaw_binary_missing} end))
       end)
 
     assert {:ok, nil} = Journal.read("incoming")
@@ -203,16 +206,16 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
       ProjectContext.with_context(loaded, fn ->
         {:ok, record} = Store.read("incoming")
-        Store.write("incoming", Map.put(record, "processed", nil))
+        Store.write("incoming", record |> Map.put("processed", nil) |> Map.drop(~w(deliveries decisions)))
 
         session = fn _, _, _, _ ->
           Enum.each(issues, fn issue -> assert :ok = Completion.invoke(%{"issue_id" => issue.id, "result" => "internal"}, opts) end)
           {:ok, %{session_id: "codex"}}
         end
 
-        assert :ok = Runner.run("incoming", issues, issues, Keyword.merge(opts, session: session, transport: denied))
+        assert :ok = run_group("incoming", issues, issues, Keyword.merge(opts, session: session, transport: denied))
         state = %Orchestrator.State{max_concurrent_agents: 1}
-        assert Coordinator.tick(state, issues, Keyword.put(opts, :transport, denied)).yolo_runs == %{}
+        assert tick(state, issues, Keyword.put(opts, :transport, denied)).yolo_runs == %{}
         assert :ok = Journal.member_available(hd(issues).id)
         assert :ok = Coordinator.stop(%{})
       end)
@@ -232,7 +235,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     interrupted = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:simulated_crash) end)
-    assert catch_throw(Runner.run("incoming", issues, issues, interrupted)) == :simulated_crash
+    assert catch_throw(run_group("incoming", issues, issues, interrupted)) == :simulated_crash
     assert_receive {:submitted, id}
     assert {:ok, order} = Journal.read("incoming")
     assert order["id"] == id
@@ -240,7 +243,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     refute order["writable"]
 
     for _ <- 1..3 do
-      assert {:error, :openclaw_unresolved_order} = Runner.run("incoming", issues, issues, interrupted)
+      assert {:error, :openclaw_unresolved_order} = run_group("incoming", issues, issues, interrupted)
     end
 
     refute_receive {:submitted, _}
@@ -259,7 +262,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       state = %Orchestrator.State{max_concurrent_agents: 1}
       sleeper = spawn(fn -> receive do: (:finish -> :ok) end)
       on_exit(fn -> Process.exit(sleeper, :kill) end)
-      restored = Coordinator.tick(state, issues, start: fn "incoming", _ -> {:ok, sleeper} end)
+      restored = tick(state, issues, start: fn "incoming", _ -> {:ok, sleeper} end)
       assert restored.claimed == MapSet.new(issues, & &1.id)
       assert map_size(restored.yolo_runs) == 1
     end)
@@ -288,7 +291,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     opts = Keyword.merge(opts, transport: transport(handler), openclaw_timeout_seconds: 0, openclaw_wait: fn _ -> throw(:pending) end)
-    assert catch_throw(Runner.run("incoming", issues, issues, opts)) == :pending
+    assert catch_throw(run_group("incoming", issues, issues, opts)) == :pending
     assert {:ok, %{"state" => "cancel_pending", "writable" => false, "abort_acknowledged" => true}} = Journal.read("incoming")
     assert {:error, :openclaw_unresolved_order} = Journal.available("incoming")
   end
@@ -299,7 +302,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       "agent.wait", %{"runId" => id} -> %{"runId" => id, "status" => "ok", "endedAt" => 2}
     end
 
-    assert {:error, :yolo_group_incomplete_or_workspace_changed} = Runner.run("incoming", issues, issues, Keyword.put(opts, :transport, transport(handler)))
+    assert {:error, :yolo_group_incomplete_or_workspace_changed} = run_group("incoming", issues, issues, Keyword.put(opts, :transport, transport(handler)))
     assert {:ok, %{"processed" => nil}} = Store.read("incoming")
   end
 
@@ -329,7 +332,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       end
 
       opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: wait, openclaw_timeout_seconds: if(test.scenario == :cancelled, do: 0, else: 3600))
-      assert catch_throw(Runner.run("incoming", issues, issues, opts)) == :observed
+      assert catch_throw(run_group("incoming", issues, issues, opts)) == :observed
     end
   end
 
@@ -451,7 +454,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:suspended) end)
-    assert catch_throw(Runner.run("incoming", issues, issues, opts)) == :suspended
+    assert catch_throw(run_group("incoming", issues, issues, opts)) == :suspended
     parent = self()
 
     watcher =
@@ -464,7 +467,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     run = %{pid: watcher, ids: Enum.map(issues, & &1.id), issues: issues}
     state = %Orchestrator.State{max_concurrent_agents: 1, yolo_runs: %{"incoming" => run}}
     withdrawn = Enum.map(issues, &%{&1 | delegate_id: nil})
-    result = Coordinator.tick(state, withdrawn, start: fn _, _ -> flunk("replacement start") end)
+    result = tick(state, withdrawn, start: fn _, _ -> flunk("replacement start") end)
     assert_receive :cancel_requested
     assert result.yolo_runs["incoming"].pid == watcher
     assert result.claimed == MapSet.new(issues, & &1.id)
@@ -478,7 +481,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:lost) end)
-    assert catch_throw(Runner.run("incoming", issues, issues, opts)) == :lost
+    assert catch_throw(run_group("incoming", issues, issues, opts)) == :lost
     assert {:ok, %{"state" => "unknown", "writable" => false, "error" => "connection_lost"}} = Journal.read("incoming")
   end
 
@@ -503,7 +506,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     on_exit(fn -> Process.exit(sleeper, :kill) end)
     run = %{pid: sleeper, ids: Enum.map(issues, & &1.id), issues: issues}
     state = %Orchestrator.State{max_concurrent_agents: 1, yolo_runs: %{"incoming" => run}}
-    result = Coordinator.tick(state, issues, start: fn _, _ -> flunk("unsafe replacement") end)
+    result = tick(state, issues, start: fn _, _ -> flunk("unsafe replacement") end)
     assert result.max_concurrent_agents == 0
     assert result.yolo_runs["incoming"].pid == sleeper
     start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
@@ -515,7 +518,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     order = %{"id" => "orphan", "group" => "incoming", "members" => members, "state" => "accepted", "writable" => true}
     assert :ok = Journal.write(order)
     state = %Orchestrator.State{max_concurrent_agents: 1}
-    result = Coordinator.tick(state, issues, start: fn _, _ -> {:error, :max_children} end)
+    result = tick(state, issues, start: fn _, _ -> {:error, :max_children} end)
     assert result.max_concurrent_agents == 0
     assert result.claimed == MapSet.new(issues, & &1.id)
     sleeper = spawn(fn -> receive do: (:finish -> :ok) end)
@@ -587,7 +590,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         %{"runId" => id, "status" => "error", "endedAt" => 3}
     end
 
-    assert {:error, :openclaw_run_failed_or_cancelled} = Runner.run("incoming", issues, issues, Keyword.put(opts, :transport, transport(handler)))
+    assert {:error, :openclaw_run_failed_or_cancelled} = run_group("incoming", issues, issues, Keyword.put(opts, :transport, transport(handler)))
     assert {:ok, %{"id" => id, "state" => "failed", "writable" => false, "abort_acknowledged" => true}} = Journal.read("incoming")
     assert_receive {:aborted, ^id}
   end
@@ -674,7 +677,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: wait)
-    assert {:error, :openclaw_generation_changed} = Runner.run("incoming", issues, issues, opts)
+    assert {:error, :openclaw_generation_changed} = run_group("incoming", issues, issues, opts)
     assert {:ok, %{"id" => "new-generation", "state" => "accepted"}} = Journal.read("incoming")
   end
 
@@ -708,7 +711,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
   test "live knowledge question is confined to the review fixture" do
     alias SymphonyElixir.TestRun.PoHandoff
     plan = %{"scenario" => "po_handoff", "openclaw_knowledge_question" => "Synthetic knowledge question?"}
-    review = PoHandoff.fixture(%{"initial_state" => "Review", "title" => "fixture"}, plan)
+    review = PoHandoff.fixture(%{"initial_state" => "Yolo Review", "title" => "fixture"}, plan)
     assert review["description"] =~ plan["openclaw_knowledge_question"]
     assert review["description"] =~ "Nenne Antwort und Quelle"
     blocker = PoHandoff.fixture(%{"initial_state" => "BLOCKER", "title" => "fixture"}, plan)
@@ -722,7 +725,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:reserved) end)
-    assert catch_throw(Runner.run("incoming", issues, issues, opts)) == :reserved
+    assert catch_throw(run_group("incoming", issues, issues, opts)) == :reserved
     {:ok, order} = Journal.read("incoming")
     order
   end
@@ -1146,7 +1149,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       {:error, :synthetic_stop}
     end
 
-    Coordinator.tick(%Orchestrator.State{max_concurrent_agents: 1}, issues,
+    tick(%Orchestrator.State{max_concurrent_agents: 1}, issues,
       start: start,
       transport: transport(handler),
       openclaw_wait: fn _ -> throw(:observed) end
@@ -1182,7 +1185,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
 
     opts = Keyword.merge(opts, transport: transport, recipient: self())
-    assert {:error, :openclaw_request_rejected_before_acceptance} = Runner.run("incoming", issues, issues, opts)
+    assert {:error, :openclaw_request_rejected_before_acceptance} = run_group("incoming", issues, issues, opts)
     assert_receive {:yolo_event, "incoming", %{event: :failed, message: message}}
     assert message =~ "Vor Annahme abgelehnt (INVALID_REQUEST/cwd_reserved)"
     assert {:ok, rejected} = Journal.read("incoming")
@@ -1196,7 +1199,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert record["processed"] == nil
     assert record["retry_at"] > System.system_time(:millisecond)
     assert {:ok, ^rejected} = Journal.update(rejected, %{"state" => "accepted", "writable" => true})
-    assert {:error, :openclaw_request_rejected_before_acceptance} = Runner.run("incoming", issues, issues, opts)
+    assert {:error, :openclaw_request_rejected_before_acceptance} = run_group("incoming", issues, issues, opts)
     assert {:ok, next} = Journal.read("incoming")
     refute next["id"] == rejected["id"]
     assert {:ok, ^rejected} = Journal.history("incoming", rejected["id"])
@@ -1424,7 +1427,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
     try do
       assert {:error, :openclaw_journal_corrupt} =
-               Runner.run("incoming", issues, issues, Keyword.merge(opts, transport: transport(handler), openclaw_wait: wait))
+               run_group("incoming", issues, issues, Keyword.merge(opts, transport: transport(handler), openclaw_wait: wait))
 
       assert File.read!(Journal.path("incoming")) == "corrupt-journal"
       assert {:error, :openclaw_journal_corrupt} = Journal.member_available(hd(issues).id)

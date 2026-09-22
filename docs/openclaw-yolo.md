@@ -411,6 +411,35 @@ Der bestehende gebundene Routineexecutor ersetzt dieses Szenario nur, wenn er
 genau diese Nachweise unterstützt. Fehlende fällige Testbereitstellung wird im
 Workpad als Betreiberpflicht übergeben, ohne neue persönliche Nutzerabnahme.
 
+## Seltene Eskalationen
+
+`kind=escalate` erhält `Yolo Review` und beendet den Lauf als Warteentscheidung.
+BLOCKER-Übergaben vor der Schlussphase bleiben möglich. Der strukturierte
+`escalation`-Beleg enthält `cause`, `attempts`, `proposal` und `decision`.
+Nur bei aktiviertem OpenClaw wird eine Nachricht versandt. Der Adapter fragt
+`sessions.list` für exakt `agent:<konfigurierter-agent>:main` ab und verwendet
+nur dessen vorhandenen `deliveryContext` (Kanal, Empfänger, optional Konto/Thread).
+Kein frei gewählter Empfänger und kein Ersatzkanal; fehlende/mehrdeutige Route
+bleibt ein konkreter Fehler. Gewöhnliche PO-Aufträge behalten `deliver=false`.
+
+Die Nachricht enthält Ticketlink, Ursache, Versuche, Lösungsvorschlag und
+benötigte Entscheidung. Eine dauerhafte Vorschlags-ID bindet den genauen Inhalt
+an Ticket und Agent. Vor `send` wird die Absicht samt Route gespeichert, danach
+nur ein bestätigtes `messageId` als Versandbeleg. Ein verlorener Ausgang wird
+nicht erneut versandt, auch nach Neustart oder Ablauf fremder Dedup-Caches.
+Ein identischer bestätigter Vorschlag ist wirkungslos. Versandbestätigung ist
+kein Beleg für menschliches Lesen oder Zustimmung. Ein OK im normalen Kanal
+bezieht sich ausschließlich auf diesen Vorschlag; der bestehende OpenClaw-Agent
+muss die konkrete menschliche Entscheidung am Ticket nachvollziehbar festhalten.
+Symphony führt keine Aktion aufgrund eines unkorrelierten OK aus und erteilt
+keine zusätzliche Zugangs-/Deploymentfreigabe.
+
+Schnittstellenbeleg am unterstützten Tag: [sessions.list-Schema](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/sessions-list.ts),
+[gespeicherte Zustellroute](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/session-utils.types.ts),
+[SendParamsSchema](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/agent.ts).
+Der Livebeleg prüft normale Route, Empfang und konkrete Vorschlagskorrelation;
+Fixtures belegen nur die technische Bindung und Wiederholungssperre.
+
 ## Standardtests und separater Live-Nachweis
 
 Im expliziten OpenClaw-Livetest fragt der Testrunner den Linear-Abnahmestand
@@ -495,5 +524,5 @@ Folgefehler, wiederkehrende Fehlerklassen und unnötige Wiederholungen. Gewollte
 Nicht-YOLO-Freigaben zählen nicht als Störung. Künftige Skillverbesserungen nur bei
 wiederverwendbarer Prüflücke und positivem Aufwand/Nutzen über reguläre Fix-/PR-
 Verfahren vorschlagen; Einzelregressionen und neue Anforderungen getrennt behandeln.
-Fixes erhalten ihre eigene Pipeline/Abnahme; der Ursprung wird nach bestätigten
-Folgeanlagen sofort an den Menschen übergeben und dafür nicht erneut abgenommen.
+Fixes erhalten ihre eigene Pipeline. Der Ursprung wartet in Yolo Review, bis
+sämtliche Folgefixes gemeinsam geprüft sind; erst dann Review ohne Delegation.

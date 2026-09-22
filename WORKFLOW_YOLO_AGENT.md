@@ -47,7 +47,8 @@ YOLO-/Skip-Behandlung.
   normaler Sitzungsabschluss allein bestätigt keine Bearbeitung.
   Offene Anlageoperationen sperren die Bestätigung und den Sammelabschluss;
   nimm sie mit demselben Auftrag wieder auf. Eine belegte menschliche
-  BLOCKER-Übergabe bleibt mit dokumentierten offenen Operationen möglich.
+  BLOCKER-Übergabe oder Eskalation unter Erhalt von Yolo Review bleibt mit
+  dokumentierten offenen Operationen möglich; sie bestätigt keinen Anlageerfolg.
   Journalisierte Aggregationsursprünge können dafür im Eingangslauf bereits
   `Umsetzungsticket erstellt` sein: nur die offene Operation unverändert
   abschließen, diese Ursprünge nicht erneut fachlich bewerten oder umplanen.
@@ -66,7 +67,13 @@ YOLO-/Skip-Behandlung.
 
 ## Eingangsgruppe: Backlog, Todo und Definiert
 
-Bewerte zuerst **alle** Mitglieder gemeinsam auf fachlichen Nutzen, Relevanz im
+Geblockte Backlog-Tickets bleiben unberührt: weder bewerten, verwerfen noch
+aggregieren, bis alle wirksamen Vorgänger abgeschlossen sind. Symphony lädt
+Relationen und Vorgängerzustände vollständig frisch nach; auch ohne Änderung
+am Ursprung ermöglicht eine Freigabe die erstmalige Bewertung. Fehler oder
+unvollständige Relationen gelten nicht als Freigabe.
+
+Bewerte zuerst **alle ausführbaren** Mitglieder gemeinsam auf fachlichen Nutzen, Relevanz im
 aktuellen Code und bereits erfüllte Anforderungen. Irrelevante Anforderungen mit
 knapper Begründung unter Erwähnung des konfigurierten Menschen nach `Verworfen`
 verschieben. Der tatsächliche Status heißt `Verworfen`.
@@ -106,18 +113,25 @@ setzen und die Agentdelegation entfernen. Der Status bleibt `BLOCKER`, solange
 die Ursache besteht. Diese Übergabe beendet die Betreuung und das Warten der
 Schlussabnahme darauf.
 
-## Review: gemeinsame fachliche Schlussabnahme
+## Yolo Review: gemeinsame fachliche Schlussabnahme
 
-Symphony startet diesen Lauf erst ohne weitere erwartete delegierte Arbeit.
-Prüfe diese Voraussetzung vor Entscheidungen erneut; Fehler sind kein Beleg
-für einen leeren Bestand. Übergebene BLOCKER, verworfene/abgebrochene Tickets
-und abgeschlossene Aggregationsursprünge zählen nicht als erwartete Arbeit.
+Agentendelegierte Tickets gelangen nach Merge in `Yolo Review`. `Review` ist
+terminal und wird nicht mehr vom PO bearbeitet. Aus `Yolo Review` ist ausschließlich
+der geprüfte Abschluss nach `Review` zulässig; kein BLOCKER-, Coding- oder
+Fertig-Rücksprung. Menschlicher Delegationsentzug beendet weiterhin die Betreuung.
 
-Übernimm die offenen Review-Nachweise gemäß den Phasenpflichten in `WORKFLOW.md`.
-Fehlt die autorisierte Betriebsbereitstellung, bleibt dies eine offene
-Review-Abnahme mit konkreter Einschränkung und benötigter Betreiberaktion;
-kein rückwirkender Testauftrag am ungemergten Stand. Verfügbare Prüfungen
-abschließen und den bestehenden Schlussübergabe-/Finding-Pfad nutzen.
+Symphony bildet zusammenhängende Abnahmeketten aus echten Linear-Abhängigkeiten.
+Offene externe Vorgänger und noch nicht gemergte Folgefixes sperren die gesamte
+betroffene Kette. Sind alle Mitglieder gemergt in `Yolo Review`, bleiben interne
+Kanten erhalten und die gemeinsame Prüfung beginnt. Unabhängige Projektarbeit
+sperrt sie nicht. Vor Entscheidungen Kette und Mergebelege frisch bestätigen;
+Vorgänger vor den abhängigen Ursprüngen abschließen. Teilübergaben erhalten.
+
+Offene Abnahmen sind hier fällig. Fehlende autorisierte Bereitstellung bleibt
+eine offene Pflicht in `Yolo Review`. Verfügbare Prüfungen abschließen, Ursache
+und konkreten Lösungsvorschlag festhalten und `kind=escalate` verwenden. Das
+beendet diesen Lauf als Warteentscheidung, ohne Erfolg oder Statuswechsel zu
+behaupten. Unveränderte Hindernisse lösen keinen weiteren Auftrag aus.
 
 Prüfe den dokumentierten gemergten Stand anhand der Anforderungen aller
 Review-Mitglieder und ihres gemeinsamen End-to-End-Verhaltens. Verbindlicher
@@ -129,13 +143,13 @@ ausschließlich aus demselben Checkout. Agentenwechsel, Memory und private
 Prüfkataloge ersetzen oder verändern diesen Maßstab nicht. Fehlender, unlesbarer,
 unversionierter oder falsch gebundener Skill erlaubt keine gültige Abnahme.
 Dokumentiere die Einschränkung; bei einer externen Voraussetzung nutze den
-bestehenden BLOCKER-Pfad. Keine spontane Skillreparatur im Abnahmecheckout.
+Eskalationspfad unter Erhalt von `Yolo Review`. Keine spontane Skillreparatur im Abnahmecheckout.
 
 Baue das Produkt und führe die für die Anforderungen relevanten Skillprüfungen
 aus. Berichte konkret: Prüfstand, tatsächlich ausgeführte Prüfungen mit Ergebnis
 und Belegen, Findings, Einschränkungen (einschließlich nicht ausgeführter Prüfungen)
-und Folgeentscheidung. Vollständige Fehlerfreiheit ist kein Abschlusskriterium;
-ausgelagerte Mängel müssen erkennbar bleiben.
+und Folgeentscheidung. Abnahmesperrende Mängel und fehlende Pflichtbelege verhindern den Abschluss.
+Neue Anforderungen außerhalb des vereinbarten Ziels können begründet ausgelagert werden.
 
 Pro Finding Reproduktion, Ist-/Sollverhalten und Beleg festhalten. Beantworte mit
 Begründung: War es mit damaligem Wissen kostengünstig in PreReview erkennbar?
@@ -156,8 +170,11 @@ keine Ticketchronik im Prompt. Zusammengehörige Korrekturen mit Reproduktion,
 Sollverhalten und Validierung sinnvoll bündeln; neue Anforderungen erkennbar
 abgrenzen. Operationsschlüssel bei Wiederaufnahme erhalten.
 
-Für `kind=handoff` im Status `Review` zusätzlich zum lesbaren `report` den
+Für `kind=handoff`, `kind=wait` oder `kind=escalate` in `Yolo Review` zusätzlich zum lesbaren `report` den
 strukturierten `review`-Beleg übergeben:
+
+Fehlt der gebundene Prüfvertrag, ist ausschließlich `kind=escalate` mit konkreter
+`escalation` und ehrlichem Bericht ohne erfundenen Prüfbeleg zulässig.
 
 ```json
 {
@@ -182,22 +199,25 @@ zeigt die drei unterschiedlichen Lernentscheidungen. Der strukturierte Beleg wir
 im selben Workpad gespeichert. Freitext über `symphony_yolo_complete` ersetzt
 die Review-Übergabe nicht; echte BLOCKER-Berichte bleiben ohne Abnahmebeleg möglich.
 
-Bei Findings neue Fix-/Folge-Tickets im Backlog desselben Projekts mit vollständigen
+Bei abnahmesperrenden Findings Fix-Tickets im Backlog desselben Projekts mit
 Anforderungen, Validierung, `symphony-generated` und Ursprungverknüpfung anlegen.
-Zusammengehörige Findings dürfen gebündelt werden. Erst nach bestätigter Anlage
-und Verknüpfung die Ursprünge **sofort** an den konfigurierten Menschen übergeben
-und die Delegation entfernen. Nicht auf den Fix warten, keine erneute Prüfung
-des Ursprungs. Der Fix erhält am Ende seines eigenen Durchlaufs eine Abnahme.
-Mängelfreie Tickets ebenso übergeben. Alle Ursprünge bleiben in `Review`;
-`Fertig` wird nie automatisch gesetzt. Berichte unterscheiden geprüfte Erfolge
-und offene ausgelagerte Mängel ausdrücklich.
+`blocks_origins=true` erzeugt zusätzlich die gerichtete Linear-Relation
+**Folgefix blockiert Ursprung**. Keine Gegenkante, kein Text als Relationsersatz.
+Nach bestätigter Anlage und Verknüpfung `kind=wait` mit Prüf-/Lernbeleg aufrufen;
+Ursprung und Delegation bleiben in `Yolo Review`. Sobald auch der Fix dort ankommt,
+prüft der nächste Lauf die gesamte Kette erneut. Weitere Findings dürfen die
+Kette verlängern. Ein neuer Anforderungsscope (`new_requirement`) darf ohne
+Abnahmesperre ausgelagert werden, mit konkreter Begründung.
+
+Erst nach bestandenen Prüfungen, erledigten Pflichtnachweisen und abgeschlossenen
+Vorgängern `kind=handoff` nutzen. Es setzt `Review`, den konfigurierten Menschen
+und entfernt die Delegation gemeinsam. Kein automatisches `Fertig`.
 
 ## Neue Folge-Tickets
 
-Mit `--yolo` **und** konfiguriertem Agenten neue Fix-/Folge-Tickets an diesen
-Agenten delegieren und den ersten konfigurierten Menschen zuweisen. Ohne `--yolo`
-entstehen sie im Backlog ohne Assignee und ohne Delegation, auch aus einer
-YOLO-Schlussabnahme. `--yolo` ohne Agent erfindet keine Agentidentität.
+Mit konfiguriertem Agenten erhalten Followups immer diesen Agenten und den ersten
+konfigurierten Menschen, unabhängig von `--yolo`. Ohne Agentenkonfiguration
+entstehen sie ohne diese Zuweisungen; keine Agentidentität erfinden.
 Nutze für Anlage und Verknüpfung `symphony_yolo_action` mit `kind=followup`,
 `origin_ids`, dauerhaft gleichem `operation_key`, vollständiger `description`
 und `validation`; `blocked_by` nennt vorausgehende Issue-IDs. Verwende für
@@ -207,7 +227,7 @@ keine Ersatzanlage nach unklarem Schreibausgang. Der Aggregationspfad überträg
 Abhängigkeiten und schließt Ursprünge erst nach bestätigten Links; das neue
 Ticket bleibt für die folgende Eingangsentscheidung im Backlog.
 
-Für Review-/BLOCKER-Übergaben `kind=handoff` mit `issue_id` und tatsächlichem
+Für erfolgreiche Schlussabnahme und BLOCKER-Übergaben `kind=handoff` mit `issue_id` und tatsächlichem
 `report` nutzen. Das Tool erhält das Workpad, prüft den Eingang frisch und
 setzt den Menschen mit leerer Delegation. Es bestätigt zugleich das Mitglied;
 Bei einem externen BLOCKER hält das Tool auch offene Anlageoperationen mit ihren
@@ -220,3 +240,24 @@ beendete Betreuung verlangen. Fehler nie als erfolgreichen Abschluss melden.
 Aggregation ist die Fortführung übernommener Eingangsarbeit und übernimmt deren
 Delegation unabhängig vom Startmodus. Labelauflösung und erfolgreiche
 Verknüpfung müssen vor einer Erfolgsmeldung bestätigt sein.
+
+## Zustellung und seltene Eskalation
+
+Symphony speichert die Zustellung pro Mitglied und fachlicher Phase dauerhaft
+vor dem Modellaufruf. Unveränderte Tickets, Status-Rundläufe, Gruppenwechsel,
+eigene Workpad-Ausgaben und Neustarts erzeugen keine erneuten Aufträge. Neue
+Inhalte, externe Kommentare oder wirksame Kettenänderungen erlauben neue Arbeit.
+Zustellung ist kein Abschlussbeleg; offene Entscheidungen bleiben sichtbar.
+Unklare OpenClaw-Annahme bleibt reserviert, ein belegter Nichtstart darf denselben
+technischen Retrypfad nutzen. Keine Ersatzanlage oder eigene Neuzustellung.
+
+Für echte externe Hindernisse `kind=escalate` (in `Yolo Review`) bzw. die bestehende
+BLOCKER-Übergabe mit `escalation: {cause, attempts, proposal, decision}` verwenden.
+Alle vier Werte konkret ausfüllen. Bei aktiviertem OpenClaw sendet Symphony
+Ticketlink, Ursache, Versuche, Lösungsvorschlag, benötigte Entscheidung und
+Vorschlags-ID an den bereits gespeicherten normalen Kanal des gebundenen Agenten.
+Routineberichte werden nicht versandt. Ein unklarer Versand bleibt journalisiert
+und wird nicht blind wiederholt. Ohne OpenClaw bleibt die Übergabe im Workpad.
+Ein OK im normalen Kanal bezieht sich nur auf den genannten Vorschlag; der
+OpenClaw-Agent hält dessen konkrete Entscheidung am Ticket fest. Keine pauschale
+Zugangs-/Deploymentfreigabe und keine automatische Ausführung unkorrelierter OKs.

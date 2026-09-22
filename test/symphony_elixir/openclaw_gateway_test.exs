@@ -66,4 +66,39 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
 
     assert {:ok, %{}} = Gateway.history(order, transport: transport)
   end
+
+  test "escalations resolve only the bound normal session and send with a stable key" do
+    route = %{"channel" => "signal", "to" => "human", "accountId" => "account"}
+
+    transport = fn
+      ["--version"] ->
+        {:ok, "OpenClaw 2026.9.4"}
+
+      ["gateway", "call", "agents.list" | _] ->
+        {:ok, Jason.encode!(%{"agents" => [%{"id" => "po"}]})}
+
+      ["gateway", "call", "sessions.list", "--params", raw | _] ->
+        assert Jason.decode!(raw)["agentId"] == "po"
+        {:ok, Jason.encode!(%{"sessions" => [%{"key" => "agent:po:main", "deliveryContext" => route}, %{"key" => "agent:other:main", "deliveryContext" => %{"to" => "foreign"}}]})}
+
+      ["gateway", "call", "send", "--params", raw | _] ->
+        params = Jason.decode!(raw)
+        assert params["to"] == "human"
+        assert params["idempotencyKey"] == "proposal-id"
+        assert params["message"] == "concrete proposal"
+        refute Map.has_key?(params, "deliver")
+        {:ok, Jason.encode!(%{"messageId" => "message", "channel" => "signal"})}
+    end
+
+    assert {:ok, destination} = Gateway.destination("po", transport: transport)
+    assert destination == Map.put(route, "sessionKey", "agent:po:main")
+    assert {:ok, %{"messageId" => "message"}} = Gateway.notify(Map.put(destination, "idempotencyKey", "proposal-id"), "concrete proposal", transport: transport)
+
+    missing = fn
+      ["gateway", "call", "sessions.list" | _] -> {:ok, Jason.encode!(%{"sessions" => []})}
+      args -> transport.(args)
+    end
+
+    assert {:error, :openclaw_normal_channel_unavailable} = Gateway.destination("po", transport: missing)
+  end
 end

@@ -393,7 +393,7 @@ defmodule SymphonyElixir.CoreTest do
     assert [[rule]] = Regex.scan(~r/^- Folge-Tickets über.*?(?=^- |\z)/msu, global_rules)
     rule = String.replace(rule, ~r/\s+/u, " ")
     assert rule =~ "symphony_yolo_action"
-    for contract <- ["kind=followup", "operation_key", "symphony-generated", "Projekt", "Backlog", "related", "blocked_by", "`--yolo` und Agentenkonfiguration"], do: assert(rule =~ contract)
+    for contract <- ["kind=followup", "operation_key", "symphony-generated", "Projekt", "Backlog", "related", "blocked_by", "unabhängig von `--yolo`"], do: assert(rule =~ contract)
     assert rule =~ "ohne bestätigte Labels/Links keinen Erfolg melden"
   end
 
@@ -905,6 +905,7 @@ defmodule SymphonyElixir.CoreTest do
       "Merge (AI)",
       "BLOCKER",
       "Abbruch (AI)",
+      "Yolo Review",
       "Review",
       "Fertig",
       "Abgebrochen"
@@ -12422,130 +12423,136 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner moves Merge (AI) issues to Review after a clean merge turn with merge evidence" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-agent-runner-merge-evidence-handoff-#{System.unique_integer([:positive])}"
-      )
+  for {initial, current, target} <- [{nil, nil, "Review"}, {nil, "agent", "Yolo Review"}, {"agent", nil, "Review"}] do
+    test "agent runner routes merge evidence using fresh delegation #{inspect({initial, current})}" do
+      target = unquote(target)
 
-    previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
-    previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-agent-runner-merge-evidence-handoff-#{System.unique_integer([:positive])}"
+        )
 
-    try do
-      template_repo = Path.join(test_root, "source")
-      workspace_root = Path.join(test_root, "workspaces")
-      codex_binary = Path.join(test_root, "fake-codex")
+      previous_memory_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+      previous_memory_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
 
-      File.mkdir_p!(template_repo)
-      File.write!(Path.join(template_repo, "README.md"), "# test")
-      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
-      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
-      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
-      System.cmd("git", ["-C", template_repo, "add", "README.md"])
-      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+      try do
+        template_repo = Path.join(test_root, "source")
+        workspace_root = Path.join(test_root, "workspaces")
+        codex_binary = Path.join(test_root, "fake-codex")
 
-      File.write!(codex_binary, """
-      #!/bin/sh
-      count=0
+        File.mkdir_p!(template_repo)
+        File.write!(Path.join(template_repo, "README.md"), "# test")
+        System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
+        System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
+        System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
+        System.cmd("git", ["-C", template_repo, "add", "README.md"])
+        System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
 
-      while IFS= read -r _line; do
-        count=$((count + 1))
-        case "$count" in
-          1)
-            printf '%s\\n' '{"id":1,"result":{}}'
-            ;;
-          2)
-            ;;
-          3)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-merge-evidence"}}}'
-            ;;
-          4)
-            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-evidence"}}}'
-            printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-merge-evidence","turn":{"id":"turn-merge-evidence"}}}'
-            ;;
-        esac
-      done
-      """)
+        File.write!(codex_binary, """
+        #!/bin/sh
+        count=0
 
-      File.chmod!(codex_binary, 0o755)
+        while IFS= read -r _line; do
+          count=$((count + 1))
+          case "$count" in
+            1)
+              printf '%s\\n' '{"id":1,"result":{}}'
+              ;;
+            2)
+              ;;
+            3)
+              printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-merge-evidence"}}}'
+              ;;
+            4)
+              printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-merge-evidence"}}}'
+              printf '%s\\n' '{"method":"turn/completed","params":{"threadId":"thread-merge-evidence","turn":{"id":"turn-merge-evidence"}}}'
+              ;;
+          esac
+        done
+        """)
 
-      write_workflow_file!(Workflow.workflow_file_path(),
-        tracker_kind: "memory",
-        workspace_root: workspace_root,
-        hook_after_create:
-          ~s(git init -b main . && git config user.name "Test User" && git config user.email "test@example.com" && cp #{Path.join(template_repo, "README.md")} README.md && git add README.md && git commit -m initial),
-        codex_command: "#{codex_binary} app-server",
-        max_turns: 3
-      )
+        File.chmod!(codex_binary, 0o755)
 
-      {:ok, state_agent} = Agent.start_link(fn -> "Merge (AI)" end)
-      parent = self()
+        write_workflow_file!(Workflow.workflow_file_path(),
+          tracker_kind: "memory",
+          workspace_root: workspace_root,
+          hook_after_create:
+            ~s(git init -b main . && git config user.name "Test User" && git config user.email "test@example.com" && cp #{Path.join(template_repo, "README.md")} README.md && git add README.md && git commit -m initial),
+          codex_command: "#{codex_binary} app-server",
+          max_turns: 3
+        )
 
-      recipient =
-        spawn(fn ->
-          review_handoff_test_recipient(parent, state_agent)
-        end)
+        {:ok, state_agent} = Agent.start_link(fn -> "Merge (AI)" end)
+        parent = self()
 
-      Application.put_env(:symphony_elixir, :memory_tracker_recipient, recipient)
+        recipient =
+          spawn(fn ->
+            review_handoff_test_recipient(parent, state_agent)
+          end)
 
-      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
-        "issue-merge-evidence-handoff" => [
-          """
-          ## Symphony Workpad
+        Application.put_env(:symphony_elixir, :memory_tracker_recipient, recipient)
 
-          ### Validierung
+        Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+          "issue-merge-evidence-handoff" => [
+            """
+            ## Symphony Workpad
 
-          - [x] Synthetisches Dienstpaket: isolierter Build und technische Tests grün
-          - [ ] Betreiber: Finale Installation/Produktabnahme am gemergten Paket; Quelle: Phasenvertrag; fällig: Review
+            ### Validierung
 
-          ### Verlauf
+            - [x] Synthetisches Dienstpaket: isolierter Build und technische Tests grün
+            - [ ] Betreiber: Finale Installation/Produktabnahme am gemergten Paket; Quelle: Phasenvertrag; fällig: Review
 
-          - 2026-05-29 18:18:00 CEST - Merge-Evidenz: PR #42 gemergt, Merge-Commit `abc1234`.
-          """
-        ]
-      })
+            ### Verlauf
 
-      state_fetcher = fn [_issue_id] ->
-        current_state = Agent.get(state_agent, & &1)
+            - 2026-05-29 18:18:00 CEST - Merge-Evidenz: PR #42 gemergt, Merge-Commit `abc1234`.
+            """
+          ]
+        })
 
-        {:ok,
-         [
-           %Issue{
-             id: "issue-merge-evidence-handoff",
-             identifier: "MT-MERGE-EVIDENCE",
-             title: "Merge handoff with evidence",
-             description: "Advance to review after explicit PR merge evidence",
-             state: current_state
-           }
-         ]}
+        state_fetcher = fn [_issue_id] ->
+          current_state = Agent.get(state_agent, & &1)
+
+          {:ok,
+           [
+             %Issue{
+               id: "issue-merge-evidence-handoff",
+               identifier: "MT-MERGE-EVIDENCE",
+               title: "Merge handoff with evidence",
+               description: "Advance to review after explicit PR merge evidence",
+               state: current_state,
+               delegate_id: unquote(current)
+             }
+           ]}
+        end
+
+        issue = %Issue{
+          id: "issue-merge-evidence-handoff",
+          identifier: "MT-MERGE-EVIDENCE",
+          title: "Merge handoff with evidence",
+          description: "Advance to review after explicit PR merge evidence",
+          state: "Merge (AI)",
+          delegate_id: unquote(initial),
+          url: "https://example.org/issues/MT-MERGE-EVIDENCE",
+          labels: []
+        }
+
+        original_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
+        assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+        assert_receive {:memory_tracker_state_update, "issue-merge-evidence-handoff", ^target}
+        assert target == Agent.get(state_agent, & &1)
+        assert Application.get_env(:symphony_elixir, :memory_tracker_comments) == original_comments
+        [body] = original_comments[issue.id]
+        assert Workpad.section_checklist_status(body, "Validierung", "Review") == :open
+      after
+        restore_app_env(:memory_tracker_comments, previous_memory_comments)
+        restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
+        File.rm_rf(test_root)
       end
-
-      issue = %Issue{
-        id: "issue-merge-evidence-handoff",
-        identifier: "MT-MERGE-EVIDENCE",
-        title: "Merge handoff with evidence",
-        description: "Advance to review after explicit PR merge evidence",
-        state: "Merge (AI)",
-        url: "https://example.org/issues/MT-MERGE-EVIDENCE",
-        labels: []
-      }
-
-      original_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
-      assert_receive {:memory_tracker_state_update, "issue-merge-evidence-handoff", "Review"}
-      assert "Review" == Agent.get(state_agent, & &1)
-      assert Application.get_env(:symphony_elixir, :memory_tracker_comments) == original_comments
-      [body] = original_comments[issue.id]
-      assert Workpad.section_checklist_status(body, "Validierung", "Review") == :open
-    after
-      restore_app_env(:memory_tracker_comments, previous_memory_comments)
-      restore_app_env(:memory_tracker_recipient, previous_memory_recipient)
-      File.rm_rf(test_root)
     end
   end
 
-  for due_phase <- ["Merge (AI)", "Review"] do
+  for due_phase <- ["Merge (AI)", "Yolo Review", "Review"] do
     @due_phase due_phase
     test "agent runner hands off clean Test AI with #{@due_phase} evidence and historical skipped review still open" do
       test_root =
@@ -12665,7 +12672,7 @@ defmodule SymphonyElixir.CoreTest do
         assert Application.get_env(:symphony_elixir, :memory_tracker_comments) == original_comments
 
         assert Workpad.section_checklist_status(workpad, "Validierung", "Merge (AI)") ==
-                 if(@due_phase == "Review", do: :deferred, else: :open)
+                 if(@due_phase in ["Review", "Yolo Review"], do: :deferred, else: :open)
 
         assert Workpad.section_checklist_status(workpad, "Validierung", "Review") == :open
       after

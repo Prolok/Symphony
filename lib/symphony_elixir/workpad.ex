@@ -149,8 +149,8 @@ defmodule SymphonyElixir.Workpad do
     [first_line | _] = String.split(item, "\n", parts: 2)
 
     length(Regex.scan(~r/fällig\s*:/iu, item)) == 1 and
-      case Regex.run(~r/; fällig: (Merge \(AI\)|Review)\s*$/u, first_line, capture: :all_but_first) do
-        ["Review"] -> true
+      case Regex.run(~r/; fällig: (Merge \(AI\)|Yolo Review|Review)\s*$/u, first_line, capture: :all_but_first) do
+        [later] when later in ["Review", "Yolo Review"] -> true
         ["Merge (AI)"] -> phase == "Test (AI)"
         _ -> false
       end

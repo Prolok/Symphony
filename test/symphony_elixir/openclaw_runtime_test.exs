@@ -694,9 +694,347 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     }
   end
 
+  defp terminal_evidence(order) do
+    history =
+      File.read!(Path.expand("../fixtures/openclaw/terminal-history.json", __DIR__))
+      |> String.replace("__SESSION_KEY__", order["session_id"])
+      |> String.replace("__RUN_ID__", order["id"])
+      |> Jason.decode!()
+
+    bytes = Jason.encode!(history)
+
+    evidence = %{
+      "version" => 2,
+      "kind" => "terminal_original",
+      "gateway_version" => "2026.9.4",
+      "binding" => rejection_evidence(order)["binding"],
+      "physical_session_id" => history["sessionId"],
+      "message_id" => "original-message",
+      "source_sha256" => OpenClaw.digest(bytes),
+      "execution_source_sha256" => OpenClaw.digest(bytes),
+      "reviewer" => "operator",
+      "checked_at" => DateTime.to_iso8601(DateTime.utc_now())
+    }
+
+    opts = [
+      sources: %{"source" => bytes, "execution_source" => bytes},
+      status: fn _ -> {:ok, %{"status" => "timeout"}} end,
+      history: fn _ -> {:ok, history} end
+    ]
+
+    {evidence, opts}
+  end
+
+  test "accepted executed run survives cache loss and restart until terminal originals release it", %{issues: issues, opts: opts, context: context} do
+    handler = fn
+      "agent", params ->
+        refute bridge_call(descriptor(context, params["idempotencyKey"]), request("tools/list"))["error"]
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", _ ->
+        {:error, :openclaw_gateway_unavailable}
+    end
+
+    interrupted = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:lost) end)
+    assert catch_throw(Runner.run("incoming", issues, issues, interrupted)) == :lost
+    {:ok, order} = Journal.read("incoming")
+    assert order["execution_observed"] == true
+    {:ok, decisions} = Store.read("incoming")
+    {evidence, recovery_opts} = terminal_evidence(order)
+    assert {:ok, %{"state" => "completed"}} = Recovery.resolve(evidence, false, recovery_opts)
+    assert {:ok, ^order} = Journal.read("incoming")
+    assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    assert {:ok, finished} = Recovery.resolve(evidence, true, recovery_opts)
+    assert finished["terminal"]["endedAt"] == 2000
+    assert finished["before_recovery"]["error"] == "openclaw_gateway_unavailable"
+    refute finished["writable"]
+    assert finished["acceptance_observed"] and finished["execution_observed"]
+    assert {:ok, ^finished} = Recovery.resolve(evidence, true, recovery_opts)
+    assert {:error, :openclaw_run_failed_or_cancelled} = OpenClaw.recover(order, transport: fn _ -> flunk("no new external work") end)
+    assert {:ok, ^decisions} = Store.read("incoming")
+    assert {:ok, []} = Journal.pending()
+    assert :ok = Journal.member_available(hd(issues).id)
+    following = %{order | "id" => Ecto.UUID.generate()}
+    assert :ok = Journal.write(following)
+    assert {:ok, ^finished} = Recovery.resolve(evidence, true, recovery_opts)
+    assert {:ok, ^following} = Journal.read("incoming")
+    assert {:ok, ^finished} = Journal.history("incoming", order["id"])
+  end
+
+  defp executed_order(issues, opts) do
+    order = uncertain_order(issues, opts)
+    {:ok, order} = Journal.update(order, %{"acceptance_observed" => true, "execution_observed" => true})
+    order
+  end
+
+  defp replace_terminal_history({evidence, opts}, history) do
+    bytes = Jason.encode!(history)
+    evidence = Map.merge(evidence, %{"source_sha256" => OpenClaw.digest(bytes), "execution_source_sha256" => OpenClaw.digest(bytes)})
+    {evidence, Keyword.merge(opts, sources: %{"source" => bytes, "execution_source" => bytes}, history: fn _ -> {:ok, history} end)}
+  end
+
+  test "terminal originals reject incomplete, nonterminal, foreign and active history", %{issues: issues, opts: opts} do
+    order = executed_order(issues, opts)
+    {evidence, recovery_opts} = package = terminal_evidence(order)
+    history = Jason.decode!(recovery_opts[:sources]["source"])
+    [record] = history["messages"]
+
+    bad = [
+      %{},
+      Map.delete(history, "sessionInfo"),
+      Map.put(history, "messages", []),
+      Map.put(history, "hasMore", true),
+      Map.delete(history, "hasMore"),
+      Map.put(history, "offset", 1),
+      Map.put(history, "totalMessages", 2),
+      Map.put(history, "sessionKey", "foreign"),
+      Map.put(history, "sessionId", "replacement-session"),
+      put_in(history, ["sessionInfo", "sessionId"], "replacement-session"),
+      put_in(history, ["sessionInfo", "lastRunId"], "new-generation"),
+      put_in(history, ["sessionInfo", "key"], "foreign"),
+      put_in(history, ["sessionInfo", "status"], "Review"),
+      put_in(history, ["sessionInfo", "status"], "running"),
+      put_in(history, ["sessionInfo", "endedAt"], nil),
+      put_in(history, ["sessionInfo", "endedAt"], 999),
+      put_in(history, ["sessionInfo", "hasActiveRun"], true),
+      update_in(history, ["sessionInfo"], &Map.delete(&1, "hasActiveRun")),
+      put_in(history, ["sessionInfo", "activeRunIds"], [order["id"]]),
+      update_in(history, ["sessionInfo"], &Map.delete(&1, "activeRunIds")),
+      put_in(history, ["sessionInfo", "hasActiveSubagentRun"], true),
+      put_in(history, ["sessionInfo", "subagentRunState"], "interrupted"),
+      put_in(history, ["sessionInfo", "abortedLastRun"], true),
+      Map.put(history, "inFlightRun", %{"runId" => "foreign"}),
+      Map.put(history, "pendingInputs", %{"items" => [], "total" => 1}),
+      Map.delete(history, "pendingInputs"),
+      Map.put(history, "yielded", true),
+      put_in(history, ["sessionInfo", "pendingError"], true),
+      Map.put(history, "messages", [Map.delete(record, "__openclaw")]),
+      Map.put(history, "messages", [put_in(record, ["__openclaw", "runTerminal"], false)]),
+      Map.put(history, "messages", [put_in(record, ["__openclaw", "runId"], "foreign")]),
+      Map.put(history, "messages", [put_in(record, ["__openclaw", "mirrorOrigin"], "text")]),
+      Map.put(history, "messages", [put_in(record, ["__openclaw", "mirrorIdentity"], nil)]),
+      Map.put(history, "messages", [put_in(record, ["__openclaw", "mirrorSourceFingerprint"], nil)]),
+      Map.put(history, "messages", [put_in(record, ["__openclaw", "yielded"], true)]),
+      Map.merge(history, %{"messages" => [put_in(record, ["__openclaw", "id"], "another-terminal"), record], "totalMessages" => 2})
+    ]
+
+    for bad_history <- bad do
+      {bad_evidence, bad_opts} = replace_terminal_history(package, bad_history)
+      assert {:error, _} = Recovery.resolve(bad_evidence, true, bad_opts)
+      assert {:ok, ^order} = Journal.read("incoming")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    end
+
+    for field <- ~w(id group project_id agent linear_agent_id linear_workspace_id session_id payload_sha256 workspace sha members) do
+      assert {:error, _} = Recovery.resolve(put_in(evidence, ["binding", field], "foreign"), true, recovery_opts)
+      assert {:ok, ^order} = Journal.read("incoming")
+    end
+
+    for changed <- [
+          Map.delete(evidence, "message_id"),
+          Map.put(evidence, "reviewer", ""),
+          Map.put(evidence, "gateway_version", "other"),
+          Map.put(evidence, "source_sha256", String.duplicate("0", 64)),
+          Map.put(evidence, "execution_source_sha256", nil),
+          Map.put(evidence, "checked_at", "2020-01-01T00:00:00Z"),
+          Map.put(evidence, "physical_session_id", "foreign")
+        ] do
+      assert {:error, _} = Recovery.resolve(changed, true, recovery_opts)
+    end
+
+    assert {:error, _} = Recovery.resolve(evidence, true, Keyword.delete(recovery_opts, :sources))
+    assert {:error, _} = Recovery.resolve(evidence, true, Keyword.put(recovery_opts, :sources, %{"source" => String.duplicate("x", 1_048_577)}))
+    assert {:ok, ^order} = Journal.read("incoming")
+  end
+
+  test "fresh counterproof, authority and observed execution remain mandatory", %{issues: issues, opts: opts} do
+    order = uncertain_order(issues, opts)
+    {evidence, recovery_opts} = terminal_evidence(order)
+    assert {:error, :openclaw_recovery_conflict} = Recovery.resolve(evidence, true, recovery_opts)
+    {:ok, _} = Journal.update(order, %{"acceptance_observed" => true})
+    assert {:error, :openclaw_recovery_conflict} = Recovery.resolve(evidence, true, recovery_opts)
+    {:ok, order} = Journal.update(order, %{"execution_observed" => true, "state" => "running", "writable" => true})
+    assert {:error, :openclaw_recovery_conflict} = Recovery.resolve(evidence, true, recovery_opts)
+    {:ok, order} = Journal.update(order, %{"state" => "cancel_pending", "writable" => false})
+
+    for reply <- [
+          {:error, :openclaw_gateway_unavailable},
+          {:ok, %{"status" => "running", "runId" => order["id"]}},
+          {:ok, %{"status" => "timeout", "runId" => "foreign"}},
+          {:ok, %{"status" => "timeout", "startedAt" => 1}},
+          {:ok, %{"status" => "timeout", "yielded" => true}},
+          {:ok, %{"status" => "timeout", "pendingError" => true}}
+        ] do
+      assert {:error, _} = Recovery.resolve(evidence, true, Keyword.put(recovery_opts, :status, fn _ -> reply end))
+    end
+
+    history = Jason.decode!(recovery_opts[:sources]["source"])
+
+    for reply <- [
+          {:error, :openclaw_gateway_unavailable},
+          {:ok, Map.put(history, "sessionId", "replacement")},
+          {:ok, put_in(history, ["sessionInfo", "hasActiveRun"], true)},
+          {:ok, put_in(history, ["sessionInfo", "endedAt"], 3000)}
+        ] do
+      assert {:error, _} = Recovery.resolve(evidence, true, Keyword.put(recovery_opts, :history, fn _ -> reply end))
+    end
+
+    assert {:ok, ^order} = Journal.read("incoming")
+  end
+
+  test "terminal recovery serializes polls and cancellation and does not replay historical decisions", %{issues: issues, opts: opts, context: context} do
+    order = executed_order(issues, opts)
+    {evidence, recovery_opts} = terminal_evidence(order)
+    {:ok, decisions} = Store.read("incoming")
+    decisions = put_in(decisions, ["attempt", "completed"], %{hd(issues).id => "historical decision"})
+    :ok = Store.write("incoming", decisions)
+    parent = self()
+
+    recovery =
+      Task.async(fn ->
+        ProjectContext.with_context(context, fn ->
+          Recovery.resolve(
+            evidence,
+            true,
+            Keyword.put(recovery_opts, :history, fn bound ->
+              send(parent, {:confirming, self()})
+              receive do: (:continue -> recovery_opts[:history].(bound))
+            end)
+          )
+        end)
+      end)
+
+    assert_receive {:confirming, pid}, 2000
+
+    racers =
+      for changes <- [%{"state" => "cancel_pending", "cancel_requested" => true}, %{"state" => "failed", "terminal" => %{"endedAt" => 3}}] do
+        Task.async(fn -> ProjectContext.with_context(context, fn -> Journal.update(order, changes) end) end)
+      end
+
+    send(pid, :continue)
+    assert {:ok, finished} = Task.await(recovery)
+    for racer <- racers, do: assert(Task.await(racer) == {:ok, finished})
+    assert {:ok, ^decisions} = Store.read("incoming")
+    assert {:ok, ^finished} = Recovery.resolve(evidence, true, Keyword.put(recovery_opts, :history, fn _ -> flunk("idempotent") end))
+    assert {:error, _} = Recovery.resolve(Map.put(evidence, "reviewer", "changed"), true, recovery_opts)
+    refute Journal.writable?("incoming", order["id"])
+  end
+
   defp recover_evidence(evidence, apply? \\ false, opts \\ []) do
     opts = Keyword.put_new(opts, :status, fn _ -> {:ok, %{"status" => "timeout"}} end)
     Recovery.resolve(evidence, apply?, opts)
+  end
+
+  test "recovered observer releases one shared slot and leases while retaining current Review and later work", %{issues: issues, opts: opts, context: context} do
+    context = put_in(context.settings.agent.max_concurrent_agents, 1)
+    ProjectContext.bind(context)
+    order = executed_order(issues, opts)
+    {evidence, recovery_opts} = terminal_evidence(order)
+    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    parent = self()
+    current = Enum.map(issues, &%{&1 | state: "Review", delegate_id: nil})
+
+    watcher_opts = [
+      fetch: fn ids -> {:ok, Enum.filter(current, &(&1.id in ids))} end,
+      transport:
+        transport(fn
+          "sessions.abort", _ -> %{"ok" => true}
+          "agent.wait", _ -> %{"status" => "timeout"}
+          _, _ -> flunk("recovery must not submit or read history automatically")
+        end),
+      openclaw_wait: fn _ ->
+        send(parent, {:reserved_observer, self()})
+        receive do: (:resume -> :ok)
+      end
+    ]
+
+    state = Coordinator.tick(%Orchestrator.State{max_concurrent_agents: 1, external_poll: true}, [], watcher_opts)
+    assert_receive {:reserved_observer, pid}, 2000
+    ref = Process.monitor(pid)
+    assert SymphonyElixir.WorkerCapacity.count(nil) == 1
+    assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("reserved") end)
+
+    for entry <- Coordinator.entries(state.yolo_runs) do
+      assert entry.state == "Review"
+      assert entry.external.original_group == "incoming"
+      assert entry.external.reserved and entry.external.resumed and entry.external.current_state_known
+      assert entry.external.missing_evidence == "terminal_original_required"
+    end
+
+    stale = %{worker_pid: self(), external: %{reserved: false}}
+    assert Coordinator.event(state.yolo_runs, "incoming", stale) == state.yolo_runs
+    unknown = Coordinator.tick(state, [], Keyword.put(watcher_opts, :fetch, fn _ -> {:error, :unavailable} end))
+    assert Enum.all?(Coordinator.entries(unknown.yolo_runs), &(&1.state == "Unbekannt" and not &1.external.current_state_known))
+    assert {:ok, _} = Recovery.resolve(evidence, true, recovery_opts)
+    send(pid, :resume)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2000
+    # The normal monitor and reconciliation remove the same observer exactly once.
+    state = Coordinator.tick(state, [], watcher_opts)
+    assert state.yolo_runs == %{} and state.claimed == MapSet.new()
+    assert Coordinator.tick(state, [], watcher_opts).yolo_runs == %{}
+    assert :ok = Journal.member_available(hd(issues).id)
+    assert {:ok, _} = Recovery.resolve(evidence, true, recovery_opts)
+
+    assert {:ok, next} =
+             SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn ->
+               send(parent, :regular_started)
+               receive do: (:finish -> :ok)
+             end)
+
+    assert_receive :regular_started
+    assert SymphonyElixir.WorkerCapacity.count(nil) == 1
+    assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("double release") end)
+    send(next, :finish)
+    assert Enum.all?(current, &(&1.state == "Review" and is_nil(&1.delegate_id)))
+  end
+
+  test "failed and cancelled originals keep their technical result", %{issues: issues, opts: opts} do
+    for {status, state} <- [{"failed", "failed"}, {"timeout", "failed"}, {"killed", "cancelled"}] do
+      order = executed_order(issues, opts)
+      {_, recovery_opts} = package = terminal_evidence(order)
+      history = Jason.decode!(recovery_opts[:sources]["source"]) |> put_in(["sessionInfo", "status"], status)
+      {evidence, recovery_opts} = replace_terminal_history(package, history)
+      assert {:ok, %{"state" => ^state}} = Recovery.resolve(evidence, true, recovery_opts)
+      assert {:error, :openclaw_run_failed_or_cancelled} = OpenClaw.recover(order, transport: fn _ -> flunk("terminal") end)
+    end
+  end
+
+  test "failed terminal persistence keeps the order and other projects or members reserved", %{issues: issues, opts: opts, context: context} do
+    order = executed_order(issues, opts)
+    {evidence, recovery_opts} = terminal_evidence(order)
+    foreign = %{order | "id" => Ecto.UUID.generate(), "group" => "blocker", "members" => [%{"id" => "foreign-member"}]}
+    assert :ok = Journal.write(foreign)
+
+    ProjectContext.with_context(%{context | id: "another-project"}, fn ->
+      assert {:error, :openclaw_recovery_evidence_invalid} = Recovery.resolve(evidence, true, recovery_opts)
+    end)
+
+    path = Journal.path("incoming")
+    saved = path <> ".original"
+
+    denied_opts =
+      Keyword.put(recovery_opts, :history, fn bound ->
+        # Simulate a target filesystem fault after the locked read, before the
+        # atomic rename. Preserve the original bytes outside the faulted target.
+        File.rename!(path, saved)
+        File.mkdir!(path)
+        recovery_opts[:history].(bound)
+      end)
+
+    try do
+      assert {:error, :runtime_state_persist_failed} = Recovery.resolve(evidence, true, denied_opts)
+      assert {:ok, ^order} = DurableState.read(saved)
+      assert {:error, :openclaw_journal_corrupt} = Journal.member_available(hd(issues).id)
+    after
+      File.rmdir!(path)
+      File.rename!(saved, path)
+    end
+
+    assert {:ok, ^order} = Journal.read("incoming")
+    assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    assert {:ok, _} = Recovery.resolve(evidence, true, recovery_opts)
+    assert {:ok, ^foreign} = Journal.read("blocker")
+    assert {:error, :openclaw_member_reserved} = Journal.member_available("foreign-member")
   end
 
   test "restarted coordinator publishes the unresolved reservation and operator action", %{issues: issues, opts: opts} do
@@ -718,8 +1056,9 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       openclaw_wait: fn _ -> throw(:observed) end
     )
 
-    assert_receive {:yolo_event, "incoming", %{event: :recovered, message: message}}
+    assert_receive {:yolo_event, "incoming", %{event: :recovered, message: message, external: external}}
     assert message =~ "reserviert. Betreiber:"
+    assert external.missing_evidence == "terminal_or_pre_acceptance_original_required"
   end
 
   test "typed pre-acceptance rejection releases only this generation, retains history and permits a new attempt", %{issues: issues, opts: opts} do

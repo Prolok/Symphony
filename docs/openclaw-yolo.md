@@ -264,6 +264,150 @@ Abnahmebeleg: Quell-/Paketstand, korrelierte Originalquelle, Trockenlauf, identi
 Anwendung/Wiederholung, erhaltene Historie und anschließende reguläre Verarbeitung
 der incoming-Gruppe. Für PRO-810 bleibt dies separate Betreiberarbeit.
 
+### Angenommene und ausgeführte Altaufträge: terminaler Originalimport
+
+Ein verlorener `agent.wait`-Cache kann auch einen tatsächlich ausgeführten Auftrag
+betreffen. Dafür gibt es den getrennten Pakettyp `version: 2`,
+`kind: terminal_original`. Version 1 bleibt ausschließlich Nichtstart vor Annahme.
+Version 2 verlangt bereits journalisierte Annahme **und** Ausführung, Zustand
+`unknown` oder `cancel_pending` und entzogene Schreibberechtigung. Ausführung wird
+durch einen Werkzeug-/Checkoutnachweis oder eine korrelierte laufende
+Gatewayantwort mit `startedAt` beziehungsweise `status=running` belegt.
+
+**Automatische Grenze:** Altjournale kennen den ursprünglichen Sitzungsschlüssel,
+aber keine unabhängig belegte physische OpenClaw-`sessionId`. Die öffentliche
+Historyprojektion liefert weder die vollständige Symphony-Auftragsbindung noch
+deren Payloadhash. Deshalb erfolgt keine automatische Freigabe aus nachträglich
+gelesenem Verlauf. Der Betreiber bestätigt anhand seiner unveränderten Originalquellen,
+dass Projekt, beide Agenten, Laufgeneration, physische Sitzung und gesamte
+Journalbindung zusammengehören. Keine privaten Hostdateien oder neuen Gatewayrechte
+werden vorausgesetzt. Kann er diese Herkunft nicht belegen, bleibt der Auftrag reserviert.
+Ein Hash schützt die Zuordnung der vorgelegten Bytes; er authentisiert deren Herkunft
+nicht. Frei erzeugte JSON-Belege sind keine Originalquellen.
+
+Der unterstützte enge Quellvertrag ist `chat.history` aus OpenClaw 2026.9.4
+([Handler](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/server-methods/chat-history-handler.ts),
+[Lifecycle](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/session-utils-display.ts),
+[Mirrorbesitz](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/extensions/codex/src/app-server/transcript-mirror-attestation.ts)).
+`source_file` enthält die originale terminale Historyantwort als JSON-Objekt,
+`execution_source_file` eine aktuelle, ebenfalls unveränderte Antwort derselben
+Sitzung. Anders als bei Version 1 wird deren Struktur maschinell geprüft; ein
+Betreiberbericht als Text genügt nicht. Keine Nachrichtendaten in das Paket,
+Workpad oder öffentliche Logs kopieren; Originaldateien geschützt aufbewahren.
+
+Die beiden Antworten müssen folgende Bedingungen erfüllen:
+
+- `sessionKey` und `sessionInfo.key` entsprechen dem originalen Agentenschlüssel;
+  beide `sessionId` entsprechen der belegten physischen Sitzung;
+  `sessionInfo.lastRunId` entspricht exakt der Journalgeneration.
+- Vollständige einzelne Seite: `offset=0`, `hasMore=false`, `totalMessages` entspricht
+  der Anzahl vorgelegter Nachrichten. Fehlende, gekürzte oder mehrseitige Verläufe
+  werden nicht zusammengeraten. Der Import führt keine zusätzlichen Seitenabrufe aus.
+- Die letzte Nachricht ist der über `__openclaw.id` benannte, eindeutig vorkommende Assistant-Datensatz
+  mit `__openclaw.runId`, `runTerminal=true`, `mirrorOrigin=codex-app-server`,
+  `mirrorIdentity` und `mirrorSourceFingerprint`. Nur ein Terminalbesitzer dieses
+  Laufs ist erlaubt. Finaltext, Zeitstempel einer Nachricht und ein isolierter
+  `runTerminal`-Marker ersetzen diesen Vertrag nicht.
+- Der Lifecycle enthält echtes `startedAt` und `endedAt` in Unix-Millisekunden
+  sowie `status=done`, `failed`, `timeout` oder `killed`. Daraus werden ausschließlich
+  die technischen Ergebnisse `completed`, `failed` oder `cancelled` gespeichert.
+- `hasActiveRun=false`, vollständige `activeRunIds=[]`, leere `pendingInputs`
+  einschließlich `total=0`, kein `inFlightRun`, kein aktiver Unterlauf und keine
+  yielded-/pendingError-Ausführung. Fehlende Pflichtfelder sind unbekannt.
+  Nur die im Release ausdrücklich bei Abwesenheit ausgelassenen Felder
+  `inFlightRun` und `hasActiveSubagentRun` dürfen fehlen.
+
+Paketbeispiel; `binding` enthält **alle** oben für Version 1 gezeigten Felder
+unverändert aus dem Originaljournal, keine Ersatzwerte:
+
+```json
+{
+  "version": 2,
+  "kind": "terminal_original",
+  "gateway_version": "2026.9.4",
+  "binding": { "...": "vollständige Originalbindung wie oben" },
+  "physical_session_id": "ORIGINALE-PHYSISCHE-SITZUNGS-ID",
+  "message_id": "ORIGINALE-TERMINALE-NACHRICHTEN-ID",
+  "source_file": "terminal-history.json",
+  "source_sha256": "SHA256-DER-ORIGINALBYTES",
+  "execution_source_file": "current-history.json",
+  "execution_source_sha256": "SHA256-DER-AKTUELLEN-ORIGINALBYTES",
+  "checked_at": "AKTUELLER-ISO8601-ZEITPUNKT-MIT-ZEITZONE",
+  "reviewer": "berechtigter-betreiber"
+}
+```
+
+Aufruf und Trockenlauf/`--apply` entsprechen Version 1. Paket maximal 32 KiB,
+jede Quelldatei maximal 1 MiB. Beim erstmaligen Anwenden darf `checked_at` weder
+in der Zukunft noch mehr als fünf Minuten zurückliegen. Unter der Journalsperre
+werden aktuelle Originalbindung, fehlender flüchtiger Endbeleg (`agent.wait`)
+und eine direkte frische `chat.history`-Antwort geprüft. Dieser eine Historyabruf
+ist auf 200 Nachrichten, 256 KiB angeforderte Historybytes und den bestehenden
+RPC-/Transporttimeout (10/15 Sekunden) begrenzt. Er fragt die **aktuelle** Sitzung
+des originalen Agentenschlüssels ab; eine inzwischen ersetzte Sitzung verweigert
+den Abschluss. Identität, Lifecycle und terminaler Nachrichtendigest müssen
+übereinstimmen. Kein zusätzlicher Hintergrundpoll und kein Auftrag/Abbruch durch
+den Import. Gatewayausfall, aktive/fremde Arbeit oder ein nun vorhandener
+flüchtiger Endbeleg verweigern diesen Import; reguläre Terminalantworten werden
+weiter vom bestehenden Beobachter behandelt.
+
+Fehler unterscheiden unter anderem `openclaw_terminal_source_invalid`,
+`openclaw_terminal_history_missing`, `openclaw_terminal_history_incomplete`,
+`openclaw_terminal_identity_mismatch`, `openclaw_terminal_activity_conflict`,
+`openclaw_terminal_end_missing`, `openclaw_terminal_record_invalid` und
+`openclaw_terminal_counterproof_conflict`. Kein Fehler gibt Plätze frei.
+`--apply` speichert technisches Ende, Beleg-/Nachrichtenhash, Referenz,
+Betreiber und Vorzustand atomar im bestehenden Journal. Die Wiederholung desselben
+Pakets bleibt auch nach Archivierung wirkungslos; neue Generationen und fremde
+Mitglieder bleiben geschützt. Speicherversagen hält die Reservierung geschlossen.
+
+Der wiederaufgenommene Beobachter liest dieses Ende; lokale Mitgliederleases,
+Gruppe und gemeinsamer Platz werden über dessen normalen Lifecycle freigegeben.
+Annahme-/Ausführungs-/Checkoutbelege und Completion-/Aktionsjournale bleiben
+erhalten. Kein Import reaktiviert alte Schreibbindungen, wiederholt PO-Entscheidungen
+oder verändert Linear. Reguläre Disposition prüft Status und Delegation frisch.
+Ein technisches `completed` ist keine fachliche Produktfreigabe.
+
+Status-API und Dashboards unterscheiden die Belegung von aktiver Modellarbeit:
+`status=reserved` beim Issue, `external.reserved`, `resumed`, `execution_state`,
+`missing_evidence`, ursprüngliche Gruppe/Status und aktueller Linear-Status mit
+`current_state_known`. Fehlende Tickets werden im bestehenden Coordinator-Tick
+gebündelt nachgelesen; fehlgeschlagene Abfragen ergeben unbekannten Status.
+Bei belegter Annahme oder Ausführung lautet `missing_evidence` auf
+`terminal_original_required`; andernfalls auf
+`terminal_or_pre_acceptance_original_required`, damit die bestehende
+Vorab-Ablehnungs-Recovery sichtbar bleibt. Die Anzeige ersetzt keinen Beleg und
+macht den Betreiberimport nicht zur Voraussetzung regulärer Terminalantworten.
+`counts.running` zählt aktive Einträge, `reserved` reservierte Ticketeinträge,
+`reserved_slots` eindeutige reservierte Gruppenplätze. Die Liste `running` enthält
+aus Kompatibilitätsgründen weiterhin alle Belegungen; Konsumenten müssen das
+Reservierungsmerkmal beachten. Nach Lifecycle-Ende verschwindet der Eintrag.
+
+### Nachweis der Altauftrags-Recovery im isolierten Testprojekt
+
+Die Tests mit `terminal-history.json` sind vollständig synthetisch. Sie belegen
+Parser, Konkurrenz, Journal, echten lokalen Beobachter/WorkerCapacity und
+HTTP-/LiveView-/Terminaldarstellung, jedoch keinen externen OpenClaw-Lauf.
+Für die frühe Produktprüfung am gebundenen Kandidatenstand im bereits freigegebenen
+`Prolok/symphony-test` dokumentiert die autorisierte Betreiberrolle:
+
+1. Quell-/Paketstand, Testinstanz, Original-Lauf-/Sitzungsbindung, Annahme und
+   Ausführung. Ausschließlich den flüchtigen Endbeleg dieses Testlaufs kontrolliert
+   verlieren lassen; keine produktive Gatewayinstanz neu starten.
+2. Wiederaufgenommene Reservierung bei aktuellem Linear-Status über API/UI;
+   gesperrte Mitglieder und einen belegten gemeinsamen Platz nachweisen.
+3. Originaldateien und v2-Paket geschützt ablegen, Hashes/Prüfer referenzieren;
+   Trockenlauf lässt Journal und Belegung unverändert. Anwendung speichert
+   tatsächliches Ende, Wiederholung verändert nichts.
+4. API/UI nach Freigabe, unveränderten fachlichen Status, erhaltene Historie und
+   genau eine nachfolgende reguläre Aufnahme mit neuer Lauf-ID nachweisen.
+   Aktive/fremde Gegenprobe muss reserviert bleiben. Transportsimulationen und
+   echte Gatewaybelege im Ergebnis getrennt kennzeichnen.
+
+Der bestehende gebundene Routineexecutor ersetzt dieses Szenario nur, wenn er
+genau diese Nachweise unterstützt. Fehlende fällige Testbereitstellung wird im
+Workpad als Betreiberpflicht übergeben, ohne neue persönliche Nutzerabnahme.
+
 ## Standardtests und separater Live-Nachweis
 
 Im expliziten OpenClaw-Livetest fragt der Testrunner den Linear-Abnahmestand

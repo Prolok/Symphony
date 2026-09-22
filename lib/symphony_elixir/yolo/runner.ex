@@ -141,7 +141,7 @@ defmodule SymphonyElixir.Yolo.Runner do
     Enum.each(issues, &Logger.info("YOLO group member issue_id=#{&1.id} issue_identifier=#{&1.identifier} run_id=#{run_id}"))
 
     on_message = fn message ->
-      if recipient = opts[:recipient], do: send(recipient, {:yolo_event, Scope.current()["group"], Map.put(message, :workspace_path, workspace.path)})
+      if recipient = opts[:recipient], do: send(recipient, {:yolo_event, Scope.current()["group"], Map.merge(message, %{workspace_path: workspace.path, worker_pid: self()})})
       if message[:session_id], do: Enum.each(issues, &Logger.info("YOLO member event issue_id=#{&1.id} issue_identifier=#{&1.identifier} run_id=#{run_id} session_id=#{message[:session_id]}"))
     end
 

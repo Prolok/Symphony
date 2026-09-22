@@ -341,7 +341,7 @@ defmodule SymphonyElixir.StatusDashboard do
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
         codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
         codex_seconds_running = Map.get(codex_totals, :seconds_running, 0)
-        agent_count = length(running)
+        agent_count = Enum.count(running, &(get_in(&1, [:external, :reserved]) != true))
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
         running_rows = format_running_rows(running, running_event_width)
@@ -624,7 +624,7 @@ defmodule SymphonyElixir.StatusDashboard do
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
     event = running_entry.last_codex_event || "none"
-    event_label = format_cell(summarize_message(running_entry.last_codex_message), running_event_width)
+    event_label = format_cell(reservation_message(running_entry), running_event_width)
 
     tokens = format_count(total_tokens) |> format_cell(@running_tokens_width, :right)
 
@@ -657,6 +657,13 @@ defmodule SymphonyElixir.StatusDashboard do
     ]
     |> Enum.join("")
   end
+
+  defp reservation_message(%{external: %{reserved: true} = external}) do
+    missing = if external.missing_evidence == "terminal_or_pre_acceptance_original_required", do: "End-/Nichtstartbeleg fehlt", else: "Endbeleg fehlt"
+    "Altreservierung (#{external.original_group}); #{missing}; Platz reserviert"
+  end
+
+  defp reservation_message(entry), do: summarize_message(entry.last_codex_message)
 
   @doc false
   @spec format_running_summary_for_test(map(), integer() | nil) :: String.t()

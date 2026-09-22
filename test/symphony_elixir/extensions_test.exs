@@ -955,7 +955,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "relay" => %{},
              "projects" => [],
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
+             "counts" => %{"running" => 1, "reserved" => 0, "reserved_slots" => 0, "retrying" => 1},
              "running" => [
                %{
                  "project" => nil,
@@ -1150,6 +1150,56 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert live_view_js =~ "var LiveView = (() => {"
   end
 
+  test "API and dashboards distinguish an old reservation from active work and remove it after release" do
+    snapshot = static_snapshot()
+    [entry] = snapshot.running
+
+    external = %{
+      run_id: "old-run",
+      original_group: "blocker",
+      original_state: "BLOCKER",
+      current_state: "Review",
+      current_state_known: true,
+      execution_state: "cancel_pending",
+      reserved: true,
+      resumed: true,
+      missing_evidence: "terminal_original_required",
+      error: "openclaw_gateway_unavailable"
+    }
+
+    entry = Map.merge(entry, %{state: "Review", external: external, turn_count: 0, runtime_seconds: 0})
+    snapshot = %{snapshot | running: [entry]}
+    name = Module.concat(__MODULE__, :ReservationOrchestrator)
+    {:ok, pid} = StaticOrchestrator.start_link(name: name, snapshot: snapshot, refresh: %{})
+    start_test_endpoint(orchestrator: name, snapshot_timeout_ms: 50)
+    payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert payload["counts"] == %{"running" => 0, "reserved" => 1, "reserved_slots" => 1, "retrying" => 1}
+    assert hd(payload["running"])["state"] == "Review"
+    assert hd(payload["running"])["external"]["original_group"] == "blocker"
+    assert json_response(get(build_conn(), "/api/v1/MT-HTTP"), 200)["status"] == "reserved"
+    {:ok, view, html} = live(build_conn(), "/")
+    assert html =~ "Altreservierung"
+    assert html =~ "Ursprüngliche Gruppe: blocker"
+    assert html =~ "Review"
+    refute html =~ "YOLO blocker"
+    assert html =~ "Fehlender Endbeleg"
+    terminal = StatusDashboard.format_running_summary_for_test(entry, 200)
+    assert terminal =~ "Review" and terminal =~ "Altreservierung (blocker)"
+    assert terminal =~ "Platz reserviert"
+
+    uncertain = put_in(entry, [:external, :missing_evidence], "terminal_or_pre_acceptance_original_required")
+    :sys.replace_state(pid, &Keyword.put(&1, :snapshot, %{snapshot | running: [uncertain]}))
+    SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
+    assert_eventually(fn -> render(view) =~ "End- oder Vorab-Ablehnungsbeleg fehlt" end)
+    refute render(view) =~ "Betreiberimport erforderlich"
+    assert StatusDashboard.format_running_summary_for_test(uncertain, 200) =~ "End-/Nichtstartbeleg fehlt"
+
+    :sys.replace_state(pid, &Keyword.put(&1, :snapshot, %{snapshot | running: []}))
+    SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
+    assert_eventually(fn -> not (render(view) =~ "Altreservierung") end)
+    assert json_response(get(build_conn(), "/api/v1/state"), 200)["counts"]["reserved_slots"] == 0
+  end
+
   test "dashboard liveview renders and refreshes over pubsub" do
     orchestrator_name = Module.concat(__MODULE__, :DashboardOrchestrator)
     snapshot = static_snapshot()
@@ -1287,7 +1337,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+    assert response.body["counts"] == %{"running" => 1, "reserved" => 0, "reserved_slots" => 0, "retrying" => 1}
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200

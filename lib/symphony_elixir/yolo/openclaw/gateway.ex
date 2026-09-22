@@ -41,6 +41,11 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @impl true
   def status(order, opts), do: rpc("agent.wait", %{"runId" => order["id"], "timeoutMs" => 1000}, opts)
 
+  @spec history(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def history(order, opts) do
+    rpc("chat.history", %{"agentId" => order["agent"], "sessionKey" => order["session_id"], "offset" => 0, "limit" => 200, "maxBytes" => 262_144}, opts)
+  end
+
   @impl true
   def cancel(order, opts) do
     case rpc("sessions.abort", %{"key" => order["session_id"], "runId" => order["id"]}, opts) do

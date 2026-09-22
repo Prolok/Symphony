@@ -20,7 +20,9 @@ defmodule SymphonyElixir.Linear.Description do
     {lines, _} = Enum.map_reduce(source_lines, nil, &line/2)
 
     lines
-    |> Enum.chunk_by(fn {kind, _} -> kind in [:blank, :literal] end)
+    |> heading_gaps()
+    |> list_continuation()
+    |> Enum.chunk_by(fn {kind, _} -> kind in [:blank, :literal, :heading] end)
     |> Enum.flat_map(&inline_links/1)
     |> Enum.map(&plain_backslashes(&1, plain))
     |> Enum.reduce([], fn
@@ -36,7 +38,32 @@ defmodule SymphonyElixir.Linear.Description do
     |> Enum.reverse()
   end
 
-  defp inline_links([{kind, _} | _] = lines) when kind in [:blank, :literal], do: lines
+  # Linear inserts blank lines around ATX headings and indents a lazy paragraph
+  # continuation immediately following a plain top-level bullet. These bounded
+  # CommonMark-equivalent forms retain heading level, list nesting and content.
+  defp heading_gaps([{:blank, ""} | rest]) do
+    rest = Enum.drop_while(rest, &(&1 == {:blank, ""}))
+
+    case rest do
+      [{:heading, _} | _] -> heading_gaps(rest)
+      _ -> [{:blank, ""} | heading_gaps(rest)]
+    end
+  end
+
+  defp heading_gaps([{:heading, text} | rest]), do: [{:heading, text} | heading_gaps(Enum.drop_while(rest, &(&1 == {:blank, ""})))]
+  defp heading_gaps([line | rest]), do: [line | heading_gaps(rest)]
+  defp heading_gaps([]), do: []
+
+  defp list_continuation([{:list, item} = bullet, {:text, "  " <> text} = continuation | rest]) do
+    if Regex.match?(~r/\A[\p{L}\p{N}]/u, item) and Regex.match?(~r/\A[\p{L}\p{N}]/u, text),
+      do: [bullet, {:text, text} | list_continuation(rest)],
+      else: [bullet | list_continuation([continuation | rest])]
+  end
+
+  defp list_continuation([line | rest]), do: [line | list_continuation(rest)]
+  defp list_continuation([]), do: []
+
+  defp inline_links([{kind, _} | _] = lines) when kind in [:blank, :literal, :heading], do: lines
 
   defp inline_links(lines) do
     # CommonMark 0.31.2 §6.3 permits optional angle delimiters for this bounded
@@ -110,6 +137,9 @@ defmodule SymphonyElixir.Linear.Description do
 
       text == "" ->
         {{:blank, ""}, nil}
+
+      Regex.match?(~r/\A\#{1,6} [^ ]/, text) ->
+        {{:heading, text}, nil}
 
       Regex.match?(~r/\A(?:-[ ]*){3,}\z|\A(?:\*[ ]*){3,}\z/, text) ->
         {{:literal, text}, nil}

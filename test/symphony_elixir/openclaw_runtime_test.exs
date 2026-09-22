@@ -46,6 +46,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     workspace = %{path: checkout, sha: String.trim(sha)}
 
     opts = [
+      dependencies: &{:ok, &1},
       fetch: fn ids -> {:ok, Enum.filter(issues, &(&1.id in ids))} end,
       lease: fn _, callback -> callback.() end,
       scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
@@ -1093,6 +1094,9 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
   test "failed and cancelled originals keep their technical result", %{issues: issues, opts: opts} do
     for {status, state} <- [{"failed", "failed"}, {"timeout", "failed"}, {"killed", "cancelled"}] do
+      # Each original is distinct work; unchanged deliveries must remain suppressed.
+      issues = Enum.map(issues, &%{&1 | title: &1.title <> " " <> status})
+      opts = Keyword.put(opts, :fetch, fn ids -> {:ok, Enum.filter(issues, &(&1.id in ids))} end)
       order = executed_order(issues, opts)
       {_, recovery_opts} = package = terminal_evidence(order)
       history = Jason.decode!(recovery_opts[:sources]["source"]) |> put_in(["sessionInfo", "status"], status)

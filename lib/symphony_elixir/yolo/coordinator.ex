@@ -10,7 +10,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   @spec tick(map(), [map()], keyword()) :: map()
   def tick(state, issues, opts \\ []) do
     state = recover_external(state, opts)
-    runs = reconcile(state.yolo_runs, issues)
+    runs = state.yolo_runs |> reconcile(issues) |> refresh_external(issues, opts)
     previous_ids = Enum.flat_map(state.yolo_runs, fn {_, run} -> run.ids end) |> MapSet.new()
     current_ids = Enum.flat_map(runs, fn {_, run} -> run.ids end) |> MapSet.new()
     claimed = state.claimed |> MapSet.difference(previous_ids) |> MapSet.union(current_ids)
@@ -48,8 +48,30 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       members = Enum.map(order["members"], fn member -> %{id: member["id"], identifier: member["identifier"], state: member["state"]} end)
       recovery_opts = Keyword.put(opts, :recipient, self())
       runner = fn _, _, _ -> OpenClaw.recover(order, recovery_opts) end
-      start(state, group, members, [], Keyword.merge(opts, runner: runner, recovering: true))
+      event = %{external: OpenClaw.observation(Map.merge(order, %{"writable" => false, "resumed" => true})), session_id: order["session_id"], workspace_path: order["workspace"]}
+      start(state, group, members, [], Keyword.merge(opts, runner: runner, recovering: true, initial_event: event))
     end
+  end
+
+  defp refresh_external(runs, issues, opts) do
+    ids = runs |> Enum.filter(fn {_, run} -> is_map(get_in(run, [:event, :external])) end) |> Enum.flat_map(fn {_, run} -> run.ids end) |> Enum.uniq()
+    known = Map.new(issues, &{&1.id, &1})
+    missing = Enum.reject(ids, &Map.has_key?(known, &1))
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+
+    fresh =
+      case if(missing == [], do: {:ok, []}, else: fetch.(missing)) do
+        {:ok, extra} -> Map.merge(known, Map.new(extra, &{&1.id, &1}))
+        _ -> known
+      end
+
+    Map.new(runs, fn {group, run} ->
+      if is_map(get_in(run, [:event, :external])) do
+        {group, Map.put(run, :current_issues, Map.take(fresh, run.ids))}
+      else
+        {group, run}
+      end
+    end)
   end
 
   defp recover_origins(state, issues, opts) do
@@ -211,7 +233,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       {:ok, pid} ->
         %{
           state
-          | yolo_runs: Map.put(state.yolo_runs, group, %{pid: pid, ids: Enum.map(members, & &1.id), issues: members, started_at: DateTime.utc_now(), event: %{}}),
+          | yolo_runs: Map.put(state.yolo_runs, group, %{pid: pid, ids: Enum.map(members, & &1.id), issues: members, started_at: DateTime.utc_now(), event: Keyword.get(opts, :initial_event, %{})}),
             claimed: MapSet.union(state.claimed, MapSet.new(members, & &1.id)),
             last_activity_at_ms: System.monotonic_time(:millisecond)
         }
@@ -229,6 +251,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   def event(runs, group, message) do
     case runs[group] do
       nil -> runs
+      %{pid: pid} when is_map_key(message, :worker_pid) and message.worker_pid != pid -> runs
       run -> Map.put(runs, group, %{run | event: Map.merge(run.event, message)})
     end
   end
@@ -237,7 +260,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   def entries(runs) do
     Enum.flat_map(runs, fn {group, run} ->
       Enum.map(run.issues, fn issue ->
-        %{
+        entry = %{
           issue_id: issue.id,
           identifier: issue.identifier,
           state: "YOLO " <> group,
@@ -256,8 +279,24 @@ defmodule SymphonyElixir.Yolo.Coordinator do
           recent_codex_events: [],
           runtime_seconds: DateTime.diff(DateTime.utc_now(), run.started_at)
         }
+
+        external_entry(entry, run, issue)
       end)
     end)
+  end
+
+  defp external_entry(entry, run, issue) do
+    case run.event[:external] do
+      nil ->
+        entry
+
+      external ->
+        current = get_in(run, [:current_issues, issue.id])
+        external = Map.merge(external, %{original_state: issue.state, current_state: current && current.state, current_state_known: not is_nil(current)})
+
+        %{entry | state: (current && current.state) || "Unbekannt", turn_count: if(external.reserved, do: 0, else: entry.turn_count)}
+        |> Map.put(:external, external)
+    end
   end
 
   @spec stop(map()) :: :ok

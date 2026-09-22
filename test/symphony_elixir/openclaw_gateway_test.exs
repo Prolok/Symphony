@@ -46,4 +46,24 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
       assert {:error, :openclaw_invalid_response} = Gateway.submit(order, "workflow", transport: transport)
     end
   end
+
+  test "operator history countercheck is bounded and reads the current original agent session" do
+    order = %{"agent" => "po", "session_id" => "agent:po:symphony:project:incoming:run"}
+
+    transport = fn ["gateway", "call", method, "--params", raw, "--json", "--timeout", "10000", "--port", "18789"] ->
+      assert method == "chat.history"
+
+      assert Jason.decode!(raw) == %{
+               "agentId" => "po",
+               "sessionKey" => order["session_id"],
+               "offset" => 0,
+               "limit" => 200,
+               "maxBytes" => 1_048_576
+             }
+
+      {:ok, "{}"}
+    end
+
+    assert {:ok, %{}} = Gateway.history(order, transport: transport)
+  end
 end

@@ -93,6 +93,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-label">Running</p>
             <p class="metric-value numeric"><%= @payload.counts.running %></p>
             <p class="metric-detail">Active issue sessions in the current runtime.</p>
+            <p :if={@payload.counts.reserved > 0} class="metric-detail">
+              Altreservierungen: <%= @payload.counts.reserved %> Tickets, <%= @payload.counts.reserved_slots %> Plätze reserviert.
+            </p>
           </article>
 
           <article class="metric-card">
@@ -130,8 +133,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <section class="section-card">
           <div class="section-header">
             <div>
-              <h2 class="section-title">Running sessions</h2>
-              <p class="section-copy">Active issues, last known agent activity, and token usage.</p>
+              <h2 class="section-title">Sessions and reservations</h2>
+              <p class="section-copy">Current ticket state, agent activity, and unresolved reservations.</p>
             </div>
           </div>
 
@@ -170,6 +173,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <span class={state_badge_class(entry.state)}>
                         <%= entry.state %>
                       </span>
+                      <div :if={entry[:external]} class="detail-stack">
+                        <strong :if={entry.external.reserved}>Altreservierung · Platz reserviert</strong>
+                        <span>Ursprüngliche Gruppe: <%= entry.external.original_group %></span>
+                        <span :if={entry.external.resumed}>Beobachter wiederaufgenommen</span>
+                        <span :if={!entry.external.current_state_known}>Linear-Status unbekannt</span>
+                        <span :if={entry.external.missing_evidence == "terminal_original_required"}>Fehlender Endbeleg · Recovery gemäß Betreibervertrag</span>
+                        <span :if={entry.external.missing_evidence == "terminal_or_pre_acceptance_original_required"}>End- oder Vorab-Ablehnungsbeleg fehlt · Recovery gemäß Betreibervertrag</span>
+                      </div>
                     </td>
                     <td>
                       <div class="session-stack">

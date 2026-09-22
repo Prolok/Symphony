@@ -1,33 +1,59 @@
 defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
-  @moduledoc "Operator-only import of correlated pre-acceptance evidence; never a timeout-based release."
+  @moduledoc "Operator-only import of correlated rejection or terminal originals; never a timeout-based release."
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{OpenClaw, Operations, Store}
-  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal}
+  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, TerminalEvidence}
   @binding ~w(id group project_id agent linear_agent_id linear_workspace_id session_id payload_sha256 workspace sha members)
 
   @spec resolve(map(), boolean(), keyword()) :: {:ok, map()} | {:error, term()}
   def resolve(evidence, apply? \\ false, opts \\ []) do
-    with %{"version" => 1, "binding" => %{"id" => id, "group" => group} = binding} <- evidence,
+    with %{"binding" => %{"id" => id, "group" => group} = binding} <- evidence,
          true <- group in ~w(incoming planning in_progress blocker review),
          true <- binding["project_id"] == ProjectContext.current().id,
-         {:ok, proof} <- proof(evidence) do
+         {:ok, proof} <- proof(evidence, opts) do
       case Journal.transition(binding, &changes(&1, binding, proof, opts), apply?) do
         {:error, :openclaw_generation_changed} -> archived(group, id, proof)
         result -> result
       end
     else
+      {:error, _} = error -> error
       _ -> {:error, :openclaw_recovery_evidence_invalid}
     end
   end
 
   defp archived(group, id, proof) do
     case Journal.history(group, id) do
-      {:ok, %{"state" => "rejected", "recovery" => ^proof} = previous} -> {:ok, previous}
+      {:ok, %{"state" => state, "recovery" => ^proof} = previous} when state in ~w(rejected completed failed cancelled) -> {:ok, previous}
       _ -> {:error, :openclaw_generation_changed}
     end
   end
 
-  defp changes(%{"state" => "rejected", "recovery" => proof}, _binding, proof, _opts), do: {:ok, %{}}
+  defp changes(%{"state" => state, "recovery" => proof}, _binding, proof, _opts) when state in ~w(rejected completed failed cancelled), do: {:ok, %{}}
+
+  defp changes(current, binding, %{"kind" => "terminal_original"} = proof, opts) do
+    with true <- Map.take(current, @binding) == binding and Enum.sort(Map.keys(binding)) == Enum.sort(@binding),
+         true <- current["state"] in ~w(unknown cancel_pending) and current["writable"] == false,
+         true <- current["acceptance_observed"] == true and current["execution_observed"] == true,
+         true <- is_nil(current["terminal"]),
+         true <- fresh?(proof["checked_at"]),
+         :ok <- no_active_run(current, opts),
+         :ok <- TerminalEvidence.confirm(current, proof, opts),
+         true <- fresh?(proof["checked_at"]) do
+      {:ok,
+       %{
+         "state" => proof["terminal"]["state"],
+         "terminal" => proof["terminal"],
+         "writable" => false,
+         "cancel_requested" => true,
+         "error" => nil,
+         "recovery" => proof,
+         "before_recovery" => Map.take(current, ~w(state error cancel_requested abort_acknowledged))
+       }}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :openclaw_recovery_conflict}
+    end
+  end
 
   defp changes(current, binding, proof, opts) do
     with true <- Map.take(current, @binding) == binding and Enum.sort(Map.keys(binding)) == Enum.sort(@binding),
@@ -89,7 +115,9 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
   defp empty_attempt?(%{"id" => id} = attempt, id), do: (attempt["completed"] || %{}) == %{} and is_nil(attempt["session_id"])
   defp empty_attempt?(_, _), do: false
 
-  defp proof(evidence) do
+  defp proof(%{"version" => 2} = evidence, opts), do: TerminalEvidence.proof(evidence, opts)
+
+  defp proof(%{"version" => 1} = evidence, _opts) do
     binding = evidence["binding"]
 
     with %{"request_id" => request_id, "method" => "agent", "run_id" => run_id, "session_id" => session} <- evidence["request"],
@@ -118,6 +146,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
       _ -> {:error, :openclaw_recovery_evidence_invalid}
     end
   end
+
+  defp proof(_, _), do: {:error, :openclaw_recovery_evidence_invalid}
 
   defp digest?(value), do: is_binary(value) and Regex.match?(~r/^[a-f0-9]{64}$/, value)
 

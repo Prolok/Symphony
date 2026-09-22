@@ -158,7 +158,10 @@ args=dict(zip(sys.argv[1::2],sys.argv[2::2]));root=pathlib.Path(args['--result-d
 (root/'plan.json').write_text('{}')
 result=dict(evidence='fixture',run_id=args['--run-id'],source=dict(checkout=args['--checkout'],sha=args['--expected-sha'],source_sha256=args['--expected-source']),status='failed',cleanup=False)
 def stop(*_):
- result['cleanup']=True;(root/'result.json').write_text(json.dumps(result));sys.exit(1)
+ result['cleanup']=True
+ # Match the real runner's atomic receipt publication while the executor polls.
+ pending=root/'result.tmp';pending.write_text(json.dumps(result));pending.replace(root/'result.json')
+ sys.exit(1)
 signal.signal(signal.SIGTERM,stop)
 print('private operator diagnostic',flush=True)
 while True:time.sleep(.02)

@@ -15,10 +15,7 @@ defmodule SymphonyElixirWeb.Presenter do
           generated_at: generated_at,
           service: SymphonyElixir.TestInstance.public_info(),
           projects: Map.get(snapshot, :projects, []),
-          counts: %{
-            running: length(snapshot.running),
-            retrying: length(snapshot.retrying)
-          },
+          counts: counts(snapshot),
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           codex_totals: snapshot.codex_totals,
@@ -32,6 +29,18 @@ defmodule SymphonyElixirWeb.Presenter do
       :unavailable ->
         %{generated_at: generated_at, error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
     end
+  end
+
+  defp counts(snapshot) do
+    reserved = Enum.filter(snapshot.running, &(get_in(&1, [:external, :reserved]) == true))
+    slots = Enum.uniq_by(reserved, &{Map.get(&1, :project_root), &1.external.run_id})
+
+    %{
+      running: length(snapshot.running) - length(reserved),
+      reserved: length(reserved),
+      reserved_slots: length(slots),
+      retrying: length(snapshot.retrying)
+    }
   end
 
   @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found | :ambiguous_issue_identifier}
@@ -121,6 +130,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
+  defp issue_status(%{external: %{reserved: true}}, _retry), do: "reserved"
   defp issue_status(_running, nil), do: "running"
   defp issue_status(nil, _retry), do: "retrying"
   defp issue_status(_running, _retry), do: "running"
@@ -146,6 +156,7 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: entry.codex_total_tokens
       }
     }
+    |> Map.merge(Map.take(entry, [:external]))
   end
 
   defp issue_reference(entry) do
@@ -186,6 +197,7 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: running.codex_total_tokens
       }
     }
+    |> Map.merge(Map.take(running, [:external]))
   end
 
   defp retry_issue_payload(retry) do

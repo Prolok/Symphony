@@ -1,0 +1,40 @@
+{
+  "sessionKey": "__SESSION_KEY__",
+  "sessionId": "original-physical-session",
+  "offset": 0,
+  "hasMore": false,
+  "totalMessages": 1,
+  "pendingInputs": {
+    "items": [],
+    "total": 0
+  },
+  "sessionInfo": {
+    "key": "__SESSION_KEY__",
+    "sessionId": "original-physical-session",
+    "lastRunId": "__RUN_ID__",
+    "status": "done",
+    "startedAt": 1000,
+    "endedAt": 2000,
+    "hasActiveRun": false,
+    "activeRunIds": []
+  },
+  "messages": [
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Synthetic result"
+        }
+      ],
+      "__openclaw": {
+        "runId": "__RUN_ID__",
+        "runTerminal": true,
+        "mirrorOrigin": "codex-app-server",
+        "mirrorIdentity": "turn:assistant",
+        "mirrorSourceFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "id": "original-message"
+      }
+    }
+  ]
+}

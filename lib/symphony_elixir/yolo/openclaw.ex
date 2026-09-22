@@ -160,7 +160,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
   defp recover_locked(order, opts) do
     hold_members(order["members"], order, opts, fn ->
-      with {:ok, current} <- Journal.update(order, %{"writable" => false, "cancel_requested" => true}) do
+      with {:ok, current} <- Journal.update(order, %{"writable" => false, "cancel_requested" => true, "resumed" => true}) do
         event(current, :recovered, opts)
         await(current, Keyword.get(opts, :openclaw_adapter, Gateway), opts)
       end
@@ -225,13 +225,19 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     end
   end
 
-  defp observe_failure(%{"id" => id} = order, {:ok, %{"runId" => id} = reply}, _opts) do
+  defp observe_failure(%{"id" => id} = order, {:ok, %{"runId" => id} = reply}, opts) do
     if is_number(reply["startedAt"]) or reply["status"] in ~w(accepted running) do
       # Observed execution rules out non-start recovery, but does not change
       # existing authority or overwrite a concurrent cancellation/transport loss.
-      case Journal.update(order, %{"acceptance_observed" => true}) do
-        {:ok, updated} -> updated
-        _ -> order
+      changes = %{"acceptance_observed" => true, "execution_observed" => is_number(reply["startedAt"]) or reply["status"] == "running"}
+
+      case Journal.update(order, changes) do
+        {:ok, updated} ->
+          observation_event(order, updated, :observation_updated, opts)
+          updated
+
+        _ ->
+          order
       end
     else
       order
@@ -253,8 +259,12 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
   defp cancel(order, adapter, opts) do
     case Journal.update(order, %{"cancel_requested" => true, "writable" => false, "state" => "cancel_pending"}) do
-      {:ok, updated} -> abort_external(updated, adapter, opts)
-      _ -> %{order | "writable" => false}
+      {:ok, updated} ->
+        observation_event(order, updated, :cancel_requested, opts)
+        abort_external(updated, adapter, opts)
+
+      _ ->
+        %{order | "writable" => false}
     end
   end
 
@@ -293,6 +303,10 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
   def terminal(_, _), do: :pending
 
+  defp observation_event(previous, current, event, opts) do
+    if observation(previous) != observation(current), do: event(current, event, opts)
+  end
+
   defp event(order, event, opts) do
     Enum.each(order["members"], fn member ->
       Logger.info(
@@ -301,9 +315,38 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     end)
 
     if recipient = opts[:recipient] do
-      message = %{event: event, session_id: order["session_id"], workspace_path: order["workspace"], message: operator_action(order)}
+      message = %{
+        event: event,
+        worker_pid: self(),
+        session_id: order["session_id"],
+        workspace_path: order["workspace"],
+        message: operator_action(order),
+        external: observation(order)
+      }
+
       send(recipient, {:yolo_event, order["group"], message})
     end
+  end
+
+  @spec observation(map()) :: map()
+  def observation(order) do
+    reserved = Journal.pending?(order) and order["writable"] == false
+
+    %{
+      run_id: order["id"],
+      original_group: order["group"],
+      execution_state: order["state"],
+      reserved: reserved,
+      resumed: order["resumed"] == true,
+      missing_evidence: if(reserved, do: missing_evidence(order)),
+      error: order["error"]
+    }
+  end
+
+  defp missing_evidence(order) do
+    if order["acceptance_observed"] == true or order["execution_observed"] == true,
+      do: "terminal_original_required",
+      else: "terminal_or_pre_acceptance_original_required"
   end
 
   defp operator_action(%{"state" => "rejected", "rejection" => %{"code" => "INVALID_REQUEST", "reason" => reason}})

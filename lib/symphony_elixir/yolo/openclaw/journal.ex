@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
   alias SymphonyElixir.Relay.Store, as: Digest
   @groups ~w(incoming planning in_progress blocker review)
   @terminal ~w(completed failed cancelled rejected)
-  @mutable ~w(state writable error cancel_requested abort_acknowledged terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery)
+  @mutable ~w(state writable error cancel_requested abort_acknowledged terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery resumed)
 
   @spec path(String.t()) :: Path.t()
   def path(group) do

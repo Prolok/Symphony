@@ -66,7 +66,13 @@ defmodule SymphonyElixir.Linear.IssueLease do
         timeout + 10_000 -> {:error, unavailable}
       end
     after
-      if Port.info(port), do: Port.close(port)
+      # A rejecting helper can exit between receiving its reply and cleanup.
+      # Closing an already closed port must not replace the lock result.
+      try do
+        Port.close(port)
+      rescue
+        ArgumentError -> :ok
+      end
     end
   end
 

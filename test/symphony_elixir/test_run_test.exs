@@ -1901,6 +1901,129 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:ok, _} = TestRun.execute("cleanup")
   end
 
+  test "new interruption fixtures roundtrip without a terminal LF", ctx do
+    prepared = prepare_interruption_descriptions(ctx)
+    members = Enum.filter(prepared["fixtures"], & &1["po_interruption"])
+    assert length(members) == 3
+    refute Enum.any?(members, &String.ends_with?(&1["description"], "\n"))
+    assert {:ok, _} = TestRun.execute("probe")
+    assert {:ok, cleaned} = TestRun.execute("cleanup")
+    assert Enum.all?(cleaned["fixtures"], & &1["deleted"])
+  end
+
+  for stage <- ["probe", "cleanup"] do
+    test "#{stage} accepts the observed single terminal LF removal without rewriting journaled intent", ctx do
+      prepared = prepare_interruption_lf_roundtrip(ctx)
+      assert {:ok, inspected} = TestRun.execute(unquote(stage))
+
+      assert Enum.map(inspected["fixtures"], &Map.take(&1, ~w(id title description))) ==
+               Enum.map(prepared["fixtures"], &Map.take(&1, ~w(id title description)))
+
+      if unquote(stage) == "cleanup" do
+        assert Enum.all?(inspected["fixtures"], & &1["deleted"])
+        assert Agent.get(ctx.source_agent, &map_size(&1.issues)) == 0
+        assert {:ok, ^inspected} = TestRun.execute("cleanup")
+      else
+        refute Enum.any?(inspected["fixtures"], & &1["complete"])
+        assert count_calls(ctx.source_agent, "mutation") == 4
+      end
+    end
+  end
+
+  test "LF tolerance preserves content and identity gates in probe and cleanup", ctx do
+    prepared = prepare_interruption_lf_roundtrip(ctx)
+    prepared = Map.update!(prepared, "fixtures", &Enum.sort_by(&1, fn fixture -> fixture["po_interruption"] != true end))
+    :ok = DurableState.write(journal_path(ctx.root), prepared)
+    target = hd(prepared["fixtures"])
+    assert target["po_interruption"]
+    original = Agent.get(ctx.source_agent, & &1.issues[target["id"]])
+    description = original["description"]
+    journal_bytes = File.read!(journal_path(ctx.root))
+
+    changes = [
+      %{"description" => String.replace(description, "sleep 300", "sleep 1")},
+      %{"description" => String.replace(description, "\n", "\n\n", global: false)},
+      %{"description" => " " <> description},
+      %{"description" => description <> " "},
+      %{"description" => description <> "\n\n"},
+      %{"description" => nil},
+      %{"id" => "foreign"},
+      %{"title" => target["title"] <> " changed"},
+      %{"project" => %{"id" => "foreign"}},
+      %{"team" => %{"id" => "foreign"}},
+      %{"assignee" => %{"id" => "foreign"}},
+      %{"delegate" => %{"id" => "foreign"}}
+    ]
+
+    for change <- changes do
+      Agent.update(ctx.source_agent, &put_in(&1.issues[target["id"]], Map.merge(original, change)))
+
+      for stage <- ["probe", "cleanup"] do
+        assert {:error, :test_fixture_changed_externally} = TestRun.execute(stage)
+        assert File.read!(journal_path(ctx.root)) == journal_bytes
+        assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+      end
+    end
+
+    Agent.update(ctx.source_agent, &put_in(&1.issues[target["id"]], original))
+    assert {:ok, _} = TestRun.execute("probe")
+    assert {:ok, _} = TestRun.execute("cleanup")
+  end
+
+  test "interruption LF tolerance does not extend to the bootstrap fixture", ctx do
+    prepared = prepare_interruption_descriptions(ctx)
+    [bootstrap | _] = prepared["fixtures"]
+    refute bootstrap["po_interruption"]
+    changed = Map.update!(bootstrap, "description", &(&1 <> "\n"))
+    :ok = DurableState.write(journal_path(ctx.root), put_in(prepared["fixtures"], [changed | tl(prepared["fixtures"])]))
+
+    for stage <- ["probe", "cleanup"] do
+      assert {:error, :test_fixture_changed_externally} = TestRun.execute(stage)
+      assert count_calls(ctx.source_agent, "DeleteTestFixture") == 0
+    end
+
+    :ok = DurableState.write(journal_path(ctx.root), prepared)
+    assert {:ok, _} = TestRun.execute("cleanup")
+  end
+
+  defp prepare_interruption_lf_roundtrip(ctx) do
+    prepared = prepare_interruption_descriptions(ctx)
+
+    # Preserve the pre-fix creation intent; Linear returned exactly these bytes
+    # without the final LF in the failed operator run.
+    prepared =
+      update_in(
+        prepared["fixtures"],
+        &Enum.map(&1, fn fixture ->
+          if fixture["po_interruption"],
+            do: Map.put(fixture, "description", String.trim_trailing(fixture["description"], "\n") <> "\n"),
+            else: fixture
+        end)
+      )
+
+    :ok = DurableState.write(journal_path(ctx.root), prepared)
+
+    Agent.update(ctx.source_agent, fn state ->
+      %{
+        state
+        | issues:
+            Map.new(state.issues, fn {id, issue} ->
+              {id, Map.update!(issue, "description", &String.trim_trailing(&1, "\n"))}
+            end)
+      }
+    end)
+
+    prepared
+  end
+
+  defp prepare_interruption_descriptions(ctx) do
+    plan = Map.merge(ctx.plan, %{"scenario" => "po_incoming", "openclaw_agent" => "po", "openclaw_interruption" => true})
+    contexts = Enum.map(ctx.contexts, &put_in(&1.settings.tracker.openclaw_yolo_agent, "po"))
+    prepare_delegation(%{ctx | plan: plan, contexts: contexts}, "po_incoming")
+    {:ok, prepared} = DurableState.read(journal_path(ctx.root))
+    prepared
+  end
+
   test "owned live interruption fences only the executed original and resumes without cancelling a successor", ctx do
     alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
     alias SymphonyElixir.Yolo.OpenClaw.Journal

@@ -15,7 +15,7 @@ defmodule SymphonyElixir.TestRun.PoActions do
     die bereits bestätigte Backlog-Entscheidung weder erneut schreiben noch bestätigen.
     """
 
-    Map.merge(fixture, %{"po_interruption" => true, "description" => fixture["description"] <> instruction})
+    Map.merge(fixture, %{"po_interruption" => true, "description" => fixture["description"] <> String.trim_trailing(instruction, "\n")})
   end
 
   def fixture(%{"po_incoming" => true} = fixture, %{"scenario" => "po_aggregation"} = plan) do

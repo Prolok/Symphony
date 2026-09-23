@@ -473,6 +473,13 @@ defmodule SymphonyElixir.TestRun do
       fixture_assignee?(issue, fixture) and get_in(issue, ["delegate", "id"]) in [nil, fixture["test_delegate_id"]]
   end
 
+  defp description_matches?(description, %{"po_interruption" => true, "description" => expected}, %{"scenario" => "po_incoming", "openclaw_interruption" => true})
+       when is_binary(description) and is_binary(expected) do
+    # Linear removes the final heredoc LF. Accept that observed roundtrip for
+    # existing interruption journals without rewriting their creation intent.
+    description == expected or description <> "\n" == expected
+  end
+
   defp description_matches?(description, fixture, plan) do
     if routine() && plan["scenario"] == "workflow" do
       case DurableState.read(description_receipt_path(plan, fixture)) do

@@ -645,6 +645,11 @@ bei Wiederaufnahme nicht hinzufügen oder entfernen. Sie wird nicht mit
 `bootstrap`/`workflow`/`failure-probe` führt diesen besonderen Betreiberlauf nicht aus.
 
 Der Runner erstellt seine regulären drei PO-Fixtures sowie die Bootstrap-Fixture.
+Neue Unterbrechungsbeschreibungen enthalten kein abschließendes LF. Bei bestehenden
+Unterbrechungs-Fixtures akzeptieren Probe und Cleanup auch die beobachtete
+Linear-Rücklesung ohne genau dieses eine Schluss-LF; der ursprüngliche Journaltext
+bleibt erhalten. Andere Inhaltsabweichungen und fremde Fixtureidentitäten sperren
+die Operation weiterhin.
 Der neue Auftrag entscheidet zunächst nur das anfängliche Backlog-Mitglied und
 wartet danach in seiner eigenen aktiven Ausführung. Der Testschritt `interrupt`
 verlangt beobachtete Annahme, einen durch echte Werkzeugnutzung bestätigten Checkout,

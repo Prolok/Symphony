@@ -50,6 +50,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
         "retired_at" => DateTime.to_iso8601(DateTime.utc_now()),
         "physical_session_id" => history["sessionId"],
         "last_run_id" => history["sessionInfo"]["lastRunId"],
+        "session_end" => Map.take(history["sessionInfo"], ~w(lastRunId status startedAt endedAt)),
         "history_sha256" => OpenClaw.digest(Jason.encode!(history)),
         "before_retirement" => Map.take(current, ~w(state error resumed cancel_requested abort_acknowledged)),
         "retained_inputs" => inputs,
@@ -73,18 +74,30 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
   defp stop_basis(order, response, history) do
     # A denied abort is never an acknowledgement. A naturally ended original
     # can still be retired, but only while that same run is freshly proven idle.
-    case OpenClaw.terminal(response, order) do
-      {:terminal, _, evidence} ->
-        info = history["sessionInfo"]
+    info = history["sessionInfo"]
 
-        if info["lastRunId"] == order["id"] and info["endedAt"] == evidence["endedAt"] and
-             (is_nil(evidence["startedAt"]) or info["startedAt"] == evidence["startedAt"]),
-           do: {:ok, "terminal_original"},
-           else: {:error, :openclaw_interruption_unresolved}
+    case {info["lastRunId"] == order["id"], OpenClaw.terminal(response, order)} do
+      {true, {:terminal, state, evidence}} ->
+        if consistent_terminal?(state, evidence, info), do: {:ok, "terminal_original"}, else: {:error, :openclaw_interruption_unresolved}
 
-      :pending ->
+      {true, :pending} ->
+        # retirement_response? already required a lost-result response. The
+        # fresh, ended ORIGINAL lifecycle permits retirement, never a result.
+        {:ok, "terminal_original_history"}
+
+      _ ->
         {:error, :openclaw_interruption_unresolved}
     end
+  end
+
+  defp consistent_terminal?(state, evidence, info) do
+    started = evidence["startedAt"] || info["startedAt"]
+    ended = evidence["endedAt"]
+
+    # Separate host projections settle at different times. Preserve both clocks;
+    # bind by run identity and finality rather than equality or a tolerance.
+    plausible_times?(started, ended) and
+      ((state == "completed" and info["status"] == "done") or (state == "failed" and info["status"] in ~w(failed timeout killed)))
   end
 
   defp idle_session(%{"sessionInfo" => info} = history, order) when is_map(info) do
@@ -105,17 +118,20 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
 
   defp inactive?(history, info) do
     info["hasActiveRun"] == false and info["activeRunIds"] == [] and
+      is_nil(info["lifecycleRunId"]) and
       info["hasActiveSubagentRun"] in [nil, false] and info["subagentRunState"] in [nil, "historical"] and
       is_nil(history["inFlightRun"]) and
       Enum.all?([history, info], &(&1["yielded"] != true and &1["pendingError"] != true))
   end
 
   defp ended?(info) do
-    started = info["startedAt"]
-    ended = info["endedAt"]
-
     is_binary(info["lastRunId"]) and info["lastRunId"] != "" and info["status"] in ~w(done failed timeout killed) and
-      is_integer(started) and is_integer(ended) and started > 0 and ended >= started and
+      (info["abortedLastRun"] != true or info["status"] == "killed") and
+      plausible_times?(info["startedAt"], info["endedAt"])
+  end
+
+  defp plausible_times?(started, ended) do
+    is_integer(started) and is_integer(ended) and started > 0 and ended >= started and
       ended <= System.system_time(:millisecond)
   end
 

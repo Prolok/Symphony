@@ -201,7 +201,6 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
          true <- id == order["id"] and current["project_id"] == ProjectContext.current().id and enabled_for?(current),
          true <- current["interruption_contract"] == 1 and Journal.pending?(current),
          response = adapter.status(current, opts),
-         {:terminal, _, _} <- terminal(response, current),
          {:ok, finished} <- Recovery.retire(current, response, adapter, opts) do
       event(finished, :ended, opts)
       {:ok, finished}

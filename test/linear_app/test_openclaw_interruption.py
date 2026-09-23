@@ -113,6 +113,11 @@ class InterruptionProofTest(unittest.TestCase):
         with self.assertRaises((ValueError, KeyError)):
             verifier.verify(proof, fixtures, proof['source'], 'proof', 'po')
 
+        proof['original']['terminal'] = None
+        proof['original']['retirement']['stop_basis'] = 'terminal_original_history'
+        with self.assertRaises((ValueError, KeyError)):
+            verifier.verify(proof, fixtures, proof['source'], 'proof', 'po')
+
     def test_missing_active_evidence_repeated_decisions_and_foreign_bindings_fail_closed(self):
         verifier = load('openclaw-interruption.py')
         changes = [

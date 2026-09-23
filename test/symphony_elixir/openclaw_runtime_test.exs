@@ -1007,7 +1007,45 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, []} = Journal.pending()
   end
 
-  test "without abort acknowledgement only the exact terminal original and fresh idle evidence can retire", %{issues: issues, opts: opts} do
+  for retained_wait? <- [false, true] do
+    @tag retained_wait: retained_wait?
+    test "original history retires delayed cleanup despite expired wait or independent end times (wait: #{retained_wait?})", %{
+      issues: issues,
+      opts: opts,
+      retained_wait: retained_wait?
+    } do
+      order = fenced_order(issues, opts) |> Map.put("abort_acknowledged", false)
+      :ok = DurableState.write(Journal.path("incoming"), order)
+      {:ok, decisions} = Store.read("incoming")
+      # Response shape/end times from operator run deacf5d7; identities and
+      # transcript are synthetic. The lifecycle and wait clocks differ by 13 ms.
+      history = put_in(original_idle_history(order), ["sessionInfo", "endedAt"], 1_790_175_914_111)
+      response = if retained_wait?, do: %{"runId" => order["id"], "status" => "ok", "endedAt" => 1_790_175_914_124}, else: %{"status" => "timeout"}
+
+      handler = fn
+        "agent.wait", %{"runId" => id} ->
+          assert id == order["id"]
+          response
+
+        "chat.history", %{"sessionKey" => key} ->
+          assert key == order["session_id"]
+          history
+      end
+
+      assert {:ok, retired} = OpenClaw.reconcile_terminal(order, transport: transport(handler))
+      assert retired["state"] == "retired"
+      refute retired["writable"]
+      refute retired["abort_acknowledged"]
+      assert retired["retirement"]["stop_basis"] == if(retained_wait?, do: "terminal_original", else: "terminal_original_history")
+      assert retired["retirement"]["session_end"] == Map.take(history["sessionInfo"], ~w(lastRunId status startedAt endedAt))
+      assert retired["terminal"] == if(retained_wait?, do: response, else: nil)
+      assert {:ok, ^decisions} = Store.read("incoming")
+      assert {:ok, []} = Journal.pending()
+      assert :ok = Journal.member_available(hd(issues).id)
+    end
+  end
+
+  test "without abort acknowledgement only a consistent original end and complete fresh idle evidence can retire", %{issues: issues, opts: opts} do
     order = fenced_order(issues, opts)
     order = Map.put(order, "abort_acknowledged", false)
     :ok = DurableState.write(Journal.path("incoming"), order)
@@ -1016,18 +1054,43 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
     for bad <- [
           put_in(history, ["sessionInfo", "lastRunId"], "newer"),
-          put_in(history, ["sessionInfo", "endedAt"], 2001),
+          put_in(history, ["sessionInfo", "endedAt"], nil),
+          put_in(history, ["sessionInfo", "endedAt"], 999),
+          put_in(history, ["sessionInfo", "endedAt"], System.system_time(:millisecond) + 60_000),
           put_in(history, ["sessionInfo", "hasActiveRun"], true),
           put_in(history, ["sessionInfo", "activeRunIds"], ["newer"]),
+          put_in(history, ["sessionInfo", "activeRunIds"], nil),
+          put_in(history, ["sessionInfo", "lifecycleRunId"], "newer"),
+          put_in(history, ["sessionInfo", "abortedLastRun"], true),
+          put_in(history, ["sessionInfo", "hasActiveSubagentRun"], true),
+          put_in(history, ["sessionInfo", "pendingError"], true),
+          Map.put(history, "sessionKey", "foreign"),
+          Map.put(history, "sessionId", "foreign"),
           Map.delete(history, "pendingInputs"),
-          Map.put(history, "pendingInputs", %{"total" => 1, "items" => []})
-        ] do
-      assert {:error, _} = Recovery.retire(order, response, Gateway, interruption_history: fn _ -> {:ok, bad} end)
+          Map.put(history, "pendingInputs", %{"total" => 1, "items" => []}),
+          Map.put(history, "pendingInputs", %{"total" => 0, "items" => [], "nextBefore" => 1}),
+          Map.put(history, "pendingInputs", %{"total" => 1, "items" => [%{"id" => "open", "state" => "queued"}]})
+        ],
+        reply <- [response, {:ok, %{"status" => "timeout"}}] do
+      assert {:error, _} = Recovery.retire(order, reply, Gateway, interruption_history: fn _ -> {:ok, bad} end)
       assert {:ok, ^order} = Journal.read("incoming")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
     end
 
     assert {:error, _} = Recovery.retire(order, response, Gateway, interruption_history: fn _ -> {:error, :unavailable} end)
-    assert {:error, _} = retire(order, history)
+    assert {:error, _} = retire(order, put_in(history, ["sessionInfo", "lastRunId"], "newer"))
+    assert {:error, _} = Recovery.retire(order, response, Gateway, interruption_history: fn _ -> {:ok, put_in(history, ["sessionInfo", "status"], "failed")} end)
+
+    for bad <- [
+          %{"runId" => order["id"], "status" => "ok", "endedAt" => 999},
+          %{"runId" => order["id"], "status" => "ok", "endedAt" => System.system_time(:millisecond) + 60_000},
+          %{"runId" => order["id"], "status" => "ok", "startedAt" => 3000, "endedAt" => 2000},
+          %{"runId" => order["id"], "status" => "error", "endedAt" => 2000}
+        ] do
+      assert {:error, _} = Recovery.retire(order, {:ok, bad}, Gateway, interruption_history: fn _ -> {:ok, history} end)
+      assert {:ok, ^order} = Journal.read("incoming")
+    end
+
     assert {:error, _} = Recovery.retire(order, {:ok, %{"runId" => "newer", "status" => "ok", "endedAt" => 2000}}, Gateway, [])
     assert {:ok, ^order} = Journal.read("incoming")
   end
@@ -1045,7 +1108,11 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
     assert {:error, :openclaw_interruption_unresolved} =
              OpenClaw.reconcile_terminal(order,
-               transport: transport(fn "agent.wait", _ -> %{"status" => "timeout"} end)
+               transport:
+                 transport(fn
+                   "agent.wait", _ -> %{"status" => "timeout"}
+                   "chat.history", _ -> {:error, :unavailable}
+                 end)
              )
 
     assert {:ok, ^order} = Journal.read("incoming")

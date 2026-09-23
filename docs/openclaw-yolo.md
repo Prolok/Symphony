@@ -163,13 +163,17 @@ Der Beobachter prüft die eigene, pro Auftrag einmalige Sitzung über `chat.hist
 Regulär ist dafür ein bestätigtes `sessions.abort` erforderlich. Verweigert der Host
 den Abbruch, bleiben Schreibrechte entzogen und aktive oder ungeklärte Ausführungen
 reserviert. Ein danach natürlich beendeter Originalauftrag darf ebenfalls technisch
-stillgelegt werden: Der echte Original-Endbeleg aus `agent.wait` muss zusätzlich zur
-frischen Inaktivitätsprüfung mit `lastRunId` und Endzeit der Sitzung übereinstimmen
-(ebenso mit der Startzeit, sofern die Antwort sie enthält). Symphony erhält den
-Original-Endbeleg und dokumentiert `retirement.stop_basis=terminal_original`, ohne
-eine Abbruchquittung oder einen fachlichen Erfolg zu erzeugen. Ein anderer letzter
-Lauf erfüllt diese Ausnahme nicht; verlorene Ergebnisse benötigen weiter die echte
-Abbruchquittung (`stop_basis=abort_acknowledged`).
+stillgelegt werden: Die frische Sitzungsprojektion muss den Originalauftrag als
+`lastRunId` mit plausiblem Endzustand und ohne aktive Laufbindung ausweisen. Ein
+vorhandener Original-Endbeleg aus `agent.wait` muss dazu fachlich konsistent sein;
+seine Zeitfelder werden separat plausibilisiert, nicht mit den unabhängig erzeugten
+Sitzungszeiten gleichgesetzt. Symphony erhält beide unverändert (`terminal` und
+`retirement.session_end`) und dokumentiert `retirement.stop_basis=terminal_original`.
+Ist der flüchtige Wartebeleg bereits verfallen, erlaubt dieselbe frische
+Originalprojektion die technische Stilllegung mit `stop_basis=terminal_original_history`;
+`terminal` bleibt dabei leer. Weder Abbruchquittung noch fachlicher Erfolg werden
+erzeugt. Ein anderer letzter Lauf erfüllt diese Ausnahme nicht: Ohne Originalende
+bleibt die echte Abbruchquittung erforderlich (`stop_basis=abort_acknowledged`).
 
 `agent.wait` muss entweder einen belegten
 Originalabschluss oder einen Timeout ohne Start-/End-/Yield-/Fehlerfortsetzungsbeleg
@@ -705,6 +709,8 @@ müssen zur eigenen unveränderten Workspacequittung passen; laufende Besitzer w
 über dieselben Recovery-/Mitgliederleases geschützt. Dieser begrenzte Abgleich startet
 oder unterbricht keinen Auftrag und wartet nicht in einer Schleife. Fehler, offene
 Eingaben und aktive oder neuere Generationen lassen Checkout und Reservierung erhalten.
+Ein verfallener `agent.wait`-Beleg verhindert diesen Abgleich nicht, wenn die frische
+History das ursprüngliche Ende samt vollständiger Inaktivitäts-/Eingabeprüfung belegt.
 Danach kann der bestehende Cleanupweg den eigenen Checkout entfernen. Historische
 Fehlerresultate und fehlende Abbruchbelege bleiben bestehen: Natürliches Ende und
 erfolgreicher Cleanup ersetzen den oben geforderten Live-Unterbrechungspass nicht.

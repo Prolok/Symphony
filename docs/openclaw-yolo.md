@@ -621,6 +621,62 @@ Bei Fehlern denselben Auftrag erhalten. Der vorhandene isolierte Runner unterst�
 `--resume --cleanup-only` mit unveränderten Lauf-/Quellparametern; dies ist nur
 Cleanup, kein nachträglicher Pass. Unbestätigtes externes Ende verhindert Cleanup.
 
+### Neuer Unterbrechungsfall im vorhandenen Live-Test
+
+Für den aktuellen `interruption_contract=1`-Ablauf erhält das bestehende
+`po_incoming`-Szenario die explizite Option `--openclaw-interruption`. Der autorisierte
+Betreiber nutzt dasselbe freigegebene Manifest und dieselbe isolierte Testbereitstellung:
+
+```sh
+python3 scripts/test-instance.py source /ABS/PRUEFCHECKOUT
+scripts/openclaw-live-test --execute-live --agent po -- \
+  --checkout /ABS/PRUEFCHECKOUT --source-mode development \
+  --test-instance openclaw-proof --manifest /ABS/manifest.json \
+  --run-id interruption-proof --expected-sha COMMIT --expected-source SOURCE_SHA256 \
+  --port 4099 --timeout 900 --result-dir /ABS/BELEGE/interruption \
+  --scenario po_incoming --openclaw-interruption
+```
+
+`COMMIT` und `SOURCE_SHA256` stammen aus dem ersten Aufruf; sie binden auch offene
+Entwicklungsänderungen. Vorhandene Läufe nur mit identischen Parametern und `--resume`
+fortsetzen. Die Unterbrechungsoption gehört dauerhaft zum Laufplan und lässt sich
+bei Wiederaufnahme nicht hinzufügen oder entfernen. Sie wird nicht mit
+`--openclaw-previous-incoming-result` kombiniert. Der Routineexecutor mit
+`bootstrap`/`workflow`/`failure-probe` führt diesen besonderen Betreiberlauf nicht aus.
+
+Der Runner erstellt seine regulären drei PO-Fixtures sowie die Bootstrap-Fixture.
+Der neue Auftrag entscheidet zunächst nur das anfängliche Backlog-Mitglied und
+wartet danach in seiner eigenen aktiven Ausführung. Der Testschritt `interrupt`
+verlangt beobachtete Annahme, einen durch echte Werkzeugnutzung bestätigten Checkout,
+die erste dauerhafte Entscheidung und eine frische, eindeutig aktive Originalsitzung.
+Unter der Werkzeug-Journalsperre sichert er den Ausgangsbeleg und setzt ausschließlich
+`writable=false` und `cancel_requested=true` für diese Generation. Der normale
+Beobachter führt `sessions.abort`, Inaktivitäts-/Eingabeprüfung und Stilllegung aus.
+Kein Gateway-Neustart, kein Eingriff in den Hauptdienst, kein künstlicher Abschluss
+und keine direkte Reservierungs-/Kapazitätsfreigabe. Wiederholungen des Testschritts
+beobachten den gesicherten Originalauftrag; neuere Generationen werden nicht abgebrochen.
+
+Ein Pass verlangt in `result.json` unter `openclaw.interruption` die erhaltene erste
+Entscheidung, aktive Vorprüfung, `original.state=retired`, entzogene Schreibrechte,
+Abbruchquittung und Stilllegungsbeleg. Dazu muss genau eine neue Lauf-/Sitzungskennung
+mit echten abgeschlossenen Entscheidungen ausschließlich für die beiden restlichen
+Mitglieder vorliegen. Nach ihren Entscheidungen wartet die Probe weiterhin auf den
+terminalen OpenClaw-Laufbeleg. Deren Aufnahme über den normalen Coordinator belegt die
+Freigabe der alten Mitglieder-/Gruppenreservierung. Die erste Entscheidung bleibt
+an den alten Auftrag gebunden; sie darf nicht in der neuen Mitgliedermenge auftauchen.
+Die üblichen Prüfungen von frischen Linear-Daten, Quellstand, Cleanup,
+`main_preserved` und `originals_preserved` bleiben erforderlich. Der interne Beleg
+`openclaw-interruption.json` bleibt zusammen mit dem Fixturejournal erhalten, auch
+wenn ein Aufruf nach gesicherter Absicht abbricht. Fehler oder unbestätigte Abfragen
+liefern keinen Pass; ungeklärte externe Aufträge verhindern weiterhin Cleanup.
+
+Dieser Livefall belegt eine gezielt unterbrochene aktuelle Ausführung und ihre
+reguläre Folgeaufnahme. Er simuliert keinen Gateway-Neustart und rekonstruiert keine
+verlorene Hosthistorie. Die Gegenproben für unvollständige Eingaben, aktive/neuere
+Läufe und Abfragefehler bleiben separat als synthetische Tests ausgewiesen. Ein
+bestandener synthetischer Runner-/Journaltest oder ein alter V2-Import ersetzt den
+hier beschriebenen realen Lauf nicht.
+
 ## Projektintegration und Lernrückkopplung
 
 Die gemeinsame Schnittstelle wird durch `test/fixtures/yolo_review` und simulierte

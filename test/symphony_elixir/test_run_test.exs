@@ -1901,6 +1901,177 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:ok, _} = TestRun.execute("cleanup")
   end
 
+  test "owned live interruption fences only the executed original and resumes without cancelling a successor", ctx do
+    alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
+    alias SymphonyElixir.Yolo.OpenClaw.Journal
+    {contexts, context, plan, journal, first, order, active} = interruption_fixture(ctx)
+    opts = [history: fn ^order -> {:ok, active} end]
+    waiting = update_in(journal["fixtures"], &Enum.map(&1, fn f -> Map.delete(f, "observed_state") end))
+    assert {:ok, %{"interruption" => %{"state" => "waiting_for_first_decision"}}} = Interruption.execute(contexts, plan, waiting, opts)
+    assert {:ok, ^first} = Interruption.probe(first, plan)
+    assert {:ok, %{"interruption" => %{"state" => "waiting_for_first_decision"}}} = TestRun.execute("interrupt")
+    assert {:ok, result} = Interruption.execute(contexts, plan, journal, opts)
+    receipt = result["interruption"]
+    assert receipt["before"] == Map.take(order, Map.keys(receipt["before"]))
+    assert receipt["original"]["writable"] == false
+    assert receipt["active"]["hasActiveRun"] == true
+    assert {:ok, observed} = Interruption.probe(first, plan)
+    assert observed["po_receipt"]["session_id"] == order["session_id"]
+    assert {:ok, snapshot} = TestRun.execute("probe")
+    observed_first = Enum.find(snapshot["fixtures"], &(&1["id"] == first["id"]))
+    assert observed_first["po_receipt"] == observed["po_receipt"]
+    refute observed_first["complete"]
+    # Recreate a process loss after intent persistence, before the fence write.
+    ProjectContext.with_context(context, fn -> :ok = DurableState.write(Journal.path("incoming"), order) end)
+    assert {:ok, _} = Interruption.execute(contexts, plan, journal, history: fn _ -> flunk("resume must not query or interrupt a new generation") end)
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, cancelled} = Journal.read("incoming")
+      assert cancelled["cancel_requested"] and not cancelled["writable"]
+      assert cancelled["state"] == "accepted"
+      assert {:ok, original} = Journal.update(cancelled, %{"state" => "retired", "retirement" => %{"attempt" => receipt["attempt"]}})
+      successor = %{order | "id" => "successor", "session_id" => "agent:po:successor"}
+      assert :ok = Journal.write(successor)
+      assert {:ok, again} = Interruption.execute(contexts, plan, journal, opts)
+      assert again["interruption"]["original"]["id"] == original["id"]
+      assert again["interruption"]["current"]["id"] == successor["id"]
+      assert Enum.sort(again["interruption"]["generation_ids"]) == ["original", "successor"]
+      assert {:ok, ^successor} = Journal.read("incoming")
+      :ok = DurableState.write(Path.join(Journal.path("incoming") <> ".history", "corrupt.json"), %{})
+      assert {:error, :test_interruption_history_unconfirmed} = Interruption.execute(contexts, plan, journal, opts)
+      assert {:ok, ^successor} = Journal.read("incoming")
+    end)
+
+    receipt_path = Path.join([ctx.root, "test-state", "runs", plan["run_id"], "openclaw-interruption.json"])
+    assert :ok = DurableState.write(receipt_path, Map.put(receipt, "source", %{}))
+    assert {:error, :test_interruption_receipt_mismatch} = Interruption.execute(contexts, plan, journal)
+    assert {:error, :test_interruption_receipt_mismatch} = Interruption.probe(first, plan)
+    File.write!(receipt_path, "not json")
+    assert {:error, _} = Interruption.execute(contexts, plan, journal)
+    assert {:error, :test_interruption_receipt_mismatch} = Interruption.probe(first, plan)
+  end
+
+  test "interruption probe waits for the successor terminal receipt after its decisions are complete", ctx do
+    alias SymphonyElixir.Yolo.OpenClaw.Journal
+    {_contexts, context, _plan, journal, first, order, _active} = interruption_fixture(ctx)
+    remaining = Enum.filter(journal["fixtures"], &(&1["po_incoming"] == true and &1["id"] != first["id"]))
+    complete(ctx.source_agent)
+
+    Agent.update(ctx.source_agent, fn state ->
+      issues =
+        Enum.reduce(remaining, state.issues, fn member, issues ->
+          Map.update!(
+            issues,
+            member["id"],
+            &Map.merge(&1, %{
+              "state" => %{"name" => "Verworfen"},
+              "assignee" => %{"id" => @human},
+              "labels" => %{"nodes" => Enum.map([~s(Skip "Freigabe Implementierung"), ~s(Skip "Freigabe Review")], fn name -> %{"name" => name} end)}
+            })
+          )
+        end)
+
+      %{state | issues: issues}
+    end)
+
+    ProjectContext.with_context(context, fn ->
+      {:ok, _} = Journal.update(order, %{"state" => "retired"})
+      successor = Map.merge(order, %{"id" => "successor", "session_id" => "successor-session", "members" => remaining})
+      :ok = Journal.write(successor)
+      {:ok, record} = YoloStore.read("incoming")
+      attempt = Map.merge(Map.take(successor, ~w(id session_id sha workspace)), %{"completed" => Map.new(remaining, &{&1["id"], "Verworfen"})})
+      :ok = YoloStore.write("incoming", Map.put(record, "attempt", attempt))
+    end)
+
+    assert {:ok, pending} = TestRun.execute("probe")
+    ids = Enum.map(remaining, & &1["id"])
+    unfinished = Enum.filter(pending["fixtures"], &(&1["id"] in ids))
+    assert Enum.all?(unfinished, &(&1["observed_state"] == "Verworfen"))
+    refute Enum.any?(unfinished, & &1["complete"])
+
+    ProjectContext.with_context(context, fn ->
+      {:ok, successor} = Journal.read("incoming")
+      {:ok, _} = Journal.update(successor, %{"state" => "completed", "writable" => false})
+    end)
+
+    assert {:ok, ready} = TestRun.execute("probe")
+    assert Enum.all?(Enum.filter(ready["fixtures"], &(&1["id"] in ids)), & &1["complete"])
+  end
+
+  test "interruption refuses inactive foreign unknown and incompletely bound executions without revocation", ctx do
+    alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
+    alias SymphonyElixir.Yolo.OpenClaw.Journal
+    {contexts, context, plan, journal, _first, order, active} = interruption_fixture(ctx)
+
+    for reply <- [
+          {:error, :gateway_unavailable},
+          {:ok, %{}},
+          {:ok, put_in(active["sessionInfo"]["hasActiveRun"], false)},
+          {:ok, put_in(active["sessionInfo"]["activeRunIds"], [order["id"], "newer"])},
+          {:ok, Map.put(active, "sessionKey", "foreign")}
+        ] do
+      assert {:error, _} = Interruption.execute(contexts, plan, journal, history: fn _ -> reply end)
+      ProjectContext.with_context(context, fn -> assert {:ok, ^order} = Journal.read("incoming") end)
+    end
+
+    for change <- [%{"interruption_contract" => nil}, %{"acceptance_observed" => false}, %{"checkout_proof" => nil}, %{"members" => []}, %{"project_id" => "foreign"}] do
+      ProjectContext.with_context(context, fn -> :ok = DurableState.write(Journal.path("incoming"), Map.merge(order, change)) end)
+      assert {:error, _} = Interruption.execute(contexts, plan, journal, history: fn _ -> flunk("unbound order queried") end)
+    end
+
+    empty = %{journal | "fixtures" => []}
+    assert {:error, :test_interruption_fixtures_unconfirmed} = Interruption.execute(contexts, plan, empty)
+    ProjectContext.with_context(context, fn -> File.write!(Journal.path("incoming"), "corrupt") end)
+    assert {:error, :openclaw_journal_corrupt} = Interruption.execute(contexts, plan, journal)
+    assert {:error, :test_interruption_unbound} = Interruption.execute(contexts, Map.put(plan, "source", %{}), journal)
+    assert {:error, :test_interruption_unbound} = Interruption.execute(contexts, Map.delete(plan, "openclaw_interruption"), journal)
+    assert {:error, :test_interruption_unbound} = Interruption.execute([], plan, journal)
+    assert {:error, :test_interruption_agent_mismatch} = Interruption.execute(contexts, Map.put(plan, "openclaw_agent", "other"), journal)
+  end
+
+  defp interruption_fixture(ctx) do
+    alias SymphonyElixir.Yolo.OpenClaw.Journal
+    plan = Map.merge(ctx.plan, %{"scenario" => "po_incoming", "openclaw_agent" => "po", "openclaw_interruption" => true})
+    contexts = Enum.map(ctx.contexts, &put_in(&1.settings.tracker.openclaw_yolo_agent, "po"))
+    {contexts, context, _} = prepare_delegation(%{ctx | plan: plan, contexts: contexts}, "po_incoming")
+    {:ok, journal} = TestRun.execute("probe")
+    journal = update_in(journal["fixtures"], &Enum.map(&1, fn f -> if f["initial_state"] == "Backlog", do: Map.put(f, "observed_state", "Verworfen"), else: f end))
+    members = Enum.filter(journal["fixtures"], & &1["po_incoming"])
+    assert Enum.all?(members, &(&1["po_interruption"] and String.contains?(&1["description"], "sleep 300")))
+    first = Enum.find(members, &(&1["initial_state"] == "Backlog"))
+
+    order = %{
+      "id" => "original",
+      "group" => "incoming",
+      "project_id" => context.id,
+      "agent" => "po",
+      "linear_agent_id" => "fixture-agent",
+      "session_id" => "agent:po:original",
+      "members" => Enum.map(members, &Map.take(&1, ~w(id identifier))),
+      "state" => "accepted",
+      "interruption_contract" => 1,
+      "acceptance_observed" => true,
+      "writable" => true,
+      "workspace" => "/synthetic",
+      "sha" => "sha",
+      "checkout_proof" => %{"id" => "original", "clean" => true}
+    }
+
+    ProjectContext.with_context(context, fn ->
+      :ok = Journal.write(order)
+      {:ok, record} = YoloStore.read("incoming")
+      :ok = YoloStore.write("incoming", Map.put(record, "attempt", %{"id" => "original", "completed" => %{first["id"] => "Verworfen: erfüllt"}}))
+    end)
+
+    active = %{
+      "sessionKey" => order["session_id"],
+      "sessionId" => "physical",
+      "sessionInfo" => %{"key" => order["session_id"], "sessionId" => "physical", "lastRunId" => "original", "hasActiveRun" => true, "activeRunIds" => ["original"]}
+    }
+
+    {contexts, context, plan, journal, first, order, active}
+  end
+
   defp prepare_delegation(ctx, scenario \\ "delegation") do
     plan = Map.put(ctx.plan, "scenario", scenario)
     :ok = DurableState.write(ctx.plan_path, plan)

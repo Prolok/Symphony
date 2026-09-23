@@ -40,6 +40,39 @@ defmodule SymphonyElixir.OpenClawConfigTest do
     assert {:error, _} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
   end
 
+  test "lifecycle gateway port is an optional integer and changes require restart" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
+    workflow = File.read!(Workflow.workflow_file_path())
+    bridge = "  openclaw_linear_bridge:\n    producer_id: symphony-example\n    consumer_account_id: account-example\n    key_id: example-key\n    gateway_port: 19892\n"
+    File.write!(Workflow.workflow_file_path(), String.replace(workflow, "tracker:\n", "tracker:\n" <> bridge))
+    root = Path.dirname(Workflow.workflow_file_path())
+    File.mkdir_p!(Path.join(root, ".symphony"))
+    File.write!(Path.join(root, ".symphony/.env"), "LINEAR_ASSIGNEE=human@example.com\n")
+    assert {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    assert context.settings.tracker.openclaw_linear_bridge["gateway_port"] == 19_892
+
+    for port <- ["1", "18789", "65535"] do
+      changed = String.replace(bridge, "19892", port)
+      File.write!(Workflow.workflow_file_path(), String.replace(workflow, "tracker:\n", "tracker:\n" <> changed))
+      assert ProjectContext.refresh(context) == context
+      assert {:ok, restarted} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+      assert restarted.settings.tracker.openclaw_linear_bridge["gateway_port"] == String.to_integer(port)
+    end
+
+    for port <- ["0", "-1", "65536", "19892.0", "null", "true", "\"19892\"", "ws://remote:19892", "$PORT"] do
+      changed = String.replace(bridge, "19892", port)
+      File.write!(Workflow.workflow_file_path(), String.replace(workflow, "tracker:\n", "tracker:\n" <> changed))
+      assert {:error, _} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+      assert ProjectContext.refresh(context) == context
+    end
+
+    for field <- ~w(gateway_url gateway_host gateway_token) do
+      changed = bridge <> "    #{field}: forbidden\n"
+      File.write!(Workflow.workflow_file_path(), String.replace(workflow, "tracker:\n", "tracker:\n" <> changed))
+      assert {:error, _} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    end
+  end
+
   test "projects retain independent selections across export, restore and rejected reload" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
     root = Path.dirname(Workflow.workflow_file_path())

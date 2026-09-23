@@ -27,9 +27,12 @@ CLI und deren öffentlichen Export `openclaw/plugin-sdk/gateway-runtime`.
 `agents.list`, `agent`, die laufenden `agent.wait`-Abfragen und `sessions.abort`
 teilen innerhalb eines Workers dessen `GatewayClient`-Verbindung. Sonstige
 Lesezugriffe und Benachrichtigungen verwenden weiterhin `openclaw gateway call`.
-Alle Aufrufe bleiben am lokalen Standardgateway `127.0.0.1:18789`, ohne
-Remote-Auswahl, `--local`, Gatewaystart oder Ersatzagent. Andere Ports werden
-nicht unterstützt. CLI und Node müssen auf dem PATH des Dienstes liegen; der
+Ausführungs-RPCs bleiben am lokalen Standardgateway `127.0.0.1:18789`, ohne
+Remote-Auswahl, `--local`, Gatewaystart oder Ersatzagent. Nur der optionale
+LinearBridge-Lifecycle-RPC kann über
+`tracker.openclaw_linear_bridge.gateway_port` einen anderen lokalen Port
+adressieren; dieser bleibt dauerhaft an seinen Originalauftrag gebunden.
+CLI und Node müssen auf dem PATH des Dienstes liegen; der
 SDK wird über die öffentliche Exportauflösung derselben CLI-Installation geladen.
 Gateway und CLI müssen zum unterstützten Release **2026.9.4** gehören. Die
 CLI-Version wird vor jedem neuen Auftrag geprüft; Gatewayversion und vorhandener

@@ -81,7 +81,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.LinearBridge.Delivery do
            {:ok, key} <- Keyword.get(opts, :bridge_key, &Config.openclaw_bridge_key/1).(order["linear_bridge"]["config"]),
            {:ok, raw} <- snapshot_bytes(snapshot),
            {:ok, wire} <- LinearBridge.sign(raw, order["linear_bridge"]["config"]["key_id"], key),
-           {:ok, reply} <- Gateway.lifecycle(wire, opts),
+           {:ok, reply} <- Gateway.lifecycle(wire, Keyword.put(opts, :bridge_gateway_port, Map.get(order["linear_bridge"]["config"], "gateway_port", 18_789))),
            :ok <- LinearBridge.acknowledge(reply, order, snapshot) do
         confirmed = Map.merge(attempted, %{"ack_sequence" => snapshot["sequence"], "payload_sha256" => snapshot["payload_sha256"], "disposition" => reply["disposition"], "retry_at" => 0})
         DurableState.write(receipt_path(order), confirmed)
@@ -108,8 +108,13 @@ defmodule SymphonyElixir.Yolo.OpenClaw.LinearBridge.Delivery do
   end
 
   defp same_config(order) do
-    config = Map.put_new(Config.openclaw_linear_bridge(), "secret_env", "SYMPHONY_LINEAR_BRIDGE_KEY")
-    if order["linear_bridge"]["config"] == config, do: :ok, else: {:error, :openclaw_bridge_binding_changed}
+    config = Config.openclaw_linear_bridge()
+    original = order["linear_bridge"]["config"]
+
+    if LinearBridge.valid_config?(config) and LinearBridge.valid_config?(original) and
+         LinearBridge.config_with_defaults(original) == LinearBridge.config_with_defaults(config),
+       do: :ok,
+       else: {:error, :openclaw_bridge_binding_changed}
   end
 
   defp now(opts), do: Keyword.get(opts, :bridge_now, &System.system_time/1).(:millisecond)

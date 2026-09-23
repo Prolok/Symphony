@@ -15,6 +15,7 @@ tracker:
     consumer_account_id: account-example
     key_id: producer-key-example
     secret_env: SYMPHONY_LINEAR_BRIDGE_KEY
+    gateway_port: 18789
 ```
 
 Die drei IDs sind ASCII-Slugs (1–128 Zeichen, Buchstaben/Ziffern, danach auch
@@ -27,6 +28,17 @@ Projektkontexten, Hooks, Worker- und CLI-Kindprozessen entfernt. Der
 Secret-Access-Deny-Vertrag gilt auch hier. Kein App-/Relay-/Gatewaycredential
 wiederverwenden. Konfigurationsänderungen verlangen einen Dienstneustart.
 
+`gateway_port` ist optional (Standard `18789`) und akzeptiert ausschließlich
+eine Ganzzahl von 1 bis 65535. Für einen separat bereitgestellten lokalen
+Testconsumer beispielsweise `19892` setzen. Nur der Lifecycle-RPC verwendet
+diesen Port über das vorhandene CLI-Argument `--port`; dieses erzwingt im
+unterstützten OpenClaw-Release das lokale Loopbackziel, auch bei abweichender
+Remote-/Env-Konfiguration. Agent-, Status-, History-, Abbruch- und
+Benachrichtigungsaufrufe bleiben auf `18789`. Keine URL-/Host-/Credentialoption,
+kein automatischer Rückfall auf den Standardport bei fehlendem Consumer.
+Gatewayauthentisierung bleibt beim bestehenden autorisierten CLI-Zugang;
+der Port ersetzt keine Authentisierung oder Consumerbindung.
+
 Ohne Option oder ohne `OPENCLAW_YOLO_AGENT`: keine Consumer- oder Schlüsselzugriffe.
 Bereits gespeicherte Snapshots bleiben bei Deaktivierung offen. Mit Option und fehlendem
 Schlüssel/Consumer: PO-Ausführung bleibt unabhängig; Zustellung bleibt
@@ -36,9 +48,24 @@ von Berechtigungen. Der Consumer muss vorher separat eingerichtet sein.
 
 Nur neu angelegte Originalaufträge erhalten die konfigurierte Bridgebindung.
 Bestehende Altjournale werden beim Aktivieren nicht rückwirkend interpretiert.
-Die gesamte Bindung einschließlich Empfänger und Schlüsselreferenz bleibt für
+Die gesamte Bindung einschließlich lokalem Gatewayport, Empfänger und Schlüsselreferenz bleibt für
 die Generation unveränderlich. Nach einem Konfigurationswechsel bleiben nicht
 passende alte Zustellungen offen (`openclaw_bridge_binding_changed`).
+Alte Bridgejournale ohne Portfeld bedeuten weiterhin ausschließlich `18789`;
+ein expliziter Standardport ist dazu gleichwertig. Die ursprüngliche Bindung
+wiederherzustellen erlaubt den bestehenden Retry mit denselben Snapshotbytes;
+Journale nicht zum Umleiten editieren. Der lokale Port gehört nur zur
+Zustellkonfiguration, nicht zum v1-Wire-Schema oder zu dessen Snapshot-Hashes.
+
+Für die isolierte Integration richtet der zuständige Betreiber den Consumer
+mit passender Produzenten-/Accountbindung und vorhandenem autorisiertem Zugang
+auf dem gewählten lokalen Port ein, bevor Symphony neue Testaufträge erzeugt.
+Die Testinstanz erhält diese Workflowoption vor ihrem Start. Symphony startet
+oder installiert den Consumer nicht und verändert keine OpenClaw-Konfiguration.
+Ein bereits journalisierter Produktionsauftrag kann durch einen Portwechsel
+nicht zum Testauftrag werden. Backlog- und Zwei-Mitglieder-Reviewlauf müssen
+über den echten Transport samt Markeränderungen und Cleanup separat belegt
+werden; aufzeichnende Testtransporte sind nur synthetische Nachweise.
 
 ## Implementierungsstand der Recoverybelege
 
@@ -52,7 +79,12 @@ Recoverypfads bleibt ein Abbruch ohne Originalterminal offen.
 
 ## Wire-Vertrag
 
-**Transport:** neuer Consumer-RPC `linearbridge.symphony.lifecycle.v1` über den bereits vorhandenen lokalen Aufruf `openclaw gateway call <method> --params <JSON> --json --timeout 10000 --port 18789`. Der LinearBridge-Consumer registriert ihn über öffentliche `api.registerGatewayMethod(method, handler, {scope: "operator.write"})`; bestehende autorisierte Gatewayverbindung verwenden, keine neue Geräteberechtigung. Kein HTTP-Server, Prompt-Parsing, agent-Aufruf oder Modell im Consumerpfad.
+**Transport:** neuer Consumer-RPC `linearbridge.symphony.lifecycle.v1` über den bereits vorhandenen lokalen Aufruf `openclaw gateway call <method> --params <JSON> --json --timeout 10000 --port <gateway_port>` (Standard `18789`). Der LinearBridge-Consumer registriert ihn über öffentliche `api.registerGatewayMethod(method, handler, {scope: "operator.write"})`; bestehende autorisierte Gatewayverbindung verwenden, keine neue Geräteberechtigung. Kein HTTP-Server, Prompt-Parsing, agent-Aufruf oder Modell im Consumerpfad.
+
+Die Portauswahl verwendet den bestehenden `localPortOverride` des
+[Gatewayclients](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/call.ts)
+und dessen
+[Zielauflösung](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/connection-details.ts).
 
 **Quellen:** OpenClaw 2026.9.4, Commit `3a9d69db306cd7f081e06254cb89c4bcc14a7107`: [öffentliche Plugin-API](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugins/plugin-api.types.ts), [Gateway-Router/Scopeprüfung](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/server-methods.ts), [Handlervertrag](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/server-methods/shared-types.ts), [Agent-RPC](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/agent.ts). Repoquellen: `lib/symphony_elixir/yolo/openclaw.ex`, `openclaw/gateway.ex`, `openclaw/journal.ex`, `ProjectContext.load/4`; die Projektion von Stilllegungen ist als Protokollreserve vorbereitet (siehe Implementierungsstand oben). Öffentliche Schnittstelle ist belegt; Registrierung, Schlüssel und isolierte Consumerinstanz sind Bereitstellungsarbeit im Gegenprojekt.
 

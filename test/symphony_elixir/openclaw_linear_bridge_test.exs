@@ -60,8 +60,8 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     }
   end
 
-  defp transport(callback) do
-    fn ["gateway", "call", "linearbridge.symphony.lifecycle.v1", "--params", raw, "--json", "--timeout", "10000", "--port", "18789"] ->
+  defp transport(callback, port \\ "18789") do
+    fn ["gateway", "call", "linearbridge.symphony.lifecycle.v1", "--params", raw, "--json", "--timeout", "10000", "--port", ^port] ->
       wire = Jason.decode!(raw)
       callback.(wire)
     end
@@ -284,6 +284,91 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     assert :ok = Delivery.flush(transport: deny, bridge_key: deny)
     assert {:ok, current} = Journal.read("incoming")
     assert {:ok, %{"ack_sequence" => 0}} = DurableState.read(Delivery.receipt_path(current))
+  end
+
+  test "isolated delivery binds the port and replays identical bytes after restart without rerouting", %{context: context} do
+    isolated = put_in(context.settings.tracker.openclaw_linear_bridge["gateway_port"], 19_892)
+    ProjectContext.bind(isolated)
+    assert :ok = Journal.write(order("review"))
+    assert {:ok, current} = Journal.read("review")
+    assert current["linear_bridge"]["config"]["gateway_port"] == 19_892
+    assert {:error, :openclaw_immutable_order} = Journal.update(current, %{"linear_bridge" => %{}})
+    parent = self()
+
+    lost =
+      transport(
+        fn wire ->
+          send(parent, {:first_wire, wire})
+          {:error, :openclaw_transport_timeout}
+        end,
+        "19892"
+      )
+
+    assert :ok = Delivery.flush(options(lost))
+    assert_received {:first_wire, first_wire}
+    refute Jason.encode!(first_wire) =~ :binary.copy(<<42>>, 32)
+    assert {:ok, %{"ack_sequence" => 0}} = DurableState.read(Delivery.receipt_path(current))
+    deny = fn _ -> flunk("port change must prevent key and transport access") end
+
+    # Reloading the default target must not move an isolated, possibly accepted delivery.
+    ProjectContext.bind(context)
+
+    logs =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok = Delivery.flush(options(deny, 30_000) |> Keyword.put(:bridge_key, deny))
+      end)
+
+    assert logs =~ "openclaw_bridge_binding_changed"
+    assert {:ok, %{"ack_sequence" => 0}} = DurableState.read(Delivery.receipt_path(current))
+
+    replay =
+      transport(
+        fn wire ->
+          assert wire == first_wire
+          send(parent, :replayed)
+          {:ok, Jason.encode!(ack(wire, "duplicate"))}
+        end,
+        "19892"
+      )
+
+    # A fresh process has no delivery memory; journal + receipt select the same target/bytes.
+    assert :ok =
+             Task.async(fn ->
+               ProjectContext.with_context(isolated, fn ->
+                 Delivery.flush(options(replay, 60_000) |> Keyword.put(:bridge_gateway_port, 18_789))
+               end)
+             end)
+             |> Task.await()
+
+    assert_received :replayed
+    assert {:ok, %{"ack_sequence" => 1, "disposition" => "duplicate"}} = DurableState.read(Delivery.receipt_path(current))
+    ProjectContext.bind(isolated)
+    assert :ok = Delivery.flush(options(deny, 90_000))
+    assert {:ok, ^current} = Journal.read("review")
+  end
+
+  test "legacy bridge journals stay on the default port and explicit defaults are equivalent", %{context: context} do
+    assert :ok = Journal.write(order())
+    assert {:ok, current} = Journal.read("incoming")
+    legacy = update_in(current["linear_bridge"]["config"], &Map.delete(&1, "gateway_port"))
+    assert :ok = DurableState.write(Journal.path("incoming"), legacy)
+    parent = self()
+    deny = fn _ -> flunk("legacy outbox must not move to an isolated target") end
+    ProjectContext.bind(put_in(context.settings.tracker.openclaw_linear_bridge["gateway_port"], 19_892))
+    assert :ok = Delivery.flush(options(deny) |> Keyword.put(:bridge_key, deny))
+    assert {:ok, %{"ack_sequence" => 0}} = DurableState.read(Delivery.receipt_path(legacy))
+    ProjectContext.bind(put_in(context.settings.tracker.openclaw_linear_bridge["gateway_port"], 18_789))
+
+    consumer =
+      transport(fn wire ->
+        send(parent, :default_delivered)
+        {:ok, Jason.encode!(ack(wire))}
+      end)
+
+    assert :ok = Delivery.flush(options(consumer, 30_000))
+    assert_received :default_delivered
+    assert {:ok, %{"ack_sequence" => 1}} = DurableState.read(Delivery.receipt_path(legacy))
+    assert {:ok, ^legacy} = Journal.read("incoming")
   end
 
   test "unknown and abort acknowledgement have no terminal evidence; rejection and operator originals are projected" do

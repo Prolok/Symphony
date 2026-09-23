@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.LinearBridge do
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.LinearBridge.Projection
   @method "linearbridge.symphony.lifecycle.v1"
-  @config_keys ~w(producer_id consumer_account_id key_id secret_env)
+  @config_keys ~w(producer_id consumer_account_id key_id secret_env gateway_port)
 
   @spec valid_config?(term()) :: boolean()
   def valid_config?(nil), do: true
@@ -12,19 +12,31 @@ defmodule SymphonyElixir.Yolo.OpenClaw.LinearBridge do
   def valid_config?(config) when is_map(config) do
     Enum.all?(Map.keys(config), &(&1 in @config_keys)) and
       Enum.all?(~w(producer_id consumer_account_id key_id), &slug?(config[&1])) and
-      secret_name?(config["secret_env"] || "SYMPHONY_LINEAR_BRIDGE_KEY")
+      secret_name?(config["secret_env"] || "SYMPHONY_LINEAR_BRIDGE_KEY") and
+      valid_gateway_port?(Map.get(config, "gateway_port", 18_789))
   end
 
   def valid_config?(_), do: false
   defp secret_name?(value), do: is_binary(value) and Regex.match?(~r/\ASYMPHONY_LINEAR_BRIDGE_[A-Z0-9_]+\z/, value)
   defp slug?(value), do: is_binary(value) and Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\z/, value)
 
+  @spec valid_gateway_port?(term()) :: boolean()
+  def valid_gateway_port?(port), do: is_integer(port) and port in 1..65_535
+
+  @doc "Old bridge journals without a port remain bound to the original local default."
+  @spec config_with_defaults(map()) :: map()
+  def config_with_defaults(config) do
+    config
+    |> Map.put_new("secret_env", "SYMPHONY_LINEAR_BRIDGE_KEY")
+    |> Map.put_new("gateway_port", 18_789)
+  end
+
   @doc "Bind only newly created orders; enabling the option does not reinterpret old journals."
   @spec bind(map()) :: {:ok, map()} | {:error, atom()}
   def bind(order) do
     case Config.openclaw_linear_bridge() do
       nil -> {:ok, order}
-      config -> capture(Map.put(order, "linear_bridge", %{"config" => Map.put_new(config, "secret_env", "SYMPHONY_LINEAR_BRIDGE_KEY"), "snapshots" => []}))
+      config -> capture(Map.put(order, "linear_bridge", %{"config" => config_with_defaults(config), "snapshots" => []}))
     end
   end
 

@@ -526,6 +526,12 @@ defmodule SymphonyElixir.Config.Schema do
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
 
+  # Bridge fields are a closed binding: an explicit null port must not become
+  # an omitted port and silently select the default gateway.
+  defp drop_nil_values(%{"openclaw_linear_bridge" => bridge} = value) when is_map(bridge) do
+    value |> Map.delete("openclaw_linear_bridge") |> drop_nil_values() |> Map.put("openclaw_linear_bridge", bridge)
+  end
+
   defp drop_nil_values(value) when is_map(value) do
     Enum.reduce(value, %{}, fn {key, nested}, acc ->
       case drop_nil_values(nested) do

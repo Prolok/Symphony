@@ -79,6 +79,9 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @spec notify(map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def notify(destination, message, opts), do: rpc("send", Map.put(destination, "message", message), opts)
 
+  @spec lifecycle(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def lifecycle(envelope, opts), do: rpc("linearbridge.symphony.lifecycle.v1", envelope, opts)
+
   defp rpc(method, params, opts) do
     raw = Jason.encode!(params)
     args = ["gateway", "call", method, "--params", raw, "--json", "--timeout", "10000", "--port", "18789"]

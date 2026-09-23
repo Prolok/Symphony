@@ -315,6 +315,8 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   aufgegeben werden; offene Arbeit wird regulär neu geplant, kein Erfolg fingiert.
   Belegimporte und ausdrücklich beauftragte administrative Altfallbereinigungen
   erfolgen getrennt durch den Betreiber gemäß diesem Vertrag.
+  Optional übergibt `tracker.openclaw_linear_bridge` journalisierte PO-Lifecycles
+  authentifiziert an LinearBridge; [Einrichtung und Vertrag](docs/linearbridge-lifecycle.md).
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
   `config.toml` oder der geprüften Repository-Skills blockieren den

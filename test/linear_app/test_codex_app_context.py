@@ -131,6 +131,21 @@ class AppContextTest(unittest.TestCase):
         self.assertNotIn("synthetic-personal", joined)
         self.assertIn(str(self.skill), joined)
 
+    def test_bridge_keys_never_enter_model_configuration_or_shell_allowlist(self):
+        target = context.prepare(self.release, self.original, [], self.project)
+        environment = {"SYMPHONY_LINEAR_CLIENT_SECRET_ENV": "APP_SECRET", "APP_SECRET": "synthetic-app",
+                       "SYMPHONY_BRIDGE_SECRET_ENV": "SYMPHONY_LINEAR_BRIDGE_CUSTOM",
+                       "SYMPHONY_LINEAR_BRIDGE_CUSTOM": "synthetic-bridge",
+                       "SYMPHONY_LINEAR_BRIDGE_OTHER_PROJECT": "synthetic-other",
+                       "PUBLIC_VALUE": "visible"}
+        args = context.launch_config(self.release, target, self.project, self.personal, environment)
+        policy = tomllib.loads("\n".join(args[i + 1] for i, value in enumerate(args) if value == "--config"))["shell_environment_policy"]
+        for key in ("SYMPHONY_LINEAR_BRIDGE_CUSTOM", "SYMPHONY_LINEAR_BRIDGE_OTHER_PROJECT", "SYMPHONY_LINEAR_BRIDGE_KEY"):
+            self.assertIn(key, policy["exclude"])
+            self.assertNotIn(key, policy["include_only"])
+        self.assertNotIn("synthetic-bridge", " ".join(args))
+        self.assertNotIn("synthetic-other", " ".join(args))
+
     def test_preparation_trusts_only_the_authorized_project_without_personal_config(self):
         target = context.prepare(self.release, self.original, [], self.project)
         self.assertEqual(tomllib.loads((target / "config.toml").read_text()), {

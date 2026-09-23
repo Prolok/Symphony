@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   @spec tick(map(), [map()], keyword()) :: map()
   def tick(state, issues, opts \\ []) do
+    SymphonyElixir.Yolo.OpenClaw.LinearBridge.Delivery.tick(opts)
     state = recover_external(state, opts)
     runs = state.yolo_runs |> reconcile(issues) |> refresh_external(issues, opts)
     previous_ids = Enum.flat_map(state.yolo_runs, fn {_, run} -> run.ids end) |> MapSet.new()

@@ -40,6 +40,7 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defmodule Tracker do
+    alias SymphonyElixir.Yolo.OpenClaw.LinearBridge
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
@@ -71,6 +72,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:yolo_agent, :string)
       field(:advisory_agent_ids, {:array, :string}, default: [])
       field(:openclaw_yolo_agent, :string)
+      field(:openclaw_linear_bridge, :map)
       field(:active_states, {:array, :string}, default: @default_active_states)
       field(:terminal_states, {:array, :string}, default: @default_terminal_states)
     end
@@ -87,10 +89,13 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent advisory_agent_ids openclaw_yolo_agent active_states terminal_states)a,
+        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent advisory_agent_ids openclaw_yolo_agent openclaw_linear_bridge active_states terminal_states)a,
         empty_values: []
       )
       |> validate_inclusion(:auth_mode, ["app"])
+      |> validate_change(:openclaw_linear_bridge, fn field, bridge ->
+        if LinearBridge.valid_config?(bridge), do: [], else: [{field, "invalid lifecycle bridge binding"}]
+      end)
       |> validate_change(:advisory_agent_ids, fn field, ids ->
         if length(ids) <= 20 and Enum.all?(ids, &match?({:ok, _}, Ecto.UUID.cast(&1))), do: [], else: [{field, "must contain at most 20 app-user UUIDs"}]
       end)

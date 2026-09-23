@@ -188,10 +188,13 @@ def launch_config(release, target, cwd, user_home, environment=None):
     # it. The allowlist contains names only and also prevents a lower-layer `set`
     # from restoring the excluded secret. Disable snapshots and unrelated hooks
     # in this app context so those subprocesses cannot capture the host env.
-    secrets = [secret_name, "LINEAR_API_KEY", "LINEAR_APP_SECRET", "LINEAR_RELAY_KEY"]
+    secrets = [secret_name, "LINEAR_API_KEY", "LINEAR_APP_SECRET", "LINEAR_RELAY_KEY", "SYMPHONY_LINEAR_BRIDGE_KEY"]
+    secrets.extend(name for name in environment if name.startswith("SYMPHONY_LINEAR_BRIDGE_"))
     relay_secret = environment.get("SYMPHONY_RELAY_KEY_ENV", "")
     if relay_secret:
         secrets.append(relay_secret)
+    if environment.get("SYMPHONY_BRIDGE_SECRET_ENV"):
+        secrets.append(environment["SYMPHONY_BRIDGE_SECRET_ENV"])
     allowed = sorted({name for name in environment if name.upper() not in {key.upper() for key in secrets}} | {"SYMPHONY_LINEAR_SECRET_ACCESS"})
     args.extend(["--config", "shell_environment_policy.exclude=" + json.dumps(secrets),
                  "--config", "shell_environment_policy.include_only=" + json.dumps(allowed),
@@ -278,7 +281,10 @@ def main():
     env = dict(os.environ, CODEX_HOME=str(target))
     env.pop("LINEAR_API_KEY", None)
     env.pop("LINEAR_RELAY_KEY", None)
+    env.pop("SYMPHONY_LINEAR_BRIDGE_KEY", None)
+    env.pop(env.get("SYMPHONY_BRIDGE_SECRET_ENV", "SYMPHONY_LINEAR_BRIDGE_KEY"), None)
     env.pop(env.get("SYMPHONY_RELAY_KEY_ENV", "LINEAR_RELAY_KEY"), None)
+    env = {name: value for name, value in env.items() if not name.startswith("SYMPHONY_LINEAR_BRIDGE_")}
     supplied = sys.argv[1:]
     index = 0
     while index < len(supplied) and supplied[index] in ("-c", "--config", "--model", "-m"):

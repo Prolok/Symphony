@@ -15,6 +15,11 @@ weiterhin seine eigenen Journale, um früher angenommene Aufträge zu sperren.
 Andere Projekte und reguläre AI-/Dialog-Läufe behalten ihren Ausführungsweg.
 Installation, Build und Standardgates installieren/starten kein OpenClaw.
 
+Optional überträgt `tracker.openclaw_linear_bridge` die vollständige
+Auftragsbindung und belegte Lifecyclezustände authentifiziert an einen
+vorhandenen LinearBridge-Consumer. Einrichtung, v1-Schema, Zustellquittungen
+und isolierte Nachweise: [LinearBridge-Lifecycle](linearbridge-lifecycle.md).
+
 ## Unterstützte Schnittstelle
 
 Der austauschbare Elixir-Adapter `Yolo.OpenClaw.Adapter` verwendet die vorhandene

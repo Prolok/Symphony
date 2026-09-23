@@ -45,6 +45,7 @@ runtime_env_vars=(
   SYMPHONY_PHASE
   SYMPHONY_YOLO_SCOPE
   SYMPHONY_RELAY_KEY_ENV
+  SYMPHONY_BRIDGE_SECRET_ENV
 )
 
 for env_var in "${runtime_env_vars[@]}"; do
@@ -61,6 +62,10 @@ unset LINEAR_YOLO_AGENT OPENCLAW_YOLO_AGENT OPENCLAW_YOLO_NOTIFY_SESSION LINEAR_
 # separate launcher; an agent selection alone never enables real test I/O.
 export SYMPHONY_OPENCLAW_TEST_DENY=1
 unset LINEAR_APP_SECRET_ENV
+for bridge_secret_name in ${!SYMPHONY_LINEAR_BRIDGE_@}; do
+  unset "$bridge_secret_name"
+done
+unset SYMPHONY_LINEAR_BRIDGE_KEY
 unset LINEAR_RELAY_KEY LINEAR_RELAY_URL LINEAR_RELAY_CONSUMER_ID LINEAR_RELAY_OWNERS
 
 unset MIX_DEPS_PATH MIX_BUILD_ROOT MIX_BUILD_PATH

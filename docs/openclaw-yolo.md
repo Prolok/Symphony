@@ -199,6 +199,11 @@ Kommentare und offene Aktionen erneut. Ein neuer Auftrag erhält eine neue Sitzu
 und bearbeitet nur noch offene Arbeit. Es gibt keine Wiederholung des alten
 `agent`-Aufrufs und keine zusätzliche Recovery-Infrastruktur.
 
+Neue fällige Betreiberarbeit nach technischen Zwischenphasen verwendet auch mit
+OpenClaw den [quellengebundenen Workpadauftrag](linear-app.md#quellengebundener-betreiberauftrag).
+Er unterscheidet die neue Pflicht vom früheren BLOCKER-Entscheid; bestehende
+Reservierungen bleiben geschützt. Dieser Zustellbeleg ist kein Live-Testpass.
+
 Das ist eine begrenzte aktuelle Schnittstellenprüfung mit dauerhaftem lokalem
 Rechteentzug, keine atomare Sperre des OpenClaw-Hosts. Zustandsabfragen können
 fehlschlagen; dann bleibt die Reservierung bestehen. Ältere Aufträge ohne diesen

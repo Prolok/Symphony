@@ -256,6 +256,8 @@ bleibt das Gate offen; negative Befunde erlauben Nacharbeit im Scope und erneute
 dieselbe Übergabe erhalten und nach `BLOCKER` zurückgeben; keinen unerfüllbaren
 Betreiberauftrag oder zusätzlichen Review allein wegen Wartezeit neu starten.
 Details und synthetische Fälle: [Betreiberpflichten und Wiederaufnahme](docs/linear-app.md#betreiberpflichten-und-wiederaufnahme).
+Neue fällige Betreiberarbeit nach Zwischenarbeit im Workpad zusätzlich als
+[quellengebundenen Betreiberauftrag](docs/linear-app.md#quellengebundener-betreiberauftrag) festhalten; unveränderte Pflichten nicht neu ausstellen.
 Freigegebene Routinetests nach einmaliger Einrichtung über `symphony_test`
 aufrufen; `worker.test_executor` verwaltet den lokalen Executor an
 `worker.test_executor_socket` im regulären Dienst. Keine zusätzliche Bestätigung

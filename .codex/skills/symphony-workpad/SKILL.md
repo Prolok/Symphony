@@ -103,6 +103,11 @@ widersprüchlich war.
   bereits bestandene lokale Prüfungen, fehlende externe Nachweise und genaue
   Fortsetzungsphase. Als ausstehende Betreiberaktion kennzeichnen; fehlende
   Testumgebung nicht als Review-/Linear-Authfehler ausgeben.
+- Für neue fällige Betreiberarbeit nach Zwischenarbeit unter `### Betreiberauftrag`
+  den [quellengebundenen Beleg](../../../docs/linear-app.md#quellengebundener-betreiberauftrag)
+  führen. Nur Aktion, Kandidatenstand, erwarteter Nachweis oder Fortsetzungsphase
+  bei fachlicher Änderung ersetzen; Zeitablauf und sonstige Workpadpflege sind
+  kein neuer Auftrag. Den letzten Beleg mit seinem Ergebnis erhalten.
 - Vor Wiederaufnahme Belegquelle, Ergebnis, Geltungsbereich und relevanten Stand
   abgleichen. Negative Befunde im Scope autonom korrigieren und erneut prüfen;
   fehlender positiver Nachweis sperrt den Gateabschluss, nicht die Nacharbeit.

@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.Yolo.Observation do
-  @moduledoc "Relay-driven semantic observations; own confirmed comments do not restart PO work."
+  @moduledoc "Relay-driven observations; confirmed workpad output restarts PO work only for explicit operator duties."
   alias SymphonyElixir.CommentCheckpoint
   alias SymphonyElixir.Relay.Store, as: Digest
-  alias SymphonyElixir.Yolo.{Dependencies, ReviewReadiness}
+  alias SymphonyElixir.Yolo.{Dependencies, OperatorHandoff, ReviewReadiness}
 
   @spec capture([map()], map(), keyword()) :: {:ok, map(), String.t()} | {:error, term()}
   def capture(issues, previous, opts \\ []) do
@@ -36,7 +36,7 @@ defmodule SymphonyElixir.Yolo.Observation do
   defp observe(issue, previous, generation, opts) do
     semantic = semantic_issue(issue)
     semantic = if generation > 0, do: Map.put(semantic, :dependency_generation, generation), else: semantic
-    signal = Digest.digest({2, issue.updated_at, issue.last_comment_signal, semantic})
+    signal = Digest.digest({3, issue.updated_at, issue.last_comment_signal, semantic})
 
     if is_map(previous) and previous["signal"] == signal do
       {:ok, previous}
@@ -44,7 +44,8 @@ defmodule SymphonyElixir.Yolo.Observation do
       scan = Keyword.get(opts, :scan, &CommentCheckpoint.scan/1)
 
       with {:ok, inbox} <- scan.(issue),
-           true <- not is_nil(inbox["last_successful_scan"]) and is_nil(inbox["scan_error"]) do
+           true <- not is_nil(inbox["last_successful_scan"]) and is_nil(inbox["scan_error"]),
+           {:ok, handoffs} <- OperatorHandoff.evidence(issue, inbox) do
         comments =
           inbox["versions"]
           |> Map.values()
@@ -52,15 +53,19 @@ defmodule SymphonyElixir.Yolo.Observation do
           |> Enum.map(&{&1["key"], &1["deleted"]})
           |> Enum.sort()
 
+        semantic = with_handoffs(semantic, handoffs)
         source = Digest.digest({semantic, comments})
         legacy = semantic_issue(issue) |> Map.put(:state, issue.state) |> Map.put(:blocked_by, Enum.map(issue.blocked_by, &Map.delete(&1, :state_type)))
-        {:ok, %{"signal" => signal, "semantic" => source, "source" => source, "legacy_semantic" => if(generation == 0, do: Digest.digest({legacy, comments}))}}
+        {:ok, %{"signal" => signal, "semantic" => source, "source" => source, "legacy_semantic" => if(generation == 0 and handoffs == [], do: Digest.digest({legacy, comments}))}}
       else
         {:error, _} = error -> error
         _ -> {:error, :yolo_comments_incomplete}
       end
     end
   end
+
+  defp with_handoffs(semantic, []), do: semantic
+  defp with_handoffs(semantic, handoffs), do: Map.put(semantic, :operator_handoffs, handoffs)
 
   defp bind_chains(issues, observations) do
     issues

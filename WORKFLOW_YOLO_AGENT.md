@@ -120,6 +120,9 @@ Löse autonom bearbeitbare Ursachen einschließlich autorisierter Betreiberprüf
 vollständig; danach Belege prüfen und in die passende Phase zurückführen. Eine
 fehlende Testbereitstellung nicht ungeprüft als fehlende Freigabe an den Menschen
 weiterreichen. Die Agentdelegation während eigener Nacharbeit erhalten.
+Ein [quellengebundener Betreiberauftrag](docs/linear-app.md#quellengebundener-betreiberauftrag)
+im Workpad bezeichnet die neue Pflicht; er ersetzt weder ihre Autorisierung noch
+einen Ausführungs-/Abnahmebeleg. Bereits ausgeführte Aktionen nicht wiederholen.
 Nur an der Eskalationsgrenze des Laufvertrags Ursache/Versuche/Empfehlung und
 menschliche Aktion übergeben, den konfigurierten ersten menschlichen Assignee
 setzen und die Agentdelegation entfernen. Der Status bleibt `BLOCKER`, solange

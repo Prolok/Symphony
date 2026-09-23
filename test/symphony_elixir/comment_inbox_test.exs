@@ -8,6 +8,25 @@ defmodule SymphonyElixir.CommentInboxTest do
     %{binding: %{"state_root" => root, "workspace_id" => "workspace", "installation_id" => "symphony", "user_id" => "app"}, issue: %{id: "one"}}
   end
 
+  test "current snapshot tracks a restored version without discarding history and survives failed scans", ctx do
+    first = comment("workpad", "Stand A")
+    second = comment("workpad", "Stand B")
+    assert {:ok, _} = scan(ctx, [first])
+    assert {:ok, state} = scan(ctx, [second])
+    assert state["current"] == %{"workpad" => CommentVersion.key(second)}
+    assert {:ok, state} = scan(ctx, [first])
+    assert state["current"] == %{"workpad" => CommentVersion.key(first)}
+    assert map_size(state["versions"]) == 2
+    fetch = fn -> {:error, {:comment_scan_incomplete, :missing_page, [second]}} end
+    assert {:error, :missing_page} = CommentInbox.scan(ctx.binding, ctx.issue, fetch)
+    assert {:ok, failed} = read(ctx)
+    assert failed["current"] == state["current"]
+    assert failed["scan_error"] != nil
+    assert {:ok, empty} = scan(ctx, [])
+    assert empty["current"] == %{}
+    assert map_size(empty["versions"]) == 2
+  end
+
   test "baseline preserves open historical guidance once; later edits are independent versions", ctx do
     historical = comment("old", "Offener Hinweis: Test für Fehler ergänzen")
     assert {:ok, state} = scan(ctx, [historical])

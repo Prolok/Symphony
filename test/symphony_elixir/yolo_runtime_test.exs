@@ -43,6 +43,199 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   defp inbox(versions \\ %{}), do: %{"versions" => versions, "last_successful_scan" => "now", "scan_error" => nil}
   defp scan(_), do: {:ok, inbox()}
 
+  test "new source-bound operator duty after technical work is delivered once", %{issues: [issue | _]} do
+    issue = %{issue | state: "BLOCKER"}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    first = operator_workpad("first", "a")
+    Process.put(:operator_versions, %{"first" => first})
+    Process.put(:operator_current, %{"workpad" => "first"})
+
+    opts = [
+      scan: fn _ -> {:ok, Map.put(inbox(Process.get(:operator_versions)), "current", Process.get(:operator_current))} end,
+      start: fn "blocker", _ ->
+        send(self(), :operator_started)
+        {:error, :observed_start}
+      end
+    ]
+
+    tick(state, [issue], opts)
+    assert_receive :operator_started
+    complete_operator_observation(issue)
+    for _ <- 1..2, do: tick(state, [issue], opts)
+    refute_receive :operator_started
+
+    for phase <- ["In Arbeit (AI)", "PreReview (AI)", "Review (AI)", "Test (AI)"] do
+      tick(state, [%{issue | state: phase}], opts)
+    end
+
+    second = operator_workpad("second", "b")
+    Process.put(:operator_versions, %{"first" => first, "second" => second})
+    Process.put(:operator_current, %{"workpad" => "second"})
+    changed = %{issue | last_comment_signal: %{relay_epoch: 2}}
+    tick(state, [changed], opts)
+    assert_receive :operator_started
+    complete_operator_observation(issue)
+
+    # The only durable restart input is the journal; no in-memory run survives.
+    for epoch <- 3..5 do
+      chatter = put_in(second, ["source", "body"], second["source"]["body"] <> "\n### Verlauf\n\nFortschritt #{epoch}\n")
+      Process.put(:operator_versions, Map.put(Process.get(:operator_versions), "chatter", chatter))
+      Process.put(:operator_current, %{"workpad" => "chatter"})
+      tick(state, [%{issue | last_comment_signal: %{relay_epoch: epoch}}], opts)
+      refute_receive :operator_started
+    end
+
+    # Removal and restoration of an old duty cannot reopen either decision.
+    removed = put_in(second, ["source", "body"], "## Symphony Workpad\n\nErgebnis dokumentiert.\n")
+    Process.put(:operator_versions, Map.put(Process.get(:operator_versions), "removed", removed))
+
+    for {epoch, key} <- [{6, "removed"}, {7, "first"}] do
+      Process.put(:operator_current, %{"workpad" => key})
+      tick(state, [%{issue | last_comment_signal: %{relay_epoch: epoch}}], opts)
+      refute_receive :operator_started
+    end
+  end
+
+  test "operator delivery keeps active claims and failed snapshots closed", %{issues: [issue | _]} do
+    issue = %{issue | state: "BLOCKER"}
+    state = %Orchestrator.State{max_concurrent_agents: 2, codex_totals: %{}}
+    duty = operator_workpad("new", "b")
+    snapshot = Map.put(inbox(%{"new" => duty}), "current", %{"workpad" => "new"})
+    start = fn _, _ -> flunk("reserved or unknown operator work must not start") end
+    opts = [scan: fn _ -> {:ok, snapshot} end, start: start]
+
+    for busy <- [%{state | claimed: MapSet.new([issue.id])}, %{state | running: %{issue.id => %{}}}] do
+      assert tick(busy, [issue], opts).yolo_runs == %{}
+    end
+
+    pid = spawn(fn -> receive do: (:stop -> :ok) end)
+    on_exit(fn -> Process.exit(pid, :kill) end)
+    active = %{pid: pid, ids: [issue.id], issues: [issue], event: %{}}
+    assert tick(%{state | yolo_runs: %{"blocker" => active}}, [issue], opts).yolo_runs == %{"blocker" => active}
+
+    {:ok, observations, _} = Observation.capture([issue], %{}, scan: opts[:scan])
+    assert :ok = Yolo.Delivery.reserve("blocker", "newer-run", observations)
+    {:ok, before} = Store.read("blocker")
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert {:ok, after_poll} = Store.read("blocker")
+    assert after_poll["deliveries"] == before["deliveries"]
+
+    changed = %{issue | last_comment_signal: %{relay_epoch: "new"}}
+
+    for response <- [{:error, :offline}, {:error, :rate_limited}, {:ok, %{snapshot | "scan_error" => "partial"}}, {:ok, Map.delete(snapshot, "current")}] do
+      assert tick(state, [changed], Keyword.put(opts, :scan, fn _ -> response end)).yolo_runs == %{}
+      assert Store.read("blocker") == {:ok, after_poll}
+    end
+  end
+
+  test "operator runner confirms only delivered duty and leaves new input open", %{issues: [issue | _], root: root} do
+    issue = %{issue | state: "BLOCKER"}
+    first = operator_workpad("first", "a")
+    Process.put(:operator_snapshot, Map.put(inbox(%{"first" => first}), "current", %{"workpad" => "first"}))
+
+    opts = [
+      fetch: fn _ -> {:ok, [issue]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: fn _ -> {:ok, Process.get(:operator_snapshot)} end,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      before_action: fn _ -> :ok end,
+      session: fn _, _, _, _ ->
+        send(self(), :operator_decision)
+        assert :ok = Completion.invoke(%{"issue_id" => issue.id, "result" => "Prüfung ausgeführt"}, fetch: fn _ -> {:ok, [issue]} end, before_action: fn _ -> :ok end)
+        {:ok, %{session_id: "operator"}}
+      end
+    ]
+
+    assert :ok = run_group("blocker", [issue], [issue], opts)
+    assert_receive :operator_decision
+    assert {:error, :yolo_group_changed} = run_group("blocker", [issue], [issue], opts)
+    refute_receive :operator_decision
+
+    second = operator_workpad("second", "b")
+    Process.put(:operator_snapshot, Map.put(inbox(%{"first" => first, "second" => second}), "current", %{"workpad" => "second"}))
+    blocked = Keyword.put(opts, :checkpoint, fn _ -> {:error, :new_input_requires_processing} end)
+    assert {:error, :new_input_requires_processing} = run_group("blocker", [issue], [issue], blocked)
+    refute_receive :operator_decision
+    assert :ok = run_group("blocker", [issue], [issue], opts)
+    assert_receive :operator_decision
+    assert {:error, :yolo_group_changed} = run_group("blocker", [issue], [issue], opts)
+    refute_receive :operator_decision
+  end
+
+  test "only complete confirmed operator workpads extend BLOCKER semantics", %{issues: [issue | _]} do
+    issue = %{issue | state: "BLOCKER"}
+    duty = operator_workpad("duty", "a")
+    snapshot = Map.put(inbox(%{"duty" => duty}), "current", %{"workpad" => "duty"})
+    assert {:ok, [_]} = Yolo.OperatorHandoff.evidence(issue, snapshot)
+    assert {:ok, []} = Yolo.OperatorHandoff.evidence(%{issue | state: "Test (AI)"}, snapshot)
+
+    for version <- [
+          %{duty | "origin" => "integration"},
+          %{duty | "origin" => "changed_app_output"},
+          Map.put(duty, "advisory_suppressed", true),
+          put_in(duty, ["source", "body"], "Normaler Eigenkommentar")
+        ] do
+      assert {:ok, []} = Yolo.OperatorHandoff.evidence(issue, put_in(snapshot, ["versions", "duty"], version))
+    end
+
+    body = duty["source"]["body"]
+
+    for malformed <- [
+          String.replace(body, String.duplicate("a", 64), "timestamp"),
+          String.replace(body, "Test (AI)", "Fertig"),
+          String.replace(body, "\"version\":1", "\"version\":2"),
+          String.replace(body, "\"version\":1", "\"version\":1.0"),
+          String.replace(body, "\"action\":", "\"unexpected\":"),
+          body <> body,
+          body <> "\n```symphony-operator-handoff\n",
+          String.replace(body, "\n```\n", "\n")
+        ] do
+      broken = put_in(snapshot, ["versions", "duty", "source", "body"], malformed)
+      assert {:error, :yolo_operator_handoff_incomplete} = Yolo.OperatorHandoff.evidence(issue, broken)
+    end
+
+    missing = %{snapshot | "current" => %{"workpad" => "missing"}}
+    assert {:error, :yolo_operator_handoff_incomplete} = Yolo.OperatorHandoff.evidence(issue, missing)
+    duplicate = put_in(duty, ["source", "id"], "other")
+    multiple = snapshot |> put_in(["versions", "other"], duplicate) |> put_in(["current", "other"], "other")
+    assert {:error, :yolo_operator_handoff_incomplete} = Yolo.OperatorHandoff.evidence(issue, multiple)
+
+    # A corrected current version is usable even if an old draft was malformed.
+    old = put_in(duty, ["source", "body"], String.replace(body, "\"version\":1", "\"version\":0"))
+    with_history = put_in(snapshot, ["versions", "old"], old)
+    assert Yolo.OperatorHandoff.evidence(issue, with_history) == Yolo.OperatorHandoff.evidence(issue, snapshot)
+
+    formatted = String.replace(body, "Isolierten Unterbrechungstest", " Isolierten  Unterbrechungstest")
+    formatted = put_in(snapshot, ["versions", "duty", "source", "body"], formatted)
+    assert Yolo.OperatorHandoff.evidence(issue, formatted) == Yolo.OperatorHandoff.evidence(issue, snapshot)
+  end
+
+  defp operator_workpad(key, source) do
+    duty = %{
+      "version" => 1,
+      "action" => "Isolierten Unterbrechungstest ausführen",
+      "head_sha" => String.duplicate(source, 40),
+      "source_sha256" => String.duplicate(source, 64),
+      "expected" => "Annahme, Unterbrechung und genau eine Folgeentscheidung belegen",
+      "resume_state" => "Test (AI)"
+    }
+
+    %{
+      "key" => key,
+      "origin" => "own",
+      "deleted" => false,
+      "source" => %{"id" => "workpad", "body" => "## Symphony Workpad\n\n### Betreiberauftrag\n\n```symphony-operator-handoff\n#{Jason.encode!(duty)}\n```\n"}
+    }
+  end
+
+  defp complete_operator_observation(issue) do
+    {:ok, record} = Store.read("blocker")
+    semantic = record["observations"][issue.id]["semantic"]
+    :ok = Store.write("blocker", Map.merge(record, %{"processed" => Observation.fingerprint(record["observations"]), "decisions" => %{issue.id => semantic}}))
+  end
+
   test "public defaults preserve empty reads and admitted issues, and reject corrupt dispatch", %{issues: [issue | _]} do
     assert {:ok, []} = Yolo.Dependencies.refresh([])
     assert {:ok, ^issue} = Yolo.Admission.prepare(issue)

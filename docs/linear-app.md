@@ -218,7 +218,11 @@ Beobachtete Blockierung und erneute Freigabe werden je Mitglied und Phase
 dauerhaft gezählt; auch ein identischer freier Endstand erlaubt genau eine neue Bewertung.
 Ein belegter lokaler App-Server-Fehler vor `turn/start` gibt den Zustellversuch
 für einen technischen Retry frei. Unklare oder bereits gestartete Turns bleiben
-reserviert.
+zunächst reserviert. Neue unterbrochene OpenClaw-Aufträge darf Symphony nach
+wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung
+[kontrolliert technisch aufgeben](openclaw-yolo.md#kontrollierte-aufgabe-unterbrochener-aufträge).
+Danach wird nur unerledigte Arbeit aus frischen Ticketdaten neu geplant;
+bestätigte Entscheidungen und neuere Zustellungen bleiben erhalten.
 Fehler-/Teilresultate erhalten
 ihren Lauf-/Sessionbezug. Der Sammelvertrag steht in
 [WORKFLOW_YOLO_AGENT.md](../WORKFLOW_YOLO_AGENT.md).

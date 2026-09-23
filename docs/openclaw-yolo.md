@@ -40,6 +40,7 @@ Das ist ein Quellnachweis, kein Beleg für eine lokale Installation.
 | Beobachtung | `agent.wait` mit derselben `runId`; `timeout` ohne Endbeleg bleibt ungeklärt |
 | Abbruch | `sessions.abort` mit Sitzungsschlüssel **und** `runId`; Bestätigung ersetzt keinen Endbeleg |
 | Ende | Passende `runId`, terminaler Status und `endedAt`; `yielded`/`pendingError` sind kein Ende |
+| Technische Aufgabe | Neue Aufträge: entzogene Werkzeugbindung, bestätigter gezielter Abbruch und frisches `chat.history` mit vollständigem Inaktivitäts-/Eingabebefund; kein fachlicher Erfolg |
 
 Schemas: [Agent-RPC](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/agent.ts),
 [Sitzungen](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/sessions.ts).
@@ -128,20 +129,82 @@ auf der aktuellen `origin/main`-SHA. Auftragsartefakte liegen getrennt unter
 Vor Versand wird eine unveränderliche Auftragsabsicht mit Agent, Sitzung,
 Mitgliedern, Payload-Hash und Checkout/SHA synchron gespeichert. Eine Gruppe
 behält Mitgliederleases, lokale Sperren und einen gemeinsamen Kapazitätsplatz
-bis zum bestätigten externen Ende oder belegten Nichtstart. Beim Neustart werden Reservierungen aus dem
+bis zum bestätigten externen Ende, belegten Nichtstart oder zur unten beschriebenen
+kontrollierten technischen Aufgabe. Beim Neustart werden Reservierungen aus dem
 Symphony-Journal rekonstruiert; alte Werkzeuge bekommen keine neue Schreibfreigabe.
 Die Wiederaufnahme beobachtet denselben Auftrag und fordert dessen gezielten
 Abbruch an. Sie sendet den Arbeitsauftrag **niemals erneut**.
 
 Verlorene Annahme, Prozessabbruch, Gateway-/Verbindungsverlust oder fehlender
-Endbeleg bleiben reserviert. Nach einer Stunde wird Abbruch verlangt. Auch ein
-bestätigter Abbruchaufruf gibt den Platz erst nach einem Endbeleg frei.
+Endbeleg bleiben zunächst reserviert. Nach einer Stunde wird Abbruch verlangt.
+Eine Abbruchbestätigung oder abgelaufene Wartezeit allein gibt keinen Platz frei.
 Nach Deaktivierung oder Agentenwechsel erfolgen keine Zugriffe auf den alten
 Agenten; die lokale Reservierung verhindert den konkurrierenden Codex-Ersatzlauf.
 Eine ungeklärte Reservierung muss mit dem ursprünglichen Agenten/Gateway und
 seiner Lauf-ID abgeglichen werden. Fehlender Verlauf oder Wartezeit rechtfertigen
-weder Journal-Löschung noch einen neuen Auftrag. Ist kein Endbeleg mehr verfügbar,
-bleibt eine sichtbare Betreiberklärung erforderlich.
+weder Journal-Löschung noch einen neuen Auftrag. Neue Aufträge können nach dem
+folgenden Verfahren technisch aufgegeben werden; ungeklärte Befunde bleiben
+reserviert und benötigen sichtbare Betreiberklärung.
+
+### Kontrollierte Aufgabe unterbrochener Aufträge
+
+Neue Aufträge tragen `interruption_contract=1`. Bei Wiederaufnahme oder angefordertem
+Abbruch bleiben ihre Werkzeuge dauerhaft gesperrt. Auch nach einem Transportfehler
+bleibt der Schreibentzug bestehen: Ein späterer Originalabschluss wird über dieselbe
+Abbruch-/Inaktivitätsprüfung technisch abgewickelt, damit unerledigte Zustellungen
+wieder planbar werden. Autorisierung und gesamte
+Werkzeugausführung verwenden dieselbe Journalsperre wie der Rechteentzug: Ein bereits
+autorisierter Aufruf muss enden, bevor Symphony die Generation freigeben kann.
+Laufende oder spätere Host-Fortsetzungen erhalten keine neue Symphony-Schreibbindung.
+Die bestehenden Grenzen für unveränderten Prüfcheckout, keine Unteragenten und
+keine direkten Ersatz-Schreibwege bleiben Teil des Agentenvertrags.
+
+Nach bestätigtem `sessions.abort` prüft der Beobachter die eigene, pro Auftrag
+einmalige Sitzung über `chat.history`. `agent.wait` muss entweder einen belegten
+Originalabschluss oder einen Timeout ohne Start-/End-/Yield-/Fehlerfortsetzungsbeleg
+liefern. Ein Abfragefehler ist kein Inaktivitätsnachweis. Die History muss konsistente
+Sitzungskennungen, eine aktuelle physische Sitzung und einen beendeten letzten Lauf
+mit plausiblen Zeitfeldern nennen. `hasActiveRun=false`, die vollständige leere
+`activeRunIds`-Menge, keine aktive Unterausführung und kein `inFlightRun`, `yielded`
+oder `pendingError` sind erforderlich. Ein anderer letzter Lauf wird nicht als
+Originalabschluss importiert. Aktive oder unklare Original-/Folgeläufe bleiben geschützt.
+Transcriptseiten sind kein Laufregister; maßgeblich sind die vollständigen
+Sitzungs- und Pending-Input-Felder, nicht die Anzahl sichtbarer Transcriptnachrichten.
+
+Die Eingabewarteschlange muss nach Gesamtzahl und Seitenkennung vollständig leer
+sein. Genau ein `interrupted` Eingang ist ebenfalls zulässig, wenn Lauf-ID und
+vollständiger Text exakt dem SHA-256 des ursprünglichen Symphony-Payloads entsprechen.
+Dieser Eingang enthält den bereits bekannten Auftrag; dessen noch offene Arbeit
+wird aus frischen Tickets, Kommentaren und Aktionsjournalen neu geplant. Sein
+Hosteintrag bleibt erhalten, seine Kennung und Inhaltsbindung werden dokumentiert.
+Zusätzliche, wartende, fremde, ausgeblendete oder gekürzte Eingaben werden nicht
+automatisch erledigt oder gelöscht. Sie halten die Reservierung geschlossen,
+bis die Betreiberprüfung den Inhalt mit offenen Aufgaben abgeglichen hat.
+Der Historyaufruf fordert bis zu 500.000 Zeichen an; Größenkürzungen werden durch
+den exakten Inhaltsvergleich nicht als vollständiger Eingang akzeptiert.
+
+Unter der Journalsperre speichert Symphony `state=retired`, eigene Stilllegungszeit,
+Prüfhash, aktuelle Sitzungs-/Laufkennung, Eingabequittungen und den bisherigen
+Entscheidungsversuch. Ein vorhandener Original-Endbeleg bleibt erhalten; ohne ihn
+bleibt `terminal` leer. Fremde Lauf-IDs oder Endzeiten werden niemals in das
+Original kopiert. `retired` liefert einen technischen Fehlerausgang und keine
+Produktfreigabe. Späte Antworten können diesen Zustand nicht wieder öffnen.
+
+Der normale Beobachter beendet sich und gibt Mitgliederleases und Kapazität frei.
+Die bestehende Zustellungs-Reconciliation löst ausschließlich unerledigte
+Zustellquittungen dieser Generation. Bestätigte Mitgliedsentscheidungen und neuere
+Quittungen bleiben erhalten; vollständige Originalaufträge werden vor dem nächsten
+Auftrag wie bisher archiviert. Der Coordinator und Runner prüfen Status, Delegation,
+Kommentare und offene Aktionen erneut. Ein neuer Auftrag erhält eine neue Sitzung
+und bearbeitet nur noch offene Arbeit. Es gibt keine Wiederholung des alten
+`agent`-Aufrufs und keine zusätzliche Recovery-Infrastruktur.
+
+Das ist eine begrenzte aktuelle Schnittstellenprüfung mit dauerhaftem lokalem
+Rechteentzug, keine atomare Sperre des OpenClaw-Hosts. Zustandsabfragen können
+fehlschlagen; dann bleibt die Reservierung bestehen. Ältere Aufträge ohne diesen
+Vertrag werden nicht automatisch migriert. V1-/V2-Importe behalten ihre bisherigen
+Voraussetzungen; eine ausdrücklich beauftragte administrative Einmalbereinigung
+ist davon getrennt.
 
 `openclaw-rpc.py` akzeptiert ausschließlich JSON-Fehler auf stdout aus dem
 geprüften CLI-Pfad: Exit 1, `ok=false`, `error.type=gateway_request_error`,
@@ -368,12 +431,53 @@ erhalten. Kein Import reaktiviert alte Schreibbindungen, wiederholt PO-Entscheid
 oder verändert Linear. Reguläre Disposition prüft Status und Delegation frisch.
 Ein technisches `completed` ist keine fachliche Produktfreigabe.
 
+### Grenze bei Neustart mit anderer Laufgeneration
+
+Eine terminale Host-Fortsetzung unter anderer `runId` ist kein terminales Original.
+V2 verweigert sie auch bei identischer physischer Sitzung mit
+`openclaw_terminal_identity_mismatch`. Original-ID oder fremdes `endedAt` dürfen
+nicht umgeschrieben werden. Beim V2-Import bleibt ein zusätzlicher unterbrochener
+Pending-Input ein eigener Sperrgrund; `items=[]` bei `total>0` bedeutet keine leere
+Warteschlange.
+
+Im oben gebundenen OpenClaw-Quellstand setzt der
+[Restart-Dispatch](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/agents/main-session-recovery/main-session-restart-dispatch.ts)
+intern `restartRecoveryDeliveryRunId` bei unverändertem
+`restartRecoveryDeliverySourceRunId` und prüft dabei die physische `sessionId`.
+Diese Felder sind eine aktive Besitzerzuordnung. Das
+[Claim-Cleanup](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/config/sessions/restart-recovery-state.ts)
+entfernt sie beim Abschluss; `restartRecoveryTerminalRunIds` bewahrt nur eine
+begrenzte ID-Menge, keine gerichtete Fortsetzungskette.
+
+Die von `chat.history` und `sessions.describe` verwendete
+[Sitzungsprojektion](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/session-utils-row.ts)
+exportiert diese Zuordnung nicht. Das hosterzeugte
+[Recovery-Terminal-Log](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/session-lifecycle-state.ts)
+nennt Sitzung, Fortsetzungslauf und Ergebnis, aber nicht dessen Originalgeneration.
+Weder dieser Eintrag allein noch eine Nachricht über einen Neustart beweist daher
+die benötigte Verknüpfung. Dies ist ein Quellbefund, kein Live-Nachweis für eine
+Installation oder einen bestimmten Auftrag.
+
+V1/V2 bieten keinen Ersatzimport für einen fremden Abschluss. Eine ausdrücklich
+beauftragte administrative Einmalbereinigung darf den alten Auftrag dagegen als
+aufgegeben/abgebrochen behandeln, ohne eine verlorene Fortsetzungskette zu erfinden.
+Sie verlangt eine rückspielbare Sicherung, frische Prüfung der exakten Generation,
+Sitzung, aktiver und neuerer Ausführung sowie vollständiger Eingaben, wirksamen
+Rechteentzug und einen Vorher-/Nachherbeleg. Nur die beauftragten Reservierungen
+ändern, vorhandene Aktionen/Entscheidungen erhalten und über den regulären
+Beobachter-/Zustellungsweg freigeben. Unterbrochene Eingänge inhaltlich abgleichen
+und offene Aufgaben übernehmen; historischen Eingang erhalten oder dokumentiert
+erledigen. Technische Stilllegung und tatsächliche Folgeaufnahme separat belegen;
+fachliche Findings bleiben offen. Dies erteilt weder zusätzliche Hostrechte noch
+eine Installation, einen produktiven Neustart oder pauschale Löschfreigaben.
+
 Status-API und Dashboards unterscheiden die Belegung von aktiver Modellarbeit:
 `status=reserved` beim Issue, `external.reserved`, `resumed`, `execution_state`,
 `missing_evidence`, ursprüngliche Gruppe/Status und aktueller Linear-Status mit
 `current_state_known`. Fehlende Tickets werden im bestehenden Coordinator-Tick
 gebündelt nachgelesen; fehlgeschlagene Abfragen ergeben unbekannten Status.
-Bei belegter Annahme oder Ausführung lautet `missing_evidence` auf
+Bei neuen unterbrochenen Aufträgen lautet `missing_evidence`
+`inactive_session_or_input_resolution_required`. Sonst lautet es bei belegter Annahme oder Ausführung auf
 `terminal_original_required`; andernfalls auf
 `terminal_or_pre_acceptance_original_required`, damit die bestehende
 Vorab-Ablehnungs-Recovery sichtbar bleibt. Die Anzeige ersetzt keinen Beleg und

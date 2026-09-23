@@ -1194,6 +1194,13 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute render(view) =~ "Betreiberimport erforderlich"
     assert StatusDashboard.format_running_summary_for_test(uncertain, 200) =~ "End-/Nichtstartbeleg fehlt"
 
+    interrupted = put_in(entry, [:external, :missing_evidence], "inactive_session_or_input_resolution_required")
+    :sys.replace_state(pid, &Keyword.put(&1, :snapshot, %{snapshot | running: [interrupted]}))
+    SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
+    assert_eventually(fn -> render(view) =~ "Inaktivität und offene Eingaben werden geprüft" end)
+    assert StatusDashboard.format_running_summary_for_test(interrupted, 200) =~ "Inaktivität/Eingaben prüfen"
+    assert json_response(get(build_conn(), "/api/v1/MT-HTTP"), 200)["status"] == "reserved"
+
     :sys.replace_state(pid, &Keyword.put(&1, :snapshot, %{snapshot | running: []}))
     SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
     assert_eventually(fn -> not (render(view) =~ "Altreservierung") end)

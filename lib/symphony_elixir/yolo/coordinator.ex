@@ -57,7 +57,13 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       members = Enum.map(order["members"], fn member -> %{id: member["id"], identifier: member["identifier"], state: member["state"]} end)
       recovery_opts = Keyword.put(opts, :recipient, self())
       runner = fn _, _, _ -> OpenClaw.recover(order, recovery_opts) end
-      event = %{external: OpenClaw.observation(Map.merge(order, %{"writable" => false, "resumed" => true})), session_id: order["session_id"], workspace_path: order["workspace"]}
+
+      event = %{
+        external: OpenClaw.observation(Map.merge(order, %{"writable" => false, "resumed" => true, "cancel_requested" => true})),
+        session_id: order["session_id"],
+        workspace_path: order["workspace"]
+      }
+
       start(state, group, members, [], Keyword.merge(opts, runner: runner, recovering: true, initial_event: event))
     end
   end

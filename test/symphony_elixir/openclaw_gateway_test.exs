@@ -130,7 +130,8 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
                "sessionKey" => order["session_id"],
                "offset" => 0,
                "limit" => 200,
-               "maxBytes" => 1_048_576
+               "maxBytes" => 1_048_576,
+               "maxChars" => 500_000
              }
 
       {:ok, "{}"}

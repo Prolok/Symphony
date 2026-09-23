@@ -1,9 +1,128 @@
 defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
-  @moduledoc "Operator-only import of correlated rejection or terminal originals; never a timeout-based release."
+  @moduledoc "Fenced interruption recovery and operator import of original evidence; never a timeout-based release."
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{OpenClaw, Operations, Store}
   alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, TerminalEvidence}
   @binding ~w(id group project_id agent linear_agent_id linear_workspace_id session_id payload_sha256 workspace sha members)
+
+  @doc "Give up a new, fenced order after a fresh idle-session check; preserve the missing original outcome."
+  @spec retire(map(), term(), module(), keyword()) :: {:ok, map()} | {:error, term()}
+  def retire(order, response, adapter, opts) do
+    if retirement_candidate?(order) and retirement_response?(response, order) and OpenClaw.enabled_for?(order) do
+      Journal.transition(order, fn current -> retirement_changes(current, response, adapter, opts) end)
+    else
+      {:error, :openclaw_interruption_unresolved}
+    end
+  end
+
+  defp retirement_response?(response, order), do: lost_result?(response, order) or match?({:terminal, _, _}, OpenClaw.terminal(response, order))
+
+  defp retirement_candidate?(order) do
+    order["interruption_contract"] == 1 and order["writable"] == false and
+      order["cancel_requested"] == true and order["abort_acknowledged"] == true and
+      order["state"] in ~w(unknown cancel_pending) and is_nil(order["terminal"])
+  end
+
+  defp lost_result?({:ok, %{"status" => "timeout"} = reply}, order) do
+    reply["runId"] in [nil, order["id"]] and is_nil(reply["startedAt"]) and is_nil(reply["endedAt"]) and
+      reply["yielded"] != true and reply["pendingError"] != true
+  end
+
+  defp lost_result?(_, _), do: false
+
+  defp retirement_changes(%{"state" => state}, _response, _adapter, _opts) when state in ~w(completed failed cancelled rejected retired), do: {:ok, %{}}
+
+  defp retirement_changes(current, response, adapter, opts) do
+    read = Keyword.get(opts, :interruption_history, &adapter.history(&1, opts))
+
+    with true <- retirement_candidate?(current),
+         true <- current["project_id"] == ProjectContext.current().id and OpenClaw.enabled_for?(current),
+         {:ok, history} <- read.(current),
+         :ok <- idle_session(history, current),
+         {:ok, inputs} <- retained_inputs(history["pendingInputs"], current),
+         {:ok, record} <- Store.read(current["group"]),
+         %{"id" => id} = attempt <- record["attempt"],
+         true <- id == current["id"] do
+      proof = %{
+        "kind" => "fenced_interruption",
+        "retired_at" => DateTime.to_iso8601(DateTime.utc_now()),
+        "physical_session_id" => history["sessionId"],
+        "last_run_id" => history["sessionInfo"]["lastRunId"],
+        "history_sha256" => OpenClaw.digest(Jason.encode!(history)),
+        "before_retirement" => Map.take(current, ~w(state error resumed cancel_requested abort_acknowledged)),
+        "retained_inputs" => inputs,
+        "attempt" => attempt,
+        "deliveries" => Map.filter(record["deliveries"] || %{}, fn {_, receipt} -> receipt["run_id"] == id end)
+      }
+
+      changes = %{"state" => "retired", "writable" => false, "retirement" => proof, "error" => "openclaw_interrupted_order_retired"}
+
+      case OpenClaw.terminal(response, current) do
+        {:terminal, _, evidence} -> {:ok, Map.put(changes, "terminal", evidence)}
+        :pending -> {:ok, changes}
+      end
+    else
+      _ -> {:error, :openclaw_interruption_unresolved}
+    end
+  end
+
+  defp idle_session(%{"sessionInfo" => info} = history, order) when is_map(info) do
+    if session_identity?(history, info, order) and inactive?(history, info) and ended?(info),
+      do: :ok,
+      else: {:error, :openclaw_interruption_unresolved}
+  end
+
+  defp idle_session(_, _), do: {:error, :openclaw_interruption_unresolved}
+
+  defp session_identity?(history, info, order) do
+    physical = history["sessionId"]
+    session = "agent:#{order["agent"]}:symphony:#{OpenClaw.digest(order["project_id"])}:#{order["group"]}:#{order["id"]}"
+
+    history["sessionKey"] == session and order["session_id"] == session and info["key"] == session and
+      is_binary(physical) and physical != "" and info["sessionId"] == physical
+  end
+
+  defp inactive?(history, info) do
+    info["hasActiveRun"] == false and info["activeRunIds"] == [] and
+      info["hasActiveSubagentRun"] in [nil, false] and info["subagentRunState"] in [nil, "historical"] and
+      is_nil(history["inFlightRun"]) and
+      Enum.all?([history, info], &(&1["yielded"] != true and &1["pendingError"] != true))
+  end
+
+  defp ended?(info) do
+    started = info["startedAt"]
+    ended = info["endedAt"]
+
+    is_binary(info["lastRunId"]) and info["lastRunId"] != "" and info["status"] in ~w(done failed timeout killed) and
+      is_integer(started) and is_integer(ended) and started > 0 and ended >= started and
+      ended <= System.system_time(:millisecond)
+  end
+
+  defp retained_inputs(%{"items" => items, "total" => total} = page, order) when is_list(items) and is_integer(total) do
+    # Only an exact copy of our original payload can be accounted for without
+    # introducing a second inbox. Keep it on the host and retain its receipt.
+    # Filtered/truncated pages, queued work and additional input require review.
+    if total == length(items) and total <= 1 and is_nil(page["nextBefore"]) and Enum.all?(items, &original_input?(&1, order)) do
+      {:ok, Enum.map(items, &(Map.take(&1, ~w(id runId state acceptedAt)) |> Map.put("payload_sha256", order["payload_sha256"])))}
+    else
+      {:error, :openclaw_interruption_input_unresolved}
+    end
+  end
+
+  defp retained_inputs(_, _), do: {:error, :openclaw_interruption_input_unresolved}
+
+  defp original_input?(%{"message" => %{"role" => "user", "content" => content}} = input, order) do
+    text = input_text(content)
+
+    is_binary(input["id"]) and input["id"] != "" and input["runId"] == order["id"] and input["state"] == "interrupted" and
+      is_integer(input["acceptedAt"]) and input["acceptedAt"] > 0 and input["acceptedAt"] <= System.system_time(:millisecond) and
+      is_binary(text) and OpenClaw.digest(text) == order["payload_sha256"]
+  end
+
+  defp original_input?(_, _), do: false
+  defp input_text(text) when is_binary(text), do: text
+  defp input_text([%{"type" => "text", "text" => text}]) when is_binary(text), do: text
+  defp input_text(_), do: nil
 
   @spec resolve(map(), boolean(), keyword()) :: {:ok, map()} | {:error, term()}
   def resolve(evidence, apply? \\ false, opts \\ []) do

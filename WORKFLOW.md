@@ -307,8 +307,11 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   ohne Wert erfolgen keine OpenClaw-Zugriffe. Aktivierung verlangt den separaten
   Live-Nachweis, Standardgates bleiben unabhängig; [Vertrag](docs/openclaw-yolo.md).
   Belegte OpenClaw-Vorab-Ablehnung gibt nur den nicht gestarteten Auftrag frei;
-  unklare Annahme bleibt reserviert. Altauftrags-Recovery erfolgt beleggebunden
-  durch den Betreiber gemäß diesem Vertrag.
+  unklare Annahme bleibt reserviert. Neue unterbrochene Aufträge dürfen nach
+  wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung technisch
+  aufgegeben werden; offene Arbeit wird regulär neu geplant, kein Erfolg fingiert.
+  Belegimporte und ausdrücklich beauftragte administrative Altfallbereinigungen
+  erfolgen getrennt durch den Betreiber gemäß diesem Vertrag.
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
   `config.toml` oder der geprüften Repository-Skills blockieren den

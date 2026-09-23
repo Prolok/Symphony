@@ -1,10 +1,10 @@
 defmodule SymphonyElixir.OpenClawRuntimeTest do
   use SymphonyElixir.TestSupport
   alias Mix.Tasks.Openclaw.Recover, as: RecoverCommand
-  alias SymphonyElixir.Linear.DurableState
+  alias SymphonyElixir.Linear.{DurableState, IssueLease}
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Relay.Store, as: Digest
-  alias SymphonyElixir.Yolo.{Completion, Coordinator, OpenClaw, ReviewContract, Runner, Scope, Store}
+  alias SymphonyElixir.Yolo.{Completion, Coordinator, Delivery, OpenClaw, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, Recovery, ToolBridge, Transport}
 
   defp run_group(group, issues, project, opts), do: Runner.run(group, issues, project, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
@@ -54,6 +54,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       unchanged: fn _ -> true end,
       checkpoint: fn _ -> {:ok, %{}} end,
       before_action: fn _ -> :ok end,
+      interruption_history: fn _ -> {:error, :fixture_history_unavailable} end,
       session: fn _, _, _, _ -> flunk("OpenClaw must not fall back to Codex") end
     ]
 
@@ -282,8 +283,13 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         %{"runId" => id, "status" => "error", "endedAt" => 3}
     end
 
-    recovery_opts = [transport: transport(recovery), recovery_lock: fn _, _, fun -> fun.() end]
-    assert {:error, :openclaw_run_failed_or_cancelled} = OpenClaw.recover(order, recovery_opts)
+    recovery_opts = [
+      transport: transport(recovery),
+      recovery_lock: fn _, _, fun -> fun.() end,
+      interruption_history: fn current -> {:ok, idle_history(current)} end
+    ]
+
+    assert {:error, :openclaw_interrupted_order_retired} = OpenClaw.recover(order, recovery_opts)
     assert :ok = Journal.available("incoming")
     assert {:ok, record} = Store.read("incoming")
     assert record["processed"] == nil
@@ -555,7 +561,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert %{"error" => "yolo_review_skill_unavailable_or_unbound"} = ReviewContract.load(workspace, "run")
   end
 
-  test "repeated transport failures keep the same order until terminal proof and publish lifecycle events", %{issues: issues, context: context} do
+  test "repeated transport failures keep the same order until safe retirement and publish lifecycle events", %{issues: issues, opts: opts} do
     handler = fn
       "agent", params ->
         %{"runId" => params["idempotencyKey"], "status" => "accepted"}
@@ -564,25 +570,73 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         count = Process.get(:status_count, 0)
         Process.put(:status_count, count + 1)
         if count < 2, do: {:error, :connection_lost}, else: %{"runId" => id, "status" => "ok", "endedAt" => 3}
+
+      "sessions.abort", _ ->
+        %{"ok" => true}
     end
 
-    id = Ecto.UUID.generate()
+    opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> :ok end, recipient: self(), interruption_history: fn current -> {:ok, idle_history(current)} end)
+    assert {:error, :openclaw_interrupted_order_retired} = run_group("incoming", issues, issues, opts)
+    assert {:ok, %{"session_id" => session, "state" => "retired"}} = Journal.read("incoming")
 
-    Scope.with_scope("incoming", issues, id, fn ->
-      assert {:ok, %{session_id: session}} =
-               OpenClaw.run(%{path: context.root, sha: "sha"}, "prompt", issues, id, transport: transport(handler), openclaw_wait: fn _ -> :ok end, recipient: self())
+    for event <- [:submitted, :acceptance, :uncertain, :cancel_requested, :ended] do
+      assert_receive {:yolo_event, "incoming", %{event: ^event, session_id: ^session}}
+    end
 
-      for event <- [:submitted, :acceptance, :uncertain, :ended] do
-        assert_receive {:yolo_event, "incoming", %{event: ^event, session_id: ^session}}
-      end
-
-      refute_receive {:yolo_event, "incoming", %{event: :uncertain}}
-    end)
-
+    refute_receive {:yolo_event, "incoming", %{event: :uncertain}}
     assert Process.get(:status_count) == 3
   end
 
-  test "cancellation messages target the accepted run and require terminal proof", %{issues: issues, opts: opts} do
+  test "transport loss fences a new order before a later original completion can suppress unfinished work", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", %{"runId" => id} ->
+        if Process.get(:lost_status_seen) do
+          %{"runId" => id, "status" => "ok", "endedAt" => 3000}
+        else
+          Process.put(:lost_status_seen, true)
+          {:error, :openclaw_gateway_unavailable}
+        end
+
+      "sessions.abort", %{"runId" => id} ->
+        send(self(), {:aborted_after_transport_loss, id})
+        %{"ok" => true}
+    end
+
+    opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> :ok end, interruption_history: fn current -> {:ok, idle_history(current)} end)
+    assert {:error, :openclaw_interrupted_order_retired} = run_group("incoming", issues, issues, opts)
+    assert {:ok, %{"id" => id, "state" => "retired", "writable" => false, "terminal" => %{"runId" => id}}} = Journal.read("incoming")
+    assert_receive {:aborted_after_transport_loss, ^id}
+    assert :ok = Delivery.reconcile("incoming")
+    assert {:ok, %{"deliveries" => deliveries}} = Store.read("incoming")
+    assert deliveries == %{}
+  end
+
+  test "revocation during a status query cannot turn the fenced order into a normal completion", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", %{"runId" => id} ->
+        {:ok, current} = Journal.read("incoming")
+        {:ok, _} = Journal.update(current, %{"writable" => false, "cancel_requested" => true})
+        %{"runId" => id, "status" => "ok", "endedAt" => 3000}
+
+      "sessions.abort", _ ->
+        %{"ok" => true}
+    end
+
+    opts = Keyword.merge(opts, transport: transport(handler), interruption_history: fn current -> {:ok, idle_history(current)} end)
+    assert {:error, :openclaw_interrupted_order_retired} = run_group("incoming", issues, issues, opts)
+    assert {:ok, %{"state" => "retired", "writable" => false}} = Journal.read("incoming")
+    assert :ok = Delivery.reconcile("incoming")
+    assert {:ok, %{"deliveries" => deliveries}} = Store.read("incoming")
+    assert deliveries == %{}
+  end
+
+  test "cancellation with an original terminal still reconciles unfinished deliveries", %{issues: issues, opts: opts} do
     handler = fn
       "agent", params ->
         send(self(), :openclaw_cancel)
@@ -596,9 +650,13 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         %{"runId" => id, "status" => "error", "endedAt" => 3}
     end
 
-    assert {:error, :openclaw_run_failed_or_cancelled} = run_group("incoming", issues, issues, Keyword.put(opts, :transport, transport(handler)))
-    assert {:ok, %{"id" => id, "state" => "failed", "writable" => false, "abort_acknowledged" => true}} = Journal.read("incoming")
+    opts = Keyword.merge(opts, transport: transport(handler), interruption_history: fn current -> {:ok, idle_history(current)} end)
+    assert {:error, :openclaw_interrupted_order_retired} = run_group("incoming", issues, issues, opts)
+    assert {:ok, %{"id" => id, "state" => "retired", "writable" => false, "abort_acknowledged" => true, "terminal" => %{"runId" => id, "endedAt" => 3}}} = Journal.read("incoming")
     assert_receive {:aborted, ^id}
+    assert :ok = Delivery.reconcile("incoming")
+    assert {:ok, %{"deliveries" => deliveries}} = Store.read("incoming")
+    assert deliveries == %{}
   end
 
   for trigger <- [:message, :deadline] do
@@ -627,7 +685,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       assert {:ok, %{"state" => "cancel_pending", "writable" => false} = order} = Journal.read("incoming")
       assert_receive {:yolo_event, "incoming", %{external: %{reserved: true, execution_state: "cancel_pending"}} = message}
       assert message.external == OpenClaw.observation(order)
-      assert message.external.missing_evidence == "terminal_original_required"
+      assert message.external.missing_evidence == "inactive_session_or_input_resolution_required"
       refute_receive {:yolo_event, "incoming", %{external: %{reserved: true}}}
 
       run = %{pid: self(), ids: Enum.map(issues, & &1.id), issues: issues, started_at: DateTime.utc_now(), event: %{}}
@@ -837,6 +895,427 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     order
   end
 
+  for interrupted_input? <- [false, true] do
+    @tag interrupted_input: interrupted_input?
+    test "restart continuation cannot stand in for the accepted original (interrupted input: #{interrupted_input?})", %{issues: issues, opts: opts, context: context} = test do
+      handler = fn
+        "agent", params ->
+          refute bridge_call(descriptor(context, params["idempotencyKey"]), request("tools/list"))["error"]
+          %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+        "agent.wait", _ ->
+          %{"status" => "timeout"}
+
+        "sessions.abort", _ ->
+          %{"ok" => true}
+      end
+
+      interrupted = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:reserved) end)
+      assert catch_throw(Runner.run("incoming", issues, issues, interrupted)) == :reserved
+      {:ok, original} = Journal.read("incoming")
+      assert original["acceptance_observed"] and original["execution_observed"]
+      assert catch_throw(OpenClaw.recover(original, interrupted)) == :reserved
+      {:ok, order} = Journal.read("incoming")
+      refute order["writable"]
+      refute order["terminal"]
+      {:ok, decisions} = Store.read("incoming")
+      {_, recovery_opts} = package = terminal_evidence(order)
+
+      # Fully correlated terminal history for another run in the SAME physical
+      # session is still no host-owned link to the interrupted original.
+      continuation =
+        recovery_opts[:sources]["source"]
+        |> String.replace(order["id"], "host-continuation")
+        |> Jason.decode!()
+
+      continuation =
+        if test.interrupted_input do
+          Map.put(continuation, "pendingInputs", %{
+            "total" => 1,
+            "items" => [%{"id" => "interrupted-input", "runId" => order["id"], "state" => "interrupted", "acceptedAt" => 1000, "message" => %{"role" => "user", "content" => "Synthetic input"}}]
+          })
+        else
+          continuation
+        end
+
+      {evidence, recovery_opts} = replace_terminal_history(package, continuation)
+
+      for apply? <- [false, true] do
+        assert {:error, :openclaw_terminal_identity_mismatch} = Recovery.resolve(evidence, apply?, recovery_opts)
+        assert {:ok, ^order} = Journal.read("incoming")
+        assert {:ok, ^decisions} = Store.read("incoming")
+        assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+        assert {:ok, [^order]} = Journal.pending()
+        refute Journal.writable?(order["group"], order["id"])
+      end
+
+      if test.interrupted_input do
+        # The input independently prevents release even with an original-ID
+        # terminal. A filtered empty projection must not hide its total count.
+        original_history = Jason.decode!(package |> elem(1) |> Keyword.fetch!(:sources) |> Map.fetch!("source"))
+
+        for items <- [continuation["pendingInputs"]["items"], []] do
+          history = Map.put(original_history, "pendingInputs", %{"total" => 1, "items" => items})
+          {evidence, recovery_opts} = replace_terminal_history(package, history)
+          assert {:error, :openclaw_terminal_activity_conflict} = Recovery.resolve(evidence, true, recovery_opts)
+          assert {:ok, ^order} = Journal.read("incoming")
+          assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+        end
+      end
+    end
+  end
+
+  defp idle_history(order) do
+    {_, opts} = terminal_evidence(order)
+    history = Jason.decode!(opts[:sources]["source"])
+    # Current idle state of the dedicated session, not an original outcome.
+    put_in(history, ["sessionInfo", "lastRunId"], "host-continuation")
+  end
+
+  defp fenced_order(issues, opts) do
+    order = executed_order(issues, opts)
+    {:ok, order} = Journal.update(order, %{"state" => "cancel_pending", "cancel_requested" => true, "abort_acknowledged" => true})
+    order
+  end
+
+  defp retire(order, history) do
+    Recovery.retire(order, {:ok, %{"status" => "timeout"}}, Gateway, interruption_history: fn _ -> {:ok, history} end)
+  end
+
+  for pending_original? <- [false, true] do
+    @tag pending_original: pending_original?
+    test "interrupted new order retries only unfinished members (pending original: #{pending_original?})", %{
+      issues: [completed | unfinished] = issues,
+      opts: opts,
+      context: context,
+      pending_original: pending?
+    } do
+      tool_opts = [fetch: opts[:fetch], before_action: opts[:before_action]]
+
+      first = fn
+        "agent", params ->
+          reply = bridge_call(descriptor(context, params["idempotencyKey"]), request("tools/call", %{name: "symphony_yolo_complete", arguments: %{issue_id: completed.id, result: "Already decided"}}))
+          refute reply["result"]["isError"]
+          send(self(), {:original_payload, params["message"]})
+          %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+        "agent.wait", _ ->
+          {:error, :openclaw_gateway_unavailable}
+      end
+
+      assert catch_throw(run_group("incoming", issues, issues, Keyword.merge(opts, transport: transport(first), tool_opts: tool_opts, openclaw_wait: fn _ -> throw(:interrupted) end))) == :interrupted
+      assert_receive {:original_payload, payload}
+      {:ok, original} = Journal.read("incoming")
+      {:ok, original_decisions} = Store.read("incoming")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(completed.id)
+      history = idle_history(original)
+
+      history =
+        if pending? do
+          Map.put(history, "pendingInputs", %{
+            "total" => 1,
+            "items" => [
+              %{
+                "id" => "input-original",
+                "runId" => original["id"],
+                "state" => "interrupted",
+                "acceptedAt" => 1000,
+                "message" => %{"role" => "user", "content" => [%{"type" => "text", "text" => payload}]}
+              }
+            ]
+          })
+        else
+          history
+        end
+
+      resumed = fn
+        "sessions.abort", params ->
+          assert params == %{"key" => original["session_id"], "runId" => original["id"]}
+          %{"ok" => true, "status" => "no-active-run", "abortedRunId" => nil}
+
+        "agent.wait", _ ->
+          %{"status" => "timeout"}
+
+        "chat.history", _ ->
+          history
+
+        "agent", _ ->
+          flunk("the original must never be submitted again")
+      end
+
+      assert {:error, :openclaw_interrupted_order_retired} = OpenClaw.recover(original, transport: transport(resumed))
+      {:ok, retired} = Journal.read("incoming")
+      assert retired["state"] == "retired" and retired["id"] == original["id"]
+      assert retired["retirement"]["last_run_id"] == "host-continuation"
+      assert retired["retirement"]["attempt"] == original_decisions["attempt"]
+      assert length(retired["retirement"]["retained_inputs"]) == if(pending?, do: 1, else: 0)
+      assert is_binary(retired["retirement"]["retired_at"])
+      refute retired["terminal"]
+      refute Journal.receipt("incoming", original["session_id"])
+      refute Journal.writable?("incoming", original["id"])
+      assert {:ok, ^original_decisions} = Store.read("incoming")
+      assert {:ok, []} = Journal.pending()
+      assert :ok = Journal.member_available(completed.id)
+      no_gateway = [transport: fn _ -> flunk("already retired") end]
+      assert {:error, :openclaw_interrupted_order_retired} = OpenClaw.recover(original, no_gateway)
+      assert {:ok, ^retired} = Journal.update(original, %{"state" => "accepted", "writable" => true})
+      assert :ok = Delivery.reconcile("incoming")
+      {:ok, reconciled} = Store.read("incoming")
+      assert Map.keys(reconciled["deliveries"]) == [completed.id]
+      assert reconciled["attempt"] == original_decisions["attempt"]
+      assert :ok = Delivery.reconcile("incoming")
+      assert {:ok, ^reconciled} = Store.read("incoming")
+
+      fresh = [completed | Enum.map(unfinished, &%{&1 | description: "Fresh still-open work"})]
+      fetch = fn ids -> {:ok, Enum.filter(fresh, &(&1.id in ids))} end
+
+      following = fn
+        "agent", params ->
+          {:ok, next} = Journal.read("incoming")
+          refute next["id"] == original["id"]
+          assert Enum.map(next["members"], & &1["id"]) == Enum.map(unfinished, & &1.id)
+          assert params["message"] =~ "Fresh still-open work"
+
+          for issue <- unfinished do
+            reply = bridge_call(descriptor(context, next["id"]), request("tools/call", %{name: "symphony_yolo_complete", arguments: %{issue_id: issue.id, result: "Remaining decision"}}))
+            refute reply["result"]["isError"]
+          end
+
+          %{"runId" => next["id"], "status" => "accepted"}
+
+        "agent.wait", %{"runId" => id} ->
+          %{"runId" => id, "status" => "ok", "endedAt" => 3000}
+      end
+
+      next_opts = Keyword.merge(opts, fetch: fetch, transport: transport(following), tool_opts: Keyword.put(tool_opts, :fetch, fetch))
+      assert :ok = run_group("incoming", fresh, fresh, next_opts)
+      assert {:ok, ^retired} = Journal.history("incoming", original["id"])
+      assert {:error, :yolo_group_changed} = run_group("incoming", fresh, fresh, next_opts)
+      {:ok, next} = Journal.read("incoming")
+      assert {:error, :openclaw_generation_changed} = retire(%{retired | "state" => "cancel_pending"}, history)
+      assert {:ok, ^next} = Journal.read("incoming")
+    end
+  end
+
+  test "interruption refuses active, unknown, foreign and incomplete session or input evidence", %{issues: issues, opts: opts} do
+    order = fenced_order(issues, opts)
+    history = idle_history(order)
+    info = history["sessionInfo"]
+
+    invalid = [
+      Map.delete(history, "sessionInfo"),
+      Map.put(history, "sessionKey", "foreign"),
+      Map.put(history, "sessionId", "other-physical-session"),
+      Map.put(history, "inFlightRun", %{"runId" => "new-active-run"}),
+      Map.put(history, "pendingError", true),
+      Map.put(history, "pendingInputs", %{"total" => 1, "items" => []}),
+      Map.put(history, "pendingInputs", %{"total" => 0, "items" => [], "nextBefore" => 1}),
+      Map.delete(history, "pendingInputs")
+    ]
+
+    invalid =
+      invalid ++
+        Enum.map(
+          [
+            Map.delete(info, "hasActiveRun"),
+            Map.delete(info, "activeRunIds"),
+            Map.put(info, "hasActiveRun", true),
+            Map.put(info, "activeRunIds", ["new-active-run"]),
+            Map.put(info, "hasActiveSubagentRun", true),
+            Map.put(info, "subagentRunState", "running"),
+            Map.put(info, "status", "running"),
+            Map.delete(info, "endedAt"),
+            Map.put(info, "endedAt", System.system_time(:millisecond) + 60_000),
+            Map.put(info, "yielded", true),
+            Map.delete(info, "lastRunId")
+          ],
+          &Map.put(history, "sessionInfo", &1)
+        )
+
+    payload = File.read!(Path.join(Path.dirname(descriptor(ProjectContext.current(), order["id"])), "request.md"))
+    input = %{"id" => "original-input", "runId" => order["id"], "state" => "interrupted", "acceptedAt" => 1000, "message" => %{"role" => "user", "content" => payload}}
+
+    invalid =
+      invalid ++
+        Enum.map(
+          [
+            Map.put(input, "state", "queued"),
+            Map.put(input, "runId", "foreign-run"),
+            put_in(input, ["message", "content"], "Still-open additional task"),
+            put_in(input, ["message", "content"], String.slice(payload, 0, 100)),
+            put_in(input, ["message", "role"], "assistant")
+          ],
+          &Map.put(history, "pendingInputs", %{"total" => 1, "items" => [&1]})
+        )
+
+    for bad <- invalid do
+      assert {:error, _} = retire(order, bad)
+      assert {:ok, ^order} = Journal.read("incoming")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    end
+
+    responses = [
+      {:error, :unavailable},
+      {:ok, %{"status" => "running"}},
+      {:ok, %{"status" => "timeout", "startedAt" => 1000}},
+      {:ok, %{"status" => "timeout", "runId" => "new"}}
+    ]
+
+    for reply <- responses do
+      assert {:error, _} = Recovery.retire(order, reply, Gateway, interruption_history: fn _ -> flunk("must not accept failed/active status") end)
+    end
+
+    assert {:error, _} = Recovery.retire(order, {:ok, %{"status" => "timeout"}}, Gateway, interruption_history: fn _ -> {:error, :unavailable} end)
+    assert {:ok, ^order} = Journal.read("incoming")
+    legacy = Map.delete(order, "interruption_contract")
+    assert :ok = DurableState.write(Journal.path("incoming"), legacy)
+    assert {:error, _} = retire(legacy, history)
+    assert {:ok, ^legacy} = Journal.read("incoming")
+  end
+
+  test "revocation drains a running tool decision before retirement and rejects later calls", %{issues: [issue | _] = issues, opts: opts, context: context, root: root} do
+    handler = fn
+      "agent", params -> %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+      "agent.wait", _ -> %{"status" => "timeout"}
+    end
+
+    assert catch_throw(run_group("incoming", issues, issues, Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:pending) end))) == :pending
+    {:ok, order} = Journal.read("incoming")
+    parent = self()
+
+    fetch = fn [id] ->
+      send(parent, {:writing, self()})
+      receive do: (:finish_write -> :ok)
+      opts[:fetch].([id])
+    end
+
+    Scope.with_scope("incoming", issues, order["id"], fn ->
+      {:ok, bridge} = ToolBridge.start(order, Path.join(root, "drain-tools"), fetch: fetch, before_action: opts[:before_action])
+
+      try do
+        caller = Task.async(fn -> bridge_call(bridge.descriptor, request("tools/call", %{name: "symphony_yolo_complete", arguments: %{issue_id: issue.id, result: "In-flight decision"}})) end)
+        assert_receive {:writing, writer}, 2000
+
+        revoker =
+          Task.async(fn ->
+            ProjectContext.with_context(context, fn ->
+              send(parent, :revoking)
+              Journal.update(order, %{"writable" => false, "state" => "cancel_pending", "cancel_requested" => true, "abort_acknowledged" => true})
+            end)
+          end)
+
+        assert_receive :revoking
+        assert Task.yield(revoker, 50) == nil
+        assert Journal.writable?("incoming", order["id"])
+        send(writer, :finish_write)
+        refute Task.await(caller)["result"]["isError"]
+        assert {:ok, fenced} = Task.await(revoker)
+        refute Journal.writable?("incoming", order["id"])
+        assert bridge_call(bridge.descriptor, request("tools/list"))["error"]
+        assert {:ok, retired} = retire(fenced, idle_history(fenced))
+        assert retired["retirement"]["attempt"]["completed"][issue.id] == "In-flight decision"
+        assert :ok = Delivery.reconcile("incoming")
+        {:ok, record} = Store.read("incoming")
+        assert Map.keys(record["deliveries"]) == [issue.id]
+      after
+        ToolBridge.stop(bridge)
+      end
+    end)
+  end
+
+  test "interruption retires through the normal observer and frees one slot and member leases", %{issues: issues, opts: opts, context: context} do
+    context = put_in(context.settings.agent.max_concurrent_agents, 1)
+    ProjectContext.bind(context)
+    order = fenced_order(issues, opts)
+    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    parent = self()
+    fresh = Enum.map(issues, &%{&1 | state: "Yolo Review"})
+
+    watcher_opts = [
+      fetch: fn ids -> {:ok, Enum.filter(fresh, &(&1.id in ids))} end,
+      transport:
+        transport(fn
+          "agent.wait", _ ->
+            %{"status" => "timeout"}
+
+          "chat.history", _ ->
+            send(parent, {:checking_idle, self()})
+            receive do: (:continue -> :ok)
+            idle_history(order)
+        end)
+    ]
+
+    state = tick(%Orchestrator.State{max_concurrent_agents: 1, external_poll: true}, [], watcher_opts)
+    assert_receive {:checking_idle, observer}, 2000
+    ref = Process.monitor(observer)
+    assert SymphonyElixir.WorkerCapacity.count(nil) == 1
+    assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("still reserved") end)
+    assert {:error, :issue_already_owned} = IssueLease.with_lock(order["linear_workspace_id"], hd(issues).id, fn -> :unsafe end)
+    send(observer, :continue)
+    assert_receive {:DOWN, ^ref, :process, ^observer, :normal}, 2000
+    state = tick(state, [], watcher_opts)
+    assert state.yolo_runs == %{} and state.claimed == MapSet.new()
+    assert tick(state, [], watcher_opts).yolo_runs == %{}
+    assert :ok = IssueLease.with_lock(order["linear_workspace_id"], hd(issues).id, fn -> :ok end)
+
+    assert {:ok, next} =
+             SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn ->
+               send(parent, :regular_started)
+               receive do: (:finish -> :ok)
+             end)
+
+    assert_receive :regular_started
+    assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("double release") end)
+    send(next, :finish)
+    assert Enum.all?(fresh, &(&1.state == "Yolo Review" and &1.delegate_id == "pai"))
+  end
+
+  test "failed interruption persistence and late replies preserve the generation", %{issues: issues, opts: opts, context: context} do
+    order = fenced_order(issues, opts)
+    history = idle_history(order)
+    path = Journal.path("incoming")
+    # DurableState cannot replace a directory with a file; keep the original bytes.
+    bytes = File.read!(path)
+
+    failing = fn _ ->
+      File.rm!(path)
+      File.mkdir!(path)
+      {:ok, history}
+    end
+
+    try do
+      assert {:error, _} = Recovery.retire(order, {:ok, %{"status" => "timeout"}}, Gateway, interruption_history: failing)
+    after
+      File.rmdir!(path)
+      File.write!(path, bytes)
+    end
+
+    assert {:ok, ^order} = Journal.read("incoming")
+    assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    parent = self()
+
+    task =
+      Task.async(fn ->
+        ProjectContext.with_context(context, fn ->
+          Recovery.retire(order, {:ok, %{"status" => "timeout"}}, Gateway,
+            interruption_history: fn _ ->
+              send(parent, {:checking, self()})
+              receive do: (:continue -> :ok)
+              {:ok, history}
+            end
+          )
+        end)
+      end)
+
+    assert_receive {:checking, pid}, 2000
+    late = Task.async(fn -> ProjectContext.with_context(context, fn -> Journal.update(order, %{"state" => "completed", "terminal" => %{"endedAt" => 3}}) end) end)
+    send(pid, :continue)
+    assert {:ok, retired} = Task.await(task)
+    assert {:ok, ^retired} = Task.await(late)
+    refute retired["terminal"]
+    assert {:ok, ^retired} = retire(order, history)
+  end
+
   defp replace_terminal_history({evidence, opts}, history) do
     bytes = Jason.encode!(history)
     evidence = Map.merge(evidence, %{"source_sha256" => OpenClaw.digest(bytes), "execution_source_sha256" => OpenClaw.digest(bytes)})
@@ -1040,6 +1519,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     current = Enum.map(issues, &%{&1 | state: "Review", delegate_id: nil})
 
     watcher_opts = [
+      interruption_history: fn _ -> {:error, :fixture_history_unavailable} end,
       fetch: fn ids -> {:ok, Enum.filter(current, &(&1.id in ids))} end,
       transport:
         transport(fn
@@ -1063,7 +1543,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       assert entry.state == "Review"
       assert entry.external.original_group == "incoming"
       assert entry.external.reserved and entry.external.resumed and entry.external.current_state_known
-      assert entry.external.missing_evidence == "terminal_original_required"
+      assert entry.external.missing_evidence == "inactive_session_or_input_resolution_required"
     end
 
     stale = %{worker_pid: self(), external: %{reserved: false}}
@@ -1151,6 +1631,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     handler = fn
       "sessions.abort", _ -> %{"ok" => true}
       "agent.wait", _ -> %{"status" => "timeout"}
+      "chat.history", _ -> {:error, :fixture_history_unavailable}
     end
 
     start = fn "incoming", callback ->
@@ -1165,8 +1646,8 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     )
 
     assert_receive {:yolo_event, "incoming", %{event: :recovered, message: message, external: external}}
-    assert message =~ "reserviert. Betreiber:"
-    assert external.missing_evidence == "terminal_or_pre_acceptance_original_required"
+    assert message =~ "reserviert. Frische Inaktivität"
+    assert external.missing_evidence == "inactive_session_or_input_resolution_required"
   end
 
   test "typed pre-acceptance rejection releases only this generation, retains history and permits a new attempt", %{issues: issues, opts: opts} do
@@ -1406,7 +1887,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     order = uncertain_order(issues, opts)
     refute Journal.writable?("incoming", order["id"])
     assert {:ok, running} = Journal.update(order, %{"state" => "running", "writable" => true})
-    assert Journal.writable?("incoming", running["id"])
+    refute Journal.writable?("incoming", running["id"])
     refute Journal.writable?("incoming", "foreign")
     assert {:ok, _} = Journal.update(running, %{"state" => "cancel_pending", "writable" => false})
     refute Journal.writable?("incoming", running["id"])

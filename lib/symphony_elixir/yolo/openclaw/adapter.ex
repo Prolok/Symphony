@@ -4,4 +4,5 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Adapter do
   @callback submit(map(), String.t(), keyword()) :: {:ok, map()} | {:rejected, map()} | {:error, term()}
   @callback status(map(), keyword()) :: {:ok, map()} | {:error, term()}
   @callback cancel(map(), keyword()) :: :ok | {:error, term()}
+  @callback history(map(), keyword()) :: {:ok, map()} | {:error, term()}
 end

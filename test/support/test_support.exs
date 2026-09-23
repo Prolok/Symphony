@@ -69,6 +69,16 @@ defmodule SymphonyElixir.TestSupport do
     String.trim(root)
   end
 
+  def routine_socket_root do
+    # Unix sockets need a short physical path even when the checkout or TMPDIR is long.
+    # mktemp creates a private directory exclusively across concurrent BEAM instances.
+    {directory, 0} = System.cmd("mktemp", ["-d", "/tmp/sym-rt-XXXXXXXX"])
+    directory = String.trim(directory)
+    ExUnit.Callbacks.on_exit(fn -> File.rm_rf!(directory) end)
+    {:ok, root} = SymphonyElixir.PathSafety.canonicalize(directory)
+    root
+  end
+
   def install_runtime_fixture!(repo_dir, bin_dir) do
     runtime_dir = Path.join(bin_dir, "runtime")
     File.mkdir_p!(runtime_dir)

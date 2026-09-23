@@ -618,7 +618,7 @@ defmodule SymphonyElixir.TestRunTest do
     assert byte_size(socket) < 104
     assert Bitwise.band(File.stat!(socket_root).mode, 0o777) == 0o700
 
-    other_root = File.cd!(checkout, &routine_socket_root/0)
+    other_root = File.cd!(checkout, &SymphonyElixir.TestSupport.routine_socket_root/0)
     refute other_root == socket_root
     marker = Path.join(other_root, "owned-by-another-run")
     File.write!(marker, "preserve")
@@ -1401,7 +1401,7 @@ defmodule SymphonyElixir.TestRunTest do
     config =
       Map.merge(config, %{"teams" => [%{"id" => "team", "key" => "PRO"}], "scenarios" => ["bootstrap", "workflow", "failure-probe"], "timeout" => 30, "result_root" => Path.join(ctx.root, "managed")})
 
-    socket_root = routine_socket_root()
+    socket_root = SymphonyElixir.TestSupport.routine_socket_root()
     context = put_in(context.settings.worker.test_executor, config)
     context = put_in(context.settings.worker.test_executor_socket, Path.join(socket_root, "e.sock"))
     context = %{context | test_instance: nil}
@@ -1460,15 +1460,6 @@ defmodule SymphonyElixir.TestRunTest do
 
     assert :ok = SymphonyElixir.TestExecutor.verify_target(context, config)
     {context, config, request}
-  end
-
-  defp routine_socket_root do
-    # Unix sockets need a short physical path even when the checkout or TMPDIR is long.
-    # mktemp creates a private directory exclusively across concurrent BEAM instances.
-    {directory, 0} = System.cmd("mktemp", ["-d", "/tmp/sym-rt-XXXXXXXX"])
-    {:ok, root} = SymphonyElixir.PathSafety.canonicalize(String.trim(directory))
-    on_exit(fn -> File.rm_rf!(root) end)
-    root
   end
 
   test "CLI probe preserves the app failure, stops without retry and leaves the fixture journal recoverable", ctx do

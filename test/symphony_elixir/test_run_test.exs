@@ -2037,6 +2037,28 @@ defmodule SymphonyElixir.TestRunTest do
     assert Enum.all?(Enum.filter(ready["fixtures"], &(&1["id"] in ids)), & &1["complete"])
   end
 
+  test "interruption preserves the original when fresh agent binding fails and can retry after recovery", ctx do
+    alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
+    alias SymphonyElixir.Yolo.OpenClaw.Journal
+    {contexts, context, plan, journal, _first, order, active} = interruption_fixture(ctx)
+    unresolved = unresolved_contexts(contexts)
+    before = ProjectContext.with_context(context, fn -> File.read!(Journal.path("incoming")) end)
+    Agent.update(ctx.source_agent, &%{&1 | calls: [], failure: :agent_timeout})
+
+    assert {:error, {:linear_api_request, :linear_app_request_unavailable}} =
+             Interruption.execute(unresolved, plan, journal, history: fn _ -> flunk("failed binding must not query OpenClaw") end)
+
+    assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 1
+    assert count_calls(ctx.source_agent, "mutation") == 0
+    assert ProjectContext.with_context(context, fn -> File.read!(Journal.path("incoming")) end) == before
+    refute File.exists?(Path.join([ctx.root, "test-state", "runs", plan["run_id"], "openclaw-interruption.json"]))
+
+    Agent.update(ctx.source_agent, &%{&1 | failure: nil})
+    assert {:ok, %{"interruption" => receipt}} = Interruption.execute(unresolved, plan, journal, history: fn ^order -> {:ok, active} end)
+    assert receipt["original"]["writable"] == false
+    assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 2
+  end
+
   test "interruption refuses inactive foreign unknown and incompletely bound executions without revocation", ctx do
     alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
     alias SymphonyElixir.Yolo.OpenClaw.Journal

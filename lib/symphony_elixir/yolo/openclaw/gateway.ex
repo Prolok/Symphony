@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Transport
+  @owner_unavailable [:openclaw_owner_connection_lost, :openclaw_owner_credentials_unavailable]
 
   @impl true
   def preflight(agent, opts) do
@@ -86,14 +87,21 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
          {:ok, response} when is_map(response) <- Jason.decode(output) do
       decode_response(response, method, raw)
     else
-      {:error, reason} when is_atom(reason) -> {:error, reason}
-      _ -> {:error, :openclaw_invalid_response}
+      {:error, reason} when method == "sessions.abort" and reason in @owner_unavailable ->
+        reason = if reason == :openclaw_owner_connection_lost, do: "owner_connection_lost", else: "credentials_unavailable"
+        {:error, {:openclaw_abort_failed, %{"method" => method, "code" => "NOT_LINKED", "reason" => reason, "retryable" => false, "request_sha256" => OpenClaw.digest(raw)}}}
+
+      {:error, reason} when is_atom(reason) ->
+        {:error, reason}
+
+      _ ->
+        {:error, :openclaw_invalid_response}
     end
   end
 
   defp decode_response(%{"symphony_openclaw_abort_error" => 1} = proof, "sessions.abort", raw) do
     if proof["method"] == "sessions.abort" and proof["code"] in ~w(INVALID_REQUEST UNAVAILABLE NOT_LINKED OTHER) and
-         proof["reason"] in ~w(unauthorized request_rejected) and is_boolean(proof["retryable"]) and
+         proof["reason"] in ~w(unauthorized request_rejected owner_connection_lost owner_mismatch credentials_unavailable) and is_boolean(proof["retryable"]) and
          proof["request_sha256"] == OpenClaw.digest(raw) do
       {:error, {:openclaw_abort_failed, Map.take(proof, ~w(method code reason retryable request_sha256))}}
     else

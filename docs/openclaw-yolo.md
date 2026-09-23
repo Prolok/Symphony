@@ -19,8 +19,9 @@ Installation, Build und Standardgates installieren/starten kein OpenClaw.
 
 Der austauschbare Elixir-Adapter `Yolo.OpenClaw.Adapter` verwendet die vorhandene
 CLI und deren öffentlichen Export `openclaw/plugin-sdk/gateway-runtime`.
-`agents.list`, `agent` und `sessions.abort` laufen über dessen `GatewayClient`;
-lesende Laufabfragen und Benachrichtigungen weiterhin über `openclaw gateway call`.
+`agents.list`, `agent`, die laufenden `agent.wait`-Abfragen und `sessions.abort`
+teilen innerhalb eines Workers dessen `GatewayClient`-Verbindung. Sonstige
+Lesezugriffe und Benachrichtigungen verwenden weiterhin `openclaw gateway call`.
 Alle Aufrufe bleiben am lokalen Standardgateway `127.0.0.1:18789`, ohne
 Remote-Auswahl, `--local`, Gatewaystart oder Ersatzagent. Andere Ports werden
 nicht unterstützt. CLI und Node müssen auf dem PATH des Dienstes liegen; der
@@ -30,16 +31,26 @@ CLI-Version wird vor jedem neuen Auftrag geprüft; Gatewayversion und vorhandene
 SDK-Vertrag sind Teil der Betreiberabnahme. Andere Versionen benötigen eine
 erneute Schnittstellenprüfung.
 
-Der SDK-Client nutzt ausschließlich die bereits vorhandene Geräteidentität und
-deren bestehenden Operatorzugang, `sharedStateMode=read-only` und explizit
-`operator.write`. Er erzeugt keine Identität und schreibt keine Zugangsdaten;
-Shared-Secret-, Admin- oder Fremdidentitätsfallbacks gibt es nicht. Fehlt eine
-nutzbare bestehende Gerätebindung, scheitert bereits die Vorprüfung. Start und
-eigener Abbruch tragen damit auch über getrennte Prozesse dieselbe signierte
-Besitzeridentität. Die Hostprüfung schützt weiterhin fremde Besitzer; Sitzung
-**und** Originallauf-ID bleiben im Abbruchauftrag gebunden. Ein Gerätewechsel
-berechtigt nicht zum Abbruch alter Läufe. Frühere gerätelose CLI-Aufträge erhalten
-keine rückwirkende Besitzerbindung; ihre bestehende Recovery bleibt erforderlich.
+Der SDK-Client nutzt den vorhandenen normalen lokalen Token-/Passwortzugang,
+`sharedStateMode=read-only` und ausschließlich `operator.write`. Die öffentlichen
+SDK-Funktionen `health.readConfigFileSnapshot` (`observe=false`, keine Recovery)
+und `resolveGatewayAuth` lesen
+Profil/Umgebung; Zugangsdaten bleiben im Kindprozess. Nicht auflösbare Zugänge,
+Remote- und andere Authmodi scheitern vor der Vorprüfung. Keine Kopplung,
+Identitätserzeugung, neuen Tokens, Konfigurationsschreibzugriffe oder Authfallbacks.
+Wie die normale lokale CLI sendet dieser Weg keine Geräteidentität. Stattdessen
+bleibt dieselbe Verbindung von der Vorprüfung bis zum eigenen Abbruch/Ende offen;
+der Host prüft ihren `ownerConnId`. Ein Kindprozess pro Worker, ohne zusätzlichen
+Dienst oder Registry. Sitzung **und** Originallauf-ID sind auch lokal gebunden;
+ein weiterer Start in derselben Verbindung ist ausgeschlossen.
+
+Bei Verbindungs-/Prozessverlust wird diese Besitzerbindung nicht neu aufgebaut.
+Die erste fehlgeschlagene Beobachtung entzieht die Schreibrechte; Reservierung
+und bestätigte Entscheidungen bleiben erhalten. Weitere lesende CLI-Abfragen
+dürfen einen tatsächlichen Originalabschluss samt Inaktivität/Eingaben belegen.
+Abbruch ohne ursprüngliche Verbindung bleibt ein sanitierter terminaler Fehler,
+keine Quittung. Neustart oder neue Verbindung verleihen keine rückwirkenden
+Abbruchrechte. Der bestehende Recoveryvertrag bleibt maßgeblich.
 Öffentliche Verträge: [Gateway-SDK](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugin-sdk/gateway-runtime.ts),
 [schreibgeschützter Client](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/client.ts).
 
@@ -71,7 +82,9 @@ Quellhash. Symphony weist das Arbeitsverzeichnis über die Werkzeugausführung n
 
 Fehler heißen unter anderem `openclaw_requires_linear_yolo_agent`,
 `openclaw_binary_missing`, `openclaw_gateway_unavailable`,
-`openclaw_agent_not_found`, `openclaw_owner_identity_unavailable`,
+`openclaw_agent_not_found`, `openclaw_owner_credentials_unavailable`,
+`openclaw_owner_connection_lost`,
+`openclaw_owner_access_rejected`,
 `openclaw_version_unsupported` oder
 `openclaw_invalid_response`. Rohes CLI-stderr und Credentials werden nicht
 in Prompt oder Logs übernommen. Kein Fehler startet einen Ersatzlauf.
@@ -620,10 +633,12 @@ Agentendateien/Gateways. Ein fehlendes Binary überspringt keinen Test.
 Der zusätzliche Vertragstest `node test/openclaw_owner_integration.mjs
 /PFAD/ZUM/openclaw/package.json` wird ausdrücklich außerhalb der Standardgates
 mit dem veröffentlichten SDK 2026.9.4 ausgeführt. Er verwendet nur einen lokalen
-Fixture-Server und injizierte synthetische Gerätezugänge: getrennte echte
-CLI-Verbindungen müssen abgewiesen, derselbe signierte Gerätebesitzer über neue
-Prozesse akzeptiert, fremde Besitzer/Sitzungen abgewiesen werden. Er fordert nur
-`operator.write` an und prüft die echte Upstream-Besitzerfunktion. Standardgates
+Fixture-Server und ein synthetisches Profil mit normalem lokalem Zugang,
+vorhandener ungekoppelter Identität und leerem Gerätecache. Die echte öffentliche
+Konfigurationsauflösung und SDK-Verbindung müssen eigenen Start/Abbruch über
+dieselbe Verbindung erlauben; fremde Besitzer/Sitzungen, Wiederholungen und
+Verbindungsverlust bleiben gesperrt. Er fordert nur `operator.write` an und
+prüft die echte Upstream-Besitzerfunktion sowie unveränderten Profilzustand. Standardgates
 laden kein SDK. Dieser Vertragstest ersetzt weder die Prüfung vorhandener
 Betreiberzugänge noch den folgenden echten Unterbrechungs-/Folgegenerationstest.
 

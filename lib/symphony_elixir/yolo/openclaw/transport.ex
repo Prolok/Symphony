@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Yolo.OpenClaw.Transport do
   @moduledoc "Bounded process boundary; compiled test builds cannot execute OpenClaw."
   alias SymphonyElixir.{Config, RuntimePaths}
+  alias SymphonyElixir.Yolo.OpenClaw.OwnerTransport
   @test_build Application.compile_env(:symphony_elixir, :openclaw_test_build, false)
 
   @spec command([String.t()], keyword()) :: {:ok, String.t()} | {:error, atom()}
@@ -15,9 +16,19 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Transport do
 
     case find.("python3") do
       nil -> {:error, :openclaw_transport_python_missing}
-      python -> invoke(python, args, ports, opts)
+      python -> dispatch(python, args, ports, opts)
     end
   end
+
+  defp dispatch(python, ["gateway", "call", method | _] = args, ports, opts) when method in ~w(agents.list agent agent.wait sessions.abort) do
+    # First lost-owner observation fences the journal. Later read-only polls may
+    # still obtain a real terminal/inactivity proof through the existing CLI.
+    if OwnerTransport.active?() and not (method == "agent.wait" and OwnerTransport.lost?()),
+      do: OwnerTransport.command(python, args, ports, opts),
+      else: invoke(python, args, ports, opts)
+  end
+
+  defp dispatch(python, args, ports, opts), do: invoke(python, args, ports, opts)
 
   defp invoke(python, args, ports, opts) do
     helper = Path.join(RuntimePaths.workflow_dir(), "scripts/openclaw-rpc.py")
@@ -45,8 +56,14 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Transport do
       {^port, {:exit_status, 0}} ->
         {:ok, output}
 
-      {^port, {:exit_status, 125}} ->
-        {:error, :openclaw_owner_identity_unavailable}
+      {^port, {:exit_status, 124}} ->
+        {:error, :openclaw_owner_credentials_unavailable}
+
+      {^port, {:exit_status, 123}} ->
+        {:error, :openclaw_owner_connection_lost}
+
+      {^port, {:exit_status, 122}} ->
+        {:error, :openclaw_owner_access_rejected}
 
       {^port, {:exit_status, 127}} ->
         {:error, :openclaw_binary_missing}

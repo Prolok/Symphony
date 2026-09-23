@@ -848,6 +848,41 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert deliveries == %{}
   end
 
+  test "owner connection loss fences writes and preserves terminal abort failure until proven natural retirement", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", %{"runId" => id} ->
+        if Process.get(:owner_lost_seen) do
+          assert {:ok, %{"writable" => false}} = Journal.read("incoming")
+          %{"runId" => id, "status" => "ok", "endedAt" => 3000}
+        else
+          Process.put(:owner_lost_seen, true)
+          {:error, :openclaw_owner_connection_lost}
+        end
+
+      "sessions.abort", _ ->
+        send(self(), :owner_abort_attempt)
+        {:error, :openclaw_owner_connection_lost}
+    end
+
+    history = fn current -> {:ok, put_in(idle_history(current), ["sessionInfo", "lastRunId"], current["id"])} end
+    opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> :ok end, interruption_history: history)
+    assert {:error, :openclaw_interrupted_order_retired} = run_group("incoming", issues, issues, opts)
+    assert {:ok, order} = Journal.read("incoming")
+    refute order["writable"]
+    refute order["abort_acknowledged"]
+    assert order["abort_error"]["reason"] == "owner_connection_lost"
+    refute order["abort_error"]["retryable"]
+    assert order["retirement"]["stop_basis"] == "terminal_original"
+    assert_receive :owner_abort_attempt
+    refute_receive :owner_abort_attempt
+    assert :ok = Delivery.reconcile("incoming")
+    assert {:ok, %{"deliveries" => deliveries}} = Store.read("incoming")
+    assert deliveries == %{}
+  end
+
   test "revocation during a status query cannot turn the fenced order into a normal completion", %{issues: issues, opts: opts} do
     handler = fn
       "agent", params ->

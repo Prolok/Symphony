@@ -32,6 +32,10 @@ class OpenClawBoundaryTest(unittest.TestCase):
                 mock.patch.object(rpc.shutil, "which", side_effect=AssertionError("discovery")), \
                 mock.patch.object(rpc.subprocess, "run", side_effect=AssertionError("process")):
             self.assertEqual(rpc.main(), 126)
+        stream = subprocess.run([sys.executable, "-I", str(REPO / "scripts/openclaw-rpc.py"), "--stream"],
+                                env=dict(os.environ, SYMPHONY_OPENCLAW_TEST_DENY="1"), capture_output=True)
+        self.assertEqual(stream.returncode, 126)
+        self.assertEqual(stream.stdout, b"")
 
     def test_transport_uses_exact_arguments_and_never_returns_error_output(self):
         rpc = load("openclaw-rpc.py")
@@ -65,14 +69,14 @@ class OpenClawBoundaryTest(unittest.TestCase):
         self.assertEqual(denied.returncode, 126)
         self.assertEqual(denied.stdout, b"")
 
-    def test_owner_identity_failure_is_specific_and_sdk_runtime_is_required(self):
+    def test_owner_access_failure_is_specific_and_sdk_runtime_is_required(self):
         rpc = load("openclaw-rpc.py")
         args = ["gateway", "call", "agents.list", "--params", "{}", "--json"]
         with mock.patch.dict(os.environ, {"SYMPHONY_OPENCLAW_TEST_DENY": "0"}), \
                 mock.patch.object(rpc.shutil, "which", return_value="/fixture/runtime"), \
                 mock.patch.object(rpc.sys, "stdin", io.StringIO(json.dumps(args))), \
-                mock.patch.object(rpc.subprocess, "run", return_value=subprocess.CompletedProcess(args, 125, b"", b"")):
-            self.assertEqual(rpc.main(), 125)
+                mock.patch.object(rpc.subprocess, "run", return_value=subprocess.CompletedProcess(args, 124, b"", b"")):
+            self.assertEqual(rpc.main(), 124)
         with mock.patch.dict(os.environ, {"SYMPHONY_OPENCLAW_TEST_DENY": "0"}), \
                 mock.patch.object(rpc.shutil, "which", side_effect=["/fixture/openclaw", None]), \
                 mock.patch.object(rpc.sys, "stdin", io.StringIO(json.dumps(args))), \

@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   require Logger
   alias SymphonyElixir.{Config, PathSafety, ProjectContext}
   alias SymphonyElixir.Linear.IssueLease
-  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, Recovery, ToolBridge}
+  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, OwnerTransport, Recovery, ToolBridge}
   alias SymphonyElixir.Yolo.Scope
 
   @spec run(map(), String.t(), [map()], String.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -12,7 +12,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     agent = Config.openclaw_yolo_agent()
     group = Scope.current()["group"]
     order = order(group, agent, workspace, issues, run_id, opts)
-    result = start(order, prompt, adapter, opts)
+    result = OwnerTransport.within(fn -> start(order, prompt, adapter, opts) end)
     log_failure(result, order, opts)
     result
   end

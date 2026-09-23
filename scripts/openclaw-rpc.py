@@ -81,8 +81,8 @@ def main():
         return 1
     # Errors may contain config/credential diagnostics: never return raw stderr.
     if result.returncode:
-        if owner_rpc and result.returncode == 125:
-            return 125
+        if owner_rpc and result.returncode in {122, 123, 124}:
+            return result.returncode
         proof = rejection(args, result) or abort_failure(args, result)
         if proof is not None:
             print(json.dumps(proof))
@@ -93,4 +93,15 @@ def main():
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--stream"]:
+        if os.environ.get("SYMPHONY_OPENCLAW_TEST_DENY") == "1":
+            sys.exit(126)
+        binary, node = shutil.which("openclaw"), shutil.which("node")
+        if binary is None or node is None:
+            sys.exit(127)
+        # Replace this wrapper: the worker owns this one process/connection via
+        # its port. EOF closes it; no daemon, socket, credentials or registry.
+        with open(os.devnull, "wb") as errors:
+            os.dup2(errors.fileno(), 2)
+        os.execv(node, [node, str(Path(__file__).with_name("openclaw-owner-rpc.mjs")), binary, "--stream"])
     sys.exit(main())

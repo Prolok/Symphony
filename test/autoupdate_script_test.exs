@@ -59,8 +59,7 @@ defmodule AutoupdateScriptTest do
 
     assert {output, 0} = run_autoupdate(worktree_dir, "YeS\n", bin_dir, build_log)
 
-    assert output =~ @update_prompt
-    assert output =~ "Symphony Update läuft…"
+    assert output == @update_prompt <> "Symphony Update läuft…\n"
     assert git_output!(worktree_dir, ["rev-parse", "HEAD"]) == remote_head
 
     assert File.read!(build_log) ==

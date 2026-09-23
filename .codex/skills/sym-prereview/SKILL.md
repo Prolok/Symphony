@@ -36,6 +36,7 @@ prüfen und passende Nachbarfälle einbeziehen; die Beispiele sind nicht abschli
 
 | Auslöser / Produktpfad | Beobachtbare Invariante und geeignete Bestandstests |
 | --- | --- |
+| Launcher, Auto-Update, Startlogging oder Terminaldarstellung | Echten Launcher/Build im isolierten PTY vom Start bis zur Hauptmaske prüfen; betroffene Updatefälle ohne Angebot sowie mit Ja/Nein über lokale Wegwerf-Remotes abdecken. Rückfrage bleibt bedienbar, Routine-/Budgetlogs bleiben unsichtbar, Warnungen/Fehler und Dateidiagnose erhalten. `startup_logging_test.exs` mit kaltem Logger, `log_file_test.exs`, `../symphony_script_test.exs`, `../autoupdate_script_test.exs`, `../linear_app/test_launcher_update.py`; bei Renderänderungen auch `status_dashboard_snapshot_test.exs`. |
 | Statuswechsel, Retry, Reconciliation oder Workerabschluss im Orchestrator | Fehlende Live-Statusauskunft erhält Claim, Workspace und Wiederaufnahmekontext; alte Retry-Tokens lösen keine zweite Arbeit aus. Terminaler Status räumt erst nach Abschluss laufender Nacharbeit auf, manuelle Gates erhalten den Workspace. `retry_refresh_test.exs`. |
 | Issue-Lease, Dispatch oder gemeinsame Kapazität | Kein zweiter Besitzer derselben Issue; Kapazität bleibt auch für wiederaufgenommene externe Läufe reserviert. Freigabe nach Besitzerende und Startfehler unterscheiden. `issue_lease_test.exs`, `worker_capacity_test.exs`. |
 | Review-Quellenbindung, Skillladen oder Test-Executor | Falsche SHA, fremder/geänderter Skill oder verlorene Laufbindung erlauben keinen Pass; Wiederaufnahme erhält die Laufidentität. `yolo_review_contract_test.exs`, `test_executor_test.exs`. |
@@ -47,6 +48,14 @@ Beispiel: Bei geändertem Abschluss-Lookup den bestehenden Test
 `retry_refresh_test.exs` samt Status-/Cleanup-Nachbarn auswählen. Ein fehlender
 Tracker-Datensatz darf nicht als bestätigter Abschluss gelten. Unberührte
 Delegations- oder Aggregationsszenarien werden dadurch nicht fällig.
+
+Für den Start-/Darstellungsnachweis die Hauptmaske mindestens 20 Sekunden über
+mehrere Refreshs auf Flackern, Logreste und Umbruchfehler beobachten; bei einem
+Breitenbefund auch kleine Terminalgröße/Resize prüfen. Launcherziel, Quell-/Buildstand,
+Terminalgröße, Dauer, zeitlichen Mitschnitt und Cleanup festhalten. Nur eigene
+Wegwerf-/Testsitzungen verwenden. Externe Doubles ausweisen; ersetzte Start-,
+Logging- oder Renderpfade und einzelne Screenshots belegen diesen Produktpfad
+nicht. `--test-instance` überspringt Auto-Update und deckt dessen Übergang nicht ab.
 
 ## Lokale Ausführung und Grenzen
 

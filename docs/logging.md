@@ -37,8 +37,16 @@ files of up to 10 MiB each and removes the default console handler after disk
 logging is configured.
 
 Beim Dienststart zeigt die Konsole bereits vor Discovery und Authentifizierung
-nur Meldungen ab Stufe `info`. Das gilt auch für die Testlaufphasen. Der Filter
-ändert weder das primäre Logger-Level noch die Debugdiagnose im späteren Dateilog.
+nur Meldungen ab Stufe `info`. Dazu startet der CLI-Einstieg zuerst Elixirs Logger:
+Im Escript ist dieser noch nicht aktiv und würde einen vorher gesetzten
+Konsolenfilter beim späteren Start ersetzen. Das gilt auch für die Testlaufphasen.
+Der Filter ändert weder das primäre Logger-Level noch die Debugdiagnose im
+späteren Dateilog; Warnungen und Startfehler bleiben sichtbar.
+
+Nach bestätigtem Auto-Update unterdrückt Git seine Fortschritts-/Dateistatistik;
+Fehler und Builddiagnosen bleiben sichtbar. Die Terminalmaske überschreibt beim
+Refresh bestehende Zeilen und entfernt verkürzte Zeilenenden und überzählige
+Zeilen erst danach, statt vor jedem Bild den ganzen Bildschirm zu leeren.
 
 `sym-codex` gibt Laufzeitlogs seiner Mix-Helfer ab Stufe `info` auf stderr aus;
 Debugmeldungen bleiben ausgeblendet. stdout enthält ausschließlich den

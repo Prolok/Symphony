@@ -492,11 +492,14 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp render_to_terminal(content) do
+    # Keep the previous frame visible while the terminal receives the next
+    # one. Erase only shortened lines and the tail after the new content.
+    lines = content |> normalize_status_lines() |> String.split("\n")
+
     IO.write([
       IO.ANSI.home(),
-      IO.ANSI.clear(),
-      normalize_status_lines(content),
-      "\n"
+      Enum.map(lines, &[&1, "\e[K\n"]),
+      "\e[J"
     ])
   end
 

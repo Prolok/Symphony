@@ -39,12 +39,15 @@ defmodule SymphonyElixir.StartupLoggingTest do
     {:ok, root: root}
   end
 
-  for stage <- [nil, "run", "prepare", "probe", "cleanup"] do
-    @tag stage: stage
-    test "CLI main filters early discovery debug logs in #{stage || "normal"} startup", %{root: root, stage: stage} do
+  for stage <- [nil, "run", "prepare", "probe", "cleanup"], logger_started? <- [true, false] do
+    @tag stage: stage, logger_started?: logger_started?
+    test "CLI main filters early discovery debug logs in #{stage || "normal"} startup with logger_started=#{logger_started?}", %{root: root, stage: stage, logger_started?: logger_started?} do
       script =
         @startup_fixture <>
           """
+          # Mix and elixir start Logger; an app:nil escript reaches CLI.main
+          # before Logger starts. Its later boot must not replace our filter.
+          if !#{logger_started?}, do: Application.stop(:logger)
           Application.put_env(:symphony_elixir, :test_instance, %{})
           SymphonyElixir.CLI.main([])
           """
@@ -72,6 +75,7 @@ defmodule SymphonyElixir.StartupLoggingTest do
     script =
       @startup_fixture <>
         """
+        Application.stop(:logger)
         Process.put(:configure_disk, true)
         SymphonyElixir.CLI.main(["--logs-root", #{inspect(logs_root)}])
         """

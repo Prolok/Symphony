@@ -2054,7 +2054,8 @@ defmodule SymphonyElixir.TestRunTest do
     refute File.exists?(Path.join([ctx.root, "test-state", "runs", plan["run_id"], "openclaw-interruption.json"]))
 
     Agent.update(ctx.source_agent, &%{&1 | failure: nil})
-    assert {:ok, %{"interruption" => receipt}} = Interruption.execute(unresolved, plan, journal, history: fn ^order -> {:ok, active} end)
+    opts = [history: fn ^order -> {:ok, active} end]
+    assert {:ok, %{"interruption" => receipt}} = Interruption.execute(unresolved, plan, journal, opts)
     assert receipt["original"]["writable"] == false
     assert count_calls(ctx.source_agent, "SymphonyYoloAgent") == 2
   end

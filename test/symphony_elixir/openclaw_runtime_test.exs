@@ -1056,6 +1056,23 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, ^replacement} = Journal.read("incoming")
   end
 
+  test "one-shot terminal reconciliation preserves a corrupt journal and keeps its reservation closed", %{issues: issues, opts: opts} do
+    order = fenced_order(issues, opts)
+    {:ok, decisions} = Store.read("incoming")
+    path = Journal.path("incoming")
+    original = File.read!(path)
+    File.write!(path, "incomplete journal")
+
+    assert {:error, :openclaw_journal_corrupt} = OpenClaw.reconcile_terminal(order)
+    assert File.read!(path) == "incomplete journal"
+    assert {:error, :openclaw_journal_corrupt} = Journal.member_available(hd(issues).id)
+    assert {:ok, ^decisions} = Store.read("incoming")
+
+    File.write!(path, original)
+    assert {:ok, ^order} = Journal.read("incoming")
+    assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+  end
+
   defp original_idle_history(order) do
     {_, opts} = terminal_evidence(order)
     Jason.decode!(opts[:sources]["source"])

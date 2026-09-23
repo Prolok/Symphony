@@ -2,6 +2,7 @@ defmodule SymphonyElixir.TestRun.OpenClawInterruption do
   @moduledoc "One owned live interruption in the existing isolated incoming proof."
   alias SymphonyElixir.{Config, ProjectContext, TestInstance}
   alias SymphonyElixir.Linear.{Client, DurableState, IssueLease}
+  alias SymphonyElixir.TestRun.PoIncoming
   alias SymphonyElixir.Yolo.{OpenClaw, Store}
   alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal}
 
@@ -144,14 +145,12 @@ defmodule SymphonyElixir.TestRun.OpenClawInterruption do
 
   defp revoke_original(_current, original), do: {:ok, original}
 
-  @spec probe(map(), map()) :: {:ok, map()} | {:error, term()}
-  def probe(%{"po_interruption" => true, "initial_state" => "Backlog"} = fixture, plan) do
+  @spec probe(map(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def probe(issue, %{"po_interruption" => true, "initial_state" => "Backlog"} = fixture, plan) do
     case DurableState.read(path(plan)) do
       {:ok, %{"source" => source, "first_id" => id} = receipt} ->
         if source == plan["source"] and id == fixture["id"] and receipt["run_id"] == plan["run_id"] do
-          before = receipt["before"]
-          proof = %{"session_id" => before["session_id"], "sha" => before["sha"], "workspace" => before["workspace"]}
-          {:ok, Map.put(fixture, "po_receipt", proof)}
+          probe_decision(issue, fixture, receipt)
         else
           {:error, :test_interruption_receipt_mismatch}
         end
@@ -164,7 +163,19 @@ defmodule SymphonyElixir.TestRun.OpenClawInterruption do
     end
   end
 
-  def probe(fixture, _plan), do: {:ok, fixture}
+  def probe(_issue, fixture, _plan), do: {:ok, fixture}
+
+  defp probe_decision(issue, fixture, receipt) do
+    # The archive supplies only the original execution binding. Success
+    # still requires fresh issue conditions, including after a prior pass.
+    if PoIncoming.decision_confirmed?(issue, fixture, receipt["attempt"]["completed"] || %{}) do
+      before = receipt["before"]
+      proof = %{"session_id" => before["session_id"], "sha" => before["sha"], "workspace" => before["workspace"]}
+      {:ok, Map.put(fixture, "po_receipt", proof)}
+    else
+      {:ok, Map.delete(fixture, "po_receipt")}
+    end
+  end
 
   defp path(plan), do: Path.join([TestInstance.state_root(), "runs", plan["run_id"], "openclaw-interruption.json"])
 end

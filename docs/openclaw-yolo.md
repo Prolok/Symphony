@@ -664,6 +664,8 @@ Mitglieder vorliegen. Nach ihren Entscheidungen wartet die Probe weiterhin auf d
 terminalen OpenClaw-Laufbeleg. Deren Aufnahme über den normalen Coordinator belegt die
 Freigabe der alten Mitglieder-/Gruppenreservierung. Die erste Entscheidung bleibt
 an den alten Auftrag gebunden; sie darf nicht in der neuen Mitgliedermenge auftauchen.
+Auch für dieses Mitglied prüft jede Probe die beiden Skip-Labels und die konfigurierte
+menschliche Zuweisung frisch; der archivierte Laufbeleg ersetzt diese Bedingungen nicht.
 Die üblichen Prüfungen von frischen Linear-Daten, Quellstand, Cleanup,
 `main_preserved` und `originals_preserved` bleiben erforderlich. Der interne Beleg
 `openclaw-interruption.json` bleibt zusammen mit dem Fixturejournal erhalten, auch

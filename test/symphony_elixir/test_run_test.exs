@@ -1905,17 +1905,19 @@ defmodule SymphonyElixir.TestRunTest do
     alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
     alias SymphonyElixir.Yolo.OpenClaw.Journal
     {contexts, context, plan, journal, first, order, active} = interruption_fixture(ctx)
+    issue = %{"assignee" => %{"id" => @human}, "labels" => %{"nodes" => Enum.map([~s(Skip "Freigabe Implementierung"), ~s(Skip "Freigabe Review")], &%{"name" => &1})}}
+    Agent.update(ctx.source_agent, fn state -> %{state | issues: Map.update!(state.issues, first["id"], &Map.merge(&1, issue))} end)
     opts = [history: fn ^order -> {:ok, active} end]
     waiting = update_in(journal["fixtures"], &Enum.map(&1, fn f -> Map.delete(f, "observed_state") end))
     assert {:ok, %{"interruption" => %{"state" => "waiting_for_first_decision"}}} = Interruption.execute(contexts, plan, waiting, opts)
-    assert {:ok, ^first} = Interruption.probe(first, plan)
+    assert {:ok, ^first} = Interruption.probe(issue, first, plan)
     assert {:ok, %{"interruption" => %{"state" => "waiting_for_first_decision"}}} = TestRun.execute("interrupt")
     assert {:ok, result} = Interruption.execute(contexts, plan, journal, opts)
     receipt = result["interruption"]
     assert receipt["before"] == Map.take(order, Map.keys(receipt["before"]))
     assert receipt["original"]["writable"] == false
     assert receipt["active"]["hasActiveRun"] == true
-    assert {:ok, observed} = Interruption.probe(first, plan)
+    assert {:ok, observed} = Interruption.probe(issue, first, plan)
     assert observed["po_receipt"]["session_id"] == order["session_id"]
     assert {:ok, snapshot} = TestRun.execute("probe")
     observed_first = Enum.find(snapshot["fixtures"], &(&1["id"] == first["id"]))
@@ -1945,10 +1947,47 @@ defmodule SymphonyElixir.TestRunTest do
     receipt_path = Path.join([ctx.root, "test-state", "runs", plan["run_id"], "openclaw-interruption.json"])
     assert :ok = DurableState.write(receipt_path, Map.put(receipt, "source", %{}))
     assert {:error, :test_interruption_receipt_mismatch} = Interruption.execute(contexts, plan, journal)
-    assert {:error, :test_interruption_receipt_mismatch} = Interruption.probe(first, plan)
+    assert {:error, :test_interruption_receipt_mismatch} = Interruption.probe(issue, first, plan)
     File.write!(receipt_path, "not json")
     assert {:error, _} = Interruption.execute(contexts, plan, journal)
-    assert {:error, :test_interruption_receipt_mismatch} = Interruption.probe(first, plan)
+    assert {:error, :test_interruption_receipt_mismatch} = Interruption.probe(issue, first, plan)
+  end
+
+  test "archived interruption decision still requires fresh labels and human assignment", ctx do
+    alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
+    {contexts, context, plan, journal, first, order, active} = interruption_fixture(ctx)
+    assert {:ok, _} = Interruption.execute(contexts, plan, journal, history: fn ^order -> {:ok, active} end)
+    complete(ctx.source_agent)
+
+    valid = %{
+      "state" => %{"name" => "Verworfen"},
+      "assignee" => %{"id" => @human},
+      "labels" => %{"nodes" => Enum.map([~s(Skip "Freigabe Implementierung"), ~s(Skip "Freigabe Review")], &%{"name" => &1})}
+    }
+
+    ProjectContext.with_context(context, fn ->
+      {:ok, record} = YoloStore.read("incoming")
+      :ok = YoloStore.write("incoming", Map.put(record, "attempt", %{"id" => "successor", "completed" => %{}}))
+    end)
+
+    for invalid <- [
+          Map.put(valid, "assignee", nil),
+          put_in(valid["labels"]["nodes"], []),
+          put_in(valid["labels"]["nodes"], [hd(valid["labels"]["nodes"])]),
+          put_in(valid["labels"]["nodes"], [List.last(valid["labels"]["nodes"])])
+        ] do
+      Agent.update(ctx.source_agent, fn state -> %{state | issues: Map.update!(state.issues, first["id"], &Map.merge(&1, valid))} end)
+      assert {:ok, passed} = TestRun.execute("probe")
+      passed_first = Enum.find(passed["fixtures"], &(&1["id"] == first["id"]))
+      assert passed_first["complete"]
+      assert passed_first["po_receipt"]["session_id"] == order["session_id"]
+
+      Agent.update(ctx.source_agent, fn state -> %{state | issues: Map.update!(state.issues, first["id"], &Map.merge(&1, invalid))} end)
+      assert {:ok, blocked} = TestRun.execute("probe")
+      blocked_first = Enum.find(blocked["fixtures"], &(&1["id"] == first["id"]))
+      refute blocked_first["complete"]
+      refute blocked_first["po_receipt"]
+    end
   end
 
   test "interruption probe waits for the successor terminal receipt after its decisions are complete", ctx do

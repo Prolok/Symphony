@@ -547,7 +547,7 @@ defmodule SymphonyElixir.TestRun do
 
       with {:ok, fixture} <- Delegation.probe(context, fixture),
            {:ok, fixture} <- PoIncoming.probe(issue, fixture),
-           {:ok, fixture} <- OpenClawInterruption.probe(fixture, plan),
+           {:ok, fixture} <- OpenClawInterruption.probe(issue, fixture, plan),
            {:ok, fixture} <- PoHandoff.probe(issue, fixture) do
         complete = complete and fixture_receipts?(fixture)
 

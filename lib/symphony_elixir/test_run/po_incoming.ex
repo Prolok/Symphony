@@ -29,16 +29,18 @@ defmodule SymphonyElixir.TestRun.PoIncoming do
 
   def probe(_, fixture), do: {:ok, fixture}
 
-  defp probe_receipt({:ok, %{"attempt" => %{"session_id" => session, "completed" => completed, "sha" => sha, "workspace" => path}}}, issue, fixture) do
+  @spec decision_confirmed?(map(), map(), map()) :: boolean()
+  def decision_confirmed?(issue, fixture, completed) do
     labels = get_in(issue, ["labels", "nodes"]) || []
     names = Enum.map(labels, &String.downcase(&1["name"]))
 
-    valid =
-      Enum.all?([~s(skip "freigabe implementierung"), ~s(skip "freigabe review")], &(&1 in names)) and
-        get_in(issue, ["assignee", "id"]) == fixture["assignee_id"] and is_binary(completed[fixture["id"]])
+    Enum.all?([~s(skip "freigabe implementierung"), ~s(skip "freigabe review")], &(&1 in names)) and
+      get_in(issue, ["assignee", "id"]) == fixture["assignee_id"] and is_binary(completed[fixture["id"]])
+  end
 
+  defp probe_receipt({:ok, %{"attempt" => %{"session_id" => session, "completed" => completed, "sha" => sha, "workspace" => path}}}, issue, fixture) do
     receipt = %{"session_id" => session, "sha" => sha, "workspace" => path, "openclaw" => OpenClawJournal.receipt("incoming", session)}
-    if valid, do: {:ok, Map.put(fixture, "po_receipt", receipt)}, else: {:ok, fixture}
+    if decision_confirmed?(issue, fixture, completed), do: {:ok, Map.put(fixture, "po_receipt", receipt)}, else: {:ok, fixture}
   end
 
   defp probe_receipt({:ok, _}, _issue, fixture), do: {:ok, fixture}

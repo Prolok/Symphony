@@ -15,7 +15,11 @@ defmodule SymphonyElixir.OpenClawTransportTest do
     end
 
     def info(_port), do: Process.get(:port_info, [])
-    def close(port), do: send(self(), {:closed, port})
+
+    def close(port) do
+      send(self(), {:closed, port})
+      if Process.get(:close_failure), do: raise(ArgumentError, "synthetic port already closed")
+    end
   end
 
   defp options do
@@ -103,6 +107,47 @@ defmodule SymphonyElixir.OpenClawTransportTest do
       refute "--stream" in Keyword.fetch!(flags, :args)
       assert OwnerTransport.lost?()
     end)
+  end
+
+  test "port exit during owner cleanup preserves callback results and exceptions" do
+    Process.put(:close_failure, true)
+    Process.put(:replies, [{:data, {:eol, Jason.encode!(%{code: 0, output: "{}"})}}])
+
+    assert :completed ==
+             OwnerTransport.within(fn ->
+               assert {:ok, "{}"} = Transport.command(["gateway", "call", "agents.list"], options())
+               :completed
+             end)
+
+    assert_receive {:closed, _}
+    refute OwnerTransport.active?()
+
+    assert_raise RuntimeError, "callback failed", fn ->
+      OwnerTransport.within(fn ->
+        assert {:ok, "{}"} = Transport.command(["gateway", "call", "agents.list"], options())
+        raise "callback failed"
+      end)
+    end
+
+    assert_receive {:closed, _}
+    refute OwnerTransport.active?()
+  end
+
+  test "port exit during failure cleanup keeps the lost owner fenced" do
+    Process.put(:close_failure, true)
+    Process.put(:replies, [{:exit_status, 1}])
+
+    OwnerTransport.within(fn ->
+      assert {:error, :openclaw_owner_connection_lost} = Transport.command(["gateway", "call", "agent.wait"], options())
+      assert_receive {:opened, _, _}
+      assert_receive {:closed, _}
+      assert OwnerTransport.lost?()
+      assert {:error, :openclaw_owner_connection_lost} = Transport.command(["gateway", "call", "sessions.abort"], options())
+      refute_receive {:opened, _, _}
+      refute_receive {:closed, _}
+    end)
+
+    refute OwnerTransport.active?()
   end
 
   test "bounded persistent framing and all failed process paths permanently fence this owner" do

@@ -5,8 +5,31 @@ defmodule SymphonyElixir.TestExecutorTest do
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.{ProjectContext, RoutineTest, TestExecutor}
 
+  setup ctx do
+    if ctx[:long_checkout] do
+      original = File.cwd!()
+      previous_tmpdir = System.get_env("TMPDIR")
+      checkout = Path.join([original, "tmp", "executor-review-#{Ecto.UUID.generate()}", String.duplicate("long-checkout-", 8)])
+      tmpdir = Path.join(checkout, "tmpdir")
+
+      on_exit(fn ->
+        File.cd!(original)
+        restore_env("TMPDIR", previous_tmpdir)
+        File.rm_rf!(Path.dirname(checkout))
+      end)
+
+      File.mkdir_p!(tmpdir)
+      File.cd!(checkout)
+      System.put_env("TMPDIR", tmpdir)
+    end
+
+    :ok
+  end
+
   setup do
     root = Path.join(File.cwd!(), "tmp/ex-#{System.unique_integer([:positive])}")
+    socket_root = SymphonyElixir.TestSupport.routine_socket_root()
+    on_exit(fn -> File.rm_rf!(root) end)
     project = Path.join(root, "project")
     workspace = Path.join(root, "worktrees/PRO-769")
     File.mkdir_p!(project)
@@ -26,10 +49,10 @@ defmodule SymphonyElixir.TestExecutorTest do
 
     settings = Config.settings!()
     settings = put_in(settings.worker.test_executor, config)
-    settings = put_in(settings.worker.test_executor_socket, Path.join(root, "socket/e.sock"))
+    settings = put_in(settings.worker.test_executor_socket, Path.join(socket_root, "e.sock"))
     settings = put_in(settings.workspace.root, Path.join(root, "worktrees"))
     context = %ProjectContext{id: project, root: project, name: "symphony-test", settings: settings}
-    {json, 0} = System.cmd("python3", ["scripts/test-instance.py", "source", workspace])
+    {json, 0} = System.cmd("python3", [Path.expand("../../scripts/test-instance.py", __DIR__), "source", workspace])
     source = Jason.decode!(json)
 
     request = %{
@@ -43,7 +66,6 @@ defmodule SymphonyElixir.TestExecutorTest do
       "checkout" => workspace
     }
 
-    on_exit(fn -> File.rm_rf!(root) end)
     %{root: root, context: context, config: config, request: request}
   end
 
@@ -139,7 +161,22 @@ defmodule SymphonyElixir.TestExecutorTest do
     assert {:error, {:test_executor_rejected, "test_environment_needs_cleanup"}} = TestTool.request(socket, %{ctx.request | "run_id" => "another"})
   end
 
+  @tag :long_checkout
   test "supervisor recovers its socket process and retains interrupted run identity", ctx do
+    checkout = File.cwd!()
+    assert byte_size(checkout) > 104
+    assert byte_size(System.fetch_env!("TMPDIR")) > 104
+    assert String.starts_with?(ctx.root, checkout <> "/")
+    socket = ctx.context.settings.worker.test_executor_socket
+    socket_root = Path.dirname(socket)
+    assert {:ok, ^socket} = SymphonyElixir.PathSafety.canonicalize(socket)
+    assert byte_size(socket) < 104
+    assert Bitwise.band(File.stat!(socket_root).mode, 0o777) == 0o700
+
+    other_root = SymphonyElixir.TestSupport.routine_socket_root()
+    refute other_root == socket_root
+    markers = [Path.join(other_root, "parallel-fixture"), Path.join(checkout, "foreign-fixture")]
+    for marker <- markers, do: File.write!(marker, "preserve")
     parent = self()
 
     runner = fn job, _, _, _, _ ->
@@ -149,7 +186,6 @@ defmodule SymphonyElixir.TestExecutorTest do
     end
 
     pid = start_supervised!({TestExecutor, contexts: [ctx.context], name: __MODULE__.Executor, runner: runner})
-    socket = ctx.context.settings.worker.test_executor_socket
     assert {:ok, _} = TestTool.request(socket, ctx.request)
     assert_receive {:started, job}, 5_000
     assert TestExecutor.active?(job["directory"])
@@ -160,8 +196,23 @@ defmodule SymphonyElixir.TestExecutorTest do
     refute TestExecutor.active?(job["directory"])
     refute_receive {:started, _}, 100
     assert {:ok, _} = TestTool.request(socket, %{ctx.request | "operation" => "cleanup"})
-    assert_receive {:started, %{"cleanup" => true}}, 5_000
+    assert_receive {:started, %{"cleanup" => true} = cleanup_job}, 5_000
+    assert cleanup_job["request"] == job["request"]
+    assert cleanup_job["directory"] == job["directory"]
     assert eventually(fn -> match?({:ok, %{"status" => "failed", "cleanup" => true}}, TestTool.request(socket, ctx.request)) end)
+    assert {:ok, result} = TestTool.request(socket, %{ctx.request | "operation" => "result"})
+    assert result["failure"] == "cancelled"
+    assert Map.take(result, ~w(run_id head_sha source_sha256 scenario)) == Map.take(ctx.request, ~w(run_id head_sha source_sha256 scenario))
+
+    :ok = stop_supervised(TestExecutor)
+    assert eventually(fn -> not File.exists?(socket) end)
+    File.rm_rf!(socket_root)
+    refute File.exists?(socket_root)
+    for marker <- markers, do: assert(File.read!(marker) == "preserve")
+    assert File.cwd!() == checkout
+    assert git!(ctx.context.root, ["status", "--porcelain"]) == ""
+    assert git!(ctx.request["checkout"], ["status", "--porcelain"]) == ""
+    assert String.trim(git!(ctx.request["checkout"], ["rev-parse", "HEAD"])) == ctx.request["head_sha"]
   end
 
   test "disabled setup opens no socket and denied workers cannot provision it", ctx do

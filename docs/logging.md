@@ -44,9 +44,10 @@ Der Filter ändert weder das primäre Logger-Level noch die Debugdiagnose im
 späteren Dateilog; Warnungen und Startfehler bleiben sichtbar.
 
 Nach bestätigtem Auto-Update unterdrückt Git seine Fortschritts-/Dateistatistik;
-Fehler und Builddiagnosen bleiben sichtbar. Die Terminalmaske überschreibt beim
-Refresh bestehende Zeilen und entfernt verkürzte Zeilenenden und überzählige
-Zeilen erst danach, statt vor jedem Bild den ganzen Bildschirm zu leeren.
+Fehler und Builddiagnosen bleiben sichtbar. Die Terminalmaske bereinigt beim
+Refresh jede Zeile unmittelbar vor deren Ausgabe, damit auch das letzte Zeichen
+voller Terminalzeilen erhalten bleibt. Überzählige Zeilen entfernt sie erst nach
+dem neuen Inhalt, statt vor jedem Bild den ganzen Bildschirm zu leeren.
 
 `sym-codex` gibt Laufzeitlogs seiner Mix-Helfer ab Stufe `info` auf stderr aus;
 Debugmeldungen bleiben ausgeblendet. stdout enthält ausschließlich den

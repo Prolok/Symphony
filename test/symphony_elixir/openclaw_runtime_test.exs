@@ -626,6 +626,118 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, %{"id" => "new", "state" => "accepted"}} = Journal.read("incoming")
   end
 
+  for shutdown <- [:coordinator, :supervisor] do
+    @tag shutdown: shutdown
+    test "#{shutdown} shutdown drains a tool beyond the journal timeout before stopping its worker", %{context: context, shutdown: shutdown} do
+      order = %{"id" => "draining", "group" => "incoming", "members" => [], "state" => "accepted", "writable" => true}
+      assert :ok = Journal.write(order)
+      parent = self()
+      sleeper = spawn(fn -> receive do: (:finish -> :ok) end)
+      ref = Process.monitor(sleeper)
+      on_exit(fn -> Process.exit(sleeper, :kill) end)
+
+      writer =
+        Task.async(fn ->
+          ProjectContext.with_context(context, fn ->
+            Journal.dispatch(order, fn _ -> {:ok, %{}} end, fn ->
+              send(parent, :writing)
+              receive do: (:finish_write -> :written)
+            end)
+          end)
+        end)
+
+      assert_receive :writing, 2000
+      runs = %{"incoming" => %{pid: sleeper}}
+
+      stop =
+        if shutdown == :coordinator do
+          fn -> ProjectContext.with_context(context, fn -> Coordinator.stop(runs) end) end
+        else
+          pid = start_supervised!({Orchestrator, name: nil, context: context, initial_poll?: false})
+          :sys.replace_state(pid, &%{&1 | yolo_runs: runs})
+          {:ok, supervisor} = ExUnit.fetch_test_supervisor()
+          fn -> Supervisor.terminate_child(supervisor, Orchestrator) end
+        end
+
+      stopper = Task.async(stop)
+
+      try do
+        refute_receive {:DOWN, ^ref, :process, ^sleeper, _}, 10_500
+        assert Task.yield(stopper, 0) == nil
+        assert Journal.writable?("incoming", order["id"])
+        send(writer.pid, :finish_write)
+        assert Task.await(writer) == :written
+        assert Task.await(stopper) == :ok
+        assert_receive {:DOWN, ^ref, :process, ^sleeper, :shutdown}
+        assert {:ok, %{"writable" => false, "cancel_requested" => true}} = Journal.read("incoming")
+      after
+        send(writer.pid, :finish_write)
+        Task.shutdown(writer)
+        Task.shutdown(stopper)
+      end
+    end
+  end
+
+  @tag shutdown: :journal_error
+  test "shutdown keeps the worker alive until an unreadable journal can be fenced", %{context: context} do
+    order = %{"id" => "unreadable", "group" => "incoming", "members" => [], "state" => "accepted", "writable" => true}
+    assert :ok = Journal.write(order)
+    path = Journal.path("incoming")
+    File.write!(path, "broken")
+    sleeper = spawn(fn -> receive do: (:finish -> :ok) end)
+    ref = Process.monitor(sleeper)
+    on_exit(fn -> Process.exit(sleeper, :kill) end)
+    stopper = Task.async(fn -> ProjectContext.with_context(context, fn -> Coordinator.stop(%{"incoming" => %{pid: sleeper}}) end) end)
+
+    try do
+      refute_receive {:DOWN, ^ref, :process, ^sleeper, _}, 100
+      assert Task.yield(stopper, 0) == nil
+      assert :ok = DurableState.write(path, order)
+      assert Task.await(stopper) == :ok
+      assert_receive {:DOWN, ^ref, :process, ^sleeper, :shutdown}
+      assert {:ok, %{"writable" => false, "cancel_requested" => true}} = Journal.read("incoming")
+    after
+      Task.shutdown(stopper)
+    end
+  end
+
+  @tag shutdown: :generation_changed
+  test "shutdown does not revoke a replacement generation while waiting for the journal", %{context: context} do
+    order = %{"id" => "old-shutdown", "group" => "incoming", "members" => [], "state" => "accepted", "writable" => true}
+    replacement = %{order | "id" => "replacement"}
+    assert :ok = Journal.write(order)
+    parent = self()
+    sleeper = spawn(fn -> receive do: (:finish -> :ok) end)
+    ref = Process.monitor(sleeper)
+    on_exit(fn -> Process.exit(sleeper, :kill) end)
+
+    writer =
+      Task.async(fn ->
+        ProjectContext.with_context(context, fn ->
+          Journal.dispatch(order, fn _ -> {:ok, %{}} end, fn ->
+            send(parent, :writing)
+            receive do: (:replace -> DurableState.write(Journal.path("incoming"), replacement))
+          end)
+        end)
+      end)
+
+    assert_receive :writing, 2000
+    stopper = Task.async(fn -> ProjectContext.with_context(context, fn -> Coordinator.stop(%{"incoming" => %{pid: sleeper}}) end) end)
+
+    try do
+      assert Task.yield(stopper, 100) == nil
+      send(writer.pid, :replace)
+      assert Task.await(writer) == :ok
+      assert Task.await(stopper) == :ok
+      assert_receive {:DOWN, ^ref, :process, ^sleeper, :shutdown}
+      assert {:ok, ^replacement} = Journal.read("incoming")
+    after
+      send(writer.pid, :replace)
+      Task.shutdown(writer)
+      Task.shutdown(stopper)
+    end
+  end
+
   test "missing ownership prevents submission and unreadable skill never supplies acceptance evidence", %{issues: issues, context: context, workspace: workspace} do
     ProjectContext.with_context(%{context | yolo_agent_id: nil}, fn ->
       Scope.with_scope("incoming", issues, "unverified", fn ->

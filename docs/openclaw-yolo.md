@@ -184,6 +184,10 @@ Abbruch-/Inaktivitätsprüfung technisch abgewickelt, damit unerledigte Zustellu
 wieder planbar werden. Autorisierung und gesamte
 Werkzeugausführung verwenden dieselbe Journalsperre wie der Rechteentzug: Ein bereits
 autorisierter Aufruf muss enden, bevor Symphony die Generation freigeben kann.
+Auch beim regulären Dienststopp wartet der Orchestrator auf diesen Drain und den
+gespeicherten Schreibentzug, bevor er Worker und Bridge beendet. Locktimeouts oder
+Journalfehler erlauben kein vorzeitiges Beenden; der Shutdown wartet mit Diagnose
+bis zur erfolgreichen Sperrung. Ein erzwungener Prozessabbruch ist kein Drainbeleg.
 Laufende oder spätere Host-Fortsetzungen erhalten keine neue Symphony-Schreibbindung.
 Die bestehenden Grenzen für unveränderten Prüfcheckout, keine Unteragenten und
 keine direkten Ersatz-Schreibwege bleiben Teil des Agentenvertrags.

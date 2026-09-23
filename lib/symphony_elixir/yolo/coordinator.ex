@@ -320,14 +320,37 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   @spec stop(map()) :: :ok
   def stop(runs) do
     Enum.each(runs, fn {group, run} ->
-      case Journal.read(group) do
-        {:ok, order} when is_map(order) -> Journal.update(order, %{"writable" => false, "cancel_requested" => true})
-        _ -> :ok
-      end
-
+      revoke_before_stop(group, run)
       Process.exit(run.pid, :shutdown)
     end)
 
     :ok
+  end
+
+  defp revoke_before_stop(group, run) do
+    case Journal.read(group) do
+      {:ok, nil} -> :ok
+      {:ok, order} -> await_revocation(order, run)
+      {:error, reason} -> retry_stop(group, run, reason, fn -> revoke_before_stop(group, run) end)
+    end
+  end
+
+  defp await_revocation(order, run) do
+    # Keep the original generation through retries. Acquiring its journal lock
+    # drains authorized calls; a timeout or failed write never permits a kill.
+    case Journal.update(order, %{"writable" => false, "cancel_requested" => true}) do
+      {:ok, _} -> :ok
+      {:error, :openclaw_generation_changed} -> :ok
+      {:error, reason} -> retry_stop(order["group"], run, reason, fn -> await_revocation(order, run) end)
+    end
+  end
+
+  defp retry_stop(group, run, reason, retry) do
+    Enum.each(Map.get(run, :issues, [%{id: nil, identifier: nil}]), fn issue ->
+      Logger.warning("OpenClaw shutdown waiting group=#{group} issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{get_in(run, [:event, :session_id])} reason=#{inspect(reason)}")
+    end)
+
+    Process.sleep(1000)
+    retry.()
   end
 end

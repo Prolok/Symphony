@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.OpenClawLinearBridgeTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.{Config, EnvFile, ProjectContext}
-  alias SymphonyElixir.Linear.DurableState
+  alias SymphonyElixir.Linear.{DurableState, IssueLease}
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.{Journal, LinearBridge}
   alias SymphonyElixir.Yolo.OpenClaw.LinearBridge.{Delivery, Projection}
@@ -64,6 +64,93 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     fn ["gateway", "call", "linearbridge.symphony.lifecycle.v1", "--params", raw, "--json", "--timeout", "10000", "--port", "18789"] ->
       wire = Jason.decode!(raw)
       callback.(wire)
+    end
+  end
+
+  defp await_deliveries do
+    for pid <- Task.Supervisor.children(SymphonyElixir.TaskSupervisor) do
+      ref = Process.monitor(pid)
+      assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 2_000
+      assert reason in [:normal, :noproc]
+    end
+
+    :ok
+  end
+
+  test "default coordinator ticks handle empty and corrupt outboxes without dispatch", %{context: context} do
+    assert :ok = Delivery.flush()
+    assert :ok = Delivery.tick()
+    await_deliveries()
+    assert {:ok, []} = Journal.bridge_orders()
+    path = Journal.path("incoming")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "not-json")
+    assert {:error, :runtime_state_corrupt} = Journal.bridge_orders()
+    assert {:error, :runtime_state_corrupt} = Delivery.flush()
+
+    logs =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok = Delivery.tick()
+        await_deliveries()
+      end)
+
+    assert logs =~ "project_root=#{context.id} reason=outbox_unavailable"
+    assert File.read!(path) == "not-json"
+  end
+
+  test "coordinator tasks preserve context and skip a busy lease before a later delivery", %{context: context} do
+    assert :ok = Journal.write(order("review"))
+    assert {:ok, current} = Journal.read("review")
+    deny = fn _ -> flunk("busy delivery lease must prevent I/O") end
+
+    logs =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok =
+                 IssueLease.with_lock("symphony-linear-bridge", context.id, fn ->
+                   assert :ok = Delivery.tick(transport: deny, bridge_key: deny)
+                   await_deliveries()
+                 end)
+      end)
+
+    refute logs =~ "delivery=pending"
+    refute File.exists?(Delivery.receipt_path(current))
+    parent = self()
+
+    consumer =
+      transport(fn wire ->
+        send(parent, {:coordinator_payload, Jason.decode!(Base.decode64!(wire["payload_b64"]))})
+        {:ok, Jason.encode!(ack(wire))}
+      end)
+
+    assert :ok = Delivery.tick(options(consumer))
+    await_deliveries()
+    assert_received {:coordinator_payload, payload}
+    assert payload["binding"]["issue_ids"] == fixture("review")["binding"]["issue_ids"]
+    assert {:ok, %{"ack_sequence" => 1}} = DurableState.read(Delivery.receipt_path(current))
+    assert {:ok, ^current} = Journal.read("review")
+  end
+
+  test "unexpected key failures and transport exceptions remain pending without exposing details" do
+    assert :ok = Journal.write(order("review"))
+    assert {:ok, current} = Journal.read("review")
+    deny = fn _ -> flunk("key failure must prevent transport") end
+
+    failures = [
+      Keyword.put(options(deny), :bridge_key, fn _ -> {:error, {:unavailable, "synthetic-private-detail"}} end),
+      options(fn _ -> raise "synthetic-private-detail" end, 30_000)
+    ]
+
+    for opts <- failures do
+      logs = ExUnit.CaptureLog.capture_log(fn -> assert :ok = Delivery.flush(opts) end)
+      assert logs =~ "reason=openclaw_bridge_delivery_unconfirmed"
+      refute logs =~ "synthetic-private-detail"
+
+      for member <- current["members"] do
+        assert logs =~ "issue_id=#{member["id"]} issue_identifier=#{member["identifier"]} run_id=#{current["id"]} session_id=#{current["session_id"]}"
+      end
+
+      assert {:ok, %{"ack_sequence" => 0}} = DurableState.read(Delivery.receipt_path(current))
+      assert {:ok, ^current} = Journal.read("review")
     end
   end
 
@@ -179,6 +266,7 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     end
 
     assert {:error, :openclaw_bridge_ack_mismatch} = LinearBridge.acknowledge(Map.put(reply, "extra", true), current, snapshot)
+    for invalid <- [nil, [], "unconfirmed"], do: assert({:error, :openclaw_bridge_ack_mismatch} == LinearBridge.acknowledge(invalid, current, snapshot))
     for disposition <- ~w(stored duplicate stale), do: assert(:ok == LinearBridge.acknowledge(Map.put(reply, "disposition", disposition), current, snapshot))
     bad = transport(fn wire -> {:ok, Jason.encode!(Map.put(ack(wire), "payload_sha256", String.duplicate("0", 64)))} end)
     assert :ok = Delivery.flush(options(bad))
@@ -206,6 +294,11 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     assert {:ok, payload} = Projection.payload(rejected, config(), 2)
     assert payload["observation"]["rejection"] == Map.put(proof, "kind", "gateway")
     recovery = Map.new(~w(source_sha256 execution_source_sha256 evidence_sha256), &{&1, String.duplicate("1", 64)})
+    rejection_recovery = Map.merge(recovery, %{"code" => "INVALID_REQUEST", "reason" => "cwd_reserved", "request_id" => uncertain["id"], "private_detail" => "excluded"})
+    assert {:ok, payload} = Projection.payload(Map.put(rejected, "recovery", rejection_recovery), config(), 3)
+    assert payload["observation"]["rejection"] == rejection_recovery |> Map.delete("private_detail") |> Map.put("kind", "operator_pre_acceptance")
+    assert payload["observation"]["terminal"] == nil
+    refute payload["observation"]["acceptance_observed"]
     recovery = Map.put(recovery, "kind", "terminal_original")
     terminal = %{"runId" => uncertain["id"], "status" => "killed", "state" => "cancelled", "startedAt" => 1, "endedAt" => 2, "messageId" => "private-extra"}
     assert {:ok, payload} = Projection.payload(Map.merge(uncertain, %{"terminal" => terminal, "recovery" => recovery}), config(), 3)
@@ -341,6 +434,8 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     on_exit(fn -> if previous, do: System.put_env(name, previous), else: System.delete_env(name) end)
     assert {^name, nil} = List.keyfind(Config.without_linear_secret([]), name, 0)
     assert LinearBridge.valid_config?(config())
+    assert LinearBridge.valid_config?(nil)
+    refute LinearBridge.valid_config?([])
     refute LinearBridge.valid_config?(Map.put(config(), "secret_env", "LINEAR_APP_SECRET"))
     refute LinearBridge.valid_config?(Map.put(config(), "secret_env", 12))
     refute LinearBridge.valid_config?(Map.put(config(), "key_id", "line\nbreak"))
@@ -355,5 +450,8 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     assert wire["version"] == 1
     assert Base.decode64!(wire["payload_b64"]) == raw
     assert wire["mac"] == Base.encode16(:crypto.mac(:hmac, :sha256, key, "linearbridge.symphony.lifecycle.v1\nproducer-key-example\n" <> wire["payload_b64"]), case: :lower)
+    assert {:error, :openclaw_bridge_signing_invalid} = LinearBridge.sign(raw, "producer-key-example", "short")
+    assert {:error, :openclaw_bridge_signing_invalid} = LinearBridge.sign(raw, "invalid\nkey", key)
+    assert {:error, :openclaw_bridge_signing_invalid} = LinearBridge.sign(:binary.copy(<<0>>, 262_145), "producer-key-example", key)
   end
 end

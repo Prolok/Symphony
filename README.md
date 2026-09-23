@@ -98,6 +98,10 @@ Tests (`SYMPHONY_RUN_LIVE_E2E=1`) und tokenfreie Codex-Starttests
 (`SYMPHONY_TEST_REAL_CODEX=1`) sind separate Opt-ins und gehören nicht zur
 Dependabot-CI; der verpflichtende Produkt-Smoke erfolgt im Symphony-Ablauf.
 
+TestSupport legt Workflow-Fixtures mit `mktemp -d` exklusiv an. Dadurch teilen
+auch unabhängige BEAM-Testläufe keine Fixture-Verzeichnisse; ihr Cleanup bleibt
+auf das jeweils eigene Verzeichnis begrenzt.
+
 ### Einrichtung
 
 1. Im Symphony-Checkout die konfigurierte Laufzeit und Abhängigkeiten installieren:

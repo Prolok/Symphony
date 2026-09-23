@@ -44,4 +44,67 @@ defmodule SymphonyElixir.TestSupportTest do
       assert System.get_env("LINEAR_YOLO_AGENT") == inherited_agent
     end
   end
+
+  @tag tmp_dir: true
+  test "independent BEAM fixtures cannot adopt or clean each other's workflow roots", %{tmp_dir: tmp_dir} do
+    first = start_fixture(tmp_dir)
+
+    try do
+      first_root = fixture_root(first)
+      marker = Path.join(first_root, "owner")
+      owner = File.read!(marker)
+      second = start_fixture(tmp_dir)
+
+      try do
+        second_root = fixture_root(second)
+        refute first_root == second_root
+        assert File.read!(marker) == owner
+        stop_fixture(second)
+        refute File.exists?(second_root)
+        assert File.read!(marker) == owner
+        stop_fixture(first)
+        refute File.exists?(first_root)
+      after
+        close_fixture(second)
+      end
+    after
+      close_fixture(first)
+    end
+  end
+
+  defp start_fixture(tmp_dir) do
+    support = Path.expand("../support/test_support.exs", __DIR__)
+    paths = Enum.flat_map(:code.get_path(), &["-pa", List.to_string(&1)])
+
+    script = """
+    root = SymphonyElixir.TestSupport.workflow_root!()
+    File.write!(Path.join(root, "owner"), System.pid())
+    IO.puts(root)
+    IO.read(:line)
+    File.rm_rf!(root)
+    """
+
+    Port.open({:spawn_executable, System.find_executable("elixir")}, [
+      :binary,
+      :exit_status,
+      {:line, 4_096},
+      {:env, [{~c"TMPDIR", String.to_charlist(Path.expand(tmp_dir))}, {~c"ERL_FLAGS", ~c"+S 1:1"}]},
+      {:args, paths ++ ["-r", support, "-e", script]}
+    ])
+  end
+
+  defp fixture_root(port) do
+    assert_receive {^port, {:data, {:eol, root}}}, 5_000
+    assert File.dir?(root)
+    root
+  end
+
+  defp stop_fixture(port) do
+    assert Port.command(port, "cleanup\n")
+    assert_receive {^port, {:exit_status, 0}}, 5_000
+  end
+
+  defp close_fixture(port) do
+    if Port.info(port), do: Port.close(port)
+  end
 end

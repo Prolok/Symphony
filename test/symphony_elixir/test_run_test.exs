@@ -1239,15 +1239,27 @@ defmodule SymphonyElixir.TestRunTest do
     socket = context.settings.worker.test_executor_socket
     assert {:ok, _} = TestTool.request(socket, request)
     assert_receive {:retried_result, result}, 12_000
-    assert result["status"] == "failed"
-    assert result["error"] == "linear_temporarily_unavailable"
+    assert result["status"] == "failed", inspect(result)
+    assert result["error"] == "linear_temporarily_unavailable", inspect(result)
     assert result["cleanup"]
+    assert result["cleanup_error"] == nil
+    assert result["originals_preserved"]
+    assert result["run_id"] == request["run_id"]
+    assert result["source"] == %{"checkout" => request["checkout"], "sha" => request["head_sha"], "source_sha256" => request["source_sha256"]}
+    assert [%{"deleted" => true}] = result["fixtures"]
     assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 3
+    assert_receive {:probe_attempt, 1, probe}
+    assert_receive {:probe_attempt, 2, ^probe}
+    assert_receive {:probe_attempt, 3, ^probe}
+    refute Process.alive?(probe)
     assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
     assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
     await_routine_result(socket, request)
     assert {:ok, %{"status" => "failed", "cleanup" => true, "failure" => "linear_temporarily_unavailable"}} = TestTool.request(socket, %{request | "operation" => "cleanup"})
     assert Agent.get(ctx.source_agent, & &1.probe_attempts) == 3
+    assert count_calls(ctx.source_agent, "CreateTestFixture") == 1
+    assert count_calls(ctx.source_agent, "DeleteTestFixture") == 1
+    refute_receive {:probe_attempt, _, _}
   end
 
   for {status, expected} <- [{401, "linear_access_denied"}, {403, "linear_access_denied"}, {429, "linear_rate_limited"}, {400, "preflight_or_runtime_failed"}] do

@@ -61,6 +61,14 @@ defmodule SymphonyElixir.TestSupport do
 
   defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
 
+  def workflow_root! do
+    # unique_integer is only unique within one BEAM. Another test VM must not
+    # adopt this root or remove its journals while a probe is retrying.
+    template = Path.join(System.tmp_dir!(), "symphony-elixir-workflow-XXXXXXXX")
+    {root, 0} = System.cmd("mktemp", ["-d", template])
+    String.trim(root)
+  end
+
   def install_runtime_fixture!(repo_dir, bin_dir) do
     runtime_dir = Path.join(bin_dir, "runtime")
     File.mkdir_p!(runtime_dir)
@@ -133,13 +141,7 @@ defmodule SymphonyElixir.TestSupport do
         # identity. Restart the store at the fixture boundary instead.
         Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
 
-        workflow_root =
-          Path.join(
-            System.tmp_dir!(),
-            "symphony-elixir-workflow-#{System.unique_integer([:positive])}"
-          )
-
-        File.mkdir_p!(workflow_root)
+        workflow_root = SymphonyElixir.TestSupport.workflow_root!()
         previous_rate_limit_root = Application.fetch_env!(:symphony_elixir, :linear_rate_limit_root)
         Application.put_env(:symphony_elixir, :linear_rate_limit_root, Path.join(workflow_root, "rate-limits"))
         # Runtime-owned comment state must never be read from the developer's

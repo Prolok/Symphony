@@ -745,6 +745,27 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, %{"id" => "new-generation", "state" => "accepted"}} = Journal.read("incoming")
   end
 
+  test "a terminal reply for the old generation cannot complete or release its replacement", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", %{"runId" => id} ->
+        {:ok, current} = Journal.read("incoming")
+        replacement = Map.put(current, "id", "new-generation")
+        :ok = DurableState.write(Journal.path("incoming"), replacement)
+        send(self(), {:replacement, replacement})
+        %{"runId" => id, "status" => "ok", "endedAt" => 3000}
+    end
+
+    assert {:error, :openclaw_generation_changed} = run_group("incoming", issues, issues, Keyword.put(opts, :transport, transport(handler)))
+    assert_receive {:replacement, replacement}
+    assert {:ok, ^replacement} = Journal.read("incoming")
+    refute replacement["terminal"]
+    assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    refute Completion.ready?("incoming", issues)
+  end
+
   test "tool bridge keeps idle bindings and supports the MCP handshake", %{root: root, workspace: workspace, context: context} do
     order = %{
       "id" => "handshake",
@@ -1143,6 +1164,8 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
             Map.put(input, "runId", "foreign-run"),
             put_in(input, ["message", "content"], "Still-open additional task"),
             put_in(input, ["message", "content"], String.slice(payload, 0, 100)),
+            put_in(input, ["message", "content"], nil),
+            put_in(input, ["message", "content"], [%{"type" => "text", "text" => payload}, %{"type" => "image", "source" => "fixture"}]),
             put_in(input, ["message", "role"], "assistant")
           ],
           &Map.put(history, "pendingInputs", %{"total" => 1, "items" => [&1]})

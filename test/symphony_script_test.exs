@@ -1,8 +1,58 @@
+Code.require_file("support/launcher_fixture.ex", __DIR__)
+
 defmodule SymphonyScriptTest do
   use ExUnit.Case, async: true
 
-  @script_source Path.expand("../symphony", __DIR__)
-  @mix_runtime_source Path.expand("../scripts/mix-runtime", __DIR__)
+  import SymphonyElixir.LauncherFixture
+
+  @tag timeout: 120_000
+  test "independent ExUnit VMs isolate launcher calls and only clean their own fixtures" do
+    %{root_dir: root_dir} = build_script_fixture!()
+    base_dir = Path.join(root_dir, "shared")
+    foreign = Path.join(base_dir, "symphony-script-foreign")
+    File.mkdir_p!(foreign)
+    File.write!(Path.join(foreign, "owner"), "foreign")
+    File.write!(Path.join(foreign, ".mix-calls"), "foreign calls\n")
+
+    a = start_fixture_probe(base_dir, "A")
+    b = start_fixture_probe(base_dir, "B")
+    {pid_a, fixture_a} = a |> await_probe("ready ") |> Base.decode64!() |> :erlang.binary_to_term([:safe])
+    {pid_b, fixture_b} = b |> await_probe("ready ") |> Base.decode64!() |> :erlang.binary_to_term([:safe])
+    refute pid_a == pid_b
+
+    for key <- [:root_dir, :repo_dir, :home_dir, :bin_dir] do
+      refute fixture_a[key] == fixture_b[key]
+      assert String.starts_with?(fixture_a[key], base_dir <> "/")
+      assert String.starts_with?(fixture_b[key], base_dir <> "/")
+    end
+
+    assert File.read!(Path.join(fixture_a.repo_dir, ".mix-calls")) == "deps.loadpaths\ncompile\nescript.build\n"
+    assert File.read!(Path.join(fixture_b.repo_dir, ".mix-calls")) == "deps.loadpaths\ncompile\nescript.build\n"
+    snapshot_b = fixture_snapshot(fixture_b.root_dir)
+    snapshot_foreign = fixture_snapshot(foreign)
+    assert snapshot_foreign == [{".mix-calls", "foreign calls\n"}, {"owner", "foreign"}]
+
+    Port.command(a, "finish\n")
+    assert await_probe(a, :exit) == 0
+    refute File.exists?(fixture_a.root_dir)
+    assert fixture_snapshot(fixture_b.root_dir) == snapshot_b
+    assert fixture_snapshot(foreign) == snapshot_foreign
+
+    Port.command(b, "rerun\n")
+    assert await_probe(b, "reran") == ""
+    Port.command(b, "finish\n")
+    assert await_probe(b, :exit) == 0
+    refute File.exists?(fixture_b.root_dir)
+    assert File.ls!(base_dir) == ["symphony-script-foreign"]
+    assert fixture_snapshot(foreign) == snapshot_foreign
+  end
+
+  test "fixture allocation reports errors other than an occupied candidate" do
+    %{root_dir: root_dir} = build_script_fixture!()
+    missing = Path.join(root_dir, "missing/parent")
+    assert_raise File.Error, ~r/create fixture directory/, fn -> build_script_fixture!(base_dir: missing) end
+    refute File.exists?(missing)
+  end
 
   test "the launcher requires Python 3.11 before update or build" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
@@ -196,14 +246,7 @@ defmodule SymphonyScriptTest do
 
   test "an isolated release binds helpers without creating global symlinks" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
-    project_dir = Path.join(System.tmp_dir!(), "symphony-script-project-#{System.unique_integer([:positive])}")
-
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-      File.rm_rf(project_dir)
-    end)
+    project_dir = Path.join(bin_dir, "project")
 
     File.mkdir_p!(project_dir)
     File.write!(Path.join(project_dir, "WORKFLOW.md"), "---\n---\n")
@@ -225,7 +268,6 @@ defmodule SymphonyScriptTest do
 
   test "a regular release preserves the explicit local Codex override" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
-    on_exit(fn -> Enum.each([home_dir, repo_dir, bin_dir], &File.rm_rf/1) end)
     command = "custom-codex --profile local app-server"
     assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_CODEX_COMMAND", command}])
     assert output =~ "symphony-stub codex_command=#{command}\n"
@@ -241,12 +283,6 @@ defmodule SymphonyScriptTest do
 
     File.chmod!(Path.join(repo_dir, "autoupdate"), 0o755)
 
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
-
     assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, ["--port", "4001"])
 
     assert String.starts_with?(output, "autoupdate project=#{repo_dir}\n")
@@ -255,12 +291,6 @@ defmodule SymphonyScriptTest do
 
   test "symphony repairs dependencies and builds the binary before launching" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
-
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
 
     assert {output, 0} =
              run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_TEST_DEPS_LOADPATHS_STATUS", "1"}])
@@ -273,12 +303,6 @@ defmodule SymphonyScriptTest do
 
   test "symphony clears inherited Mix artifact paths before preflight and launch" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
-
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
 
     assert {output, 0} =
              run_script(repo_dir, home_dir, bin_dir, [],
@@ -295,12 +319,6 @@ defmodule SymphonyScriptTest do
   test "symphony fails before polling when the local build cannot be repaired" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
 
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
-
     assert {output, 9} =
              run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_TEST_COMPILE_STATUS", "9"}])
 
@@ -310,12 +328,6 @@ defmodule SymphonyScriptTest do
 
   test "symphony fails before polling when dependency repair fails" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
-
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
 
     assert {output, 7} =
              run_script(repo_dir, home_dir, bin_dir, [],
@@ -331,12 +343,6 @@ defmodule SymphonyScriptTest do
 
   test "symphony fails before polling when the escript build fails" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
-
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
 
     assert {output, 6} =
              run_script(repo_dir, home_dir, bin_dir, [], env: [{"SYMPHONY_TEST_ESCRIPT_STATUS", "6"}])
@@ -364,12 +370,6 @@ defmodule SymphonyScriptTest do
 
     File.chmod!(autoupdate_path, 0o755)
 
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
-
     tasks =
       for _ <- 1..2 do
         Task.async(fn -> run_script(repo_dir, home_dir, bin_dir, []) end)
@@ -384,15 +384,8 @@ defmodule SymphonyScriptTest do
 
   test "symphony issue symlink keeps release configuration without registering a new global command" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
-    project_dir = Path.join(System.tmp_dir!(), "symphony-script-issue-project-#{System.unique_integer([:positive])}")
+    project_dir = Path.join(bin_dir, "issue-project")
     issue_link = Path.join(bin_dir, "symphony-PRO-351")
-
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-      File.rm_rf(project_dir)
-    end)
 
     File.mkdir_p!(project_dir)
     File.write!(Path.join(project_dir, "WORKFLOW.md"), "---\n---\n")
@@ -412,15 +405,8 @@ defmodule SymphonyScriptTest do
 
   test "symphony issue symlink binds workflow files to its own checkout from another Symphony cwd" do
     %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir} = build_script_fixture!()
-    other_repo_dir = Path.join(System.tmp_dir!(), "symphony-script-other-#{System.unique_integer([:positive])}")
+    other_repo_dir = Path.join(bin_dir, "other-project")
     issue_link = Path.join(bin_dir, "symphony-PRO-456")
-
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-      File.rm_rf(other_repo_dir)
-    end)
 
     File.mkdir_p!(other_repo_dir)
     File.write!(Path.join(other_repo_dir, "WORKFLOW.md"), "---\n---\n")
@@ -446,12 +432,6 @@ defmodule SymphonyScriptTest do
 
     File.chmod!(Path.join(repo_dir, "autoupdate"), 0o755)
 
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
-
     assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, ["--port", "4001"])
 
     assert String.starts_with?(output, "autoupdate project=#{repo_dir}\n")
@@ -466,12 +446,6 @@ defmodule SymphonyScriptTest do
 
     File.mkdir_p!(user_bin_dir)
     File.write!(Path.join(user_bin_dir, "sym-watch"), "not managed by symphony\n")
-
-    on_exit(fn ->
-      File.rm_rf(home_dir)
-      File.rm_rf(repo_dir)
-      File.rm_rf(bin_dir)
-    end)
 
     assert {output, 0} = run_script(repo_dir, home_dir, bin_dir, [])
     assert File.read!(Path.join(user_bin_dir, "sym-watch")) == "not managed by symphony\n"
@@ -650,122 +624,53 @@ defmodule SymphonyScriptTest do
     )
   end
 
-  defp build_script_fixture! do
-    repo_dir = Path.join(System.tmp_dir!(), "symphony script-#{System.unique_integer([:positive])}")
-    home_dir = Path.join(System.tmp_dir!(), "symphony-home-#{System.unique_integer([:positive])}")
-    bin_dir = Path.join(System.tmp_dir!(), "symphony-bin-#{System.unique_integer([:positive])}")
+  defp start_fixture_probe(base_dir, owner) do
+    paths = Enum.flat_map(:code.get_path(), fn path -> ["-pa", to_string(path)] end)
 
-    File.mkdir_p!(repo_dir)
-    File.mkdir_p!(Path.join(repo_dir, "bin"))
-    File.mkdir_p!(Path.join(repo_dir, "scripts"))
-    File.mkdir_p!(Path.join(repo_dir, ".codex/skills/symphony-test"))
-    File.mkdir_p!(bin_dir)
+    port =
+      Port.open({:spawn_executable, System.find_executable("elixir")}, [
+        :binary,
+        :exit_status,
+        :stderr_to_stdout,
+        {:line, 16_384},
+        {:args, paths ++ ["--erl", "+S 2:2", Path.expand("support/launcher_fixture_probe.ex", __DIR__), base_dir, owner]},
+        {:env, [{~c"TMPDIR", String.to_charlist(base_dir)}, {~c"GIT_CEILING_DIRECTORIES", String.to_charlist(base_dir)}]}
+      ])
 
-    File.cp!(@script_source, Path.join(repo_dir, "symphony"))
-    File.cp!(@mix_runtime_source, Path.join(repo_dir, "scripts/mix-runtime"))
-    File.cp!(Path.expand("../scripts/service-lock.py", __DIR__), Path.join(repo_dir, "scripts/service-lock.py"))
-    File.write!(Path.join(repo_dir, "sym-codex"), "#!/usr/bin/env bash\n")
-    File.write!(Path.join(repo_dir, "sym-watch"), "#!/usr/bin/env bash\n")
-
-    File.write!(Path.join(repo_dir, "bin/symphony"), """
-    #!/usr/bin/env bash
-    printf 'symphony-stub cwd=%s\\n' "$(pwd -P)"
-    printf 'symphony-stub codex_command=%s\\n' "${SYMPHONY_CODEX_COMMAND:-}"
-    printf 'symphony-stub project_root=%s\\n' "${SYMPHONY_PROJECT_ROOT:-}"
-    printf 'symphony-stub source_repo=%s\\n' "${SYMPHONY_SOURCE_REPO:-}"
-    printf 'symphony-stub workflow_file=%s\\n' "${SYMPHONY_WORKFLOW_FILE:-}"
-    printf 'symphony-stub workflow_interactive_file=%s\\n' "${SYMPHONY_WORKFLOW_INTERACTIVE_FILE:-}"
-    printf 'symphony-stub workflow_dialog_file=%s\\n' "${SYMPHONY_WORKFLOW_DIALOG_FILE:-}"
-    printf 'symphony-stub workflow_dir=%s\\n' "${SYMPHONY_WORKFLOW_DIR:-}"
-    printf 'symphony-stub worktrees_root=%s\\n' "${SYMPHONY_PROJECT_WORKTREES_ROOT:-}"
-    printf 'symphony-stub mix_deps=%s mix_build_root=%s mix_build_path=%s\\n' \
-      "${MIX_DEPS_PATH-unset}" \
-      "${MIX_BUILD_ROOT-unset}" \
-      "${MIX_BUILD_PATH-unset}"
-    printf 'symphony-stub args=%s\\n' "$*"
-    """)
-
-    SymphonyElixir.TestSupport.install_runtime_fixture!(repo_dir, bin_dir)
-    File.write!(Path.join(bin_dir, "codex"), "#!/bin/bash\nexit 0\n")
-    File.chmod!(Path.join(bin_dir, "codex"), 0o755)
-
-    File.write!(Path.join(bin_dir, "mix"), """
-    #!/usr/bin/env bash
-    printf '%s\\n' "$1" >> "$PWD/.mix-calls"
-
-    case "$1" in
-      deps.loadpaths)
-        exit "${SYMPHONY_TEST_DEPS_LOADPATHS_STATUS:-0}"
-        ;;
-      deps.get)
-        exit "${SYMPHONY_TEST_DEPS_GET_STATUS:-0}"
-        ;;
-      compile)
-        exit "${SYMPHONY_TEST_COMPILE_STATUS:-0}"
-        ;;
-      escript.build)
-        exit "${SYMPHONY_TEST_ESCRIPT_STATUS:-0}"
-        ;;
-      run)
-        exit 0
-        ;;
-    esac
-
-    exit 1
-    """)
-
-    File.chmod!(Path.join(repo_dir, "symphony"), 0o755)
-    File.chmod!(Path.join(repo_dir, "sym-codex"), 0o755)
-    File.chmod!(Path.join(repo_dir, "sym-watch"), 0o755)
-    File.chmod!(Path.join(repo_dir, "bin/symphony"), 0o755)
-    File.chmod!(Path.join(repo_dir, "scripts/mix-runtime"), 0o755)
-    File.chmod!(Path.join(bin_dir, "mise"), 0o755)
-    File.chmod!(Path.join(bin_dir, "mix"), 0o755)
-
-    on_exit(fn ->
-      Enum.each([home_dir, repo_dir, bin_dir], &File.rm_rf/1)
-    end)
-
-    %{home_dir: home_dir, repo_dir: repo_dir, bin_dir: bin_dir}
+    on_exit(fn -> if Port.info(port), do: Port.close(port) end)
+    port
   end
 
-  defp run_script(repo_dir, home_dir, bin_dir, args, opts \\ []) do
-    run_script_path(Path.join(repo_dir, "symphony"), home_dir, bin_dir, args, opts)
+  defp await_probe(port, expected) do
+    receive_probe(port, expected, System.monotonic_time(:millisecond) + 30_000, "")
   end
 
-  defp run_script_path(script_path, home_dir, bin_dir, args, opts) do
-    cmd_opts =
-      [
-        env:
-          [
-            {"HOME", home_dir},
-            {"BASH_ENV", nil},
-            {"ENV", nil},
-            {"PATH", SymphonyElixir.TestSupport.script_path(bin_dir)}
-          ] ++ Keyword.get(opts, :env, []),
-        stderr_to_stdout: true
-      ]
-      |> maybe_put_cd(Keyword.get(opts, :cd))
+  defp receive_probe(port, expected, deadline, output) do
+    receive do
+      {^port, {:data, {_, line}}} ->
+        if is_binary(expected) and String.starts_with?(line, "PROBE " <> expected) do
+          String.replace_prefix(line, "PROBE " <> expected, "")
+        else
+          receive_probe(port, expected, deadline, output <> line <> "\n")
+        end
 
-    System.cmd("/bin/bash", [script_path | args], cmd_opts)
+      {^port, {:exit_status, status}} ->
+        assert expected == :exit, "probe exited with #{status} while awaiting #{inspect(expected)}:\n#{output}"
+        assert status == 0, output
+        status
+    after
+      max(0, deadline - System.monotonic_time(:millisecond)) ->
+        flunk("probe timeout awaiting #{inspect(expected)}:\n#{output}")
+    end
   end
 
-  defp maybe_put_cd(opts, nil), do: opts
-  defp maybe_put_cd(opts, cd), do: Keyword.put(opts, :cd, cd)
-
-  defp await_service_unlock(home_dir) do
-    # The detached guardian observes owner exit asynchronously. Sequential
-    # preflight cases must await its kernel-lock release before reusing HOME.
-    script = """
-    import fcntl, pathlib, signal, sys
-    path = pathlib.Path(sys.argv[1]) / ".cache/symphony/service.lock"
-    if path.exists():
-        signal.alarm(5)
-        with path.open() as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-    """
-
-    assert {_, 0} = System.cmd(System.find_executable("python3"), ["-c", script, home_dir], stderr_to_stdout: true)
+  defp fixture_snapshot(root_dir) do
+    root_dir
+    |> Path.join("**/*")
+    |> Path.wildcard(match_dot: true)
+    |> Enum.filter(&File.regular?/1)
+    |> Enum.map(&{Path.relative_to(&1, root_dir), File.read!(&1)})
+    |> Enum.sort()
   end
 
   defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"

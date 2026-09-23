@@ -262,13 +262,18 @@ Verknüpfung müssen vor einer Erfolgsmeldung bestätigt sein.
 
 Symphony speichert die Zustellung pro Mitglied und fachlicher Phase dauerhaft
 vor dem Modellaufruf. Unveränderte Tickets, Status-Rundläufe, Gruppenwechsel,
-eigene Workpad-Ausgaben und Neustarts erzeugen keine erneuten Aufträge. Neue
+eigene Workpad-Ausgaben und Neustarts allein erzeugen keine erneuten Aufträge. Neue
 Inhalte, externe Kommentare oder wirksame Kettenänderungen erlauben neue Arbeit.
 Zustellung ist kein Abschlussbeleg; offene Entscheidungen bleiben sichtbar.
 Offene journalisierte Anlagen setzt Symphony unter den bestehenden Leases ohne
 erneute Modellzustellung fort; ausdrücklich eskalierte Operationen bleiben offen.
 Unklare OpenClaw-Annahme bleibt reserviert, ein belegter Nichtstart darf denselben
-technischen Retrypfad nutzen. Keine Ersatzanlage oder eigene Neuzustellung.
+technischen Retrypfad nutzen. Neue unterbrochene OpenClaw-Aufträge darf Symphony
+nach wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung technisch
+aufgeben und nur unerledigte Arbeit aus frischen Ticketdaten neu planen;
+bestätigte Entscheidungen und neuere Zustellungen bleiben erhalten. Voraussetzungen:
+[kontrollierte Aufgabe](docs/openclaw-yolo.md#kontrollierte-aufgabe-unterbrochener-aufträge).
+Keine Ersatzanlage oder eigene Neuzustellung durch den Agenten.
 
 Für echte externe Hindernisse `kind=escalate` (in `Yolo Review`) bzw. die bestehende
 BLOCKER-Übergabe mit `escalation: {cause, attempts, proposal, decision}` verwenden.

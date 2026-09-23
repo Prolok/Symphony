@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
   alias SymphonyElixir.Relay.Store, as: Digest
   @groups ~w(incoming planning in_progress blocker review)
   @terminal ~w(completed failed cancelled rejected retired)
-  @mutable ~w(state writable error cancel_requested abort_acknowledged terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery resumed retirement)
+  @mutable ~w(state writable error cancel_requested abort_acknowledged abort_error terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery resumed retirement)
 
   @spec path(String.t()) :: Path.t()
   def path(group) do
@@ -129,6 +129,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
 
   defp change(current, changes) do
     updated = Map.merge(current, changes)
+    updated = if get_in(current, ["abort_error", "retryable"]) == false, do: Map.put(updated, "abort_error", current["abort_error"]), else: updated
     updated = if current["interruption_contract"] == 1 and current["writable"] == false, do: Map.put(updated, "writable", false), else: updated
 
     updated =

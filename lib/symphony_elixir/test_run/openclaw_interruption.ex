@@ -6,7 +6,7 @@ defmodule SymphonyElixir.TestRun.OpenClawInterruption do
   alias SymphonyElixir.Yolo.{OpenClaw, Store}
   alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal}
 
-  @fields ~w(id group project_id agent session_id payload_sha256 workspace sha members state writable interruption_contract acceptance_observed checkout_proof terminal retirement abort_acknowledged)
+  @fields ~w(id group project_id agent session_id payload_sha256 workspace sha members state writable interruption_contract acceptance_observed checkout_proof terminal retirement abort_acknowledged abort_error)
 
   @spec execute([ProjectContext.t()], map(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def execute(contexts, plan, journal, opts \\ []) do

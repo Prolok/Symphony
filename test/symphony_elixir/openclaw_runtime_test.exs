@@ -277,7 +277,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     recovery = fn
       "sessions.abort", params ->
         assert params["runId"] == id
-        %{"ok" => true}
+        %{"ok" => true, "status" => "aborted", "abortedRunId" => id}
 
       "agent.wait", %{"runId" => ^id} ->
         %{"runId" => id, "status" => "error", "endedAt" => 3}
@@ -298,7 +298,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
   test "timeout and abort acknowledgement do not prove external termination", %{issues: issues, opts: opts} do
     handler = fn
       "agent", params -> %{"runId" => params["idempotencyKey"], "status" => "accepted"}
-      "sessions.abort", _ -> %{"ok" => true}
+      "sessions.abort", params -> %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
       "agent.wait", %{"runId" => id} -> %{"runId" => id, "status" => "timeout"}
     end
 
@@ -306,6 +306,84 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert catch_throw(run_group("incoming", issues, issues, opts)) == :pending
     assert {:ok, %{"state" => "cancel_pending", "writable" => false, "abort_acknowledged" => true}} = Journal.read("incoming")
     assert {:error, :openclaw_unresolved_order} = Journal.available("incoming")
+  end
+
+  for reply <- [%{"ok" => true, "status" => "no-active-run", "abortedRunId" => nil}, %{"ok" => true, "status" => "aborted", "abortedRunId" => "foreign"}] do
+    @tag unconfirmed_abort: reply
+    test "#{reply["status"]}/#{reply["abortedRunId"]} cannot retire a continuation; a fresh original end stays separate", %{issues: issues, opts: opts, unconfirmed_abort: reply} do
+      handler = fn
+        "agent", params -> %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+        "sessions.abort", _ -> reply
+        "agent.wait", _ -> %{"status" => "timeout"}
+      end
+
+      interrupted =
+        Keyword.merge(opts,
+          transport: transport(handler),
+          openclaw_timeout_seconds: 0,
+          openclaw_wait: fn _ -> throw(:reserved) end,
+          interruption_history: fn current -> {:ok, idle_history(current)} end
+        )
+
+      assert catch_throw(run_group("incoming", issues, issues, interrupted)) == :reserved
+      {:ok, order} = Journal.read("incoming")
+      assert order["state"] == "cancel_pending" and order["writable"] == false
+      refute order["abort_acknowledged"]
+      assert order["abort_error"]["reason"] == "openclaw_abort_unconfirmed"
+      assert {:error, :openclaw_unresolved_order} = Journal.available("incoming")
+
+      history = put_in(idle_history(order), ["sessionInfo", "lastRunId"], order["id"])
+      assert {:ok, retired} = Recovery.retire(order, {:ok, %{"status" => "timeout"}}, Gateway, interruption_history: fn _ -> {:ok, history} end)
+      assert retired["retirement"]["stop_basis"] == "terminal_original_history"
+      refute retired["abort_acknowledged"]
+      refute retired["terminal"]
+    end
+  end
+
+  for retryable <- [true, false] do
+    @tag abort_retryable: retryable
+    test "abort failure retryable=#{retryable} survives polling and recovery without releasing work", %{issues: issues, opts: opts, abort_retryable: retryable} do
+      handler = fn
+        "agent", params ->
+          %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+        "sessions.abort", params ->
+          send(self(), :abort_attempt)
+
+          %{
+            "symphony_openclaw_abort_error" => 1,
+            "method" => "sessions.abort",
+            "code" => "INVALID_REQUEST",
+            "reason" => "unauthorized",
+            "retryable" => retryable,
+            "request_sha256" => OpenClaw.digest(Jason.encode!(params))
+          }
+
+        "agent.wait", _ ->
+          {:error, :connection_lost}
+      end
+
+      opts = Keyword.merge(opts, transport: transport(handler), openclaw_timeout_seconds: 0, openclaw_wait: fn _ -> throw(:pending) end)
+      assert catch_throw(run_group("incoming", issues, issues, opts)) == :pending
+      assert_receive :abort_attempt
+      assert {:ok, order} = Journal.read("incoming")
+      assert order["abort_error"]["reason"] == "unauthorized"
+      assert order["abort_error"]["retryable"] == retryable
+      assert OpenClaw.observation(order).abort_error == order["abort_error"]
+      refute order["abort_acknowledged"]
+      refute order["writable"]
+      assert {:error, :openclaw_unresolved_order} = Journal.available("incoming")
+      assert catch_throw(OpenClaw.recover(order, opts)) == :pending
+      if retryable, do: assert_receive(:abort_attempt), else: refute_receive(:abort_attempt)
+      assert {:ok, recovered} = Journal.read("incoming")
+      assert recovered["abort_error"] == order["abort_error"]
+      assert recovered["id"] == order["id"]
+
+      if not retryable do
+        assert {:ok, still_terminal} = Journal.update(order, %{"abort_error" => %{"reason" => "late_transient", "retryable" => true}})
+        assert still_terminal["abort_error"] == order["abort_error"]
+      end
+    end
   end
 
   test "accepted but partial work is never processed", %{issues: issues, opts: opts} do
@@ -325,8 +403,8 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         "agent", params ->
           if test.scenario == :lost, do: {:error, :connection_lost}, else: %{"runId" => params["idempotencyKey"], "status" => "accepted"}
 
-        "sessions.abort", _ ->
-          %{"ok" => true}
+        "sessions.abort", params ->
+          %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
 
         "agent.wait", %{"runId" => id} ->
           %{"runId" => id, "status" => "ok", "startedAt" => 1, "endedAt" => 2, "yielded" => true}
@@ -571,8 +649,8 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         Process.put(:status_count, count + 1)
         if count < 2, do: {:error, :connection_lost}, else: %{"runId" => id, "status" => "ok", "endedAt" => 3}
 
-      "sessions.abort", _ ->
-        %{"ok" => true}
+      "sessions.abort", params ->
+        %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
     end
 
     opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> :ok end, recipient: self(), interruption_history: fn current -> {:ok, idle_history(current)} end)
@@ -602,7 +680,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
       "sessions.abort", %{"runId" => id} ->
         send(self(), {:aborted_after_transport_loss, id})
-        %{"ok" => true}
+        %{"ok" => true, "status" => "aborted", "abortedRunId" => id}
     end
 
     opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> :ok end, interruption_history: fn current -> {:ok, idle_history(current)} end)
@@ -624,8 +702,8 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         {:ok, _} = Journal.update(current, %{"writable" => false, "cancel_requested" => true})
         %{"runId" => id, "status" => "ok", "endedAt" => 3000}
 
-      "sessions.abort", _ ->
-        %{"ok" => true}
+      "sessions.abort", params ->
+        %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
     end
 
     opts = Keyword.merge(opts, transport: transport(handler), interruption_history: fn current -> {:ok, idle_history(current)} end)
@@ -644,7 +722,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
       "sessions.abort", params ->
         send(self(), {:aborted, params["runId"]})
-        %{"ok" => true}
+        %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
 
       "agent.wait", %{"runId" => id} ->
         %{"runId" => id, "status" => "error", "endedAt" => 3}
@@ -667,8 +745,8 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
           if trigger == :message, do: send(self(), :openclaw_cancel)
           %{"runId" => params["idempotencyKey"], "status" => "accepted"}
 
-        "sessions.abort", _ ->
-          %{"ok" => true}
+        "sessions.abort", params ->
+          %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
 
         "agent.wait", _ ->
           %{"status" => "timeout"}
@@ -927,8 +1005,8 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         "agent.wait", _ ->
           %{"status" => "timeout"}
 
-        "sessions.abort", _ ->
-          %{"ok" => true}
+        "sessions.abort", params ->
+          %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
       end
 
       interrupted = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:reserved) end)
@@ -1211,7 +1289,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       resumed = fn
         "sessions.abort", params ->
           assert params == %{"key" => original["session_id"], "runId" => original["id"]}
-          %{"ok" => true, "status" => "no-active-run", "abortedRunId" => nil}
+          %{"ok" => true, "status" => "aborted", "abortedRunId" => original["id"]}
 
         "agent.wait", _ ->
           %{"status" => "timeout"}
@@ -1705,7 +1783,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       fetch: fn ids -> {:ok, Enum.filter(current, &(&1.id in ids))} end,
       transport:
         transport(fn
-          "sessions.abort", _ -> %{"ok" => true}
+          "sessions.abort", params -> %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
           "agent.wait", _ -> %{"status" => "timeout"}
           _, _ -> flunk("recovery must not submit or read history automatically")
         end),
@@ -1811,7 +1889,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     uncertain_order(issues, opts)
 
     handler = fn
-      "sessions.abort", _ -> %{"ok" => true}
+      "sessions.abort", params -> %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
       "agent.wait", _ -> %{"status" => "timeout"}
       "chat.history", _ -> {:error, :fixture_history_unavailable}
     end

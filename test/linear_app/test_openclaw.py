@@ -43,7 +43,8 @@ class OpenClawBoundaryTest(unittest.TestCase):
                 mock.patch.object(rpc.sys, "stdout", new_callable=io.StringIO) as output:
             self.assertEqual(rpc.main(), 1)
             self.assertEqual(output.getvalue(), "")
-            run.assert_called_once_with(["/synthetic/openclaw", *args], capture_output=True, timeout=12, check=False)
+            run.assert_called_once_with(["/synthetic/openclaw", str(REPO / "scripts/openclaw-owner-rpc.mjs"), "/synthetic/openclaw"],
+                                        input=json.dumps(args).encode() + b"\n", capture_output=True, timeout=12, check=False)
 
     def test_missing_binary_and_timeout_remain_failures(self):
         rpc = load("openclaw-rpc.py")
@@ -55,6 +56,48 @@ class OpenClawBoundaryTest(unittest.TestCase):
                 mock.patch.object(rpc.sys, "stdin", io.StringIO('["--version"]\n')), \
                 mock.patch.object(rpc.subprocess, "run", side_effect=subprocess.TimeoutExpired("synthetic", 12)):
             self.assertEqual(rpc.main(), 1)
+
+    def test_owner_sdk_boundary_without_loading_an_installation(self):
+        result = subprocess.run(["node", str(REPO / "test/fixtures/openclaw/owner-rpc-test.mjs")], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        denied = subprocess.run(["node", str(REPO / "scripts/openclaw-owner-rpc.mjs"), "/missing/cli"],
+                                env=dict(os.environ, SYMPHONY_OPENCLAW_TEST_DENY="1"), capture_output=True)
+        self.assertEqual(denied.returncode, 126)
+        self.assertEqual(denied.stdout, b"")
+
+    def test_owner_identity_failure_is_specific_and_sdk_runtime_is_required(self):
+        rpc = load("openclaw-rpc.py")
+        args = ["gateway", "call", "agents.list", "--params", "{}", "--json"]
+        with mock.patch.dict(os.environ, {"SYMPHONY_OPENCLAW_TEST_DENY": "0"}), \
+                mock.patch.object(rpc.shutil, "which", return_value="/fixture/runtime"), \
+                mock.patch.object(rpc.sys, "stdin", io.StringIO(json.dumps(args))), \
+                mock.patch.object(rpc.subprocess, "run", return_value=subprocess.CompletedProcess(args, 125, b"", b"")):
+            self.assertEqual(rpc.main(), 125)
+        with mock.patch.dict(os.environ, {"SYMPHONY_OPENCLAW_TEST_DENY": "0"}), \
+                mock.patch.object(rpc.shutil, "which", side_effect=["/fixture/openclaw", None]), \
+                mock.patch.object(rpc.sys, "stdin", io.StringIO(json.dumps(args))), \
+                mock.patch.object(rpc.subprocess, "run", side_effect=AssertionError("no CLI fallback")):
+            self.assertEqual(rpc.main(), 127)
+
+    def test_abort_error_is_sanitized_correlated_and_preserves_retryability(self):
+        rpc = load("openclaw-rpc.py")
+        raw = json.dumps(dict(key="session", runId="original"))
+        args = ["gateway", "call", "sessions.abort", "--params", raw, "--json"]
+        for retryable in (True, False):
+            reply = dict(ok=False, error=dict(type="gateway_request_error", code="INVALID_REQUEST",
+                         message="unauthorized", retryable=retryable, details="SECRET"))
+            result = subprocess.CompletedProcess(args, 1, json.dumps(reply).encode(), b"SECRET")
+            proof = rpc.abort_failure(args, result)
+            self.assertEqual(proof["retryable"], retryable)
+            self.assertEqual(proof["reason"], "unauthorized")
+            self.assertEqual(proof["request_sha256"], hashlib.sha256(raw.encode()).hexdigest())
+            self.assertNotIn("SECRET", json.dumps(proof))
+            for invalid in ({}, [], dict(reply, error=dict(reply["error"], retryable=None)),
+                            dict(reply, error=dict(reply["error"], type="cli_error")),
+                            dict(reply, error=dict(reply["error"], code="SECRET"))):
+                self.assertIsNone(rpc.abort_failure(args, subprocess.CompletedProcess(args, 1, json.dumps(invalid).encode(), b"")))
+            self.assertIsNone(rpc.abort_failure(args, subprocess.CompletedProcess(args, 0, result.stdout, b"")))
+            self.assertIsNone(rpc.abort_failure(["gateway", "call", "agent", *args[3:]], result))
 
     def test_tool_helper_round_trip_and_expired_binding(self):
         helper = load("sym-yolo-tool.py")

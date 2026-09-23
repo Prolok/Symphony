@@ -17,15 +17,31 @@ Installation, Build und Standardgates installieren/starten kein OpenClaw.
 
 ## Unterstützte Schnittstelle
 
-Der austauschbare Elixir-Adapter `Yolo.OpenClaw.Adapter` verwendet standardmäßig
-`openclaw gateway call`, ohne `--local`, Gatewaystart oder anderen Agenten als
-Ersatz. `--port 18789` bindet sämtliche RPCs an den lokalen Standardgateway und
-überschreibt eine eventuell konfigurierte Remote-Auswahl; der Toolzugang bleibt
-auf demselben Rechner. Andere Gatewayports werden derzeit nicht unterstützt.
-Die CLI muss auf dem PATH des Dienstes liegen. Gateway und CLI müssen
-zum unterstützten Release **2026.9.4** gehören. Die CLI-Version wird vor jedem
-neuen externen Auftrag geprüft; die Gleichheit der Gatewayversion ist Teil der
-Betreiberabnahme. Andere Versionen benötigen eine erneute Schnittstellenprüfung.
+Der austauschbare Elixir-Adapter `Yolo.OpenClaw.Adapter` verwendet die vorhandene
+CLI und deren öffentlichen Export `openclaw/plugin-sdk/gateway-runtime`.
+`agents.list`, `agent` und `sessions.abort` laufen über dessen `GatewayClient`;
+lesende Laufabfragen und Benachrichtigungen weiterhin über `openclaw gateway call`.
+Alle Aufrufe bleiben am lokalen Standardgateway `127.0.0.1:18789`, ohne
+Remote-Auswahl, `--local`, Gatewaystart oder Ersatzagent. Andere Ports werden
+nicht unterstützt. CLI und Node müssen auf dem PATH des Dienstes liegen; der
+SDK wird über die öffentliche Exportauflösung derselben CLI-Installation geladen.
+Gateway und CLI müssen zum unterstützten Release **2026.9.4** gehören. Die
+CLI-Version wird vor jedem neuen Auftrag geprüft; Gatewayversion und vorhandener
+SDK-Vertrag sind Teil der Betreiberabnahme. Andere Versionen benötigen eine
+erneute Schnittstellenprüfung.
+
+Der SDK-Client nutzt ausschließlich die bereits vorhandene Geräteidentität und
+deren bestehenden Operatorzugang, `sharedStateMode=read-only` und explizit
+`operator.write`. Er erzeugt keine Identität und schreibt keine Zugangsdaten;
+Shared-Secret-, Admin- oder Fremdidentitätsfallbacks gibt es nicht. Fehlt eine
+nutzbare bestehende Gerätebindung, scheitert bereits die Vorprüfung. Start und
+eigener Abbruch tragen damit auch über getrennte Prozesse dieselbe signierte
+Besitzeridentität. Die Hostprüfung schützt weiterhin fremde Besitzer; Sitzung
+**und** Originallauf-ID bleiben im Abbruchauftrag gebunden. Ein Gerätewechsel
+berechtigt nicht zum Abbruch alter Läufe. Frühere gerätelose CLI-Aufträge erhalten
+keine rückwirkende Besitzerbindung; ihre bestehende Recovery bleibt erforderlich.
+Öffentliche Verträge: [Gateway-SDK](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugin-sdk/gateway-runtime.ts),
+[schreibgeschützter Client](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/client.ts).
 
 Geprüfte Quelle: offizielles Tag `v2026.9.4`, Commit
 [`3a9d69db306cd7f081e06254cb89c4bcc14a7107`](https://github.com/openclaw/openclaw/tree/3a9d69db306cd7f081e06254cb89c4bcc14a7107).
@@ -38,7 +54,7 @@ Das ist ein Quellnachweis, kein Beleg für eine lokale Installation.
 | Annahme | Antwort `runId` gleich Auftrags-ID und `status=accepted`; noch kein Arbeitsabschluss |
 | Nichtstart | Typisierte erste Gateway-Fehlerantwort mit belegtem Vorab-Grund; eigener Ablehnungsbeleg, kein erfundenes `endedAt` |
 | Beobachtung | `agent.wait` mit derselben `runId`; `timeout` ohne Endbeleg bleibt ungeklärt |
-| Abbruch | `sessions.abort` mit Sitzungsschlüssel **und** `runId`; Bestätigung ersetzt keinen Endbeleg |
+| Abbruch | `sessions.abort` mit Sitzungsschlüssel **und** `runId`; nur `ok=true`, `status=aborted` und die exakte `abortedRunId` quittieren den Abbruch; Bestätigung ersetzt keinen Endbeleg |
 | Ende | Passende `runId`, terminaler Status und `endedAt`; `yielded`/`pendingError` sind kein Ende |
 | Technische Aufgabe | Neue Aufträge: entzogene Werkzeugbindung, bestätigter gezielter Abbruch oder korrelierter natürlicher Originalabschluss; zusätzlich frisches `chat.history` mit vollständigem Inaktivitäts-/Eingabebefund, kein fachlicher Erfolg |
 
@@ -55,9 +71,22 @@ Quellhash. Symphony weist das Arbeitsverzeichnis über die Werkzeugausführung n
 
 Fehler heißen unter anderem `openclaw_requires_linear_yolo_agent`,
 `openclaw_binary_missing`, `openclaw_gateway_unavailable`,
-`openclaw_agent_not_found`, `openclaw_version_unsupported` oder
+`openclaw_agent_not_found`, `openclaw_owner_identity_unavailable`,
+`openclaw_version_unsupported` oder
 `openclaw_invalid_response`. Rohes CLI-stderr und Credentials werden nicht
 in Prompt oder Logs übernommen. Kein Fehler startet einen Ersatzlauf.
+
+Typisierte Abbruchfehler werden auf Code, erlaubten Grund, `retryable` und den
+Hash der konkreten Anfrage reduziert. `abort_error` bleibt im Originaljournal,
+der Laufbeobachtung und dem isolierten Testbeleg erhalten, auch wenn spätere
+Zustandsabfragen scheitern. `retryable=false` verhindert weitere automatische
+Abbruchversuche derselben Generation, einschließlich Wiederaufnahme. Transiente
+oder ungeklärte Transportfehler bleiben wiederholbar. Eine Ablehnung, ein Timeout
+oder eine Abbruchquittung allein gibt keine Reservierung frei; der bestehende
+End-/Inaktivitäts-/Eingabevertrag gilt unverändert.
+`status=no-active-run`, eine fehlende oder fremde `abortedRunId` sind keine
+Abbruchquittung. Ein frisch belegtes natürliches Originalende bleibt davon
+getrennt für sicheren Cleanup nutzbar, erfüllt aber keinen Live-Unterbrechungspass.
 
 ## Auftrag, Werkzeuge und Wissen
 
@@ -226,8 +255,8 @@ Vertrag werden nicht automatisch migriert. V1-/V2-Importe behalten ihre bisherig
 Voraussetzungen; eine ausdrücklich beauftragte administrative Einmalbereinigung
 ist davon getrennt.
 
-`openclaw-rpc.py` akzeptiert ausschließlich JSON-Fehler auf stdout aus dem
-geprüften CLI-Pfad: Exit 1, `ok=false`, `error.type=gateway_request_error`,
+Für einen Nichtstartbeleg akzeptiert `openclaw-rpc.py` ausschließlich typisierte
+erste JSON-Fehler aus dem geprüften CLI-/SDK-Pfad: Exit 1, `ok=false`, `error.type=gateway_request_error`,
 `code=INVALID_REQUEST`, `retryable=false` und den exakten Vorab-Grund
 `cwd is reserved for plugin-owned subagent runs` oder `cwd must be absolute`.
 Die erste Antwort wird ohne `--expect-final` angefordert. Maximal 16 KiB Fehler-JSON
@@ -583,6 +612,16 @@ Agentenwahl und setzt zusätzlich `SYMPHONY_OPENCLAW_TEST_DENY=1`. Python-Gates
 setzen dieselbe Sperre. Aktivierte Testfälle injizieren Antworten und verwenden
 temporäre Bindungen, lokale Sockets sowie simulierte Prozesse, keine persönlichen
 Agentendateien/Gateways. Ein fehlendes Binary überspringt keinen Test.
+
+Der zusätzliche Vertragstest `node test/openclaw_owner_integration.mjs
+/PFAD/ZUM/openclaw/package.json` wird ausdrücklich außerhalb der Standardgates
+mit dem veröffentlichten SDK 2026.9.4 ausgeführt. Er verwendet nur einen lokalen
+Fixture-Server und injizierte synthetische Gerätezugänge: getrennte echte
+CLI-Verbindungen müssen abgewiesen, derselbe signierte Gerätebesitzer über neue
+Prozesse akzeptiert, fremde Besitzer/Sitzungen abgewiesen werden. Er fordert nur
+`operator.write` an und prüft die echte Upstream-Besitzerfunktion. Standardgates
+laden kein SDK. Dieser Vertragstest ersetzt weder die Prüfung vorhandener
+Betreiberzugänge noch den folgenden echten Unterbrechungs-/Folgegenerationstest.
 
 Vor **erstmaliger produktiver Aktivierung** führt die autorisierte Betreiberrolle
 außerhalb der Gates einen Live-Nachweis aus. Ein bereits dafür beauftragter

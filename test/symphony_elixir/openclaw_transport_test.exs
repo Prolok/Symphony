@@ -41,6 +41,7 @@ defmodule SymphonyElixir.OpenClawTransportTest do
 
   test "bounded output, missing binary, gateway failure and timeout remain distinct" do
     for {replies, expected} <- [
+          {[{:exit_status, 125}], :openclaw_owner_identity_unavailable},
           {[{:exit_status, 127}], :openclaw_binary_missing},
           {[{:exit_status, 1}], :openclaw_gateway_unavailable},
           {[{:data, String.duplicate("x", 2_000_001)}], :openclaw_response_too_large},

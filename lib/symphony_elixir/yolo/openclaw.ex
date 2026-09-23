@@ -343,12 +343,35 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   end
 
   defp abort_external(order, adapter, opts) do
-    with true <- Journal.pending?(order) and enabled_for?(order) and order["abort_acknowledged"] != true,
-         :ok <- adapter.cancel(order, opts),
-         {:ok, acknowledged} <- Journal.update(order, %{"abort_acknowledged" => true}) do
-      acknowledged
+    if Journal.pending?(order) and enabled_for?(order) and order["abort_acknowledged"] != true and
+         get_in(order, ["abort_error", "retryable"]) != false do
+      persist_abort_result(order, adapter.cancel(order, opts), opts)
     else
-      _ -> order
+      order
+    end
+  end
+
+  defp persist_abort_result(order, :ok, opts), do: update_abort(order, %{"abort_acknowledged" => true}, opts)
+
+  defp persist_abort_result(order, {:error, {:openclaw_abort_failed, proof}}, opts) do
+    update_abort(order, %{"abort_error" => proof}, opts)
+  end
+
+  defp persist_abort_result(order, {:error, reason}, opts) do
+    reason = if is_atom(reason), do: Atom.to_string(reason), else: "openclaw_transport_failed"
+    update_abort(order, %{"abort_error" => %{"reason" => reason, "retryable" => true}}, opts)
+  end
+
+  defp persist_abort_result(order, _, opts), do: persist_abort_result(order, {:error, :openclaw_abort_unconfirmed}, opts)
+
+  defp update_abort(order, changes, opts) do
+    case Journal.update(order, changes) do
+      {:ok, updated} ->
+        observation_event(order, updated, :abort_updated, opts)
+        updated
+
+      _ ->
+        order
     end
   end
 
@@ -414,6 +437,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
       reserved: reserved,
       resumed: order["resumed"] == true,
       missing_evidence: if(reserved, do: missing_evidence(order)),
+      abort_error: order["abort_error"],
       error: order["error"]
     }
   end
@@ -434,11 +458,12 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
   defp operator_action(%{"state" => "retired"}), do: "Unterbrochenen Auftrag technisch aufgegeben; offene Arbeit wird frisch geplant, keine fachliche Erfolgsbestätigung."
 
-  defp operator_action(%{"interruption_contract" => 1, "cancel_requested" => true, "writable" => false} = order) do
-    if Journal.pending?(order),
-      do: "OpenClaw unterbrochen; reserviert. Frische Inaktivität und Eingaben werden geprüft; ungeklärte Eingaben benötigen Betreiberklärung gemäß docs/openclaw-yolo.md.",
-      else: "OpenClaw beendet; Reservierung freigegeben."
-  end
+  defp operator_action(%{"abort_acknowledged" => true} = order), do: interruption_action(order)
+
+  defp operator_action(%{"abort_error" => %{"retryable" => false}}),
+    do: "OpenClaw-Abbruch abgewiesen; Fehlerbeleg erhalten, kein automatischer Abbruchretry. Reservierung bis frischem End-/Inaktivitätsbeleg erhalten."
+
+  defp operator_action(%{"interruption_contract" => 1, "cancel_requested" => true, "writable" => false} = order), do: interruption_action(order)
 
   defp operator_action(%{"state" => "local_error"}), do: "OpenClaw-Aufruf fehlgeschlagen; Gateway und Auftragsjournal prüfen."
 
@@ -449,6 +474,12 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   end
 
   defp operator_action(_), do: "OpenClaw-Auftrag läuft."
+
+  defp interruption_action(order) do
+    if Journal.pending?(order),
+      do: "OpenClaw unterbrochen; reserviert. Frische Inaktivität und Eingaben werden geprüft; ungeklärte Eingaben benötigen Betreiberklärung gemäß docs/openclaw-yolo.md.",
+      else: "OpenClaw beendet; Reservierung freigegeben."
+  end
 
   @spec digest(binary()) :: String.t()
   def digest(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower)

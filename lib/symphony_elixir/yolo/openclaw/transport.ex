@@ -45,6 +45,9 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Transport do
       {^port, {:exit_status, 0}} ->
         {:ok, output}
 
+      {^port, {:exit_status, 125}} ->
+        {:error, :openclaw_owner_identity_unavailable}
+
       {^port, {:exit_status, 127}} ->
         {:error, :openclaw_binary_missing}
 

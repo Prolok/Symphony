@@ -2054,11 +2054,16 @@ defmodule SymphonyElixir.TestRunTest do
       assert {:ok, cancelled} = Journal.read("incoming")
       assert cancelled["cancel_requested"] and not cancelled["writable"]
       assert cancelled["state"] == "accepted"
+      abort_error = %{"code" => "INVALID_REQUEST", "reason" => "unauthorized", "retryable" => false}
+      assert {:ok, cancelled} = Journal.update(cancelled, %{"abort_error" => abort_error})
+      assert {:ok, failed_abort} = Interruption.execute(contexts, plan, journal, opts)
+      assert failed_abort["interruption"]["original"]["abort_error"] == abort_error
       assert {:ok, original} = Journal.update(cancelled, %{"state" => "retired", "retirement" => %{"attempt" => receipt["attempt"]}})
       successor = %{order | "id" => "successor", "session_id" => "agent:po:successor"}
       assert :ok = Journal.write(successor)
       assert {:ok, again} = Interruption.execute(contexts, plan, journal, opts)
       assert again["interruption"]["original"]["id"] == original["id"]
+      assert again["interruption"]["original"]["abort_error"] == abort_error
       assert again["interruption"]["current"]["id"] == successor["id"]
       assert Enum.sort(again["interruption"]["generation_ids"]) == ["original", "successor"]
       assert {:ok, ^successor} = Journal.read("incoming")

@@ -49,8 +49,10 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
 
   @impl true
   def cancel(order, opts) do
+    id = order["id"]
+
     case rpc("sessions.abort", %{"key" => order["session_id"], "runId" => order["id"]}, opts) do
-      {:ok, %{"ok" => true}} -> :ok
+      {:ok, %{"ok" => true, "status" => "aborted", "abortedRunId" => ^id}} when is_binary(id) and id != "" -> :ok
       {:error, _} = error -> error
       _ -> {:error, :openclaw_abort_unconfirmed}
     end
@@ -88,6 +90,18 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
       _ -> {:error, :openclaw_invalid_response}
     end
   end
+
+  defp decode_response(%{"symphony_openclaw_abort_error" => 1} = proof, "sessions.abort", raw) do
+    if proof["method"] == "sessions.abort" and proof["code"] in ~w(INVALID_REQUEST UNAVAILABLE NOT_LINKED OTHER) and
+         proof["reason"] in ~w(unauthorized request_rejected) and is_boolean(proof["retryable"]) and
+         proof["request_sha256"] == OpenClaw.digest(raw) do
+      {:error, {:openclaw_abort_failed, Map.take(proof, ~w(method code reason retryable request_sha256))}}
+    else
+      {:error, :openclaw_invalid_response}
+    end
+  end
+
+  defp decode_response(%{"symphony_openclaw_abort_error" => _}, _, _), do: {:error, :openclaw_invalid_response}
 
   defp decode_response(%{"symphony_openclaw_rejection" => 1} = proof, "agent", raw) do
     if proof["method"] == "agent" and proof["phase"] == "pre_acceptance" and

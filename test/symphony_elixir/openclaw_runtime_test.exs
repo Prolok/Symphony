@@ -7,6 +7,11 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
   alias SymphonyElixir.Yolo.{Completion, Coordinator, Delivery, OpenClaw, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, Recovery, ToolBridge, Transport}
 
+  defmodule MalformedAbortAdapter do
+    def cancel(_order, _opts), do: {:ok, %{"ok" => true}}
+    def status(_order, _opts), do: {:error, :openclaw_gateway_unavailable}
+  end
+
   defp run_group(group, issues, project, opts), do: Runner.run(group, issues, project, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
   defp tick(state, issues, opts), do: Coordinator.tick(state, issues, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
 
@@ -384,6 +389,45 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
         assert still_terminal["abort_error"] == order["abort_error"]
       end
     end
+  end
+
+  test "a malformed adapter abort reply stays unconfirmed and reserved", %{opts: opts} do
+    order = %{"id" => "malformed-abort", "group" => "incoming", "members" => [], "state" => "accepted", "writable" => true, "agent" => "po", "linear_agent_id" => "pai"}
+    assert :ok = Journal.write(order)
+    opts = Keyword.merge(opts, openclaw_adapter: MalformedAbortAdapter, openclaw_wait: fn _ -> throw(:pending) end)
+
+    assert catch_throw(OpenClaw.recover(order, opts)) == :pending
+    assert {:ok, current} = Journal.read("incoming")
+    assert current["abort_error"] == %{"reason" => "openclaw_abort_unconfirmed", "retryable" => true}
+    refute current["abort_acknowledged"]
+    refute current["writable"]
+    assert {:error, :openclaw_unresolved_order} = Journal.available("incoming")
+  end
+
+  test "a late abort acknowledgement cannot overwrite a replacement generation", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "sessions.abort", params ->
+        assert {:ok, original} = Journal.read("incoming")
+        replacement = %{original | "id" => "newer-abort-generation", "state" => "accepted", "writable" => true}
+        assert :ok = DurableState.write(Journal.path("incoming"), replacement)
+        send(self(), {:replacement, replacement})
+        %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
+
+      "agent.wait", _ ->
+        {:error, :connection_lost}
+    end
+
+    opts = Keyword.merge(opts, transport: transport(handler), openclaw_timeout_seconds: 0, openclaw_wait: fn _ -> throw(:pending) end)
+    assert catch_throw(run_group("incoming", issues, issues, opts)) == :pending
+    assert_receive {:replacement, replacement}
+    assert {:ok, ^replacement} = Journal.read("incoming")
+    refute replacement["abort_acknowledged"]
+    refute replacement["abort_error"]
+    assert replacement["writable"]
+    assert {:error, :openclaw_unresolved_order} = Journal.available("incoming")
   end
 
   test "accepted but partial work is never processed", %{issues: issues, opts: opts} do

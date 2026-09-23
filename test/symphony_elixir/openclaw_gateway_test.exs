@@ -118,7 +118,7 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
       refute inspect(proof) =~ "SECRET"
     end
 
-    for changed <- [%{"request_sha256" => "foreign"}, %{"retryable" => nil}, %{"reason" => "SECRET"}, %{"method" => "agent"}] do
+    for changed <- [%{"symphony_openclaw_abort_error" => 2}, %{"request_sha256" => "foreign"}, %{"retryable" => nil}, %{"reason" => "SECRET"}, %{"method" => "agent"}] do
       transport = fn ["gateway", "call", "sessions.abort", "--params", raw | _] ->
         proof = %{
           "symphony_openclaw_abort_error" => 1,
@@ -134,6 +134,9 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
 
       assert {:error, :openclaw_invalid_response} = Gateway.cancel(order, transport: transport)
     end
+
+    foreign_method = fn _ -> {:ok, Jason.encode!(%{"symphony_openclaw_abort_error" => 1})} end
+    assert {:error, :openclaw_invalid_response} = Gateway.status(order, transport: foreign_method)
   end
 
   test "escalations resolve only the bound normal session and send with a stable key" do

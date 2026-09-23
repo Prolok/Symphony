@@ -266,7 +266,11 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     end
 
     assert {:error, :openclaw_bridge_ack_mismatch} = LinearBridge.acknowledge(Map.put(reply, "extra", true), current, snapshot)
-    for invalid <- [nil, [], "unconfirmed"], do: assert({:error, :openclaw_bridge_ack_mismatch} == LinearBridge.acknowledge(invalid, current, snapshot))
+
+    for invalid <- [nil, [], "unconfirmed"] do
+      assert {:error, :openclaw_bridge_ack_mismatch} = LinearBridge.acknowledge(invalid, current, snapshot)
+    end
+
     for disposition <- ~w(stored duplicate stale), do: assert(:ok == LinearBridge.acknowledge(Map.put(reply, "disposition", disposition), current, snapshot))
     bad = transport(fn wire -> {:ok, Jason.encode!(Map.put(ack(wire), "payload_sha256", String.duplicate("0", 64)))} end)
     assert :ok = Delivery.flush(options(bad))
@@ -296,7 +300,13 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     recovery = Map.new(~w(source_sha256 execution_source_sha256 evidence_sha256), &{&1, String.duplicate("1", 64)})
     rejection_recovery = Map.merge(recovery, %{"code" => "INVALID_REQUEST", "reason" => "cwd_reserved", "request_id" => uncertain["id"], "private_detail" => "excluded"})
     assert {:ok, payload} = Projection.payload(Map.put(rejected, "recovery", rejection_recovery), config(), 3)
-    assert payload["observation"]["rejection"] == rejection_recovery |> Map.delete("private_detail") |> Map.put("kind", "operator_pre_acceptance")
+
+    expected_rejection =
+      rejection_recovery
+      |> Map.delete("private_detail")
+      |> Map.put("kind", "operator_pre_acceptance")
+
+    assert payload["observation"]["rejection"] == expected_rejection
     assert payload["observation"]["terminal"] == nil
     refute payload["observation"]["acceptance_observed"]
     recovery = Map.put(recovery, "kind", "terminal_original")

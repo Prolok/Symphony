@@ -40,7 +40,7 @@ Das ist ein Quellnachweis, kein Beleg für eine lokale Installation.
 | Beobachtung | `agent.wait` mit derselben `runId`; `timeout` ohne Endbeleg bleibt ungeklärt |
 | Abbruch | `sessions.abort` mit Sitzungsschlüssel **und** `runId`; Bestätigung ersetzt keinen Endbeleg |
 | Ende | Passende `runId`, terminaler Status und `endedAt`; `yielded`/`pendingError` sind kein Ende |
-| Technische Aufgabe | Neue Aufträge: entzogene Werkzeugbindung, bestätigter gezielter Abbruch und frisches `chat.history` mit vollständigem Inaktivitäts-/Eingabebefund; kein fachlicher Erfolg |
+| Technische Aufgabe | Neue Aufträge: entzogene Werkzeugbindung, bestätigter gezielter Abbruch oder korrelierter natürlicher Originalabschluss; zusätzlich frisches `chat.history` mit vollständigem Inaktivitäts-/Eingabebefund, kein fachlicher Erfolg |
 
 Schemas: [Agent-RPC](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/agent.ts),
 [Sitzungen](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/sessions.ts).
@@ -159,8 +159,19 @@ Laufende oder spätere Host-Fortsetzungen erhalten keine neue Symphony-Schreibbi
 Die bestehenden Grenzen für unveränderten Prüfcheckout, keine Unteragenten und
 keine direkten Ersatz-Schreibwege bleiben Teil des Agentenvertrags.
 
-Nach bestätigtem `sessions.abort` prüft der Beobachter die eigene, pro Auftrag
-einmalige Sitzung über `chat.history`. `agent.wait` muss entweder einen belegten
+Der Beobachter prüft die eigene, pro Auftrag einmalige Sitzung über `chat.history`.
+Regulär ist dafür ein bestätigtes `sessions.abort` erforderlich. Verweigert der Host
+den Abbruch, bleiben Schreibrechte entzogen und aktive oder ungeklärte Ausführungen
+reserviert. Ein danach natürlich beendeter Originalauftrag darf ebenfalls technisch
+stillgelegt werden: Der echte Original-Endbeleg aus `agent.wait` muss zusätzlich zur
+frischen Inaktivitätsprüfung mit `lastRunId` und Endzeit der Sitzung übereinstimmen
+(ebenso mit der Startzeit, sofern die Antwort sie enthält). Symphony erhält den
+Original-Endbeleg und dokumentiert `retirement.stop_basis=terminal_original`, ohne
+eine Abbruchquittung oder einen fachlichen Erfolg zu erzeugen. Ein anderer letzter
+Lauf erfüllt diese Ausnahme nicht; verlorene Ergebnisse benötigen weiter die echte
+Abbruchquittung (`stop_basis=abort_acknowledged`).
+
+`agent.wait` muss entweder einen belegten
 Originalabschluss oder einen Timeout ohne Start-/End-/Yield-/Fehlerfortsetzungsbeleg
 liefern. Ein Abfragefehler ist kein Inaktivitätsnachweis. Die History muss konsistente
 Sitzungskennungen, eine aktuelle physische Sitzung und einen beendeten letzten Lauf
@@ -659,6 +670,11 @@ Der neue Auftrag entscheidet zunächst nur das anfängliche Backlog-Mitglied und
 wartet danach in seiner eigenen aktiven Ausführung. Der Testschritt `interrupt`
 verlangt beobachtete Annahme, einen durch echte Werkzeugnutzung bestätigten Checkout,
 die erste dauerhafte Entscheidung und eine frische, eindeutig aktive Originalsitzung.
+Die Laufidentität stammt aus `lastRunId` plus genau dieser `activeRunIds`-Menge oder
+bei `status=running` aus dem aktuellen `observerDigest.runId` der Hostprojektion.
+Letzteres berücksichtigt aktive eingebettete Läufe ohne sichtbaren Chat-Abbruchcontroller;
+fehlende Felder werden nicht als leere Laufmenge interpretiert. Vorhandene widersprüchliche
+Laufkennungen, inaktive Zustände und fremde physische Sitzungen verhindern den Eingriff.
 Unter der Werkzeug-Journalsperre sichert er den Ausgangsbeleg und setzt ausschließlich
 `writable=false` und `cancel_requested=true` für diese Generation. Der normale
 Beobachter führt `sessions.abort`, Inaktivitäts-/Eingabeprüfung und Stilllegung aus.
@@ -681,6 +697,17 @@ Die üblichen Prüfungen von frischen Linear-Daten, Quellstand, Cleanup,
 `openclaw-interruption.json` bleibt zusammen mit dem Fixturejournal erhalten, auch
 wenn ein Aufruf nach gesicherter Absicht abbricht. Fehler oder unbestätigte Abfragen
 liefern keinen Pass; ungeklärte externe Aufträge verhindern weiterhin Cleanup.
+
+Beim regulären Cleanup eines gestoppten Testdiensts darf Symphony einen bereits
+schreibgesperrten, zum Abbruch vorgemerkten Auftrag einmalig mit den normalen
+Originalterminal-/Inaktivitätsprüfungen abgleichen. Projekt, Lauf-ID, SHA und Checkout
+müssen zur eigenen unveränderten Workspacequittung passen; laufende Besitzer werden
+über dieselben Recovery-/Mitgliederleases geschützt. Dieser begrenzte Abgleich startet
+oder unterbricht keinen Auftrag und wartet nicht in einer Schleife. Fehler, offene
+Eingaben und aktive oder neuere Generationen lassen Checkout und Reservierung erhalten.
+Danach kann der bestehende Cleanupweg den eigenen Checkout entfernen. Historische
+Fehlerresultate und fehlende Abbruchbelege bleiben bestehen: Natürliches Ende und
+erfolgreicher Cleanup ersetzen den oben geforderten Live-Unterbrechungspass nicht.
 
 Dieser Livefall belegt eine gezielt unterbrochene aktuelle Ausführung und ihre
 reguläre Folgeaufnahme. Er simuliert keinen Gateway-Neustart und rekonstruiert keine

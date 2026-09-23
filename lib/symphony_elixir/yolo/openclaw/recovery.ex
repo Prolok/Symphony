@@ -19,8 +19,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
 
   defp retirement_candidate?(order) do
     order["interruption_contract"] == 1 and order["writable"] == false and
-      order["cancel_requested"] == true and order["abort_acknowledged"] == true and
-      order["state"] in ~w(unknown cancel_pending) and is_nil(order["terminal"])
+      order["cancel_requested"] == true and
+      order["state"] in ~w(accepted unknown cancel_pending) and is_nil(order["terminal"])
   end
 
   defp lost_result?({:ok, %{"status" => "timeout"} = reply}, order) do
@@ -39,12 +39,14 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
          true <- current["project_id"] == ProjectContext.current().id and OpenClaw.enabled_for?(current),
          {:ok, history} <- read.(current),
          :ok <- idle_session(history, current),
+         {:ok, stop_basis} <- stop_basis(current, response, history),
          {:ok, inputs} <- retained_inputs(history["pendingInputs"], current),
          {:ok, record} <- Store.read(current["group"]),
          %{"id" => id} = attempt <- record["attempt"],
          true <- id == current["id"] do
       proof = %{
         "kind" => "fenced_interruption",
+        "stop_basis" => stop_basis,
         "retired_at" => DateTime.to_iso8601(DateTime.utc_now()),
         "physical_session_id" => history["sessionId"],
         "last_run_id" => history["sessionInfo"]["lastRunId"],
@@ -63,6 +65,25 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
       end
     else
       _ -> {:error, :openclaw_interruption_unresolved}
+    end
+  end
+
+  defp stop_basis(%{"abort_acknowledged" => true}, _response, _history), do: {:ok, "abort_acknowledged"}
+
+  defp stop_basis(order, response, history) do
+    # A denied abort is never an acknowledgement. A naturally ended original
+    # can still be retired, but only while that same run is freshly proven idle.
+    case OpenClaw.terminal(response, order) do
+      {:terminal, _, evidence} ->
+        info = history["sessionInfo"]
+
+        if info["lastRunId"] == order["id"] and info["endedAt"] == evidence["endedAt"] and
+             (is_nil(evidence["startedAt"]) or info["startedAt"] == evidence["startedAt"]),
+           do: {:ok, "terminal_original"},
+           else: {:error, :openclaw_interruption_unresolved}
+
+      :pending ->
+        {:error, :openclaw_interruption_unresolved}
     end
   end
 

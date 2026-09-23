@@ -2192,7 +2192,10 @@ defmodule SymphonyElixir.TestRunTest do
           {:error, :gateway_unavailable},
           {:ok, %{}},
           {:ok, put_in(active["sessionInfo"]["hasActiveRun"], false)},
+          {:ok, put_in(active["sessionInfo"]["status"], "done")},
           {:ok, put_in(active["sessionInfo"]["activeRunIds"], [order["id"], "newer"])},
+          {:ok, Map.put(active, "inFlightRun", %{"runId" => "newer"})},
+          {:ok, Map.put(active, "inFlightRun", "invalid")},
           {:ok, Map.put(active, "sessionKey", "foreign")}
         ] do
       assert {:error, _} = Interruption.execute(contexts, plan, journal, history: fn _ -> reply end)
@@ -2212,6 +2215,114 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:error, :test_interruption_unbound} = Interruption.execute(contexts, Map.delete(plan, "openclaw_interruption"), journal)
     assert {:error, :test_interruption_unbound} = Interruption.execute([], plan, journal)
     assert {:error, :test_interruption_agent_mismatch} = Interruption.execute(contexts, Map.put(plan, "openclaw_agent", "other"), journal)
+  end
+
+  test "active embedded original is bound by its current observer digest without chat controller fields", ctx do
+    alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
+    {contexts, _context, plan, journal, _first, order, active} = interruption_fixture(ctx)
+    info = active["sessionInfo"] |> Map.drop(~w(lastRunId activeRunIds)) |> Map.merge(%{"status" => "running", "observerDigest" => %{"runId" => order["id"]}})
+    active = Map.put(active, "sessionInfo", info)
+
+    assert {:ok, %{"interruption" => receipt}} = Interruption.execute(contexts, plan, journal, history: fn _ -> {:ok, active} end)
+    assert receipt["active"]["observerDigest"]["runId"] == order["id"]
+    assert receipt["original"]["writable"] == false
+  end
+
+  test "embedded identity rejects missing and conflicting current run evidence before revocation", ctx do
+    alias SymphonyElixir.TestRun.OpenClawInterruption, as: Interruption
+    alias SymphonyElixir.Yolo.OpenClaw.Journal
+    {contexts, context, plan, journal, _first, order, active} = interruption_fixture(ctx)
+    info = active["sessionInfo"] |> Map.drop(~w(lastRunId activeRunIds)) |> Map.merge(%{"status" => "running", "observerDigest" => %{"runId" => order["id"]}})
+
+    for bad <- [
+          Map.delete(info, "observerDigest"),
+          Map.put(info, "observerDigest", "invalid"),
+          Map.put(info, "observerDigest", %{"runId" => "newer"}),
+          Map.put(info, "activeRunIds", []),
+          Map.put(info, "activeRunIds", ["newer"]),
+          Map.put(info, "lastRunId", "newer"),
+          Map.put(info, "status", "done"),
+          Map.put(info, "hasActiveRun", false)
+        ] do
+      assert {:error, _} = Interruption.execute(contexts, plan, journal, history: fn _ -> {:ok, Map.put(active, "sessionInfo", bad)} end)
+      ProjectContext.with_context(context, fn -> assert {:ok, ^order} = Journal.read("incoming") end)
+    end
+  end
+
+  test "owned PO cleanup reconciles a fenced natural original terminal without an abort or a service restart", ctx do
+    alias SymphonyElixir.TestRun.PoIncoming
+    alias SymphonyElixir.Yolo.OpenClaw
+    alias SymphonyElixir.Yolo.OpenClaw.Journal
+    {_contexts, context, plan, _journal, _first, order, _active} = interruption_fixture(ctx)
+    path = Path.join(context.settings.workspace.root, "yolo/incoming/original")
+    sha = git!(context.root, ["rev-parse", "HEAD"]) |> String.trim()
+    File.mkdir_p!(Path.dirname(path))
+    git!(context.root, ["worktree", "add", "--detach", path, sha])
+
+    order =
+      Map.merge(order, %{
+        "session_id" => "agent:po:symphony:#{OpenClaw.digest(context.id)}:incoming:original",
+        "linear_workspace_id" => "synthetic-workspace",
+        "workspace" => path,
+        "sha" => sha,
+        "writable" => false,
+        "cancel_requested" => true
+      })
+
+    ProjectContext.with_context(context, fn ->
+      :ok = DurableState.write(Journal.path("incoming"), order)
+      System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+      :ok = PoIncoming.record(%{path: path, sha: sha}, order["id"])
+    end)
+
+    history =
+      File.read!(Path.expand("../fixtures/openclaw/terminal-history.json", __DIR__))
+      |> String.replace("__SESSION_KEY__", order["session_id"])
+      |> String.replace("__RUN_ID__", order["id"])
+      |> Jason.decode!()
+
+    transport = fn ["gateway", "call", method, "--params", raw | _] ->
+      params = Jason.decode!(raw)
+
+      case method do
+        "agent.wait" ->
+          assert params["runId"] == order["id"]
+          {:ok, Jason.encode!(%{"runId" => order["id"], "status" => "ok", "endedAt" => 2000})}
+
+        "chat.history" ->
+          assert params["sessionKey"] == order["session_id"]
+          {:ok, Jason.encode!(history)}
+
+        _ ->
+          flunk("cleanup must not submit or abort an execution")
+      end
+    end
+
+    unavailable = [transport: fn _ -> {:error, :unavailable} end]
+    assert {:error, :test_po_workspace_cleanup_unconfirmed} = PoIncoming.cleanup(context, plan, unavailable)
+    assert File.dir?(path)
+    ProjectContext.with_context(context, fn -> assert {:ok, ^order} = Journal.read("incoming") end)
+
+    for change <- [%{"id" => "newer"}, %{"sha" => "foreign"}, %{"project_id" => "foreign"}, %{"writable" => true}, %{"cancel_requested" => false}] do
+      ProjectContext.with_context(context, fn -> :ok = DurableState.write(Journal.path("incoming"), Map.merge(order, change)) end)
+      deny = [transport: fn _ -> flunk("unbound cleanup queried gateway") end]
+      assert {:error, :test_po_workspace_cleanup_unconfirmed} = PoIncoming.cleanup(context, plan, deny)
+      assert File.dir?(path)
+    end
+
+    ProjectContext.with_context(context, fn -> :ok = DurableState.write(Journal.path("incoming"), order) end)
+    assert :ok = PoIncoming.cleanup(context, plan, transport: transport)
+    refute File.exists?(path)
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, retired} = Journal.read("incoming")
+      assert retired["state"] == "retired"
+      assert retired["retirement"]["stop_basis"] == "terminal_original"
+      refute retired["abort_acknowledged"]
+      assert {:ok, []} = Journal.pending()
+    end)
+
+    assert :ok = PoIncoming.cleanup(context, plan, transport: fn _ -> flunk("cleanup must remain idempotent") end)
   end
 
   defp interruption_fixture(ctx) do

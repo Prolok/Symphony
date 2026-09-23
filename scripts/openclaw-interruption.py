@@ -1,6 +1,20 @@
 """Validate live interruption evidence; no transport or authority of its own."""
 
 
+def active_original(active, run_id):
+    digest = active.get("observerDigest")
+    digest_matches = isinstance(digest, dict) and digest.get("runId") == run_id
+    controller = active.get("lastRunId") == run_id and active.get("activeRunIds") == [run_id]
+    embedded = active.get("status") == "running" and digest_matches
+    return (
+        active.get("hasActiveRun") is True and active.get("status", "running") == "running"
+        and (controller or embedded)
+        and active.get("lastRunId", run_id) == run_id
+        and active.get("activeRunIds", [run_id]) == [run_id]
+        and (digest is None or digest_matches)
+    )
+
+
 def verify(proof, fixtures, source, run_id, agent):
     before = proof["before"]
     original = proof["original"]
@@ -22,8 +36,7 @@ def verify(proof, fixtures, source, run_id, agent):
         and before["interruption_contract"] == current["interruption_contract"] == 1
         and before["acceptance_observed"] is True and before["writable"] is True
         and active["key"] == before["session_id"] and active["sessionId"]
-        and active["lastRunId"] == before["id"] and active["hasActiveRun"] is True
-        and active["activeRunIds"] == [before["id"]] and proof["active_checked_at"]
+        and active_original(active, before["id"]) and proof["active_checked_at"]
         and all(before[k] == original[k] for k in binding)
         and original["state"] == "retired" and original["writable"] is False
         and original["abort_acknowledged"] is True

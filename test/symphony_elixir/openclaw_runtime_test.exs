@@ -986,6 +986,81 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     end
   end
 
+  test "denied abort does not strand a fenced original that naturally terminates", %{issues: issues, opts: opts} do
+    order = executed_order(issues, opts)
+    {:ok, before} = Store.read("incoming")
+
+    handler = fn
+      "sessions.abort", _ -> {:error, :openclaw_command_failed}
+      "agent.wait", %{"runId" => id} -> %{"runId" => id, "status" => "ok", "endedAt" => 2000}
+      "chat.history", _ -> original_idle_history(order)
+    end
+
+    recovery = [transport: transport(handler), openclaw_wait: fn _ -> throw(:stranded) end]
+    assert {:error, :openclaw_interrupted_order_retired} = OpenClaw.recover(order, recovery)
+    assert {:ok, retired} = Journal.read("incoming")
+    assert retired["state"] == "retired"
+    assert retired["terminal"] == %{"runId" => order["id"], "status" => "ok", "endedAt" => 2000}
+    refute retired["abort_acknowledged"]
+    assert retired["retirement"]["stop_basis"] == "terminal_original"
+    assert {:ok, ^before} = Store.read("incoming")
+    assert {:ok, []} = Journal.pending()
+  end
+
+  test "without abort acknowledgement only the exact terminal original and fresh idle evidence can retire", %{issues: issues, opts: opts} do
+    order = fenced_order(issues, opts)
+    order = Map.put(order, "abort_acknowledged", false)
+    :ok = DurableState.write(Journal.path("incoming"), order)
+    history = original_idle_history(order)
+    response = {:ok, %{"runId" => order["id"], "status" => "ok", "endedAt" => 2000}}
+
+    for bad <- [
+          put_in(history, ["sessionInfo", "lastRunId"], "newer"),
+          put_in(history, ["sessionInfo", "endedAt"], 2001),
+          put_in(history, ["sessionInfo", "hasActiveRun"], true),
+          put_in(history, ["sessionInfo", "activeRunIds"], ["newer"]),
+          Map.delete(history, "pendingInputs"),
+          Map.put(history, "pendingInputs", %{"total" => 1, "items" => []})
+        ] do
+      assert {:error, _} = Recovery.retire(order, response, Gateway, interruption_history: fn _ -> {:ok, bad} end)
+      assert {:ok, ^order} = Journal.read("incoming")
+    end
+
+    assert {:error, _} = Recovery.retire(order, response, Gateway, interruption_history: fn _ -> {:error, :unavailable} end)
+    assert {:error, _} = retire(order, history)
+    assert {:error, _} = Recovery.retire(order, {:ok, %{"runId" => "newer", "status" => "ok", "endedAt" => 2000}}, Gateway, [])
+    assert {:ok, ^order} = Journal.read("incoming")
+  end
+
+  test "one-shot terminal reconciliation keeps active owners and replacement generations protected", %{issues: issues, opts: opts} do
+    order = fenced_order(issues, opts)
+    deny = [transport: fn _ -> flunk("owned or replaced execution must not be queried") end]
+
+    assert {:error, :issue_already_owned} =
+             IssueLease.with_lock(order["linear_workspace_id"], hd(issues).id, fn ->
+               OpenClaw.reconcile_terminal(order, deny)
+             end)
+
+    assert {:ok, ^order} = Journal.read("incoming")
+
+    assert {:error, :openclaw_interruption_unresolved} =
+             OpenClaw.reconcile_terminal(order,
+               transport: transport(fn "agent.wait", _ -> %{"status" => "timeout"} end)
+             )
+
+    assert {:ok, ^order} = Journal.read("incoming")
+
+    replacement = Map.put(order, "id", "newer")
+    :ok = DurableState.write(Journal.path("incoming"), replacement)
+    assert {:error, :openclaw_interruption_unresolved} = OpenClaw.reconcile_terminal(order, deny)
+    assert {:ok, ^replacement} = Journal.read("incoming")
+  end
+
+  defp original_idle_history(order) do
+    {_, opts} = terminal_evidence(order)
+    Jason.decode!(opts[:sources]["source"])
+  end
+
   defp idle_history(order) do
     {_, opts} = terminal_evidence(order)
     history = Jason.decode!(opts[:sources]["source"])

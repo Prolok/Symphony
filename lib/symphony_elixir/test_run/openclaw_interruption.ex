@@ -83,7 +83,7 @@ defmodule SymphonyElixir.TestRun.OpenClawInterruption do
            "first_id" => first["id"],
            "before" => Map.take(order, @fields),
            "attempt" => attempt,
-           "active" => Map.take(active["sessionInfo"], ~w(key sessionId lastRunId hasActiveRun activeRunIds)),
+           "active" => Map.take(active["sessionInfo"], ~w(key sessionId status lastRunId hasActiveRun activeRunIds observerDigest)),
            "active_checked_at" => DateTime.to_iso8601(DateTime.utc_now())
          },
          :ok <- DurableState.write(path(plan), receipt) do
@@ -96,11 +96,29 @@ defmodule SymphonyElixir.TestRun.OpenClawInterruption do
 
   defp active_original?(%{"sessionInfo" => info} = history, order) when is_map(info) do
     history["sessionKey"] == order["session_id"] and info["key"] == order["session_id"] and
-      is_binary(history["sessionId"]) and info["sessionId"] == history["sessionId"] and
-      info["lastRunId"] == order["id"] and info["hasActiveRun"] == true and info["activeRunIds"] == [order["id"]]
+      is_binary(history["sessionId"]) and history["sessionId"] != "" and info["sessionId"] == history["sessionId"] and
+      info["hasActiveRun"] == true and Map.get(info, "status", "running") == "running" and
+      active_run_identity?(info, order["id"]) and
+      optional_run_identity?(history["inFlightRun"], order["id"])
   end
 
   defp active_original?(_, _), do: false
+
+  defp active_run_identity?(info, id) do
+    # Embedded runs need not have a visible chat-abort controller. Their
+    # current observer digest supplies identity, not an inferred empty run set.
+    controller = info["lastRunId"] == id and info["activeRunIds"] == [id]
+    embedded = info["status"] == "running" and run_identity(info["observerDigest"]) == id
+
+    (controller or embedded) and Map.get(info, "lastRunId", id) == id and
+      Map.get(info, "activeRunIds", [id]) == [id] and
+      optional_run_identity?(info["observerDigest"], id)
+  end
+
+  defp optional_run_identity?(nil, _id), do: true
+  defp optional_run_identity?(value, id), do: run_identity(value) == id
+  defp run_identity(%{"runId" => id}), do: id
+  defp run_identity(_), do: nil
 
   defp resume(plan, receipt) do
     with true <- receipt["source"] == plan["source"] and receipt["run_id"] == plan["run_id"],

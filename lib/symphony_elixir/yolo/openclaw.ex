@@ -184,6 +184,33 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     end)
   end
 
+  @doc "One terminal reconciliation for an already fenced order; no abort, submission or polling loop."
+  @spec reconcile_terminal(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def reconcile_terminal(order, opts \\ []) do
+    IssueLease.with_lock("symphony-openclaw", Journal.path(order["group"]), fn ->
+      hold_members(order["members"], order, opts, fn ->
+        reconcile_terminal_locked(order, opts)
+      end)
+    end)
+  end
+
+  defp reconcile_terminal_locked(order, opts) do
+    adapter = Keyword.get(opts, :openclaw_adapter, Gateway)
+
+    with {:ok, %{"id" => id, "writable" => false, "cancel_requested" => true} = current} <- Journal.read(order["group"]),
+         true <- id == order["id"] and current["project_id"] == ProjectContext.current().id and enabled_for?(current),
+         true <- current["interruption_contract"] == 1 and Journal.pending?(current),
+         response = adapter.status(current, opts),
+         {:terminal, _, _} <- terminal(response, current),
+         {:ok, finished} <- Recovery.retire(current, response, adapter, opts) do
+      event(finished, :ended, opts)
+      {:ok, finished}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :openclaw_interruption_unresolved}
+    end
+  end
+
   defp hold_members([], _order, _opts, callback), do: callback.()
 
   defp hold_members([member | rest], order, opts, callback) do

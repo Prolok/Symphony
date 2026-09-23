@@ -87,6 +87,32 @@ class InterruptionProofTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, 'Wiederaufnahme gehört nicht'):
                 runner.main()
 
+    def test_embedded_active_projection_is_preserved_and_verified_without_controller_ids(self):
+        verifier = load('openclaw-interruption.py')
+        proof, fixtures = evidence()
+        active = proof['active']
+        del active['lastRunId']
+        del active['activeRunIds']
+        active.update(status='running', observerDigest={'runId': 'old'})
+        self.assertEqual(len(verifier.verify(proof, fixtures, proof['source'], 'proof', 'po')), 2)
+
+        for change in [dict(observerDigest=None), dict(observerDigest='invalid'),
+                       dict(observerDigest={'runId': 'new'}), dict(activeRunIds=[]),
+                       dict(activeRunIds=['new']), dict(lastRunId='new'),
+                       dict(hasActiveRun=False), dict(status='done')]:
+            with self.subTest(change=change):
+                changed = dict(proof, active=dict(active, **change))
+                with self.assertRaises((ValueError, KeyError, TypeError)):
+                    verifier.verify(changed, fixtures, proof['source'], 'proof', 'po')
+
+        # Natural termination permits cleanup but is no substitute for this
+        # live scenario's required abort acknowledgement.
+        proof['original'].pop('abort_acknowledged')
+        proof['original']['terminal'] = dict(runId='old', status='ok', endedAt=3)
+        proof['original']['retirement']['stop_basis'] = 'terminal_original'
+        with self.assertRaises((ValueError, KeyError)):
+            verifier.verify(proof, fixtures, proof['source'], 'proof', 'po')
+
     def test_missing_active_evidence_repeated_decisions_and_foreign_bindings_fail_closed(self):
         verifier = load('openclaw-interruption.py')
         changes = [

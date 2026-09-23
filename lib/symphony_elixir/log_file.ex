@@ -22,6 +22,10 @@ defmodule SymphonyElixir.LogFile do
 
   @spec configure_startup_console() :: :ok
   def configure_startup_console do
+    # app:nil escripts enter the CLI before Logger starts. Start it before
+    # setting the handler level; its boot replaces OTP's default handler.
+    {:ok, _} = Application.ensure_all_started(:logger)
+
     case :logger.set_handler_config(:default, :level, :info) do
       :ok -> :ok
       {:error, {:not_found, :default}} -> :ok

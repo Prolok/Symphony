@@ -492,11 +492,15 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp render_to_terminal(content) do
+    # Clear each line immediately before replacing it, keeping the rest of
+    # the frame visible. Erasing after a full row can delete its last cell
+    # while the terminal is waiting to wrap.
+    lines = content |> normalize_status_lines() |> String.split("\n")
+
     IO.write([
       IO.ANSI.home(),
-      IO.ANSI.clear(),
-      normalize_status_lines(content),
-      "\n"
+      Enum.map(lines, &["\e[K", &1, "\n"]),
+      "\e[J"
     ])
   end
 

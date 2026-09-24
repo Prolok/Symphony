@@ -71,12 +71,22 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp checkout_available("review", %{"attempt" => %{"cleanup_contract" => 1} = attempt} = record) do
     delivered? = Enum.any?(Map.values(record["deliveries"] || %{}), &(&1["run_id"] == attempt["id"]))
 
-    if attempt["checkout_cleanup"] in ["none", "removed"] or is_binary(attempt["session_id"]) or delivered?,
+    if attempt["checkout_cleanup"] in ["none", "removed"] or is_binary(attempt["session_id"]) or delivered? or retired_attempt?(attempt),
       do: :ok,
       else: {:error, :yolo_review_checkout_cleanup_unconfirmed}
   end
 
   defp checkout_available(_, _), do: :ok
+
+  defp retired_attempt?(attempt) do
+    case Journal.read("review") do
+      {:ok, %{"id" => id, "state" => "retired", "writable" => false, "retirement" => %{"kind" => "fenced_interruption", "attempt" => proof}}} ->
+        id == attempt["id"] and proof == attempt
+
+      _ ->
+        false
+    end
+  end
 
   defp with_members([], callback, _lease), do: callback.()
 

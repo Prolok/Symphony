@@ -4,6 +4,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
   alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.Linear.CommentActionGuard
+  alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.Yolo.{BlockerBrake, Completion, Coordinator, Group, Observation, Operations, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
@@ -1557,6 +1558,79 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = run_group("review", [review], [review])
     assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
     assert length(Regex.scan(~r/^worktree /m, listing)) == 2
+  end
+
+  test "fenced retired review delivery permits replanning while retaining its checkout", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "worktrees")))
+    assert {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: root)
+    File.write!(Path.join(root, "tracked"), "merged")
+    assert {_, 0} = System.cmd("git", ["add", "tracked"], cd: root)
+    assert {_, 0} = System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cd: root)
+    assert {_, 0} = System.cmd("git", ["remote", "add", "origin", root], cd: root)
+    run_id = Ecto.UUID.generate()
+    assert {:ok, workspace} = Yolo.Workspace.create("review", run_id)
+    assert {:ok, record} = Store.read("review")
+    attempt = %{"id" => run_id, "members" => [review.id], "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1, "checkout_cleanup" => "creating"}
+    receipt = %{"run_id" => run_id, "semantic" => "original"}
+    assert :ok = Store.write("review", Map.merge(record, %{"attempt" => attempt, "deliveries" => %{review.id => receipt}}))
+
+    order = %{
+      "id" => run_id,
+      "group" => "review",
+      "members" => [%{"id" => review.id}],
+      "state" => "retired",
+      "writable" => false,
+      "retirement" => %{"kind" => "fenced_interruption", "attempt" => attempt, "deliveries" => %{review.id => receipt}}
+    }
+
+    assert :ok = DurableState.write(Journal.path("review"), order)
+    opts = [lease: fn _, fun -> fun.() end, fetch: fn _ -> {:error, :synthetic_replan} end]
+    assert {:error, :synthetic_replan} = run_group("review", [review], [review], opts)
+    assert {:ok, after_reconcile} = Store.read("review")
+    assert after_reconcile["deliveries"] == %{}
+    assert after_reconcile["attempt"] == attempt
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 2
+
+    assert :ok = DurableState.write(Journal.path("review"), put_in(order, ["retirement", "attempt", "id"], "other-run"))
+    assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = run_group("review", [review], [review], opts)
+  end
+
+  test "review retry keeps backoff for unchanged pending subset", %{issues: [first, second | _]} do
+    first = %{first | state: "Yolo Review"}
+    second = %{second | state: "Yolo Review"}
+    assert {:ok, observations, _} = Observation.capture([first, second], %{}, scan: &scan/1)
+    assert {:ok, record} = Store.read("review")
+    retry_at = System.system_time(:millisecond) + 120_000
+
+    record =
+      Map.merge(record, %{
+        "observations" => observations,
+        "deliveries" => %{first.id => %{"run_id" => "earlier", "semantic" => observations[first.id]["semantic"]}},
+        "nonstart" => %{"fingerprint" => Observation.fingerprint(Map.take(observations, [second.id])), "members" => [second.id], "count" => 2},
+        "retry_at" => retry_at
+      })
+
+    assert :ok = Store.write("review", record)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    tick(state, [first, second], scan: &scan/1, start: fn _, _ -> flunk("unchanged pending subset must wait") end)
+    assert {:ok, unchanged} = Store.read("review")
+    assert unchanged["nonstart"] == record["nonstart"]
+    assert unchanged["retry_at"] == retry_at
+
+    tick(state, [first, %{second | title: "changed review"}],
+      scan: &scan/1,
+      start: fn group, _ ->
+        send(self(), {:started, group})
+        {:error, :capacity}
+      end
+    )
+
+    assert_receive {:started, "review"}
+    assert {:ok, changed} = Store.read("review")
+    assert changed["nonstart"] == nil
+    assert changed["retry_at"] == nil
   end
 
   test "failed checkout creation without a worktree remains retryable", %{issues: [issue | _], root: root, context: context} do

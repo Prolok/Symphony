@@ -165,7 +165,7 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
       cond do
         String.trim(section(workpad.body, "Betreiberauftrag")) != "" -> {:ok, String.trim(section(workpad.body, "Betreiberauftrag"))}
         relevant != [] -> {:ok, Enum.join(relevant, "\n")}
-        map_size(last_escalation_body(workpad.body)) > 0 -> {:ok, last_escalation_body(workpad.body) |> Enum.sort() |> Jason.encode!()}
+        map_size(last_escalation_body(workpad.body)) > 0 -> {:ok, Jason.encode!(last_escalation_body(workpad.body))}
         String.trim(validation) != "" -> {:ok, String.trim(validation)}
         true -> {:error, :blocker_cause_missing}
       end

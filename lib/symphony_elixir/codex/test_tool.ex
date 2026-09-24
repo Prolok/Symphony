@@ -93,7 +93,6 @@ defmodule SymphonyElixir.Codex.TestTool do
          {:ok, bound} <- CommentCheckpoint.bound_issue(owner, Keyword.put(opts, :fetch_issue, fn _ -> {:ok, [issue]} end)) do
       {:ok, bound}
     else
-      {:ok, [_]} -> {:error, :test_assignee_not_bound}
       false -> {:error, :test_assignee_not_bound}
       {:error, _} = error -> error
       _ -> {:error, :test_issue_lookup_incomplete}

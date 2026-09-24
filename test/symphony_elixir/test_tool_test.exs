@@ -111,9 +111,12 @@ defmodule SymphonyElixir.Codex.TestToolTest do
       WriteContext.with_context(%{issue_id: issue.id}, fn ->
         assert {:ok, %{"running" => true}} = TestTool.invoke(args(), opts)
         assert {:error, :test_poller_context_changed} = TestTool.invoke(args(), Keyword.put(opts, :poller_context, fn _ -> target end))
+        assert {:error, :test_poller_context_changed} = TestTool.invoke(args(), Keyword.put(opts, :poller_context, fn _ -> nil end))
+        assert {:error, :test_poller_context_unavailable} = TestTool.invoke(args(), Keyword.put(opts, :poller_context, fn _ -> exit(:offline) end))
         assert {:error, :test_project_not_bound} = TestTool.invoke(args(), Keyword.put(opts, :contexts, [target]))
         assert {:error, :test_executor_not_configured} = TestTool.invoke(args(), Keyword.put(opts, :contexts, [caller]))
         assert {:error, :test_assignee_not_bound} = TestTool.invoke(args(), Keyword.put(opts, :fetch_issue, fn _ -> {:ok, [%{issue | assigned_to_worker: false}]} end))
+        assert {:error, :test_issue_lookup_incomplete} = TestTool.invoke(args(), Keyword.put(opts, :fetch_issue, fn _ -> {:ok, []} end))
         assert {:error, :test_phase_not_allowed} = TestTool.invoke(args(), Keyword.put(opts, :fetch_issue, fn _ -> {:ok, [%{issue | state: "Merge (AI)"}]} end))
       end)
     end)

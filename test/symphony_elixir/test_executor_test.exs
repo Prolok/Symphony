@@ -88,6 +88,9 @@ defmodule SymphonyElixir.TestExecutorTest do
     assert {:ok, _} = Schema.parse(%{"worker" => %{"test_executor" => ctx.config, "test_executor_socket" => ctx.context.settings.worker.test_executor_socket}})
     assert :ok = TestExecutor.validate_contexts([])
     assert {:error, :routine_test_setup_invalid} = TestExecutor.validate_contexts([%{ctx.context | name: "foreign"}])
+    context = ctx.context
+    assert {:error, :routine_test_setup_invalid} = TestExecutor.validate_contexts([put_in(context.settings.worker.test_executor, %{})])
+    assert {:error, :routine_test_setup_invalid} = TestExecutor.validate_contexts([ctx.context, ctx.context])
   end
 
   test "normal supervisor owns a real executor process from socket readiness through result and shutdown", ctx do

@@ -399,6 +399,23 @@ Planung/Workpad halten Aktion, Rolle, Phase und Entscheidungsquelle oder technis
 Begründung fest. Finale Produkt-/Zielumgebungsabnahme gehört standardmäßig nach
 Merge in `Review`, bei Agentdelegation in `Yolo Review`; das Belegformat und die strikte Rückstellung späterer Pflichten
 regelt [symphony-workpad](../.codex/skills/symphony-workpad/SKILL.md).
+Bei Agentdelegation sind auch isolierte Symphony-, OpenClaw- und LinearBridge-Proben,
+Dienstwechsel und Paketaktivierung erst in `Yolo Review` fällig. Vor Merge bleiben
+Build, automatisierte Tests, technischer Review, Mergegates und gebundene
+Routinetests über `symphony_test` fällig. Ohne Delegation gilt die bisherige
+Betreiberübergabe für frühe Nachweise und die finale Abnahme in `Review`.
+
+Der **Produkt-Quellhash** ist SHA-256 über die sortierten Pfade, Modusbits und
+Inhalte aller versionierten Produktdateien des Kandidatenstands. Workpad-, Log-
+und Fixturedateien sind ausgenommen; nicht ignorierte neue Kandidatendateien
+zählen mit, ein reiner Autocommit ohne Produktänderung ändert ihn nicht.
+`python3 scripts/test-instance.py product-source <Workspace>`
+liefert `product_source_sha256` nach dieser Definition. Der vorhandene
+`source_sha256` des Testarchivs darf nur verwendet werden, wenn seine Dateimenge
+dieser Definition entspricht. Betreiber- und Live-Belege nennen Hash, geprüfte
+Aktion, Ergebnis und Geltungsbereich. Vor erneuter Anforderung vergleichen Worker
+und PO den Hash: unverändert erhält den Beleg, bei Produktdelta sind nur die
+betroffenen Prüfungen zu wiederholen.
 Eine irrtümliche agentenseitige Frühfrist ist mit Begründung korrigierbar,
 keine Nutzerfreigabe; offene Pflicht, Quelle und technische Belege bleiben erhalten.
 Tatsächliche frühe Test-/Freigabegates bleiben bindend, auch bei technischem Review-Skip.
@@ -420,7 +437,7 @@ fehlenden Aktion, nicht pauschal „kein Authzugriff“. Eine Übergabe enthält
 | Feld | Sekretfreies synthetisches Beispiel |
 | --- | --- |
 | Aktion und Rolle | Betreiber stellt die erlaubte Docker-Testlaufzeit für Projekt `Beispiel` bereit und bestätigt die Testdatenbank-Erreichbarkeit. |
-| Quell-/Paketstand | Commit `1111111`; bei ungecommittiertem Stand zusätzlich eindeutiger Diff-/Paketbezug `Paket A`. |
+| Quell-/Paketstand | Produkt-Quellhash `aaaaaaaa…`, Commit `1111111`; bei ungecommittiertem Stand zusätzlich eindeutiger Diff-/Paketbezug `Paket A`. |
 | Bestandene lokale Prüfungen | Format/Lint für `Paket A` bestanden; keine Aussage über noch ausstehende Datenbanktests. |
 | Fehlende externe Nachweise | Docker-Daemon erreichbar, bestehender repo-lokaler Testdatenbank-Start erfolgreich, Datenbank erreichbar; Bezug zu Projekt und Testumgebung. |
 | Fortsetzungsphase | `Test (AI)`; nach Entblockung repo-lokale Wiederholungsregel anwenden. |
@@ -509,6 +526,10 @@ Runtime-Regressionen prüfen zusätzlich den tatsächlichen Workpad-/AgentRunner
 | Eingabe | Erwartete Einordnung und Fortsetzung |
 | --- | --- |
 | Lokales Plugin-/Dienstpaket und technische Tests grün, finale Installation nach Merge | Technische Pipeline bis Review; offene finale Abnahme übernehmen. Kein Betriebswechsel vor Merge und kein behaupteter Live-Erfolg. |
+| Delegiertes Ticket, Test-Checkliste geschlossen, Live-/Host-Probe offen | Vor Merge `; fällig: Yolo Review` offen lassen; Handoff nach `Merge (AI)` und nach Merge in `Yolo Review`. Keine frühe BLOCKER-Übergabe. |
+| Dasselbe Ticket ohne Agentdelegation | Frühe Betreiberprobe bleibt nach bisherigem Vertrag fällig; bei fehlendem Beleg konkrete BLOCKER-Übergabe. Finale Abnahme in `Review`. |
+| Workpad-, Log-, Fixture- oder reiner Autocommit-Stand ändert sich ohne Produktdelta | Produkt-Quellhash und positiver Betreiberbeleg bleiben gültig; keine neue Übergabe. |
+| Produktdatei ändert sich, andere Prüfbereiche bleiben unverändert | Neuer Produkt-Quellhash; nur die vom Delta betroffene Prüfung erneut anfordern, übrige Belege mit Geltungsbereich erhalten. |
 | Agent hat finale Zielumgebungsabnahme ohne frühe Nutzerentscheidung in Test eingeplant | Quelle prüfen, begründet nach Review korrigieren, Nachweis offen erhalten und regulär wiederaufnehmen. |
 | Notwendige Testdatenbank/Buildabhängigkeit fehlt | Technisches Gate bleibt offen; zulässige Diagnose/Startwege nutzen, sonst konkrete Betreiberübergabe. Keine Umetikettierung als finale Betriebsabnahme. |
 | In Review fehlt autorisierte Bereitstellung | Offene Review-Abnahme mit Standbezug und benötigter Aktion übergeben; kein Rücksprung zum ungemergten Testauftrag. |
@@ -528,6 +549,27 @@ Runtime-Regressionen prüfen zusätzlich den tatsächlichen Workpad-/AgentRunner
 | Nur drei öffentliche Installations-IDs in versionierter `.symphony/.env` | Kein Secret-Blocker; regulärer Commit-/Testpfad erlaubt. |
 | Tatsächliches Secret in öffentlicher Konfiguration | Veröffentlichung verhindern; autorisierten Bereinigungsweg verwenden, keine Werte in Diagnose/Fixtures übernehmen. |
 | Review-Skip, aber Test-Evidenz fehlt oder `Requires Manual Review` ohne gültiges Approval | Test-/GitHub-Gate bleibt erforderlich; Skip liefert weder Tests noch Approval oder Betreiberbelege. |
+
+### BLOCKER-Schleifenbremse und Workspace-Warten
+
+Für delegierte `BLOCKER`-Tickets journalisiert Symphony vor der PO-Zustellung
+den SHA-256 der offenen Betreiberaktion im Workpad oder der strukturierten
+`escalation`. Erscheint dieselbe Ursache innerhalb von 24 Stunden erneut,
+erfolgt kein weiterer PO-Lauf: Das Ticket bleibt in `BLOCKER`, die Delegation
+endet, der erste konfigurierte Mensch übernimmt, das Workpad erhält Ursache,
+Versuche, Vorschlag und Entscheidung. Der bestehende OpenClaw-Kanal erhält
+genau einen korrelierten Eskalationsversuch; ein unklarer Versand wird nicht
+blind wiederholt. Eine andere Ursache oder ein neues Zeitfenster erlaubt Arbeit.
+
+`Wartet auf: <IDENT>` darf mehrfach als eigene Zeile in Beschreibung oder Workpad
+stehen. Die Kennung muss ein Ticket in einem anderen gebundenen Workspace
+bezeichnen. Symphony prüft dessen Projektbindung und Status frisch. In
+`Backlog`/`BLOCKER` bleibt der wartende Status bestehen; PO-Aufträge in
+`incoming`, `blocker`, `planning` und `review` warten bis `Yolo Review`,
+`Review` oder `Fertig` des Ziels. Ein regulärer `Planung (AI)`-Kandidat mit
+offenem Marker erhält einen Workpad-Vermerk und geht nach `Backlog` zurück.
+Fehlt eine eindeutige Zielbindung, steht der Fehler in Log und Workpad; er wird
+nicht als stilles Warten behandelt. Vor Zustellung und Aktion wird neu geprüft.
 
 Die koordinierte PO-Prüfung gleicht den Worker-Vertrag mit der Betreiberübernahme
 und gegebenenfalls dem repo-gebundenen öffentlichen Konfigurations-Regeldelta ab.
@@ -801,7 +843,7 @@ worker:
     project_id: 22222222-2222-4222-8222-222222222222
     slug_id: symphony-test-slug
     teams: [{id: 33333333-3333-4333-8333-333333333333, key: PRO}]
-    scenarios: [bootstrap, workflow, failure-probe]
+    scenarios: [bootstrap, workflow, failure-probe, po_handoff, po_followup]
     timeout: 1800
     result_root: /ABS/private-test/results
 ```
@@ -840,7 +882,8 @@ Aktivierung durch den Betreiber, keinen Zugriffsfehler. Worker ändern keine
 fremden Checkouts oder laufenden Dienste. Eine gültige Einrichtung braucht keine
 erneute Betreiberbestätigung pro Routinelauf.
 
-Die aufrufende Issue-Bindung wird bei Start und Cleanup gegen den aktuellen
+Die aufrufende Issue-Bindung aus jedem gebundenen Projekt beider Workspaces wird
+bei Start und Cleanup gegen den aktuellen
 Projektkontext des regulären Pollers geprüft, einschließlich seiner verifizierten
 menschlichen Assignees. Fehlende Zuständigkeit oder ein nicht erreichbarer Poller
 sperren den Lauf; der unaufgelöste Startkontext ersetzt diese Prüfung nicht.
@@ -908,8 +951,9 @@ bleiben erhalten; der Worker erfindet keine zusätzliche Liveabnahme je Zwischen
 
 Jeder Aufruf enthält `operation`, `run_id`, `head_sha`, `source_sha256` und
 `scenario`. Die Quellkennung liefert `scripts/test-instance.py source <Workspace>`.
-Feste Operationen: `start`, `result`, `cancel`, `cleanup`; Szenarien: `bootstrap`
-oder im verwalteten Weg `workflow`; `failure-probe` ist ein absichtlicher Fehler nach Fixtureanlage mit regulärem Cleanup.
+Feste Operationen: `start`, `result`, `cancel`, `cleanup`; Szenarien: `bootstrap`,
+`workflow`, `failure-probe`, `po_handoff` und `po_followup`. `failure-probe` ist
+ein absichtlicher Fehler nach Fixtureanlage mit regulärem Cleanup.
 Keine Shellbefehle, Pfadargumente oder Envwerte. Issue/Workspace ergänzt das Tool
 aus seinem verifizierten Kontext und der Executor vergleicht seine Betreiberbindung.
 

@@ -232,13 +232,14 @@ vorhandene Belege erhalten; konkrete frühere Nutzer-/Sicherheitsfreigaben nicht
 verschieben. Bekannte Zuständigkeit übernehmen; materielle Entscheidungen nach
 `Planung` zurückgeben.
 
-Vor Merge sind erforderliche Build-/Test-/technische Review-/Mergegates und
-konkrete frühere Freigabepflichten zu erfüllen. Finale Produkt-/Zielumgebungsabnahme
-am gemergten bzw. regulär ausgelieferten Stand ist standardmäßig in `Review`
-fällig, bei Agentdelegation bereits in `Yolo Review`. Fehlende Installation dieses neuen Stands allein sperrt Merge nicht.
-Frühe isolierte Produkt-/Paket-/Integrationsprüfungen bleiben erforderlich;
-fehlende notwendige Testumgebung oder rote technische Gates sind keine finale
-Betriebsabnahme. `Review` ist weder `Review (AI)` noch `Freigabe Review`.
+Vor Merge sind Build, automatisierte Tests, technischer Review, Mergegates,
+gebundene Routinetests über `symphony_test` und konkrete frühere Freigaben zu erfüllen.
+Bei Agentdelegation sind Live-/Host-/Zielumgebungs- und isolierte Integrationsnachweise
+erst in `Yolo Review` fällig; sie bleiben bis dahin mit `; fällig: Yolo Review`
+offen und führen vor Merge nicht nach `BLOCKER`. Ohne Agentdelegation bleibt die
+Betreiberübergabe für frühe Nachweise und die finale Abnahme in `Review` bestehen.
+Fehlende notwendige Umgebung für technische Gates und rote Gates bleiben sperrend.
+`Review` ist weder `Review (AI)` noch `Freigabe Review`.
 Merge erteilt keine Deploymentfreigabe und bestätigt keine Produktabnahme.
 Später fällige Nachweise bleiben sichtbar offen, ohne falsche Häkchen.
 
@@ -250,7 +251,7 @@ autonomer Fortsetzungsweg bleibt, im einen Workpad Aktion, Rolle, Quell-/Paketst
 externe Belege und Fortsetzungsphase übergeben; nach `BLOCKER` wechseln und den
 Turn beenden. Das gilt auch für externe Testvoraussetzungen. Kein erfundener
 Authfehler, keine fremden Checkouts oder Betriebsumstellung durch den Worker.
-Bei Wiederaufnahme vor weiterer Phasenarbeit Beleg, Geltungsbereich und Stand
+Bei Wiederaufnahme vor weiterer Phasenarbeit Beleg, Geltungsbereich und Produkt-Quellhash
 abgleichen: Statusschieben allein ist keine Abnahme. Ohne passenden neuen Beleg
 bleibt das Gate offen; negative Befunde erlauben Nacharbeit im Scope und erneute Prüfung. Nur ohne zulässigen autonomen Weg
 dieselbe Übergabe erhalten und nach `BLOCKER` zurückgeben; keinen unerfüllbaren
@@ -491,7 +492,7 @@ bleiben wirksam; ein Review-Skip ersetzt keinen Betreiberbeleg.
 | `Freigabe Review` | Nein | Manueller Freigabepunkt der reviewten Version vor dem Test-/Merge-Zyklus; ohne Skip-Label keine weitere automatische Aktion. | Warten auf menschliches Verschieben |
 | `Test (AI)` | Ja | Branch vor den Tests per `symphony-pull` auf den späteren PR-Merge-Stand synchronisieren und danach `symphony-test` ausführen. | `Merge (AI)` |
 | `Merge (AI)` | Ja | Merge-Ablauf mit `symphony-land` ausführen; automatische Commits sind hier zulässig. Wenn Pull, Konfliktlösung oder andere Merge-Dateiänderungen neue Änderungen erzeugen oder übernehmen, nach `Test (AI)` zurückspringen. Wenn `Requires Manual Review` ohne gültiges GitHub-Approval blockiert oder der aktuelle Linear-Labelstand nicht verifizierbar ist, nach `BLOCKER` verschieben. | Bei Agentdelegation `Yolo Review`, sonst `Review`; bei Merge-Dateiänderungen `Test (AI)`; bei fehlendem gültigem Manual-Review-Approval oder nicht verifizierbarem Labelstand `BLOCKER` |
-| `BLOCKER` | Nein | Hindernis ohne zulässigen autonomen Fortsetzungsweg; keine weitere automatische Aktion, bis ein Mensch das Problem löst und das Ticket weiter verschiebt. | Warten auf menschliches Verschieben |
+| `BLOCKER` | PO-Sonderlauf bei Agentdelegation | Der delegierte Betreiberagent bearbeitet fällige Hindernisse. Gleiche Ursache binnen 24 Stunden führt ohne zweiten Agentenlauf zur menschlichen Eskalation. Ohne Delegation auf Entblockung warten. | Nach belegter Entblockung regulär fortsetzen |
 | `Abbruch (AI)` | Ja | Laufende Arbeit sofort abbrechen und Cleanup ausführen. | `Abgebrochen` |
 | `Yolo Review` | PO-Sonderlauf | Schlussabnahme agentendelegierter gemergter Tickets samt Folgefixkette nach `WORKFLOW_YOLO_AGENT.md`; kein regulärer Codingstart, nur geprüfter Abschluss nach `Review`. | `Review` mit entfernter Delegation |
 | `Review` | Nein | Terminaler Übergabestatus nach dem Merge; keine weitere automatische Aktion, manuelles Verschieben nach `Fertig` bleibt beim Benutzer. | - |
@@ -584,7 +585,7 @@ offenen Klärungsbedarf so dokumentieren, dass der Benutzer den Plan im Status
 
 ### Ablauf
 
-1. Finde oder erstelle genau einen persistierenden Scratchpad-Kommentar für das Issue und befolge für Aufbau und Pflege des Kommentars den globalen Skill `symphony-workpad`.
+1. Finde oder erstelle genau einen persistierenden Scratchpad-Kommentar für das Issue und befolge für Aufbau und Pflege des Kommentars den globalen Skill `symphony-workpad`. Bei offenem `Wartet auf: <IDENT>` eines anderen gebundenen Workspaces den Grund im Workpad festhalten, nach `Backlog` zurückgeben und den Turn beenden.
 2. Führe die inhaltliche Planung mit dem globalen Skill `symphony-planning` aus:
    - prüfe, ob die Ticketbeschreibung ausführlich genug für sichere Umsetzung ist,
    - prüfe streng, ob Codex das Ticket auf Basis von Beschreibung, Workpad und Kontext vollständig autonom verstehen und umsetzen kann,

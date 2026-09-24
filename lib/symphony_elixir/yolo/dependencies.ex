@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Yolo.Dependencies do
   @moduledoc "Complete, fresh dependency snapshots and connected acceptance chains."
   alias SymphonyElixir.Linear.YoloAgent
+  alias SymphonyElixir.WaitMarker
   alias SymphonyElixir.Yolo.{Admission, API}
 
   @terminal ~w(completed canceled duplicate)
@@ -26,8 +27,8 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   end
 
   defp refresh_issue(issue, opts) do
-    if YoloAgent.delegated?(issue) and issue.state in ["Backlog", "Yolo Review"] do
-      with {:ok, blockers} <- blockers(issue.id, opts), do: {:ok, %{issue | blocked_by: blockers}}
+    if YoloAgent.delegated?(issue) and issue.state in ["Backlog", "Todo", "Definiert", "BLOCKER", "Planung", "Yolo Review"] do
+      with {:ok, blockers} <- blockers(issue.id, opts), {:ok, markers} <- WaitMarker.targets(issue, opts), do: {:ok, %{issue | blocked_by: blockers ++ markers}}
     else
       {:ok, issue}
     end
@@ -55,18 +56,30 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   defp blocker(%{"issue" => issue}), do: %{id: issue["id"], identifier: issue["identifier"], state: issue["state"]["name"], state_type: issue["state"]["type"]}
 
   @spec terminal?(map()) :: boolean()
+  def terminal?(%{marker: true} = blocker), do: WaitMarker.merged?(blocker)
   def terminal?(blocker), do: Map.get(blocker, :state_type) in @terminal or Map.get(blocker, :state) in @terminal_names
 
   @spec unblocked?(map()) :: boolean()
   def unblocked?(issue), do: is_list(issue.blocked_by) and Enum.all?(issue.blocked_by, &terminal?/1)
 
+  @spec dispatchable?(map()) :: boolean()
+  def dispatchable?(issue) do
+    is_list(issue.blocked_by) and
+      (issue.state != "Backlog" or unblocked?(issue)) and
+      Enum.all?(issue.blocked_by, fn blocker -> not Map.get(blocker, :marker, false) or terminal?(blocker) end)
+  end
+
   @doc "Recheck Backlog blocking at the action boundary, including predecessor-only changes."
   @spec actionable([map()], keyword()) :: :ok | {:error, term()}
   def actionable(issues, opts) do
-    backlog = Enum.filter(issues, &(&1.state == "Backlog" and YoloAgent.delegated?(&1)))
+    backlog = Enum.filter(issues, &YoloAgent.delegated?/1)
 
     with {:ok, fresh} <- refresh(backlog, opts) do
-      if Enum.all?(fresh, &unblocked?/1), do: :ok, else: {:error, :yolo_backlog_blocked}
+      cond do
+        Enum.all?(fresh, &dispatchable?/1) -> :ok
+        Enum.any?(fresh, &(&1.state == "Backlog" and not dispatchable?(&1))) -> {:error, :yolo_backlog_blocked}
+        true -> {:error, :yolo_dependency_blocked}
+      end
     end
   end
 

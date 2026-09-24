@@ -89,6 +89,23 @@ class TestInstancePreflightTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check()
 
+    def test_product_hash_keeps_operator_evidence_until_product_content_changes(self):
+        (self.source / "fixtures").mkdir()
+        (self.source / "fixtures" / "sample.json").write_text("first")
+        (self.source / "workpad.md").write_text("pending")
+        (self.source / "run.log").write_text("first")
+        self.git("add", ".")
+        before = test_instance.product_source(self.source)["product_source_sha256"]
+        for name in ("fixtures/sample.json", "workpad.md", "run.log"):
+            (self.source / name).write_text("updated")
+        self.git("commit", "-qam", "operator evidence only")
+        self.assertEqual(before, test_instance.product_source(self.source)["product_source_sha256"])
+        (self.source / "code").write_text("product delta")
+        self.assertNotEqual(before, test_instance.product_source(self.source)["product_source_sha256"])
+        (self.source / "code").write_text("first")
+        (self.source / "new-product").write_text("candidate addition")
+        self.assertNotEqual(before, test_instance.product_source(self.source)["product_source_sha256"])
+
     def test_only_the_public_dummy_may_be_discovered_and_bound(self):
         self.assertEqual(set(self.check()['manifest']['projects']), {'symphony-test'})
         original = self.manifest['projects']

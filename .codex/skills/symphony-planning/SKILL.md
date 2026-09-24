@@ -35,7 +35,9 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
   Betreiber), fälliger Phase und konkreter Entscheidungsquelle/technischer
   Begründung gemäß `WORKFLOW.md`, „Phasenpflichten und Betreiberübergaben“,
   zuordnen. Agentenfristen sind keine Nutzerentscheidung; finale Produktabnahme
-  standardmäßig nach Merge in `Review`, frühe technische Gates bleiben erhalten.
+  standardmäßig nach Merge in `Review`; bei Agentdelegation Live-/Host- und isolierte
+  Integrationsnachweise mit `; fällig: Yolo Review` offen führen. Frühe technische
+  Gates bleiben erhalten.
   Bereits festgelegte Zuständigkeit übernehmen, nicht erneut erfragen. Bekannte spätere Betreiberpflichten
   verhindern keine autonome lokale Umsetzung; fehlende materielle Entscheidungen
   bleiben Klärungsbedarf. Vereinbarte Fälligkeiten nicht still verschieben.

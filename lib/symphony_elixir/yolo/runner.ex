@@ -4,7 +4,8 @@ defmodule SymphonyElixir.Yolo.Runner do
   alias SymphonyElixir.Codex.AppServer, as: AppServer
   alias SymphonyElixir.{CommentCheckpoint, Config, ProjectContext, RuntimePaths, Tracker}
   alias SymphonyElixir.Linear.{Client, IssueLease, YoloAgent}
-  alias SymphonyElixir.Yolo.{Admission, Completion, Delivery, Dependencies, Group, Observation, OpenClaw, Operations}
+  alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
+  alias SymphonyElixir.Yolo.{Group, Observation, OpenClaw, Operations}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{ReviewContract, ReviewReadiness, Scope, Store, Workspace}
 
@@ -51,12 +52,13 @@ defmodule SymphonyElixir.Yolo.Runner do
     with {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
          true <- Enum.sort(Enum.map(fresh, & &1.id)) == Enum.sort(Enum.map(issues, & &1.id)),
          {:ok, fresh} <- Dependencies.refresh(fresh, opts),
-         true <- Enum.all?(fresh, &(&1.state != "Backlog" or Dependencies.unblocked?(&1))),
+         true <- Enum.all?(fresh, &Dependencies.dispatchable?/1),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))),
          {:ok, observations, fingerprint} <- Observation.capture(fresh, %{}, opts),
          record = Delivery.migrate(record, observations),
          {:ok, operations} <- Operations.pending(Enum.map(fresh, & &1.id)),
          pending = Delivery.pending(fresh, observations, if(operations == [], do: record, else: Map.put(record, "processed", nil))),
+         {:ok, pending} <- if(group == "blocker", do: BlockerBrake.check(pending, opts), else: {:ok, pending}),
          true <- pending != [],
          {:ok, project_issues} <- current_project(group, fresh, opts) do
       fresh = pending
@@ -89,7 +91,11 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp execute_session(group, issues, project_issues, workspace, run_id, {record, observations, _fingerprint}, opts) do
     with {:ok, prompt} <- prompt(group, issues, project_issues, workspace, opts),
          :ok <- verify_start(group, issues, workspace, opts),
-         delivery_opts = Keyword.merge(opts, before_delivery: fn -> Delivery.reserve(group, run_id, observations) end, delivery_rejected: fn -> Delivery.rejected(group, run_id) end),
+         delivery_opts =
+           Keyword.merge(opts,
+             before_delivery: fn -> reserve_delivery(group, issues, run_id, observations, opts) end,
+             delivery_rejected: fn -> release_delivery(group, issues, run_id) end
+           ),
          {:ok, result} <- run_session(workspace, prompt, issues, run_id, delivery_opts),
          true <- Keyword.get(opts, :unchanged, &Workspace.unchanged?/1).(workspace),
          {:ok, retained} <- retained_members(issues, opts),
@@ -116,6 +122,25 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
   end
 
+  defp reserve_delivery(group, issues, run_id, observations, opts) do
+    with :ok <- Delivery.reserve(group, run_id, observations),
+         :ok <- if(group == "blocker", do: BlockerBrake.reserve(issues, run_id, opts), else: :ok) do
+      :ok
+    else
+      error ->
+        Delivery.rejected(group, run_id)
+        if group == "blocker", do: BlockerBrake.release(issues, run_id)
+        error
+    end
+  end
+
+  defp release_delivery(group, issues, run_id) do
+    case Delivery.rejected(group, run_id) do
+      :ok -> if(group == "blocker", do: BlockerBrake.release(issues, run_id), else: :ok)
+      error -> error
+    end
+  end
+
   defp verify_start(group, issues, workspace, opts) do
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
@@ -126,7 +151,7 @@ defmodule SymphonyElixir.Yolo.Runner do
          {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
          {:ok, fresh} <- Dependencies.refresh(fresh, opts),
          true <- Enum.sort_by(fresh, & &1.id) == Enum.sort_by(issues, & &1.id),
-         true <- Enum.all?(fresh, &(&1.state != "Backlog" or Dependencies.unblocked?(&1))),
+         true <- Enum.all?(fresh, &Dependencies.dispatchable?/1),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))) do
       :ok
     else

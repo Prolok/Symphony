@@ -138,6 +138,9 @@ defmodule SymphonyElixir.TestExecutorTest do
     request_fun = fn _, _ -> {:ok, %{status: 200, body: %{"data" => response}}} end
     Application.put_env(:symphony_elixir, :linear_client_request_fun, request_fun)
     assert :ok = TestExecutor.validate_contexts([context])
+    other_settings = %{context.settings | worker: %{context.settings.worker | test_executor: nil, test_executor_socket: nil}}
+    other = %{context | id: context.id <> "-tilor", root: context.root <> "-tilor", name: "tilor-project", settings: other_settings}
+    assert :ok = TestExecutor.validate_contexts([other, context])
     wrong = put_in(context.settings.tracker.project_slug, "foreign")
     assert {:error, :routine_test_project_binding_rejected} = TestExecutor.validate_contexts([wrong])
     Application.put_env(:symphony_elixir, :linear_client_request_fun, fn _, _ -> {:error, :offline} end)

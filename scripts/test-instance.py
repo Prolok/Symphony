@@ -59,6 +59,27 @@ def source(repo):
             "dirty": bool(git(repo, "status", "--porcelain", "--untracked-files=normal"))}
 
 
+def product_source(repo):
+    """Hash tracked product content, independent of workpad and fixture evidence."""
+    repo = Path(repo).resolve(strict=True)
+    names = set(git(repo, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split(b"\0")) - {b""}
+    excluded = {b"workpad", b"workpads", b"log", b"logs", b"fixture", b"fixtures", b"test-runs"}
+    digest = hashlib.sha256()
+    for raw in sorted(names):
+        parts = {part.lower() for part in raw.split(b"/")}
+        if parts & excluded or raw.lower().endswith((b".log", b".workpad", b"workpad.md")):
+            continue
+        path = repo / os.fsdecode(raw)
+        digest.update(raw + b"\0")
+        if path.is_symlink():
+            digest.update(b"link\0" + os.fsencode(os.readlink(path)))
+        elif path.is_file():
+            digest.update(str(path.stat().st_mode & 0o777).encode() + b"\0" + path.read_bytes())
+        else:
+            digest.update(b"missing\0")
+    return {"product_source_sha256": digest.hexdigest()}
+
+
 def canonical(path):
     expanded = Path(path).expanduser().absolute()
     if expanded != expanded.resolve():
@@ -200,6 +221,8 @@ if __name__ == "__main__":
     try:
         if sys.argv[1] == "source" and len(sys.argv) == 3:
             result = source(sys.argv[2])
+        elif sys.argv[1] == "product-source" and len(sys.argv) == 3:
+            result = product_source(sys.argv[2])
         elif sys.argv[1] == "preflight" and len(sys.argv) == 4:
             result = preflight(sys.argv[2], sys.argv[3])
         elif sys.argv[1] == "stamp" and len(sys.argv) == 3:
@@ -212,7 +235,7 @@ if __name__ == "__main__":
                 temporary.write_text(contents)
                 temporary.replace(path)
         else:
-            raise ValueError("usage: test-instance.py source checkout | preflight name checkout")
+            raise ValueError("usage: test-instance.py source|product-source checkout | preflight name checkout")
         print(json.dumps(result, sort_keys=True))
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError):
         sys.exit("Teststart abgewiesen: öffentliche Testbindung, Pfade und erwarteten Quellstand prüfen")

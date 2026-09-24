@@ -28,8 +28,8 @@ defmodule SymphonyElixir.Yolo.Group do
 
   @spec groups([map()]) :: map()
   def groups(issues) do
+    issues = Enum.filter(issues, &Dependencies.dispatchable?/1)
     reviews = Dependencies.review_members(issues)
-    issues = Enum.reject(issues, &(&1.state == "Backlog" and not Dependencies.unblocked?(&1)))
     pending = issues |> Enum.filter(&(Admission.eligible?(&1) and Admission.needed?(&1))) |> Enum.map(&name/1)
 
     issues

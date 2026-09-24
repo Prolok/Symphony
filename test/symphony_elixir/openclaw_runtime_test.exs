@@ -1229,7 +1229,10 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     refute finished["writable"]
     assert finished["acceptance_observed"] and finished["execution_observed"]
     assert {:ok, ^finished} = Recovery.resolve(evidence, true, recovery_opts)
-    assert {:error, :openclaw_run_failed_or_cancelled} = OpenClaw.recover(order, transport: fn _ -> flunk("no new external work") end)
+
+    assert {:error, :openclaw_run_failed_or_cancelled} =
+             recover_after_owner_exit(order, transport: fn _ -> flunk("no new external work") end)
+
     assert {:ok, ^decisions} = Store.read("incoming")
     assert {:ok, []} = Journal.pending()
     assert :ok = Journal.member_available(hd(issues).id)
@@ -1238,6 +1241,20 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, ^finished} = Recovery.resolve(evidence, true, recovery_opts)
     assert {:ok, ^following} = Journal.read("incoming")
     assert {:ok, ^finished} = Journal.history("incoming", order["id"])
+  end
+
+  defp recover_after_owner_exit(order, opts, retries \\ 50)
+
+  defp recover_after_owner_exit(order, opts, retries) do
+    case OpenClaw.recover(order, opts) do
+      {:error, :issue_already_owned} when retries > 0 ->
+        # The Python lease helper can release the pipe just after the interrupted run exits.
+        Process.sleep(20)
+        recover_after_owner_exit(order, opts, retries - 1)
+
+      result ->
+        result
+    end
   end
 
   defp executed_order(issues, opts) do

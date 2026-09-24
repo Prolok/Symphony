@@ -269,7 +269,7 @@ defmodule SymphonyElixir.YoloReviewContractTest do
                 {:ok, %{"data" => %{"issue" => %{"id" => ctx.issue.id, "team" => %{"states" => %{"nodes" => [%{"id" => "target", "name" => "Review"}], "pageInfo" => %{"hasNextPage" => false}}}}}}}
               end
 
-              assert :ok = CommentActionGuard.check(mutation, query: states, fetch_issue: ctx.opts[:fetch], guard: fn _ -> :ok end)
+              assert :ok = CommentActionGuard.check(mutation, query: states, fetch_issue: ctx.opts[:fetch], guard: fn _ -> :ok end, dependencies: &{:ok, &1})
               response
 
             document, variables ->

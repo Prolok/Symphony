@@ -59,6 +59,8 @@ nicht. `--test-instance` überspringt Auto-Update und deckt dessen Übergang nic
 
 ## Lokale Ausführung und Grenzen
 
+Unix-Socket-Fixtures unabhängig von `File.cwd!()` unter einem kurzen Temp-Pfad anlegen, da Reviewcheckouts lange Pfade haben und macOS höchstens 104 Bytes für Socketpfade erlaubt.
+
 `make check` verwendet den repo-lokalen Wrapper `scripts/mix-gate` und führt
 Build, Format und Lint inklusive `specs.check` ohne Tests aus. Die vollständige
 Suite mit Coverage und Dialyzer bleibt in `Test (AI)`. Keine

@@ -1210,8 +1210,10 @@ Fehlresultate bleiben erhalten, Exitstatus 1 und `status=failed` bleiben auch be
 Für neu angelegte YOLO-Tickets verwenden Anlageabgleich und abgeleitete
 Testfixtures denselben begrenzten Beschreibungsvergleich: `-`/`*` bei
 obersten Listen, zusammengefasste leere Zeilen, eine Leerzeile zwischen
-Doppelpunkt-Einleitung und oberster Aufzählung oder `1. `-Liste sowie endständige
-Linear-Issuelinks mit exakt gleichem Schlüssel und Ziel-URL. Nummerierung,
+Doppelpunkt-Einleitung und oberster Aufzählung oder `1. `-Liste sowie belegte
+Linear-Issuelinks am Zeilenende oder im Fließtext: Die nackte URL und
+`[ISSUE-SCHLÜSSEL](URL)` sind nur bei identischem URL-Schlüssel austauschbar.
+Das gilt auch neben Code-Spans, aber nie innerhalb von Code-Spans. Nummerierung,
 Listentrennzeichen und Abstände innerhalb nummerierter Listen bleiben unverändert.
 Für eindeutige Prosa gilt zusätzlich der belegte Backslash-Roundtrip:
 Ein oder zwei Backslashes vor ASCII-Buchstaben/Ziffern stellen denselben
@@ -1229,7 +1231,11 @@ Anlagepayload und journalisierter Intent werden dabei nicht umgeschrieben.
 Codeblöcke bleiben unverändert; Dokumente mit
 eingerückten Blöcken oder rohem HTML verlangen weiterhin Bytegleichheit.
 Andere Texte, Links, Einrückungen, Checkboxen, Titel, Identitäten, Status und
-Zuweisungen bleiben strikt geprüft. Unbekannte Transformationen werden abgewiesen;
+Zuweisungen bleiben strikt geprüft. Bei abweichenden angelegten Tickets nennt
+`yolo_created_issue_changed` das erste abweichende Feld und seine Stelle; die
+Beschreibung erhält Byteposition, Zeile, Spalte und kurze Textfragmente der
+normalisierten Vergleichsfassung.
+Unbekannte Transformationen werden abgewiesen;
 unvollständige Anlagen sind weder erfolgreiche Aggregationen noch Testpässe.
 
 SIGINT/SIGTERM lösen kontrolliertes Cleanup aus; ein Guardian hält die Reservierung,

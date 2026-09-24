@@ -360,6 +360,45 @@ defmodule SymphonyElixir.YoloActionsTest do
     end
   end
 
+  test "PRO-906 prose autolink resumes an existing linked follow-up without a second create", %{issues: [source | _]} do
+    source = %{source | state: "Yolo Review", url: "https://linear.app/test/issue/PRO-0"}
+    change(&%{&1 | issues: %{source.id => source}})
+    original = File.read!("test/fixtures/linear_markdown/pro906-input-description.md")
+    returned = File.read!("test/fixtures/linear_markdown/pro906-linear-description.md")
+    request = %{args([source], "followup") | "description" => original, "validation" => "Requirements checked"}
+
+    group([source], fn ->
+      change(&%{&1 | fail: "YoloCreate"})
+      assert {:error, :response_lost} = Followup.invoke(request, opts())
+      [{id, ticket}] = Map.to_list(db().created)
+      assert ticket["labelIds"] == ["generated"]
+      assert ticket["assignee"]["id"] == "human"
+      assert ticket["delegate"]["id"] == "pai"
+
+      related = %{"id" => "existing-related", "type" => "related", "issue" => %{"id" => id}, "relatedIssue" => %{"id" => source.id}}
+      saved = Map.update!(ticket, "description", &String.replace(&1, original, returned))
+      change(&%{&1 | fail: nil, created: %{id => Map.put(saved, "description", String.replace(saved["description"], "keine Reviewcheckouts", "Reviewcheckouts"))}, relations: [related]})
+
+      error = ActionTool.execute(request, opts())
+      refute error["success"]
+      assert %{"error" => message} = Jason.decode!(error["output"])
+      assert message =~ "yolo_created_issue_changed"
+      assert message =~ "description"
+      assert message =~ "line:"
+      assert message =~ "column:"
+      assert message =~ "keine Reviewcheckouts"
+      assert length(writes("YoloCreate")) == 1
+
+      change(&%{&1 | created: %{id => saved}})
+      assert {:ok, %{"id" => ^id}} = Followup.invoke(request, opts())
+      assert {:ok, [intent]} = Operations.related([source.id])
+      assert intent["done"] == true
+      assert db().relations == [related]
+      assert writes("YoloRelation") == []
+      assert length(writes("YoloCreate")) == 1
+    end)
+  end
+
   for prefix <- ["backslash-", "inline-link-"] do
     test "changed #{prefix}requirements refuse creation confirmation, probe, handoff and cleanup", ctx do
       alias SymphonyElixir.TestRun.Derived
@@ -396,7 +435,7 @@ defmodule SymphonyElixir.YoloActionsTest do
 
         for edited <- edits do
           change(&%{&1 | fail: nil, created: %{id => Map.put(ticket, "description", edited)}})
-          assert {:error, :yolo_created_issue_changed} = Followup.invoke(request, opts())
+          assert {:error, {:yolo_created_issue_changed, %{field: "description", at: %{byte: _, line: _, column: _}}}} = Followup.invoke(request, opts())
           assert {:error, :test_derived_fixture_changed} = Derived.inspect_fixtures("probe", plan, opts())
           assert {:error, :test_derived_fixture_changed} = Derived.inspect_fixtures("cleanup", plan, opts())
           assert {:error, :yolo_handoff_not_ready} = handoff(%{"issue_id" => source.id, "report" => "Open fix"}, opts())
@@ -518,7 +557,7 @@ defmodule SymphonyElixir.YoloActionsTest do
             String.replace(normalized, "docs/README.md", "docs/OTHER.md")
           ] do
         change(&%{&1 | fail: nil, created: %{id => Map.put(ticket, "description", edited)}})
-        assert {:error, :yolo_created_issue_changed} = Followup.invoke(request, opts())
+        assert {:error, {:yolo_created_issue_changed, %{field: "description", at: %{byte: _, line: _, column: _}}}} = Followup.invoke(request, opts())
         assert {:error, :test_derived_fixture_changed} = Derived.inspect_fixtures("probe", plan, opts())
         assert {:error, :test_derived_fixture_changed} = Derived.inspect_fixtures("cleanup", plan, opts())
       end
@@ -571,10 +610,20 @@ defmodule SymphonyElixir.YoloActionsTest do
         change(&%{&1 | fail: nil, created: %{id => Map.put(ticket, key, edit)}})
         action_error = if key == "id", do: :yolo_created_issue_unconfirmed, else: :yolo_created_issue_changed
         derived_error = if key == "id", do: :yolo_created_issue_unconfirmed, else: :test_derived_fixture_changed
-        assert {:error, ^action_error} = Followup.invoke(request, opts())
+
+        if key == "id" do
+          assert {:error, ^action_error} = Followup.invoke(request, opts())
+        else
+          assert {:error, {^action_error, %{field: field}}} = Followup.invoke(request, opts())
+          assert field == if(key in ~w(project team assignee delegate state), do: "#{key}.id", else: key)
+        end
+
         assert {:error, ^derived_error} = Derived.inspect_fixtures("probe", plan, opts())
         assert {:error, ^derived_error} = Derived.inspect_fixtures("cleanup", plan, opts())
       end
+
+      change(&%{&1 | created: %{id => Map.put(ticket, "state", nil)}})
+      assert {:error, {:yolo_created_issue_changed, %{field: "state.id", expected: _, actual: "nil"}}} = Followup.invoke(request, opts())
 
       assert writes("YoloUpdate") == []
       assert writes("DeleteDerivedTestFixture") == []
@@ -983,8 +1032,8 @@ defmodule SymphonyElixir.YoloActionsTest do
       assert {:error, :yolo_followup_sources_changed} = Followup.invoke(args(issues), opts())
       assert writes("YoloUpdate") == []
       change(&%{&1 | issues: Map.put(&1.issues, issue.id, issue)})
-      change(&%{&1 | created: Map.new(&1.created, fn {id, node} -> {id, Map.put(node, "title", "external edit")} end)})
-      assert {:error, :yolo_created_issue_changed} = Followup.invoke(args(issues), opts())
+      change(&%{&1 | created: Map.new(&1.created, fn {id, node} -> {id, Map.put(node, "title", node["title"] <> " changed")} end)})
+      assert {:error, {:yolo_created_issue_changed, %{field: "title"}}} = Followup.invoke(args(issues), opts())
       assert length(writes("YoloCreate")) == 1
       current_context = ProjectContext.current()
       ProjectContext.bind(%{current_context | test_instance: %{}})
@@ -1133,7 +1182,7 @@ defmodule SymphonyElixir.YoloActionsTest do
         result
       end
 
-      assert {:error, :yolo_created_issue_changed} = Followup.invoke(args(issues), Keyword.put(opts(), :query, query))
+      assert {:error, {:yolo_created_issue_changed, %{field: "labelIds", at: "labelIds[0]"}}} = Followup.invoke(args(issues), Keyword.put(opts(), :query, query))
       assert writes("YoloUpdate") == []
     end)
   end

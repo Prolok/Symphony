@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.Yolo.Delivery do
   @moduledoc "Durable per-member dispatch receipts, independent of group membership and model completion."
   alias SymphonyElixir.Linear.IssueLease
-  alias SymphonyElixir.Yolo.{Observation, Store}
+  alias SymphonyElixir.Yolo.{BlockerBrake, Observation, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
 
   @doc "Carry forward provably unchanged completed observations from the earlier group journal."
@@ -43,11 +43,11 @@ defmodule SymphonyElixir.Yolo.Delivery do
   @spec reconcile(String.t()) :: :ok | {:error, term()}
   def reconcile(group) do
     case Journal.read(group) do
-      {:ok, %{"state" => "rejected", "id" => id}} ->
-        rejected(group, id)
+      {:ok, %{"state" => "rejected", "id" => id} = order} ->
+        reconcile_rejected(group, id, order)
 
-      {:ok, %{"state" => "retired", "retirement" => %{"kind" => "fenced_interruption"} = proof}} ->
-        interrupted(group, proof)
+      {:ok, %{"state" => "retired", "id" => id, "retirement" => %{"kind" => "fenced_interruption"} = proof}} ->
+        interrupted(group, id, proof)
 
       {:ok, %{"state" => "completed", "id" => id}} ->
         completed_session(group, id)
@@ -64,6 +64,20 @@ defmodule SymphonyElixir.Yolo.Delivery do
     end
   end
 
+  defp reconcile_rejected("blocker" = group, run_id, order) do
+    members = order["members"]
+
+    if is_list(members) and Enum.all?(members, &(is_map(&1) and is_binary(&1["id"]))) do
+      issues = Enum.map(members, &%{id: &1["id"]})
+
+      with :ok <- BlockerBrake.release(issues, run_id), do: rejected(group, run_id)
+    else
+      {:error, :openclaw_journal_corrupt}
+    end
+  end
+
+  defp reconcile_rejected(group, run_id, _order), do: rejected(group, run_id)
+
   defp completed_session(group, id) do
     update(group, fn record ->
       case record["attempt"] do
@@ -78,22 +92,50 @@ defmodule SymphonyElixir.Yolo.Delivery do
     end)
   end
 
-  defp interrupted(group, proof) do
-    update(group, fn record ->
-      completed = proof["attempt"]["completed"] || %{}
+  defp interrupted("blocker" = group, run_id, %{"attempt" => %{"id" => run_id} = attempt, "deliveries" => original})
+       when is_map(original) do
+    reconcile_interrupted(group, run_id, attempt, original)
+  end
 
-      # Keep completed decisions suppressed; only the unfinished deliveries of
-      # this exact generation can be scheduled again. Newer receipts survive.
-      deliveries =
-        Map.reject(record["deliveries"] || %{}, fn {id, receipt} ->
-          receipt == proof["deliveries"][id] and not is_binary(completed[id])
-        end)
+  defp interrupted("blocker", _run_id, _proof), do: {:error, :openclaw_journal_corrupt}
 
-      record
-      |> Map.put("deliveries", deliveries)
-      |> Map.update("delivery_ends", %{proof["attempt"]["id"] => true}, &Map.put(&1, proof["attempt"]["id"], true))
+  defp interrupted(group, run_id, %{"attempt" => %{"id" => attempt_id} = attempt, "deliveries" => original})
+       when is_binary(attempt_id) and is_map(original) do
+    reconcile_interrupted(group, run_id, attempt, original)
+  end
+
+  defp interrupted(_group, _run_id, _proof), do: {:error, :openclaw_journal_corrupt}
+
+  defp reconcile_interrupted(group, run_id, attempt, original) do
+    IssueLease.with_journal_lock(Store.path(group) <> ".completion", fn ->
+      with {:ok, record} <- Store.read(group), do: release_interrupted(group, run_id, attempt, original, record)
     end)
   end
+
+  defp release_interrupted(group, run_id, attempt, original, record) do
+    completed = attempt["completed"] || %{}
+
+    # Keep completed decisions suppressed; only unfinished deliveries of this
+    # generation can be scheduled again. Newer receipts survive.
+    {released, deliveries} =
+      Enum.split_with(record["deliveries"] || %{}, fn {id, receipt} ->
+        matching_generation?(group, receipt, original, id, run_id) and not is_binary(completed[id])
+      end)
+
+    issues = if group == "blocker", do: Enum.map(released, fn {id, _} -> %{id: id} end), else: []
+
+    with :ok <- BlockerBrake.release(issues, run_id) do
+      updated =
+        record
+        |> Map.put("deliveries", Map.new(deliveries))
+        |> Map.update("delivery_ends", %{attempt["id"] => true}, &Map.put(&1, attempt["id"], true))
+
+      Store.write(group, updated)
+    end
+  end
+
+  defp matching_generation?("blocker", receipt, original, id, run_id), do: receipt["run_id"] == run_id and receipt == original[id]
+  defp matching_generation?(_group, receipt, original, id, _run_id), do: receipt == original[id]
 
   @spec pending([map()], map(), map()) :: [map()]
   def pending(members, observations, record) do

@@ -69,7 +69,7 @@ defmodule SymphonyElixir.Relay do
 
   defp stamp_issue(issue, record) do
     epoch = Store.digest({record["generation"], record["epochs"][issue.id]})
-    %{issue | last_comment_signal: Map.put(issue.last_comment_signal || %{}, :relay_epoch, epoch)}
+    %{issue | last_comment_signal: Map.put(issue.last_comment_signal || %{}, :relay_epoch, epoch), relay_event: get_in(record, ["event_positions", issue.id])}
   end
 
   @spec background_issues([String.t()]) :: {:ok, [SymphonyElixir.Linear.Issue.t()]} | {:error, term()}

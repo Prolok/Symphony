@@ -264,6 +264,16 @@ defmodule SymphonyElixir.YoloAgentTest do
     assert Enum.sort(Enum.map(issues, & &1.id)) == ~w(backlog defined dialog foreign review todo)
     assert Enum.find(issues, &(&1.id == "foreign")).assigned_to_worker == false
     refute Enum.find(issues, &(&1.id == "backlog")).assigned_to_worker
+    marker = %{"generation" => "relay", "position" => 3, "event_id" => "event-3"}
+
+    session = %SymphonyElixir.Relay.Session{
+      status: :ready,
+      contexts: [context],
+      record: %{"issues" => Map.new(nodes, &{&1["id"], &1}), "generation" => "relay", "epochs" => %{}, "event_positions" => %{"todo" => marker}}
+    }
+
+    assert {:ok, stamped} = Relay.candidates(session, [context])
+    assert Enum.find(stamped[context.id], &(&1.id == "todo")).relay_event == marker
     assert {:ok, empty} = Client.relay_candidates([context], [put_in(hd(nodes), ["project", "slugId"], "elsewhere")])
     assert empty[context.id] == []
     restricted = put_in(context.settings.tracker.app["allowed_issue_ids"], ["todo"])

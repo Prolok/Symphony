@@ -40,6 +40,7 @@ defmodule SymphonyElixir.Relay.Session do
       "dirty" => [],
       "epochs" => %{},
       "foreign_comment_epochs" => %{},
+      "event_positions" => %{},
       "pending" => nil,
       "reconcile_at" => 0
     }
@@ -106,6 +107,7 @@ defmodule SymphonyElixir.Relay.Session do
   defp valid_record?(record) do
     valid_collections?(record) and
       valid_foreign_epochs?(record["foreign_comment_epochs"]) and
+      valid_event_positions?(Map.get(record, "event_positions", %{})) and
       is_integer(record["cursor"]) and record["cursor"] >= 0 and is_integer(record["reconcile_at"]) and
       valid_phase?(record) and valid_pending?(record)
   end
@@ -119,6 +121,18 @@ defmodule SymphonyElixir.Relay.Session do
   defp valid_foreign_epochs?(nil), do: true
   defp valid_foreign_epochs?(epochs) when is_map(epochs), do: Enum.all?(epochs, fn {id, epoch} -> is_binary(id) and is_integer(epoch) and epoch >= 0 end)
   defp valid_foreign_epochs?(_), do: false
+
+  defp valid_event_positions?(positions) when is_map(positions) do
+    Enum.all?(positions, fn
+      {id, %{"generation" => generation, "position" => position, "event_id" => event_id}} ->
+        is_binary(id) and is_binary(generation) and is_integer(position) and position >= 0 and is_binary(event_id)
+
+      _ ->
+        false
+    end)
+  end
+
+  defp valid_event_positions?(_), do: false
 
   defp valid_pending?(%{"pending" => nil}), do: true
 
@@ -285,7 +299,23 @@ defmodule SymphonyElixir.Relay.Session do
         end
       end)
 
-    r = session.record |> Map.put("pending", page) |> Map.put("foreign_comment_epochs", foreign_epochs) |> Map.update!("dirty", &Enum.uniq(&1 ++ ids))
+    positions =
+      Enum.reduce(page["events"], Map.get(session.record, "event_positions", %{}), fn event, acc ->
+        case event["issueId"] do
+          id when is_binary(id) ->
+            Map.put(acc, id, %{"generation" => page["generation"], "position" => event["position"], "event_id" => event["eventId"]})
+
+          _ ->
+            acc
+        end
+      end)
+
+    r =
+      session.record
+      |> Map.put("pending", page)
+      |> Map.put("foreign_comment_epochs", foreign_epochs)
+      |> Map.put("event_positions", positions)
+      |> Map.update!("dirty", &Enum.uniq(&1 ++ ids))
     continue_saved(session, r, &acknowledge/1)
   end
 

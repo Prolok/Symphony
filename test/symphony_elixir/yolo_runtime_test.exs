@@ -6,7 +6,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.Linear.WriteContext
-  alias SymphonyElixir.Yolo.{BlockerBrake, Completion, Coordinator, Group, Observation, Operations, Scope, Store}
+  alias SymphonyElixir.Yolo.{BlockerBrake, Completion, Coordinator, Group, Impulse}
+  alias SymphonyElixir.Yolo.{Observation, Operations, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
 
   setup do
@@ -52,6 +53,146 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
   defp inbox(versions \\ %{}), do: %{"versions" => versions, "last_successful_scan" => "now", "scan_error" => nil}
   defp scan(_), do: {:ok, inbox()}
+
+  defp fixture_delivery_end(group, run_id) do
+    {:ok, record} = Store.read(group)
+    Store.write(group, Map.put(record, "delivery_ends", Map.put(record["delivery_ends"] || %{}, run_id, true)))
+  end
+
+  test "a short withdrawal and redelegation becomes one durable review impulse", %{issues: [issue | _]} do
+    history = fn id, fields ->
+      Map.merge(
+        %{"id" => id, "createdAt" => "2026-09-24T12:00:00Z", "fromDelegate" => nil, "toDelegate" => nil, "fromPriority" => nil, "toPriority" => nil, "actor" => nil, "botActor" => nil},
+        fields
+      )
+    end
+
+    baseline = history.("baseline", %{})
+    withdrawn = history.("withdrawn", %{"fromDelegate" => %{"id" => "pai"}})
+    restored = history.("restored", %{"toDelegate" => %{"id" => "pai"}})
+    event = fn position -> %{"generation" => "relay-generation", "position" => position, "event_id" => "event-#{position}"} end
+    issue = %{issue | relay_event: event.(1)}
+    assert {:ok, record} = Impulse.observe([issue], %{}, history: fn _ -> {:ok, [baseline]} end)
+    assert Impulse.generations(record)[issue.id] == 0
+
+    issue = %{issue | relay_event: event.(3)}
+    history_page = fn _ -> {:ok, [restored, withdrawn, baseline]} end
+    assert {:ok, resumed} = Impulse.observe([issue], record, history: history_page)
+    assert Impulse.generations(resumed)[issue.id] == 1
+    assert get_in(resumed, ["impulses", issue.id, "reason"]) == "delegated_again"
+
+    assert {:ok, ^resumed} =
+             Impulse.observe([issue], resumed, history: fn _ -> flunk("replayed event must not query history") end)
+
+    assert {:error, :yolo_history_gap} =
+             Impulse.observe([%{issue | relay_event: event.(4)}], resumed, history: fn _ -> {:ok, [withdrawn]} end)
+  end
+
+  test "relay snapshot establishes history baseline before the first event", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(put_in(context.settings.tracker.relay, %{"consumer_id" => "test"}))
+
+    baseline = %{
+      "id" => "baseline",
+      "createdAt" => "2026-09-24T12:00:00Z",
+      "fromDelegate" => nil,
+      "toDelegate" => nil,
+      "fromPriority" => nil,
+      "toPriority" => nil,
+      "actor" => nil,
+      "botActor" => nil
+    }
+
+    reassigned = %{baseline | "id" => "reassigned", "toDelegate" => %{"id" => "pai"}}
+    assert {:ok, record} = Impulse.observe([issue], %{}, history: fn _ -> {:ok, [baseline]} end)
+    assert get_in(record, ["impulses", issue.id, "history_head"]) == "baseline"
+    event = %{"generation" => "relay", "position" => 1, "event_id" => "event-1"}
+    history_page = fn _ -> {:ok, [reassigned, baseline]} end
+    assert {:ok, resumed} = Impulse.observe([%{issue | relay_event: event}], record, history: history_page)
+    assert Impulse.generations(resumed)[issue.id] == 1
+  end
+
+  test "only a verified human priority increase creates an impulse", %{issues: [issue | _]} do
+    base = %{
+      "id" => "baseline",
+      "createdAt" => "2026-09-24T12:00:00Z",
+      "fromDelegate" => nil,
+      "toDelegate" => nil,
+      "fromPriority" => nil,
+      "toPriority" => nil,
+      "actor" => nil,
+      "botActor" => nil
+    }
+
+    event = fn position -> %{"generation" => "relay-generation", "position" => position, "event_id" => "event-#{position}"} end
+    issue = %{issue | relay_event: event.(1)}
+    {:ok, baseline} = Impulse.observe([issue], %{}, history: fn _ -> {:ok, [base]} end)
+
+    cases = [
+      {0, 2, %{"id" => "human", "app" => false}, nil, 1},
+      {3, 1, %{"id" => "human", "app" => false}, nil, 1},
+      {2, 1, %{"id" => "bot", "app" => true}, nil, 0},
+      {2, 1, nil, %{"id" => "bot"}, 0},
+      {1, 4, %{"id" => "human", "app" => false}, nil, 0},
+      {2, 2, %{"id" => "human", "app" => false}, nil, 0}
+    ]
+
+    for {from, to, actor, bot, expected} <- cases do
+      change = %{base | "id" => "change", "fromPriority" => from, "toPriority" => to, "actor" => actor, "botActor" => bot}
+
+      history_page = fn _ -> {:ok, [change, base]} end
+      assert {:ok, record} = Impulse.observe([%{issue | relay_event: event.(2)}], baseline, history: history_page)
+
+      assert Impulse.generations(record)[issue.id] == expected
+    end
+  end
+
+  test "history-backed redelegation restarts an ended, open delivery once across orchestrator restart", %{issues: [issue | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    baseline = %{"id" => "before", "createdAt" => "2026-09-24T12:00:00Z", "fromDelegate" => nil, "toDelegate" => nil, "fromPriority" => nil, "toPriority" => nil, "actor" => nil, "botActor" => nil}
+    withdrawn = %{baseline | "id" => "withdrawn", "fromDelegate" => %{"id" => "pai"}}
+    restored = %{baseline | "id" => "restored", "toDelegate" => %{"id" => "pai"}}
+    event = fn position -> %{"generation" => "relay", "position" => position, "event_id" => "event-#{position}"} end
+    Process.put(:history_nodes, [baseline])
+
+    opts = [
+      scan: &scan/1,
+      history: fn _ -> {:ok, Process.get(:history_nodes)} end,
+      start: fn group, _ ->
+        {:ok, record} = Store.read(group)
+        :ok = Delivery.reserve(group, "ended-run", record["observations"])
+        :ok = fixture_delivery_end(group, "ended-run")
+        send(self(), :review_started)
+        {:error, :fixture_end}
+      end
+    ]
+
+    issue = %{issue | relay_event: event.(1)}
+    tick(state, [issue], opts)
+    assert_receive :review_started
+    tick(state, [issue], opts)
+    refute_receive :review_started
+
+    Process.put(:history_nodes, [restored, withdrawn, baseline])
+    issue = %{issue | relay_event: event.(3)}
+    tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [issue], opts)
+    assert_receive :review_started
+    for _ <- 1..3, do: tick(state, [issue], opts)
+    refute_receive :review_started
+    tick(state, [%{issue | delegate_id: nil}], opts)
+    refute_receive :review_started
+  end
+
+  test "missing history evidence defers dispatch with a durable reason", %{issues: [issue | _]} do
+    issue = %{issue | relay_event: %{"generation" => "relay", "position" => 1, "event_id" => "event-1"}}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    opts = [scan: &scan/1, history: fn _ -> {:error, :history_offline} end, start: fn _, _ -> flunk("history is required") end]
+
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert {:ok, record} = Store.read("incoming")
+    assert record["waiting_reason"] == ":history_offline"
+    assert record["observations"] == %{}
+  end
 
   test "new source-bound operator duty after technical work is delivered once", %{issues: [issue | _]} do
     issue = %{issue | state: "BLOCKER"}
@@ -135,7 +276,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     for response <- [{:error, :offline}, {:error, :rate_limited}, {:ok, %{snapshot | "scan_error" => "partial"}}, {:ok, Map.delete(snapshot, "current")}] do
       assert tick(state, [changed], Keyword.put(opts, :scan, fn _ -> response end)).yolo_runs == %{}
-      assert Store.read("blocker") == {:ok, after_poll}
+      assert {:ok, waiting} = Store.read("blocker")
+      assert Map.delete(waiting, "waiting_reason") == Map.delete(after_poll, "waiting_reason")
+      assert is_binary(waiting["waiting_reason"])
     end
   end
 
@@ -170,6 +313,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     second = operator_workpad("second", "b")
     Process.put(:operator_snapshot, Map.put(inbox(%{"first" => first, "second" => second}), "current", %{"workpad" => "second"}))
+    {:ok, second_observations, _} = Observation.capture([issue], %{}, scan: opts[:scan])
+    {:ok, prior_record} = Store.read("blocker")
+    assert second_observations[issue.id]["source"] != prior_record["observations"][issue.id]["source"]
+    assert Yolo.Delivery.pending([issue], second_observations, prior_record) == [issue]
     blocked = Keyword.put(opts, :checkpoint, fn _ -> {:error, :new_input_requires_processing} end)
     assert {:error, :new_input_requires_processing} = run_group("blocker", [issue], [issue], blocked)
     refute_receive :operator_decision
@@ -991,7 +1138,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     for error <- [:rate_limited, :incomplete_pagination] do
       failing = Keyword.put(opts, :scan, fn _ -> {:error, error} end)
       tick(state, [%{own | last_comment_signal: %{relay_epoch: 5}}], failing)
-      assert Store.read("review") == {:ok, before_failure}
+      assert {:ok, waiting} = Store.read("review")
+      assert Map.delete(waiting, "waiting_reason") == Map.delete(before_failure, "waiting_reason")
+      assert is_binary(waiting["waiting_reason"])
       assert Process.get(:review_counts) == %{scans: 4, sessions: 3}
     end
   end
@@ -1930,6 +2079,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     start = fn group, _ ->
       {:ok, record} = Store.read(group)
       :ok = Delivery.reserve(group, "started", record["observations"])
+      :ok = fixture_delivery_end(group, "started")
       send(self(), :dispatched)
       {:error, :session_exited_without_decision}
     end
@@ -1952,6 +2102,90 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert_receive :dispatched
     tick(state, [%{first | description: "changed requirement"}], opts)
     refute_receive :dispatched
+  end
+
+  test "technically ended delivery resumes only for a new impulse; uncertain delivery stays reserved", %{issues: [issue | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    {:ok, observations, _} = Observation.capture([issue], %{}, scan: &scan/1)
+    receipt = %{"semantic" => observations[issue.id]["semantic"], "run_id" => "run"}
+
+    record = %{
+      "deliveries" => %{issue.id => receipt},
+      "attempt" => %{"id" => "run", "session_end" => true, "members" => [issue.id]},
+      "decisions" => %{}
+    }
+
+    assert Delivery.pending([issue], observations, record) == []
+    {:ok, resumed, _} = Observation.capture([issue], %{}, scan: &scan/1, impulse_generations: %{issue.id => 1})
+    assert Delivery.pending([issue], resumed, record) == [issue]
+    assert Delivery.pending([issue], resumed, put_in(record, ["attempt", "session_end"], false)) == []
+  end
+
+  test "a confirmed member is reused when a partly completed delivery resumes", %{issues: [first, second | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    {:ok, original, _} = Observation.capture([first, second], %{}, scan: &scan/1)
+    generations = %{first.id => 1, second.id => 1}
+    {:ok, resumed, _} = Observation.capture([first, second], %{}, scan: &scan/1, impulse_generations: generations)
+
+    receipts =
+      Map.new([first, second], fn issue ->
+        {issue.id, %{"semantic" => original[issue.id]["semantic"], "run_id" => "run"}}
+      end)
+
+    record = %{"deliveries" => receipts, "delivery_ends" => %{"run" => true}, "completed_sources" => %{first.id => original[first.id]["source"]}}
+
+    assert Delivery.pending([first, second], resumed, record) == [second]
+  end
+
+  test "an unresolved delivery reserves its whole group while another member changes", %{issues: [first, second | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    {:ok, observations, _} = Observation.capture([first, second], %{}, scan: &scan/1)
+    receipt = %{"semantic" => observations[first.id]["semantic"], "run_id" => "uncertain"}
+    record = %{"deliveries" => %{first.id => receipt}}
+
+    assert Delivery.pending([first, second], observations, record) == []
+    assert Delivery.waiting_reason([first, second], observations, record) == "delivery_end_unconfirmed"
+  end
+
+  test "review runner resumes only the open member of a ready chain", %{issues: [first, second | _], root: root} do
+    first = %{first | state: "Yolo Review"}
+    second = %{second | state: "Yolo Review", blocked_by: [%{id: first.id, state: "Yolo Review"}]}
+    issues = [first, second]
+    {:ok, old, _} = Observation.capture(issues, %{}, scan: &scan/1)
+    {:ok, current, _} = Observation.capture(issues, %{}, scan: &scan/1, impulse_generations: %{second.id => 1})
+    {:ok, record} = Store.read("review")
+    receipts = Map.new(issues, fn issue -> {issue.id, %{"semantic" => old[issue.id]["semantic"], "run_id" => "earlier"}} end)
+
+    record =
+      Map.merge(record, %{
+        "observations" => current,
+        "impulses" => %{second.id => %{"generation" => 1, "reason" => "delegated_again"}},
+        "deliveries" => receipts,
+        "delivery_ends" => %{"earlier" => true},
+        "completed_sources" => %{first.id => old[first.id]["source"]}
+      })
+
+    :ok = Store.write("review", record)
+
+    opts = [
+      fetch: fn _ -> {:ok, [second]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      project: fn -> {:ok, issues} end,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      before_action: fn _ -> :ok end,
+      session: fn _, _, lead, _ ->
+        assert lead.id == second.id
+        send(self(), :open_member_reviewed)
+        assert :ok = Completion.invoke(%{"issue_id" => second.id, "result" => "offen geprüft"}, handoff_completed: true, fetch: fn _ -> {:ok, [second]} end, before_action: fn _ -> :ok end)
+        {:ok, %{session_id: "resumed"}}
+      end
+    ]
+
+    assert :ok = run_group("review", [second], issues, opts)
+    assert_receive :open_member_reviewed
   end
 
   test "unchanged legacy completions survive migration and group membership changes", %{issues: [first, second | _]} do
@@ -1992,6 +2226,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       start: fn group, _ ->
         {:ok, record} = Store.read(group)
         :ok = Delivery.reserve(group, "run", record["observations"])
+        :ok = fixture_delivery_end(group, "run")
         send(self(), :dispatched)
         {:error, :done}
       end
@@ -2033,6 +2268,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         start: fn group, _ ->
           {:ok, record} = Store.read(group)
           :ok = Delivery.reserve(group, "run", record["observations"])
+          :ok = fixture_delivery_end(group, "run")
           send(self(), :dispatched)
           {:error, :session_exited_without_decision}
         end
@@ -2066,6 +2302,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         {:ok, record} = Store.read(group)
         ids = Enum.map(members, & &1.id)
         :ok = Delivery.reserve(group, "run", Map.take(record["observations"], ids))
+        :ok = fixture_delivery_end(group, "run")
         send(self(), {:dispatched, ids})
       end,
       start: fn _, callback ->

@@ -36,7 +36,8 @@ defmodule SymphonyElixir.Yolo.Observation do
   defp observe(issue, previous, generation, opts) do
     semantic = semantic_issue(issue)
     semantic = if generation > 0, do: Map.put(semantic, :dependency_generation, generation), else: semantic
-    signal = Digest.digest({3, issue.updated_at, issue.last_comment_signal, semantic})
+    impulse_generation = get_in(opts, [:impulse_generations, issue.id]) || 0
+    signal = Digest.digest({4, issue.updated_at, issue.last_comment_signal, semantic, impulse_generation})
 
     if is_map(previous) and previous["signal"] == signal do
       {:ok, previous}
@@ -55,13 +56,36 @@ defmodule SymphonyElixir.Yolo.Observation do
 
         semantic = with_handoffs(semantic, handoffs)
         source = Digest.digest({semantic, comments})
-        legacy = semantic_issue(issue) |> Map.put(:state, issue.state) |> Map.put(:blocked_by, Enum.map(issue.blocked_by, &Map.delete(&1, :state_type)))
-        {:ok, %{"signal" => signal, "semantic" => source, "source" => source, "legacy_semantic" => if(generation == 0 and handoffs == [], do: Digest.digest({legacy, comments}))}}
+        version = impulse_version(source, impulse_generation)
+
+        {:ok,
+         %{
+           "signal" => signal,
+           "semantic" => version,
+           "member_semantic" => version,
+           "source" => source,
+           "legacy_semantic" => legacy_semantic(issue, generation, handoffs, comments)
+         }}
       else
         {:error, _} = error -> error
         _ -> {:error, :yolo_comments_incomplete}
       end
     end
+  end
+
+  defp impulse_version(source, generation) when generation > 0, do: Digest.digest({source, generation})
+  defp impulse_version(source, _generation), do: source
+
+  defp legacy_semantic(_issue, generation, handoffs, _comments) when generation != 0 or handoffs != [], do: nil
+
+  defp legacy_semantic(issue, _generation, _handoffs, comments) do
+    legacy =
+      issue
+      |> semantic_issue()
+      |> Map.put(:state, issue.state)
+      |> Map.put(:blocked_by, Enum.map(issue.blocked_by, &Map.delete(&1, :state_type)))
+
+    Digest.digest({legacy, comments})
   end
 
   defp with_handoffs(semantic, []), do: semantic
@@ -72,10 +96,10 @@ defmodule SymphonyElixir.Yolo.Observation do
     |> Enum.filter(&(&1.state == "Yolo Review"))
     |> Dependencies.components()
     |> Enum.reduce(observations, fn members, acc ->
-      chain = members |> Enum.map(&{&1.id, observations[&1.id]["source"] || observations[&1.id]["semantic"]}) |> Enum.sort() |> Digest.digest()
+      chain = members |> Enum.map(&{&1.id, observations[&1.id]["member_semantic"] || observations[&1.id]["source"] || observations[&1.id]["semantic"]}) |> Enum.sort() |> Digest.digest()
 
       Enum.reduce(members, acc, fn issue, result ->
-        Map.update!(result, issue.id, &Map.put(&1, "semantic", Digest.digest({&1["source"] || &1["semantic"], chain})))
+        Map.update!(result, issue.id, &Map.put(&1, "semantic", Digest.digest({&1["member_semantic"] || &1["source"] || &1["semantic"], chain})))
       end)
     end)
   end

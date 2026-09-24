@@ -2,9 +2,9 @@ defmodule SymphonyElixir.YoloReviewContractTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.ProjectContext
-  alias SymphonyElixir.Yolo.{ActionTool, Completion, Group, Handoff, OpenClaw, ReviewContract, Runner, Scope, Store}
+  alias SymphonyElixir.Yolo.{ActionTool, Completion, Escalation, Group, Handoff, OpenClaw}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
-  alias SymphonyElixir.Yolo.{Operations, Recovery}
+  alias SymphonyElixir.Yolo.{Operations, Recovery, ReviewContract, Runner, Scope, Store}
   alias SymphonyElixir.YoloReviewFixture, as: Fixture
 
   setup do
@@ -355,6 +355,61 @@ defmodule SymphonyElixir.YoloReviewContractTest do
         assert %{issue: %{state: "Yolo Review", delegate_id: "pai"}, updates: 0, body: body} = Agent.get(ctx.db, & &1)
         assert body =~ "unfinished-fix"
         assert {:error, _} = Handoff.invoke(Map.put(request, "kind", "handoff"), ctx.opts)
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "a missing notification route preserves the confirmed review for notification-only retry", ctx do
+    File.rm!(Path.join(ctx.workspace.path, ".codex/skills/sym-yolo-review/SKILL.md"))
+    context = ctx.context
+    context = put_in(context.settings.tracker.openclaw_yolo_agent, "po")
+    ProjectContext.bind(context)
+    issue = %{ctx.issue | url: "https://linear.app/test/PRO-1"}
+    Agent.update(ctx.db, &%{&1 | issue: issue})
+
+    Scope.with_scope(
+      "review",
+      [issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [issue.id]}))
+
+        request = %{
+          "kind" => "escalate",
+          "issue_id" => issue.id,
+          "report" => "Prüfanweisung fehlt",
+          "escalation" => %{
+            "cause" => "Prüfanweisung fehlt",
+            "attempts" => "Gebundenen Checkout geprüft",
+            "proposal" => "Versionierte Prüfanweisung bereitstellen",
+            "decision" => "Bereitstellung bestätigen"
+          }
+        }
+
+        unavailable = Keyword.put(ctx.opts, :escalation_route, fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end)
+        assert {:error, :openclaw_normal_channel_unavailable} = Handoff.invoke(request, unavailable)
+        assert Completion.ready?("review", [issue])
+        assert {:ok, true} = Escalation.pending(issue.id)
+        assert {:ok, notification} = Store.read("escalation:" <> issue.id)
+        assert Enum.any?(Map.values(notification["messages"]), &(&1["initial_error"] == ":openclaw_normal_channel_unavailable" and &1["retry_reason"] == "configured_normal_route_unavailable"))
+
+        repaired =
+          Keyword.merge(ctx.opts,
+            escalation_route: fn _, _ -> {:ok, %{"channel" => "signal", "to" => "human", "sessionKey" => "agent:po:main"}} end,
+            escalation_send: fn _, _, _ ->
+              send(self(), :notification_sent)
+              {:ok, %{"messageId" => "sent-once"}}
+            end
+          )
+
+        assert :ok = Escalation.retry_pending(issue, repaired)
+        assert_receive :notification_sent
+        assert {:ok, false} = Escalation.pending(issue.id)
+        assert :ok = Escalation.retry_pending(issue, repaired)
+        refute_receive :notification_sent
+        assert Agent.get(ctx.db, & &1.issue.state) == "Yolo Review"
       end,
       workspace: ctx.workspace
     )

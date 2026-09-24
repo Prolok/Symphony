@@ -202,8 +202,10 @@ defmodule SymphonyElixir.RelayCacheTest do
     after_ack = Session.tick(%{s | request: request})
     assert_received :durable_before_ack
     assert after_ack.record["pending"] != nil
+    assert get_in(after_ack.record, ["event_positions", "issue", "position"]) == 1
     assert Server.consumer(c.server, "workspace", "one").cursor == 1
     {:ok, restarted} = open(c)
+    assert restarted.record["event_positions"] == after_ack.record["event_positions"]
     restarted = Session.tick(restarted)
     assert restarted.status == :ready
     assert restarted.record["pending"] == nil
@@ -232,6 +234,26 @@ defmodule SymphonyElixir.RelayCacheTest do
     assert s.record["cursor"] == 5
     refute_received {:ids, _}
     assert length(Server.consumer(c.server, "workspace", "one").acks) == 2
+  end
+
+  test "two issue events in one page retain their last durable event position after ack and restart", c do
+    {:ok, initial} = open(c)
+    initial = Session.tick(initial)
+    Server.publish(c.server, "workspace")
+    Server.publish(c.server, "workspace")
+    current = Session.tick(initial)
+    assert current.status == :ready
+
+    assert get_in(current.record, ["event_positions", "issue"]) == %{
+             "generation" => current.record["generation"],
+             "position" => 2,
+             "event_id" => "event-2"
+           }
+
+    {:ok, restarted} = open(c)
+    assert get_in(restarted.record, ["event_positions", "issue"]) == get_in(current.record, ["event_positions", "issue"])
+    :ok = DurableState.write(current.path, put_in(current.record, ["event_positions", "issue", "position"], "invalid"))
+    assert {:error, :relay_cache_corrupt} = open(c)
   end
 
   test "two consumers and two workspaces have independent receipts and caches", c do

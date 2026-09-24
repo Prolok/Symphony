@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   alias SymphonyElixir.{Config, ProjectContext, Tracker}
   alias SymphonyElixir.Linear.YoloAgent
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
-  alias SymphonyElixir.Yolo.{Group, Observation, Operations}
+  alias SymphonyElixir.Yolo.{Escalation, Group, Impulse, Observation, Operations}
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{Recovery, ReviewReadiness, Runner, Store}
@@ -24,6 +24,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
       case Dependencies.refresh(issues, opts) do
         {:ok, issues} ->
+          retry_notifications(state, issues, opts)
           :ok = Recovery.resume(state, issues, opts)
           {issues, state} = admit(issues, state, opts)
           schedule_groups(state, issues, opts)
@@ -35,6 +36,54 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     else
       state
     end
+  end
+
+  defp retry_notifications(state, issues, opts) do
+    case Journal.pending() do
+      {:ok, orders} -> retry_unreserved_notifications(state, issues, orders, opts)
+      {:error, reason} -> Logger.warning("YOLO notification reservation check failed reason=#{inspect(reason)}")
+    end
+  end
+
+  defp retry_unreserved_notifications(state, issues, orders, opts) do
+    reserved = MapSet.new(for order <- orders, member <- order["members"], do: member["id"])
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+
+    for issue <- issues,
+        YoloAgent.delegated?(issue) and Admission.eligible?(issue) and
+          not MapSet.member?(reserved, issue.id) and not MapSet.member?(state.claimed, issue.id) and
+          not Map.has_key?(state.running, issue.id) do
+      retry_notification_if_pending(issue, fetch, opts)
+    end
+  end
+
+  defp retry_notification_if_pending(issue, fetch, opts) do
+    case Escalation.pending(issue.id) do
+      {:ok, true} -> retry_notification(issue, fetch, opts)
+      {:ok, false} -> :ok
+      {:error, reason} -> Logger.warning("YOLO notification journal unavailable issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+    end
+  end
+
+  defp retry_notification(issue, fetch, opts) do
+    case fetch.([issue.id]) do
+      {:ok, [fresh]} ->
+        if fresh.id == issue.id and YoloAgent.delegated?(fresh) and Admission.eligible?(fresh) and fresh.assignee_id == issue.assignee_id do
+          log_notification_retry(issue, Escalation.retry_pending(fresh, opts))
+        end
+
+      {:error, reason} ->
+        Logger.warning("YOLO notification refresh failed issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp log_notification_retry(_issue, :ok), do: :ok
+
+  defp log_notification_retry(issue, {:error, reason}) do
+    Logger.warning("YOLO notification waiting issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
   end
 
   defp recover_external(state, opts) do
@@ -217,17 +266,22 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     with :ok <- Journal.available(group),
          :ok <- Delivery.reconcile(group),
          {:ok, record} <- Store.read(group),
-         {:ok, observations, _fingerprint} <- Observation.capture(members, record["observations"], opts),
+         {:ok, record} <- Impulse.observe(members, record, opts),
+         {:ok, observations, _fingerprint} <-
+           Observation.capture(members, record["observations"], Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
          record = Delivery.migrate(record, observations),
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
-         pending = Delivery.pending(members, observations, if(operations == [], do: record, else: Map.put(record, "processed", nil))),
+         effective = if(operations == [], do: record, else: Map.put(record, "processed", nil)),
+         pending = Delivery.pending(members, observations, effective),
          record = reset_changed_nonstart(record, pending, observations),
+         waiting = if(pending == [], do: Delivery.waiting_reason(members, observations, effective), else: nil),
          true <- record["checkout_cleanup_blocked"] != true,
          true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
-         :ok <- Store.write(group, Map.put(record, "observations", observations)) do
+         :ok <- Store.write(group, record |> Map.put("observations", observations) |> Map.put("waiting_reason", waiting)) do
       prepare_pending(group, pending, opts)
     else
       {:error, reason} ->
+        record_waiting(group, reason)
         Logger.warning("YOLO observation failed group=#{group} reason=#{inspect(reason)}")
         :unavailable
 
@@ -259,8 +313,16 @@ defmodule SymphonyElixir.Yolo.Coordinator do
         {:run, pending}
 
       {:error, reason} ->
+        record_waiting(group, reason)
         Logger.warning("YOLO BLOCKER brake unavailable reason=#{inspect(reason)}")
         :unavailable
+    end
+  end
+
+  defp record_waiting(group, reason) do
+    with {:ok, record} <- Store.read(group) do
+      waiting = inspect(reason)
+      if record["waiting_reason"] == waiting, do: :ok, else: Store.write(group, Map.put(record, "waiting_reason", waiting))
     end
   end
 

@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   alias SymphonyElixir.{CommentCheckpoint, Config, ProjectContext, RuntimePaths, Tracker}
   alias SymphonyElixir.Linear.{Client, IssueLease, YoloAgent}
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
-  alias SymphonyElixir.Yolo.{Group, Observation, OpenClaw, Operations}
+  alias SymphonyElixir.Yolo.{Group, Impulse, Observation, OpenClaw, Operations}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{ReviewContract, ReviewReadiness, Scope, Store, Workspace}
 
@@ -102,13 +102,16 @@ defmodule SymphonyElixir.Yolo.Runner do
          {:ok, fresh} <- Dependencies.refresh(fresh, opts),
          true <- Enum.all?(fresh, &Dependencies.dispatchable?/1),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))),
-         {:ok, observations, fingerprint} <- Observation.capture(fresh, %{}, opts),
+         {:ok, project_issues} <- current_project(group, fresh, opts),
+         observation_issues = if(group == "review", do: Group.groups(project_issues)["review"] || [], else: fresh),
+         {:ok, all_observations, fingerprint} <-
+           Observation.capture(observation_issues, %{}, Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
+         observations = Map.take(all_observations, Enum.map(fresh, & &1.id)),
          record = Delivery.migrate(record, observations),
          {:ok, operations} <- Operations.pending(Enum.map(fresh, & &1.id)),
          pending = Delivery.pending(fresh, observations, if(operations == [], do: record, else: Map.put(record, "processed", nil))),
          {:ok, pending} <- if(group == "blocker", do: BlockerBrake.check(pending, opts), else: {:ok, pending}),
-         true <- pending != [],
-         {:ok, project_issues} <- current_project(group, fresh, opts) do
+         true <- pending != [] do
       fresh = pending
       observations = Map.take(observations, Enum.map(fresh, & &1.id))
       execute(group, fresh, project_issues, run_id, record, observations, fingerprint, opts)
@@ -122,6 +125,15 @@ defmodule SymphonyElixir.Yolo.Runner do
     create = Keyword.get(opts, :workspace, &Workspace.create/2)
     members = Enum.map(issues, & &1.id)
     attempt = %{"id" => run_id, "members" => members, "fingerprint" => fingerprint}
+    reasons =
+      Map.new(issues, fn issue ->
+        reason = get_in(record, ["impulses", issue.id, "reason"])
+        {issue.id, if(reason in [nil, "no_relevant_history", "no_relay_event"], do: "source_changed", else: reason)}
+      end)
+
+    resume_context = %{"previous_error" => record["error"] || record["previous_error"], "reason" => reasons}
+    record = Map.merge(record, %{"previous_error" => resume_context["previous_error"], "resume_reason" => reasons})
+    opts = Keyword.put(opts, :resume_context, resume_context)
 
     attempt =
       if group == "review",
@@ -273,6 +285,7 @@ defmodule SymphonyElixir.Yolo.Runner do
              delivery_rejected: fn -> release_delivery(group, issues, run_id) end
            ),
          {:ok, result} <- run_session(workspace, prompt, issues, run_id, delivery_opts),
+         :ok <- session_ended(group, run_id, result),
          true <- Keyword.get(opts, :unchanged, &Workspace.unchanged?/1).(workspace),
          {:ok, retained} <- retained_members(issues, opts),
          :ok <- complete_inputs(retained, opts),
@@ -284,6 +297,7 @@ defmodule SymphonyElixir.Yolo.Runner do
         group,
         Map.merge(finished, %{
           "decisions" => Map.merge(finished["decisions"] || %{}, Map.new(observations, fn {id, data} -> {id, data["semantic"]} end)),
+          "decision_sources" => Map.merge(finished["decision_sources"] || %{}, Map.new(observations, fn {id, data} -> {id, data["source"]} end)),
           "observations" => observations,
           "processed_epoch" => record["capture_epoch"],
           "processed" => observations |> Map.take(Enum.map(retained, & &1.id)) |> Observation.fingerprint(),
@@ -319,6 +333,19 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
   end
 
+  defp session_ended(group, run_id, result) do
+    with {:ok, record} <- Store.read(group),
+         %{"id" => ^run_id} = attempt <- record["attempt"] do
+      record =
+        record |> Map.put("attempt", Map.merge(attempt, %{"session_end" => true, "session_id" => result.session_id})) |> Map.update("delivery_ends", %{run_id => true}, &Map.put(&1, run_id, true))
+
+      Store.write(group, record)
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :yolo_attempt_unavailable}
+    end
+  end
+
   defp verify_start(group, issues, workspace, opts) do
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
@@ -343,7 +370,7 @@ defmodule SymphonyElixir.Yolo.Runner do
 
     with {:ok, issues} <- fetch.(),
          {:ok, issues} <- Dependencies.refresh(issues, opts),
-         true <- Dependencies.review_ready?(members, issues) do
+         true <- review_members_ready?(members, issues) do
       {:ok, issues}
     else
       {:error, _} = error -> error
@@ -352,6 +379,11 @@ defmodule SymphonyElixir.Yolo.Runner do
   end
 
   defp current_project(_, previous, _opts), do: {:ok, previous}
+
+  defp review_members_ready?(members, project) do
+    ready = MapSet.new(Dependencies.review_members(project), & &1.id)
+    Enum.all?(members, &MapSet.member?(ready, &1.id))
+  end
 
   defp run_session(workspace, prompt, [lead | _] = issues, run_id, opts) do
     Enum.each(issues, &Logger.info("YOLO group member issue_id=#{&1.id} issue_identifier=#{&1.identifier} run_id=#{run_id}"))
@@ -419,7 +451,8 @@ defmodule SymphonyElixir.Yolo.Runner do
         sha: workspace.sha,
         issues: Enum.map(issues, &issue_data/1),
         open_project_work: project_issues |> Enum.filter(&YoloAgent.delegated?/1) |> Enum.map(&issue_data/1),
-        comment_inputs: inputs
+        comment_inputs: inputs,
+        resume_context: opts[:resume_context]
       }
 
       {:ok, template <> "\n\nGebundener Laufkontext:\n" <> Jason.encode!(context, pretty: true) <> review_instructions(workspace)}

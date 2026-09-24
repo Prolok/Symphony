@@ -2,6 +2,7 @@ defmodule SymphonyElixir.YoloEscalationTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.Escalation
+  alias SymphonyElixir.Yolo.Store
 
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
@@ -69,8 +70,28 @@ defmodule SymphonyElixir.YoloEscalationTest do
   test "missing target and incomplete proposals do not send; disabled OpenClaw has no access", %{issue: issue, context: context} do
     opts = [escalation_route: fn _, _ -> {:error, :missing_target} end, escalation_send: fn _, _, _ -> flunk("unexpected send") end]
     assert {:error, :missing_target} = Escalation.notify(issue, request(), opts)
+    assert {:ok, true} = Escalation.pending(issue.id)
+
+    send = fn _, _, _ ->
+      send(self(), :route_repaired)
+      {:ok, %{"messageId" => "repair-1", "channel" => "signal"}}
+    end
+
+    assert :ok = Escalation.retry_pending(issue, escalation_route: &route/2, escalation_send: send)
+    assert_receive :route_repaired
+    assert {:ok, false} = Escalation.pending(issue.id)
+    assert :ok = Escalation.retry_pending(issue, escalation_route: &route/2, escalation_send: send)
+    refute_receive :route_repaired
     assert {:error, :yolo_escalation_incomplete} = Escalation.notify(issue, %{}, opts)
     ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, nil))
     assert :ok = Escalation.notify(issue, request(), escalation_route: fn _, _ -> flunk("disabled access") end)
+  end
+
+  test "corrupt notification journal stays visible", %{issue: issue} do
+    key = "escalation:" <> issue.id
+    {:ok, record} = Store.read(key)
+    :ok = Store.write(key, Map.put(record, "messages", []))
+    assert {:error, :yolo_escalation_journal_corrupt} = Escalation.pending(issue.id)
+    assert {:error, :yolo_escalation_journal_corrupt} = Escalation.retry_pending(issue)
   end
 end

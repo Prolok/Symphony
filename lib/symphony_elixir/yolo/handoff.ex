@@ -43,8 +43,8 @@ defmodule SymphonyElixir.Yolo.Handoff do
     with {:ok, [fresh]} <- Dependencies.refresh([issue], opts),
          true <- kind == "escalate" or not Dependencies.unblocked?(fresh),
          :ok <- report(issue, report, opts),
-         :ok <- maybe_escalate(issue, args, opts) do
-      Completion.invoke(%{"issue_id" => issue.id, "result" => report}, Keyword.merge(opts, review_waiting: true, unresolved_escalation: kind == "escalate"))
+         :ok <- Completion.invoke(%{"issue_id" => issue.id, "result" => report}, Keyword.merge(opts, review_waiting: true, unresolved_escalation: kind == "escalate")) do
+      maybe_escalate(issue, args, opts)
     else
       {:error, _} = error -> error
       _ -> {:error, :yolo_wait_requires_dependency}

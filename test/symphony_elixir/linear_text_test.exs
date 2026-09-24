@@ -62,4 +62,21 @@ defmodule SymphonyElixir.LinearTextTest do
     assert Workpad.section_checklist_status(compact, "Validierung", "Test (AI)") == :deferred
     assert Workpad.merge_handoff_status(compact) == :blocked
   end
+
+  test "delegated live evidence stays open until Yolo Review while an early unassigned obligation blocks" do
+    delegated = """
+    ## Symphony Workpad
+
+    ### Validierung
+    - [ ] Betreiber prüft Live-Dienst mit Produkt-Quellhash; fällig: Yolo Review
+
+    ### Test
+    - [x] Gebundene Routinetests bestanden.
+    """
+
+    assert Workpad.section_checklist_status(delegated, "Test") == :closed
+    assert Workpad.section_checklist_status(delegated, "Validierung", "Test (AI)") == :deferred
+    assert Workpad.section_checklist_status(delegated, "Validierung", "Merge (AI)") == :deferred
+    assert Workpad.section_checklist_status(String.replace(delegated, "; fällig: Yolo Review", ""), "Validierung", "Test (AI)") == :open
+  end
 end

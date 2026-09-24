@@ -3,7 +3,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   require Logger
   alias SymphonyElixir.{Config, ProjectContext, Tracker}
   alias SymphonyElixir.Linear.YoloAgent
-  alias SymphonyElixir.Yolo.{Admission, Completion, Delivery, Dependencies, Group, Observation, Operations}
+  alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
+  alias SymphonyElixir.Yolo.{Group, Observation, Operations}
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{Recovery, ReviewReadiness, Runner, Store}
@@ -169,7 +170,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     issues =
       Enum.flat_map(issues, fn issue ->
         if Admission.eligible?(issue) and Admission.needed?(issue) and
-             (issue.state != "Backlog" or Dependencies.unblocked?(issue)) and
+             Dependencies.dispatchable?(issue) and
              not Group.terminal?(issue) and issue.id not in reserved and not Map.has_key?(state.running, issue.id) do
           [prepare_issue(issue, prepare)]
         else
@@ -221,7 +222,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          :ok <- Store.write(group, Map.put(record, "observations", observations)) do
       pending = Delivery.pending(members, observations, if(operations == [], do: record, else: Map.put(record, "processed", nil)))
-      if pending == [], do: :unchanged, else: {:run, pending}
+
+      prepare_pending(group, pending, opts)
     else
       {:error, reason} ->
         Logger.warning("YOLO observation failed group=#{group} reason=#{inspect(reason)}")
@@ -229,6 +231,22 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
       _ ->
         :waiting
+    end
+  end
+
+  defp prepare_pending(group, pending, opts) do
+    result = if group == "blocker", do: BlockerBrake.check(pending, opts), else: {:ok, pending}
+
+    case result do
+      {:ok, []} ->
+        :unchanged
+
+      {:ok, pending} ->
+        {:run, pending}
+
+      {:error, reason} ->
+        Logger.warning("YOLO BLOCKER brake unavailable reason=#{inspect(reason)}")
+        :unavailable
     end
   end
 

@@ -23,7 +23,7 @@ Workflows.
 
 ## Test-/Fix-Schleife
 
-1. Bei Wiederaufnahme zuerst passende neue Betreiberbelege gemäß
+1. Bei Wiederaufnahme zuerst passende Betreiberbelege samt Produkt-Quellhash gemäß
    `symphony-workpad` prüfen, dann die repo-lokale Wiederholungsregel anwenden;
    ohne besondere Regel mit dem ersten repo-lokalen Testschritt beginnen.
 2. Nach jedem Schritt den zugehörigen `### Test`-Punkt aktualisieren.
@@ -32,7 +32,11 @@ Workflows.
 4. Lokale Fixes dürfen mit `<Issue-Key> Test (AI) Autocommit` plus kurzem Body
    committet werden.
 
-Fehlt eine externe Testvoraussetzung, den erlaubten repo-lokalen Startpfad
+Bei Agentdelegation bleiben Live-/Host- und isolierte Integrationsnachweise bis
+`Yolo Review` mit `; fällig: Yolo Review` offen; `symphony_test` deckt die vor Merge
+fälligen gebundenen Routinetests einschließlich `bootstrap`, `workflow`,
+`failure-probe`, `po_handoff` und `po_followup` ab. Fehlt eine externe
+Testvoraussetzung für ein jetzt fälliges technisches Gate, den erlaubten repo-lokalen Startpfad
 nutzen. Ist etwa Docker/Testdatenbank nicht erreichbar und die Host-Bereitstellung
 Betreiberaufgabe, bestandene Teilprüfungen erhalten und einmalig konkret mit
 benötigtem Verfügbarkeitsnachweis und Fortsetzung in `Test (AI)` übergeben.

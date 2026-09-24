@@ -206,7 +206,7 @@ defmodule SymphonyElixir.YoloActionsTest do
       assert writes("YoloCreate") == []
 
       mutation = %{"query" => "mutation { issueUpdate(id: \"#{issue.id}\", input: {stateId: \"Test (AI)\"}) { success } }"}
-      guard_opts = [query: &query/2, fetch_issue: options[:fetch], guard: fn _ -> :ok end]
+      guard_opts = [query: &query/2, fetch_issue: options[:fetch], comments: options[:comments], guard: fn _ -> :ok end]
       assert {:error, :yolo_backlog_blocked} = CommentActionGuard.check(mutation, guard_opts)
       change(&%{&1 | issues: Map.put(&1.issues, blocker.id, %{blocker | state: "Review"})})
       assert {:ok, [_]} = ActionScope.sources([issue.id], options)
@@ -746,7 +746,7 @@ defmodule SymphonyElixir.YoloActionsTest do
       "variables" => %{"id" => source.id, "input" => %{"stateId" => target}}
     }
 
-    with :ok <- CommentActionGuard.check(payload, query: &query/2, fetch_issue: opts()[:fetch], guard: guard) do
+    with :ok <- CommentActionGuard.check(payload, query: &query/2, fetch_issue: opts()[:fetch], comments: opts()[:comments], guard: guard) do
       API.update(source.id, %{stateId: target}, opts())
     end
   end

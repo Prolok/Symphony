@@ -7,7 +7,7 @@ defmodule SymphonyElixir.TestExecutor do
   alias SymphonyElixir.Linear.{Client, ScopeBinding}
 
   @required ~w(workspace_id project_id slug_id teams scenarios timeout result_root)
-  @scenarios ~w(bootstrap workflow failure-probe)
+  @scenarios ~w(bootstrap workflow failure-probe po_handoff po_followup)
 
   @spec valid_config?(term()) :: boolean()
   def valid_config?(value) when is_map(value) do
@@ -36,20 +36,22 @@ defmodule SymphonyElixir.TestExecutor do
 
   @spec validate_contexts([ProjectContext.t()]) :: :ok | {:error, term()}
   def validate_contexts(contexts) do
-    case settings(contexts) do
-      nil ->
-        :ok
+    case configured_targets(contexts) do
+      [] ->
+        if Enum.all?(contexts, &is_nil(&1.settings.worker.test_executor)), do: :ok, else: {:error, :routine_test_setup_invalid}
 
-      config ->
+      [{target, config}] ->
         with true <- valid_config?(config),
-             true <- Enum.all?(contexts, &(&1.settings.worker.test_executor == config and is_nil(&1.test_instance))),
-             [target] <- Enum.filter(contexts, &(&1.name == "symphony-test")),
+             true <- Enum.all?(contexts, &(is_nil(&1.test_instance) and &1.settings.worker.test_executor in [nil, config])),
              :ok <- verify_target(target, config) do
           :ok
         else
           {:error, _} = error -> error
           _ -> {:error, :routine_test_setup_invalid}
         end
+
+      _ ->
+        {:error, :routine_test_setup_invalid}
     end
   end
 
@@ -81,7 +83,14 @@ defmodule SymphonyElixir.TestExecutor do
     "query SymphonyRoutineBinding($id: String!) { project(id: $id) { id name slugId teams(first: 100, includeArchived: true) { nodes { id key } pageInfo { hasNextPage } } } viewer { organization { id urlKey } } }"
   end
 
-  defp settings(contexts), do: Enum.find_value(contexts, & &1.settings.worker.test_executor)
+  defp configured_targets(contexts), do: for(context <- contexts, context.name == "symphony-test", config = context.settings.worker.test_executor, is_map(config), do: {context, config})
+
+  defp settings(contexts) do
+    case List.first(configured_targets(contexts)) do
+      {_, config} -> config
+      nil -> nil
+    end
+  end
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
@@ -110,19 +119,19 @@ defmodule SymphonyElixir.TestExecutor do
   end
 
   defp open_executor(contexts, config, opts) do
-    socket = hd(contexts).settings.worker.test_executor_socket
+    target = Enum.find(contexts, &(&1.name == "symphony-test"))
+    socket = target.settings.worker.test_executor_socket
     root = config["result_root"]
 
     with false <- System.get_env("SYMPHONY_LINEAR_SECRET_ACCESS") == "denied",
          {:ok, ^root} <- PathSafety.canonicalize(root),
-         true <- Enum.all?(contexts, &(&1.settings.worker.test_executor_socket == socket)),
+         true <- Enum.all?(contexts, &(&1.settings.worker.test_executor_socket in [nil, socket])),
          {:ok, ^socket} <- PathSafety.canonicalize(socket),
          true <- byte_size(socket) < 104 do
       command = Keyword.get(opts, :command, [System.find_executable("python3"), Path.join(RuntimePaths.workflow_dir(), "scripts/test-executor.py"), "--managed"])
       [executable | args] = command
       port = Port.open({:spawn_executable, executable}, [:binary, :exit_status, {:line, 1_048_576}, args: args])
       sources = Enum.map(contexts, &%{root: &1.root, workspace_root: &1.settings.workspace.root})
-      target = Enum.find(contexts, &(&1.name == "symphony-test"))
       binding = %{target: target.root, workspace_root: target.settings.workspace.root, app: Map.take(target.settings.tracker.app, ~w(workspace_id client_id user_id)), config: config}
       payload = %{socket: socket, result_root: root, manifest: Path.join(root, "binding.json"), sources: sources, timeout: config["timeout"], scenarios: config["scenarios"], runtime_binding: binding}
       Port.command(port, Jason.encode!(payload) <> "\n")

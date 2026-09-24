@@ -26,6 +26,7 @@ defmodule SymphonyElixir.Orchestrator do
     RuntimePaths,
     StatusDashboard,
     Tracker,
+    WaitMarker,
     Workpad,
     Workspace
   }
@@ -1344,7 +1345,7 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, run_opts)
+        maybe_dispatch_waiting_plan(state, refreshed_issue, attempt, preferred_worker_host, run_opts)
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -1373,6 +1374,33 @@ defmodule SymphonyElixir.Orchestrator do
         )
     end
   end
+
+  defp maybe_dispatch_waiting_plan(state, %Issue{state: "Planung (AI)"} = issue, attempt, preferred_worker_host, run_opts) do
+    case WaitMarker.planning_action(issue) do
+      :wait ->
+        release_issue_claim(state, issue.id)
+
+      :continue ->
+        do_dispatch_issue(state, issue, attempt, preferred_worker_host, run_opts)
+
+      {:error, reason} ->
+        schedule_refresh_retry(
+          state,
+          issue.id,
+          attempt,
+          %{
+            identifier: issue.identifier,
+            error: "wait marker lookup failed: #{inspect(reason)}",
+            worker_host: preferred_worker_host,
+            delegate_id: issue.delegate_id
+          },
+          reason
+        )
+    end
+  end
+
+  defp maybe_dispatch_waiting_plan(state, issue, attempt, preferred_worker_host, run_opts),
+    do: do_dispatch_issue(state, issue, attempt, preferred_worker_host, run_opts)
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, run_opts) do
     recipient = self()

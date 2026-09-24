@@ -109,7 +109,9 @@ widersprüchlich war.
   bei fachlicher Änderung ersetzen; Zeitablauf und sonstige Workpadpflege sind
   kein neuer Auftrag. Den letzten Beleg mit seinem Ergebnis erhalten.
 - Vor Wiederaufnahme Belegquelle, Ergebnis, Geltungsbereich und relevanten Stand
-  abgleichen. Negative Befunde im Scope autonom korrigieren und erneut prüfen;
+  anhand des Produkt-Quellhashes gemäß `docs/linear-app.md` abgleichen. Unveränderter
+  Hash erhält den Beleg; bei geändertem Hash nur vom Delta betroffene Prüfungen
+  wiederholen. Negative Befunde im Scope autonom korrigieren und erneut prüfen;
   fehlender positiver Nachweis sperrt den Gateabschluss, nicht die Nacharbeit.
   Statusschieben allein ist keine Abnahme. Ohne passenden neuen Beleg
   das Gate offen halten; nur ohne zulässigen autonomen Fortsetzungsweg die

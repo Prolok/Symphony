@@ -267,6 +267,10 @@ Symphony speichert die Zustellung pro Mitglied und fachlicher Phase dauerhaft
 vor dem Modellaufruf. Unveränderte Tickets, Status-Rundläufe, Gruppenwechsel,
 eigene Workpad-Ausgaben und Neustarts allein erzeugen keine erneuten Aufträge. Neue
 Inhalte, externe Kommentare oder wirksame Kettenänderungen erlauben neue Arbeit.
+`Wartet auf: <IDENT>` in Beschreibung oder Workpad sperrt `incoming`, `blocker`,
+`planning` und `review`, bis das Ziel im anderen gebundenen Workspace `Yolo Review`,
+`Review` oder `Fertig` erreicht. Unauflösbare Marker werden in Log und Workpad
+sichtbar; Einzelheiten stehen in `docs/linear-app.md`.
 Zustellung ist kein Abschlussbeleg; offene Entscheidungen bleiben sichtbar.
 Offene journalisierte Anlagen setzt Symphony unter den bestehenden Leases ohne
 erneute Modellzustellung fort; ausdrücklich eskalierte Operationen bleiben offen.
@@ -280,6 +284,12 @@ Keine Ersatzanlage oder eigene Neuzustellung durch den Agenten.
 
 Für echte externe Hindernisse `kind=escalate` (in `Yolo Review`) bzw. die bestehende
 BLOCKER-Übergabe mit `escalation: {cause, attempts, proposal, decision}` verwenden.
+In `BLOCKER` übernimmt der delegierte Agent die fällige Betreiberarbeit. Enthält
+das Journal bereits einen eigenen Lauf zur selben Ursache, wiederholt er sie nicht,
+sondern übergibt Ursache, Versuche, Vorschlag und benötigte Entscheidung.
+Live-/Host-/Zielumgebungs- und isolierte Integrationsnachweise aus dem Workpad
+sind bei Delegation erst hier in `Yolo Review` fällig; Belege tragen den
+Produkt-Quellhash gemäß `docs/linear-app.md`.
 Alle vier Werte konkret ausfüllen. Bei aktiviertem OpenClaw sendet Symphony
 Ticketlink, Ursache, Versuche, Lösungsvorschlag, benötigte Entscheidung und
 Vorschlags-ID an den bereits gespeicherten normalen Kanal des gebundenen Agenten.

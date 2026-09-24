@@ -88,6 +88,9 @@ defmodule SymphonyElixir.TestExecutorTest do
     assert {:ok, _} = Schema.parse(%{"worker" => %{"test_executor" => ctx.config, "test_executor_socket" => ctx.context.settings.worker.test_executor_socket}})
     assert :ok = TestExecutor.validate_contexts([])
     assert {:error, :routine_test_setup_invalid} = TestExecutor.validate_contexts([%{ctx.context | name: "foreign"}])
+    context = ctx.context
+    assert {:error, :routine_test_setup_invalid} = TestExecutor.validate_contexts([put_in(context.settings.worker.test_executor, %{})])
+    assert {:error, :routine_test_setup_invalid} = TestExecutor.validate_contexts([ctx.context, ctx.context])
   end
 
   test "normal supervisor owns a real executor process from socket readiness through result and shutdown", ctx do
@@ -138,6 +141,9 @@ defmodule SymphonyElixir.TestExecutorTest do
     request_fun = fn _, _ -> {:ok, %{status: 200, body: %{"data" => response}}} end
     Application.put_env(:symphony_elixir, :linear_client_request_fun, request_fun)
     assert :ok = TestExecutor.validate_contexts([context])
+    other_settings = %{context.settings | worker: %{context.settings.worker | test_executor: nil, test_executor_socket: nil}}
+    other = %{context | id: context.id <> "-tilor", root: context.root <> "-tilor", name: "tilor-project", settings: other_settings}
+    assert :ok = TestExecutor.validate_contexts([other, context])
     wrong = put_in(context.settings.tracker.project_slug, "foreign")
     assert {:error, :routine_test_project_binding_rejected} = TestExecutor.validate_contexts([wrong])
     Application.put_env(:symphony_elixir, :linear_client_request_fun, fn _, _ -> {:error, :offline} end)

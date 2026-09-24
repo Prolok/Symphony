@@ -29,7 +29,7 @@ defmodule SymphonyElixir.Yolo.Admission do
 
     with {:ok, [current]} <- fetch.([issue.id]),
          {:ok, [current]} <- Dependencies.refresh([current], opts),
-         true <- eligible?(current) and (current.state != "Backlog" or Dependencies.unblocked?(current)),
+         true <- eligible?(current) and Dependencies.dispatchable?(current),
          {:ok, current} <- complete_labels(current, query),
          {:ok, ids} <- missing_labels(current, query),
          :ok <- update(current, ids, query),

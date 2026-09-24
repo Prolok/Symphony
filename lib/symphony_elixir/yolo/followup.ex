@@ -171,22 +171,64 @@ defmodule SymphonyElixir.Yolo.Followup do
   defp verify_created(created, intent, opts) when is_map(created) do
     input = intent["input"]
 
-    with true <-
-           created["id"] == input["id"] and get_in(created, ["project", "id"]) == input["projectId"] and
-             get_in(created, ["team", "id"]) == input["teamId"] and created["title"] == input["title"],
-         true <- Description.equivalent?(input["description"], created["description"]),
-         true <- get_in(created, ["assignee", "id"]) == input["assigneeId"] and get_in(created, ["delegate", "id"]) == input["delegateId"],
-         true <- get_in(created, ["state", "id"]) == input["stateId"],
+    with true <- created["id"] == input["id"],
+         :ok <- equal("project.id", input["projectId"], get_in(created, ["project", "id"])),
+         :ok <- equal("team.id", input["teamId"], get_in(created, ["team", "id"])),
+         :ok <- equal("title", input["title"], created["title"]),
+         :ok <- equal("description", input["description"], created["description"], &Description.equivalent?/2),
+         :ok <- equal("assignee.id", input["assigneeId"], get_in(created, ["assignee", "id"])),
+         :ok <- equal("delegate.id", input["delegateId"], get_in(created, ["delegate", "id"])),
+         :ok <- equal("state.id", input["stateId"], get_in(created, ["state", "id"])),
          {:ok, labels} <- API.labels(input["id"], opts),
-         true <- Enum.all?(input["labelIds"], fn id -> Enum.any?(labels, &(&1["id"] == id)) end) do
+         :ok <- required_labels(input["labelIds"], labels) do
       {:ok, created}
     else
       {:error, _} = error -> error
-      _ -> {:error, :yolo_created_issue_changed}
+      false -> {:error, :yolo_created_issue_unconfirmed}
     end
   end
 
   defp verify_created(_, _, _), do: {:error, :yolo_created_issue_unconfirmed}
+
+  defp equal(field, expected, actual, comparable? \\ &Kernel.==/2) do
+    if comparable?.(expected, actual) do
+      :ok
+    else
+      {:error, {:yolo_created_issue_changed, difference(field, expected, actual)}}
+    end
+  end
+
+  defp required_labels(expected, actual) do
+    case Enum.find_index(expected, fn id -> not Enum.any?(actual, &(&1["id"] == id)) end) do
+      nil -> :ok
+      index -> {:error, {:yolo_created_issue_changed, %{field: "labelIds", at: "labelIds[#{index}]", expected: Enum.at(expected, index), actual: Enum.map(actual, & &1["id"])}}}
+    end
+  end
+
+  defp difference("description", expected, actual) when is_binary(expected) and is_binary(actual),
+    do: Map.put(Description.first_difference(expected, actual), :field, "description")
+
+  defp difference(field, expected, actual) when is_binary(expected) and is_binary(actual) do
+    offset = common_prefix_bytes(expected, actual, 0)
+    prefix = binary_part(expected, 0, offset)
+    lines = String.split(prefix, "\n")
+
+    %{
+      field: field,
+      at: %{byte: offset, line: length(lines), column: byte_size(List.last(lines)) + 1},
+      expected_fragment: fragment(expected, offset),
+      actual_fragment: fragment(actual, offset)
+    }
+  end
+
+  defp difference(field, expected, actual), do: %{field: field, at: field, expected: inspect(expected), actual: inspect(actual)}
+
+  defp common_prefix_bytes(<<byte, expected::binary>>, <<byte, actual::binary>>, count),
+    do: common_prefix_bytes(expected, actual, count + 1)
+
+  defp common_prefix_bytes(_, _, count), do: count
+
+  defp fragment(value, offset), do: value |> binary_part(offset, min(48, byte_size(value) - offset)) |> inspect()
 
   defp link(intent, opts) do
     edges = effective_relations(intent["relations"])

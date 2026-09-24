@@ -38,6 +38,44 @@ defmodule SymphonyElixir.LinearDescriptionTest do
     end
   end
 
+  test "PRO-906 returned description accepts the evidenced issue autolink in prose" do
+    # The returned fixture is the live PRO-906 description. The input fixture
+    # reconstructs the documented single bare-URL delta within this worktree.
+    expected = File.read!("test/fixtures/linear_markdown/pro906-input-description.md")
+    actual = File.read!("test/fixtures/linear_markdown/pro906-linear-description.md")
+    assert Description.equivalent?(expected, actual)
+    assert Description.equivalent?(actual, expected)
+
+    for changed <- [
+          String.replace(actual, "[PRO-854](https://linear.app/prolok/issue/PRO-854/yolo-review) (gemeinsame", "[Anders](https://linear.app/prolok/issue/PRO-854/yolo-review) (gemeinsame"),
+          String.replace(actual, "/PRO-854/yolo-review) (gemeinsame", "/PRO-855/yolo-review) (gemeinsame"),
+          String.replace(actual, "keine Reviewcheckouts akkumulieren", "Reviewcheckouts akkumulieren")
+        ] do
+      refute Description.equivalent?(expected, changed)
+    end
+  end
+
+  test "issue autolink in prose preserves code spans and all other bytes" do
+    url = "https://linear.app/prolok/issue/PRO-854/yolo-review"
+    bare = "`Yolo.Runner.execute/8` Ursprung: #{url} (weiter)"
+    linked = "`Yolo.Runner.execute/8` Ursprung: [PRO-854](#{url}) (weiter)"
+    assert Description.equivalent?(bare, linked)
+    assert Description.equivalent?(url, "[PRO-854](#{url})")
+
+    for {before, returned} <- [
+          {"`#{url}`", "`[PRO-854](#{url})`"},
+          {"`begin\n#{url}\nend`", "`begin\n[PRO-854](#{url})\nend`"},
+          {"```\n#{url}\n```", "```\n[PRO-854](#{url})\n```"},
+          {"[outer #{url}]", "[outer [PRO-854](#{url})]"},
+          {"\\#{url}", "\\[PRO-854](#{url})"},
+          {"Text #{url} danach", "Text [PRO-855](#{url}) danach"},
+          {"Text #{url} danach", "Text [PRO-854](https://linear.app/prolok/issue/PRO-855/yolo-review) danach"},
+          {"Text #{url} danach", "Text [PRO-854](#{url}) geändert"}
+        ] do
+      refute Description.equivalent?(before, returned), inspect({before, returned})
+    end
+  end
+
   test "inline link destination brackets are bounded to unambiguous prose paragraphs" do
     url = "https://linear.app/prolok/issue/PRO-807/example"
     expected = "[Ursprung](#{url})"

@@ -41,6 +41,15 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   defp tick(state, issues, opts), do: Coordinator.tick(state, issues, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
   defp run_group(group, issues, project, opts \\ []), do: Yolo.Runner.run(group, issues, project, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
 
+  defp init_review_git(root, context) do
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "worktrees")))
+    assert {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: root)
+    File.write!(Path.join(root, "tracked"), "merged")
+    assert {_, 0} = System.cmd("git", ["add", "tracked"], cd: root)
+    assert {_, 0} = System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cd: root)
+    assert {_, 0} = System.cmd("git", ["remote", "add", "origin", root], cd: root)
+  end
+
   defp inbox(versions \\ %{}), do: %{"versions" => versions, "last_successful_scan" => "now", "scan_error" => nil}
   defp scan(_), do: {:ok, inbox()}
 
@@ -1658,6 +1667,105 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       assert :ok = Store.write("review", %{record | "retry_at" => nil})
     end
 
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+  end
+
+  test "journal write failure after checkout creation removes only the owned review checkout", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    init_review_git(root, context)
+
+    opts = [
+      fetch: fn _ -> {:ok, [review]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      project: fn -> {:ok, [review]} end,
+      store_write: fn _, _ -> {:error, :synthetic_journal_failure} end,
+      session: fn _, _, _, _ -> flunk("journal failure must precede delivery") end
+    ]
+
+    assert {:error, :synthetic_journal_failure} = run_group("review", [review], [review], opts)
+    assert {:ok, record} = Store.read("review")
+    assert record["attempt"]["checkout_cleanup"] == "removed"
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+
+    assert :ok = File.rm(Store.path("review"))
+
+    assert {:error, :synthetic_journal_failure} =
+             run_group("review", [review], [review], Keyword.put(opts, :workspace, fn _, _ -> {:ok, %{path: root, sha: "fixture"}} end))
+
+    assert {:ok, %{"attempt" => %{"checkout_cleanup" => "blocked"}}} = Store.read("review")
+
+    incoming = %{issue | state: "Backlog"}
+    incoming_opts = Keyword.put(opts, :fetch, fn _ -> {:ok, [incoming]} end)
+
+    assert {:error, :synthetic_journal_failure} =
+             run_group("incoming", [incoming], [incoming], Keyword.put(incoming_opts, :workspace, fn _, _ -> {:ok, %{path: root, sha: "fixture"}} end))
+
+    assert {:error, :synthetic_creation_failure} =
+             run_group("incoming", [incoming], [incoming], Keyword.put(incoming_opts, :workspace, fn _, _ -> {:error, :synthetic_creation_failure} end))
+  end
+
+  test "uncertain review journals retain their checkouts for recovery", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    init_review_git(root, context)
+
+    for mode <- [:observed_rejection, :foreign_pending, :unconfirmed_order] do
+      opts = [
+        fetch: fn _ -> {:ok, [review]} end,
+        lease: fn _, fun -> fun.() end,
+        scan: &scan/1,
+        project: fn -> {:ok, [review]} end,
+        checkpoint: fn _ -> {:ok, %{}} end,
+        session: fn _, _, _, session_opts ->
+          assert {:ok, %{"attempt" => %{"id" => run_id}}} = Store.read("review")
+
+          order =
+            case mode do
+              :observed_rejection -> %{"id" => run_id, "group" => "review", "members" => [], "state" => "rejected", "rejection" => %{}, "acceptance_observed" => true}
+              :foreign_pending -> %{"id" => Ecto.UUID.generate(), "group" => "review", "members" => [], "state" => "accepted"}
+              :unconfirmed_order -> %{"id" => run_id, "group" => "review", "members" => [], "state" => "accepted"}
+            end
+
+          assert :ok = DurableState.write(Journal.path("review"), order)
+          assert :ok = session_opts[:on_session_start_failure].()
+          {:error, :synthetic_delivery_failure}
+        end
+      ]
+
+      assert {:error, :synthetic_delivery_failure} = run_group("review", [review], [review], opts)
+      assert {:ok, %{"attempt" => %{"id" => run_id}}} = Store.read("review")
+      path = Path.join([root, "worktrees", "yolo", "review", run_id])
+      assert File.dir?(path)
+      assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+      assert length(Regex.scan(~r/^worktree /m, listing)) == 2
+      assert {_, 0} = System.cmd("git", ["worktree", "remove", path], cd: root)
+      assert :ok = File.rm(Store.path("review"))
+      assert :ok = File.rm(Journal.path("review"))
+    end
+  end
+
+  test "caught review startup failure cleans its checkout", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    init_review_git(root, context)
+    Process.put(:project_checks, 0)
+
+    opts = [
+      fetch: fn _ -> {:ok, [review]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      project: fn ->
+        checks = Process.get(:project_checks) + 1
+        Process.put(:project_checks, checks)
+        if checks == 1, do: {:ok, [review]}, else: throw(:synthetic_project_failure)
+      end,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      session: fn _, _, _, _ -> flunk("project failure must precede delivery") end
+    ]
+
+    assert {:error, {:yolo_review_start_caught, :throw, ":synthetic_project_failure"}} = run_group("review", [review], [review], opts)
+    assert {:ok, %{"attempt" => %{"checkout_cleanup" => "removed"}}} = Store.read("review")
     assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
     assert length(Regex.scan(~r/^worktree /m, listing)) == 1
   end

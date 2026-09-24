@@ -151,7 +151,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp record_created(group, issues, project_issues, run_id, {record, observations, fingerprint}, opts, attempt, workspace) do
     attempt = Map.merge(attempt, %{"workspace" => workspace.path, "sha" => workspace.sha})
 
-    case Store.write(group, Map.merge(record, %{"observations" => observations, "attempt" => attempt, "error" => nil})) do
+    case Keyword.get(opts, :store_write, &Store.write/2).(group, Map.merge(record, %{"observations" => observations, "attempt" => attempt, "error" => nil})) do
       :ok -> run_created(group, issues, project_issues, run_id, workspace, {record, observations, fingerprint}, opts)
       {:error, _} = error -> cleanup_unrecorded(group, run_id, workspace, error)
     end

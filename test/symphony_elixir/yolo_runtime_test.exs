@@ -362,7 +362,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, []} = WaitMarker.targets(issue, comments: comments)
     waiting = %{issue | description: "Wartet auf: PRI-173"}
     assert {:ok, true} = WaitMarker.open?(waiting, comments: comments, resolve: fn _, _ -> {:ok, %{state: "BLOCKER"}} end)
-    assert :continue = WaitMarker.planning_action(waiting, comments: comments, resolve: fn _, _ -> {:ok, %{state: "Review"}} end)
+    merged = fn _, _ -> {:ok, %{state: "Review"}} end
+    assert :continue = WaitMarker.planning_action(waiting, comments: comments, resolve: merged)
   end
 
   test "existing wait Workpad keeps its comment inbox and propagates read failures", %{issues: [issue | _], context: context} do
@@ -384,9 +385,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     target = %{target | id: "target-context"}
     waiting = %{issue | description: "Wartet auf: PRI-173"}
     base = [contexts: [context, target], comments: fn _ -> {:ok, []} end, report_error: fn _, _, _ -> :ok end]
+    absent = %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}}}
 
     assert {:error, {:wait_marker_unresolved, "PRI-173", :wait_target_unresolved}} =
-             WaitMarker.targets(waiting, base ++ [query: fn _, _ -> {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}}}} end])
+             WaitMarker.targets(waiting, base ++ [query: fn _, _ -> {:ok, absent} end])
 
     assert {:error, {:wait_marker_unresolved, "PRI-173", :offline}} =
              WaitMarker.targets(waiting, base ++ [query: fn _, _ -> {:error, :offline} end])

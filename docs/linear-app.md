@@ -764,12 +764,12 @@ Vor Änderungen an der Projektmenge alte Läufe mit ihrem gebundenen Runner und
 Manifest bereinigen. Offene alte Journale bleiben sperrend; die neue Bindung
 übernimmt oder löscht keine früheren Fixtures.
 
-In PRO-736 sind kontrollierter Hauptneustart/Inventar und reale Zugänge die
-Betreiberanteile O1/O2, vor Live-Prüfung in **Test (AI)** fällig. O3 liefert dort
-Runnerresultate beider Checkouts, begrenzten Abbruch samt Cleanup sowie getrennten
-Relay-Empfang/Ack und fortbestehenden produktiven Fortschritt. Der Worker prüft die
-Belege vor Merge. Fehlende fällige Belege führen gemäß Betreiberübergabevertrag
-nach BLOCKER; lokale Fixtures ersetzen sie nicht. Der Worker liest keine private
+Für PRO-736 waren kontrollierter Hauptneustart/Inventar, reale Zugänge und
+Runnerresultate beider Checkouts samt Cleanup und Relay-Empfang/Ack als damalige
+Betreiberbelege in **Test (AI)** vorgesehen. Diese historische Projektpflicht
+bleibt für ihren Kandidatenstand bestehen. Für neu delegierte Tickets gelten die
+oben beschriebenen Fälligkeiten: Live- und isolierte Integrationsbelege werden
+erst in `Yolo Review` am gemergten Stand geprüft. Der Worker liest keine private
 Envdatei und startet, stoppt oder aktualisiert die Hauptinstallation nicht.
 
 ### Aufrufvertrag für Entwicklung und PRO-734

@@ -52,6 +52,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     opts = [
       scan: fn _ -> {:ok, Map.put(inbox(Process.get(:operator_versions)), "current", Process.get(:operator_current))} end,
+      workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: Process.get(:operator_versions)[Process.get(:operator_current)["workpad"]]["source"]["body"]}]} end,
       start: fn "blocker", _ ->
         send(self(), :operator_started)
         {:error, :observed_start}
@@ -137,6 +138,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       fetch: fn _ -> {:ok, [issue]} end,
       lease: fn _, fun -> fun.() end,
       scan: fn _ -> {:ok, Process.get(:operator_snapshot)} end,
+      workpad_comments: fn _ ->
+        snapshot = Process.get(:operator_snapshot)
+        {:ok, [%{id: "workpad", body: snapshot["versions"][snapshot["current"]["workpad"]]["source"]["body"]}]}
+      end,
       workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
       unchanged: fn _ -> true end,
       checkpoint: fn _ -> {:ok, %{}} end,
@@ -359,6 +364,60 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert comment.body =~ "Wartemarker-Fehler PRI-999"
   end
 
+  test "an open marker creates the first Workpad before returning to Backlog", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(put_in(context.settings.tracker.kind, "memory"))
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    waiting = %{issue | state: "Planung (AI)", description: "Wartet auf: PRI-173"}
+
+    assert :wait =
+             WaitMarker.planning_action(waiting,
+               comments: fn _ -> {:ok, []} end,
+               resolve: fn _, _ -> {:ok, %{identifier: "PRI-173", state: "BLOCKER"}} end
+             )
+
+    assert {:ok, [comment]} = Tracker.fetch_issue_comments(issue.id)
+    assert comment.body =~ "## Symphony Workpad"
+    assert comment.body =~ "Wartemarker offen: PRI-173"
+    assert_receive {:memory_tracker_state_update, id, "Backlog"}
+    assert id == issue.id
+  end
+
+  test "a marker matching two bound workspaces is ambiguous", %{issues: [issue | _], context: context} do
+    targets =
+      for suffix <- ["one", "two"] do
+        target = put_in(context.settings.tracker.app["workspace_id"], "other-#{suffix}")
+        %{target | id: "target-#{suffix}"}
+      end
+
+    query = fn _, _ ->
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => ProjectContext.current().id,
+                 "identifier" => "PRI-173",
+                 "project" => %{"slugId" => "project"},
+                 "team" => %{"key" => "PRI"},
+                 "state" => %{"name" => "BLOCKER"}
+               }
+             ],
+             "pageInfo" => %{"hasNextPage" => false}
+           }
+         }
+       }}
+    end
+
+    assert {:error, {:wait_marker_unresolved, "PRI-173", :wait_target_ambiguous}} =
+             WaitMarker.targets(%{issue | description: "Wartet auf: PRI-173"},
+               contexts: [context | targets],
+               comments: fn _ -> {:ok, []} end,
+               query: query,
+               report_error: fn _, _, _ -> :ok end
+             )
+  end
+
   test "planning worker returns an open cross-workspace wait to Backlog with a note", %{issues: [issue | _]} do
     waiting = %{issue | state: "Planung (AI)", description: "Wartet auf: PRI-173"}
     parent = self()
@@ -431,6 +490,80 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, [^issue]} = BlockerBrake.check([issue], opts)
   end
 
+  test "a changed operator duty supersedes unchanged validation lines", %{issues: [issue | _]} do
+    issue = %{issue | state: "BLOCKER"}
+    initial = "## Symphony Workpad\n\n### Validierung\n\n- [ ] Betreiber prüft Hostzugang\n\n### Betreiberauftrag\n\nAktion A\n"
+    Process.put(:brake_body, initial)
+    opts = [now: fn -> 1_000 end, workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: Process.get(:brake_body)}]} end]
+
+    assert :ok = BlockerBrake.reserve([issue], "first", opts)
+    Process.put(:brake_body, String.replace(initial, "Aktion A", "Aktion B"))
+    assert {:ok, [^issue]} = BlockerBrake.check([issue], opts)
+  end
+
+  test "handoff notes leave the operator duty cause unchanged", %{issues: [issue | _]} do
+    issue = %{issue | state: "BLOCKER", url: "https://linear.example/PRO-0"}
+    Process.put(:brake_body, "## Symphony Workpad\n\n### Betreiberauftrag\n\nHostzugang prüfen.\n")
+
+    opts = [
+      now: fn -> 1_000 end,
+      workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: Process.get(:brake_body)}]} end,
+      workpad_write: fn _, body ->
+        Process.put(:brake_body, body)
+        :ok
+      end,
+      query: fn _, %{id: id} -> {:ok, %{"data" => %{"issueUpdate" => %{"success" => true, "issue" => %{"id" => id}}}}} end,
+      fetch: fn _ -> {:ok, [%{issue | delegate_id: nil, assignee_id: "human"}]} end
+    ]
+
+    assert :ok = BlockerBrake.reserve([issue], "first", opts)
+    assert {:ok, []} = BlockerBrake.check([issue], opts)
+    assert Process.get(:brake_body) =~ "### BLOCKER-Übergabe"
+    assert {:ok, []} = BlockerBrake.check([issue], opts)
+  end
+
+  test "the brake's own Verlauf note cannot create a new cause", %{issues: [issue | _]} do
+    issue = %{issue | state: "BLOCKER", url: "https://linear.example/PRO-0"}
+    Process.put(:brake_body, "## Symphony Workpad\n\n### Verlauf\n\n- Betreiber wartet auf Hostzugang.\n")
+
+    opts = [
+      now: fn -> 1_000 end,
+      workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: Process.get(:brake_body)}]} end,
+      workpad_write: fn _, body ->
+        Process.put(:brake_body, body)
+        :ok
+      end,
+      query: fn _, %{id: id} -> {:ok, %{"data" => %{"issueUpdate" => %{"success" => true, "issue" => %{"id" => id}}}}} end,
+      fetch: fn _ -> {:ok, [%{issue | delegate_id: nil, assignee_id: "human"}]} end
+    ]
+
+    assert :ok = BlockerBrake.reserve([issue], "first", opts)
+    Process.put(:brake_body, Process.get(:brake_body) <> "- BLOCKER-Schleifenbremse: bisheriger Versuch dokumentiert.\n")
+    assert {:ok, []} = BlockerBrake.check([issue], opts)
+  end
+
+  test "a missing escalation route still completes the human handoff", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, "pai"))
+    issue = %{issue | state: "BLOCKER", url: "https://linear.example/PRO-0"}
+    Process.put(:brake_body, "## Symphony Workpad\n\n### Validierung\n\n- [ ] Betreiber prüft Hostzugang\n")
+
+    opts = [
+      now: fn -> 1_000 end,
+      workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: Process.get(:brake_body)}]} end,
+      workpad_write: fn _, body ->
+        Process.put(:brake_body, body)
+        :ok
+      end,
+      escalation_route: fn _, _ -> {:error, :route_unavailable} end,
+      query: fn _, %{id: id} -> {:ok, %{"data" => %{"issueUpdate" => %{"success" => true, "issue" => %{"id" => id}}}}} end,
+      fetch: fn _ -> {:ok, [%{issue | delegate_id: nil, assignee_id: "human"}]} end
+    ]
+
+    assert :ok = BlockerBrake.reserve([issue], "first", opts)
+    assert {:ok, []} = BlockerBrake.check([issue], opts)
+    assert Process.get(:brake_body) =~ "BLOCKER-Eskalationsweg nicht verfügbar"
+  end
+
   test "coordinator does not deliver a repeated BLOCKER cause", %{issues: [issue | _]} do
     issue = %{issue | state: "BLOCKER", url: "https://linear.example/PRO-0"}
     body = "## Symphony Workpad\n\n### Validierung\n\n- [ ] Betreiber prüft Hostzugang; fällig: Yolo Review\n"
@@ -445,11 +578,13 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       end,
       query: fn _, %{id: id} -> {:ok, %{"data" => %{"issueUpdate" => %{"success" => true, "issue" => %{"id" => id}}}}} end,
       fetch: fn _ -> {:ok, [%{issue | delegate_id: nil, assignee_id: "human"}]} end,
-      scan: &scan/1,
+      scan: fn _ -> {:ok, Map.put(inbox(), "current", %{})} end,
       start: fn _, _ -> flunk("same BLOCKER must not start another PO run") end
     ]
 
     assert :ok = BlockerBrake.reserve([issue], "previous", opts)
+    assert Group.groups([issue]) == %{"blocker" => [issue]}
+    assert SymphonyElixir.TestRun.start_allowed?(issue)
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
     assert tick(state, [issue], opts).yolo_runs == %{}
     assert_receive {:brake_note, updated}

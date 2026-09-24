@@ -77,10 +77,10 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
 
     with true <- is_binary(human),
          :ok <- note(issue, details, opts),
-         :ok <- notify_once(issue, details, opts),
          :ok <- API.update(issue.id, %{assigneeId: human, delegateId: nil}, opts),
          {:ok, [fresh]} <- Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1).([issue.id]),
          true <- fresh.state == "BLOCKER" and fresh.delegate_id == nil and fresh.assignee_id == human do
+      notify_once(issue, details, opts)
       :handed_off
     else
       {:error, _} = error -> error
@@ -95,22 +95,26 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
 
       {:error, :yolo_escalation_delivery_unconfirmed} ->
         Logger.warning("BLOCKER escalation delivery unconfirmed issue_id=#{issue.id} issue_identifier=#{issue.identifier}; no duplicate send")
-        note_uncertain_delivery(issue, opts)
+        record_delivery_issue(issue, "BLOCKER-Eskalationsversand unbestätigt; journalisierter Versuch wird nicht wiederholt.", opts)
 
       error ->
-        error
+        Logger.warning("BLOCKER escalation route unavailable issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(error)}")
+        record_delivery_issue(issue, "BLOCKER-Eskalationsweg nicht verfügbar: #{inspect(error)}; menschliche Übergabe ist erfolgt.", opts)
     end
   end
 
-  defp note_uncertain_delivery(issue, opts) do
+  defp record_delivery_issue(issue, entry, opts) do
     fetch = Keyword.get(opts, :workpad_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1))
     write = Keyword.get(opts, :workpad_write, Keyword.get(opts, :workpad, &Workpad.update_tracker_workpad/2))
-    entry = "BLOCKER-Eskalationsversand unbestätigt; journalisierter Versuch wird nicht wiederholt."
 
-    with {:ok, comments} <- fetch.(issue.id),
-         {:ok, workpad} <- Workpad.find_comment(comments) do
-      if String.contains?(workpad.body, entry), do: :ok, else: write.(issue.id, insert_note(workpad.body, entry))
-    end
+    result =
+      with {:ok, comments} <- fetch.(issue.id),
+           {:ok, workpad} <- Workpad.find_comment(comments) do
+        if String.contains?(workpad.body, entry), do: :ok, else: write.(issue.id, insert_note(workpad.body, entry))
+      end
+
+    if result != :ok, do: Logger.warning("BLOCKER escalation note unavailable issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(result)}")
+    :ok
   end
 
   defp note(issue, details, opts) do
@@ -127,9 +131,11 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
   defp insert_note(body, entry) do
     note = "- " <> entry <> "\n"
 
-    if String.contains?(body, "### Kommentareingang"),
-      do: String.replace(body, "### Kommentareingang", note <> "\n### Kommentareingang"),
-      else: body <> "\n" <> note
+    cond do
+      String.contains?(body, "### BLOCKER-Übergabe\n\n") -> String.replace(body, "### BLOCKER-Übergabe\n\n", "### BLOCKER-Übergabe\n\n" <> note)
+      String.contains?(body, "### Kommentareingang") -> String.replace(body, "### Kommentareingang", "### BLOCKER-Übergabe\n\n" <> note <> "\n### Kommentareingang")
+      true -> body <> "\n### BLOCKER-Übergabe\n\n" <> note
+    end
   end
 
   defp cause(issue, opts) do
@@ -147,10 +153,17 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
 
       relevant =
         if lines == [],
-          do: section(workpad.body, "Verlauf") |> String.split("\n") |> Enum.filter(&Regex.match?(~r/(?:Betreiber|Live|Host|Integration|Freigabe|Zugang|BLOCKER)/iu, &1)) |> List.last() |> List.wrap(),
+          do:
+            section(workpad.body, "Verlauf")
+            |> String.split("\n")
+            |> Enum.filter(&Regex.match?(~r/(?:Betreiber|Live|Host|Integration|Freigabe|Zugang|BLOCKER)/iu, &1))
+            |> Enum.reject(&Regex.match?(~r/BLOCKER-(?:Schleifenbremse|Eskalations)/u, &1))
+            |> List.last()
+            |> List.wrap(),
           else: lines
 
       cond do
+        String.trim(section(workpad.body, "Betreiberauftrag")) != "" -> {:ok, String.trim(section(workpad.body, "Betreiberauftrag"))}
         relevant != [] -> {:ok, Enum.join(relevant, "\n")}
         map_size(last_escalation_body(workpad.body)) > 0 -> {:ok, last_escalation_body(workpad.body) |> Enum.sort() |> Jason.encode!()}
         String.trim(validation) != "" -> {:ok, String.trim(validation)}

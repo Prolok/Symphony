@@ -67,10 +67,19 @@ defmodule SymphonyElixir.WaitMarker do
     waiting = targets |> Enum.reject(&merged?/1) |> Enum.map_join(", ", & &1.identifier)
     note = "Wartemarker offen: #{waiting}; Ticket nach Backlog zurückgegeben."
 
-    with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id),
-         {:ok, workpad} <- Workpad.find_comment(comments) do
-      write_wait_note(issue, workpad.body, note)
+    with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id) do
+      case Workpad.find_comment(comments) do
+        {:ok, workpad} -> write_wait_note(issue, workpad.body, note)
+        {:error, :workpad_comment_not_found} -> create_wait_workpad(issue, note)
+        error -> error
+      end
     end
+  end
+
+  defp create_wait_workpad(issue, note) do
+    stamp = NaiveDateTime.local_now() |> Calendar.strftime("%Y-%m-%d %H:%M:%S")
+    body = "## Symphony Workpad\n\n### Plan\n\n- [ ] Wartemarker nach Ziel-Merge erneut prüfen.\n\n### Validierung\n\n- [ ] Ziel-Ticket gemergt.\n\n### Verlauf\n\n- #{stamp} - #{note}\n"
+    Tracker.create_comment(issue.id, body)
   end
 
   defp write_wait_note(issue, body, note) do
@@ -94,12 +103,24 @@ defmodule SymphonyElixir.WaitMarker do
     contexts = Keyword.get(opts, :contexts, Projects.configured())
     candidates = Enum.reject(contexts, &(&1.settings.tracker.app["workspace_id"] == source.settings.tracker.app["workspace_id"]))
 
-    Enum.reduce_while(candidates, {:error, :wait_target_unresolved}, fn context, _ ->
+    Enum.reduce_while(candidates, {:ok, []}, fn context, {:ok, found} ->
       case lookup(context, identifier, opts) do
-        {:ok, nil} -> {:cont, {:error, :wait_target_unresolved}}
-        result -> {:halt, result}
+        {:ok, nil} -> {:cont, {:ok, found}}
+        {:ok, target} -> {:cont, {:ok, [target | found]}}
+        error -> {:halt, error}
       end
     end)
+    |> case do
+      {:ok, found} ->
+        case Enum.uniq_by(found, & &1.id) do
+          [target] -> {:ok, target}
+          [] -> {:error, :wait_target_unresolved}
+          _ -> {:error, :wait_target_ambiguous}
+        end
+
+      error ->
+        error
+    end
   end
 
   defp lookup(context, identifier, opts) do

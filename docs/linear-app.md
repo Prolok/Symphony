@@ -208,8 +208,11 @@ keine `symphony_yolo_complete`-Bestätigung; Änderungen während des Turns blei
 gegenüber dem eingefrorenen Ausgangsstand offen. Pro Mitglied und fachlicher Phase
 wird bereits die Zustellung dauerhaft gespeichert. Gruppenbeitritt/-austritt,
 Status-Rundläufe und Neustarts erzeugen keine erneute Zustellung unveränderter
-Arbeit. Inhalt, externe Kommentare und wirksame Abhängigkeiten bestimmen die
-nächste fachliche Version. Vollständig paginierte Relationsabfragen beobachten
+Arbeit. Inhalt, externe Kommentare, wirksame Abhängigkeiten und belegte
+Delegations- oder menschliche Prioritätsimpulse bestimmen die nächste fachliche
+Version. Relay-Ereignispositionen und Resync-Snapshots stoßen einen paginierten
+Abgleich der Linear-Issue-Historie an; nur nachgewiesene relevante Feldwechsel
+erhöhen die Impulsgeneration. Vollständig paginierte Relationsabfragen beobachten
 Vorgängerzustände auch ohne Änderung am Ursprung. Geblocktes Backlog bleibt
 unbewertet; frische Abhängigkeiten sperren auch Aktionen eines bereits laufenden
 PO-Turns, wenn das Backlog-Ticket inzwischen blockiert wurde. Zusammenhängende Reviewketten warten auf sämtliche Folgefixes und
@@ -1628,8 +1631,10 @@ nicht erfasste Prozesse machen die Messung unvollständig. Keine privaten Secret
 an Worker weitergeben; nur die sekretfreien Messartefakte übergeben.
 
 Zusätzliche Aktionen/Checkpoints und geänderte Inhalte erhöhen den Verbrauch.
-Es gibt keine harte Zustell-SLA, keine rekonstruierbare Historie
-zwischen Polls und keine atomare Linear-/GitHub- oder Exactly-once-Garantie.
+Es gibt keine harte Zustell-SLA; zwischen Polls überschriebene Kommentartexte
+sind nicht rekonstruierbar. Delegations- und Prioritätswechsel werden nur soweit
+erkannt, wie sie in der Linear-Issue-Historie abrufbar sind. Eine atomare
+Linear-/GitHub- oder Exactly-once-Garantie besteht nicht.
 Das unvermeidbare Fenster zwischen letzter API-Antwort und Aktion bleibt bestehen.
 
 ### Ausführbare Operator-Messübergabe PRO-716

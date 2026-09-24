@@ -1319,6 +1319,29 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     end
   end
 
+  test "a newly ready review chain member prevents a partial launch", %{issues: [first, second | _], root: root} do
+    first = %{first | state: "Yolo Review"}
+    second = %{second | state: "Yolo Review", blocked_by: [%{id: first.id, state: "Yolo Review"}]}
+    Process.put(:review_project_reads, 0)
+
+    opts = [
+      fetch: fn _ -> {:ok, [first]} end,
+      lease: fn _, callback -> callback.() end,
+      scan: &scan/1,
+      project: fn ->
+        reads = Process.get(:review_project_reads)
+        Process.put(:review_project_reads, reads + 1)
+        {:ok, if(reads == 0, do: [first], else: [first, second])}
+      end,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{inputs: []}} end,
+      session: fn _, _, _, _ -> flunk("incomplete review chain must not launch") end
+    ]
+
+    assert {:error, :yolo_review_waiting} = run_group("review", [first], [first], opts)
+  end
+
   test "fresh lookup cannot substitute unleased members", %{issues: issues} do
     first = hd(issues)
 
@@ -1349,6 +1372,34 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert record["processed"] == nil
     assert record["retry_at"] > System.system_time(:millisecond)
     assert record["attempt"]["members"] == Enum.map(issues, & &1.id)
+  end
+
+  test "terminal local turn failure ends delivery without claiming a decision", %{issues: [issue | _], root: root} do
+    alias SymphonyElixir.Yolo.Delivery
+
+    opts = [
+      fetch: fn _ -> {:ok, [issue]} end,
+      lease: fn _, callback -> callback.() end,
+      scan: &scan/1,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{inputs: []}} end,
+      before_action: fn _ -> :ok end,
+      session: fn _, _, _, session_opts ->
+        session_opts[:on_message].(%{event: :turn_failed, session_id: "failed-session"})
+        {:error, :turn_failed}
+      end
+    ]
+
+    assert {:error, :turn_failed} = run_group("incoming", [issue], [issue], opts)
+    assert {:ok, record} = Store.read("incoming")
+    assert get_in(record, ["delivery_ends", record["attempt"]["id"]]) == true
+    assert record["attempt"]["completed"] == nil
+
+    {:ok, same, _} = Observation.capture([issue], %{}, scan: &scan/1)
+    {:ok, changed, _} = Observation.capture([issue], %{}, scan: &scan/1, impulse_generations: %{issue.id => 1})
+    assert Delivery.pending([issue], same, record) == []
+    assert Delivery.pending([issue], changed, record) == [issue]
   end
 
   test "pending actions reopen an old processed snapshot and cannot hide behind member receipts", %{issues: issues, root: root} do
@@ -1539,7 +1590,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     ]
 
     for answer <- [{:ok, [blocked, expected]}, {:error, :rate_limited}] do
-      assert {:error, _} = run_group("review", [review], [], Keyword.put(base, :project, fn -> answer end))
+      assert {:error, _} = run_group("review", [review], [review], Keyword.put(base, :project, fn -> answer end))
       assert {:ok, %{"processed" => nil}} = Store.read("review")
     end
 
@@ -1551,7 +1602,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       {:ok, if(count == 0, do: [review], else: [blocked, expected])}
     end
 
-    assert {:error, :yolo_review_waiting} = run_group("review", [review], [], Keyword.put(base, :project, changed))
+    assert {:error, :yolo_review_waiting} = run_group("review", [review], [review], Keyword.put(base, :project, changed))
     assert Process.get(:project_checks) == 2
   end
 
@@ -2121,10 +2172,29 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Delivery.pending([issue], resumed, put_in(record, ["attempt", "session_end"], false)) == []
   end
 
+  test "a confirmed wait does not suppress a new impulse for the same source", %{issues: [issue | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    {:ok, original, _} = Observation.capture([issue], %{}, scan: &scan/1)
+    {:ok, raised, _} = Observation.capture([issue], %{}, scan: &scan/1, impulse_generations: %{issue.id => 1})
+
+    record = %{
+      "observations" => original,
+      "deliveries" => %{issue.id => %{"semantic" => original[issue.id]["semantic"], "run_id" => "run"}},
+      "delivery_ends" => %{"run" => true},
+      "completed_sources" => %{issue.id => original[issue.id]["source"]}
+    }
+
+    assert Delivery.pending([issue], original, record) == []
+    assert Delivery.pending([issue], raised, record) == [issue]
+    preserved = Delivery.migrate(record, raised)
+    assert get_in(preserved, ["completed_versions", issue.id]) == original[issue.id]["member_semantic"]
+    assert Delivery.pending([issue], raised, Map.put(preserved, "observations", raised)) == [issue]
+  end
+
   test "a confirmed member is reused when a partly completed delivery resumes", %{issues: [first, second | _]} do
     alias SymphonyElixir.Yolo.Delivery
     {:ok, original, _} = Observation.capture([first, second], %{}, scan: &scan/1)
-    generations = %{first.id => 1, second.id => 1}
+    generations = %{second.id => 1}
     {:ok, resumed, _} = Observation.capture([first, second], %{}, scan: &scan/1, impulse_generations: generations)
 
     receipts =
@@ -2132,7 +2202,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         {issue.id, %{"semantic" => original[issue.id]["semantic"], "run_id" => "run"}}
       end)
 
-    record = %{"deliveries" => receipts, "delivery_ends" => %{"run" => true}, "completed_sources" => %{first.id => original[first.id]["source"]}}
+    record = %{"observations" => original, "deliveries" => receipts, "delivery_ends" => %{"run" => true}, "completed_sources" => %{first.id => original[first.id]["source"]}}
 
     assert Delivery.pending([first, second], resumed, record) == [second]
   end

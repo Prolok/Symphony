@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Yolo.Delivery do
   @spec migrate(map(), map()) :: map()
   def migrate(record, observations) do
     previous = record["observations"] || %{}
+    record = preserve_source_versions(record, previous)
 
     if record["processed"] == Observation.fingerprint(previous) do
       decisions =
@@ -22,6 +23,21 @@ defmodule SymphonyElixir.Yolo.Delivery do
     else
       record
     end
+  end
+
+  defp preserve_source_versions(record, previous) do
+    record
+    |> Map.put("completed_versions", source_versions(record, previous, "completed_sources", "completed_versions"))
+    |> Map.put("decision_versions", source_versions(record, previous, "decision_sources", "decision_versions"))
+  end
+
+  defp source_versions(record, previous, sources_key, versions_key) do
+    Enum.reduce(record[sources_key] || %{}, record[versions_key] || %{}, fn {id, source}, versions ->
+      case previous[id] do
+        %{"source" => ^source, "member_semantic" => version} when is_binary(version) -> Map.put_new(versions, id, version)
+        _ -> versions
+      end
+    end)
   end
 
   @spec reconcile(String.t()) :: :ok | {:error, term()}
@@ -108,35 +124,45 @@ defmodule SymphonyElixir.Yolo.Delivery do
   end
 
   defp same_open_delivery?(issue, observations, record) do
-    semantic = observations[issue.id]["semantic"]
-    source = observations[issue.id]["source"]
+    observation = observations[issue.id]
+    semantic = observation["semantic"]
     receipt = get_in(record, ["deliveries", issue.id])
-    is_map(receipt) and receipt["semantic"] == semantic and not decided?(record, issue.id, semantic, source)
+    is_map(receipt) and receipt["semantic"] == semantic and not decided?(record, issue.id, observation)
   end
 
   defp skip_member?(issue, observations, record) do
-    semantic = observations[issue.id]["semantic"]
-    source = observations[issue.id]["source"]
+    observation = observations[issue.id]
+    semantic = observation["semantic"]
     receipt = get_in(record, ["deliveries", issue.id])
 
-    decided?(record, issue.id, semantic, source) or
+    decided?(record, issue.id, observation) or
       (is_map(receipt) and (receipt["semantic"] == semantic or not ended?(record, receipt["run_id"])))
   end
 
-  defp decided?(record, id, semantic, source) do
+  defp decided?(record, id, observation) do
     previous = get_in(record, ["observations", id])
     decided = get_in(record, ["decisions", id])
 
-    decided == semantic or same_source_decided?(record, id, source, previous, decided)
+    decided == observation["semantic"] or same_source_decided?(record, id, observation, previous, decided)
   end
 
-  defp same_source_decided?(_record, _id, source, _previous, _decided) when not is_binary(source), do: false
+  defp same_source_decided?(record, id, observation, previous, decided) do
+    source = observation["source"]
+    version = observation["member_semantic"]
 
-  defp same_source_decided?(record, id, source, previous, decided) do
-    get_in(record, ["decision_sources", id]) == source or
-      get_in(record, ["completed_sources", id]) == source or
-      (is_map(previous) and previous["source"] == source and
-         (is_binary(get_in(record, ["attempt", "completed", id])) or decided == previous["semantic"]))
+    source_receipt?(record, id, source, version, previous, "decision") or
+      source_receipt?(record, id, source, version, previous, "completed") or
+      prior_attempt_decided?(record, id, source, version, previous, decided)
+  end
+
+  defp source_receipt?(record, id, source, version, previous, kind) do
+    stored_version = get_in(record, ["#{kind}_versions", id]) || (previous && previous["member_semantic"])
+    is_binary(source) and stored_version == version and get_in(record, ["#{kind}_sources", id]) == source
+  end
+
+  defp prior_attempt_decided?(record, id, source, version, previous, decided) do
+    is_binary(source) and is_map(previous) and previous["member_semantic"] == version and previous["source"] == source and
+      (is_binary(get_in(record, ["attempt", "completed", id])) or decided == previous["semantic"])
   end
 
   defp ended?(record, run_id) do

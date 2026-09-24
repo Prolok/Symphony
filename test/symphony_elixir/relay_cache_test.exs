@@ -453,10 +453,17 @@ defmodule SymphonyElixir.RelayCacheTest do
   test "explicit resync signals are accepted durably and reconfigure or watch failures remain blocked", c do
     {:ok, s} = open(c)
     s = Session.tick(s)
+    previous = get_in(s.record, ["event_positions", "issue"])
     Server.publish(c.server, "workspace", %{"type" => "RelayGap", "action" => "expired_input", "signal" => "resync_required"})
     resynced = Session.tick(s)
     assert resynced.status == :ready
     assert resynced.record["generation"] != s.record["generation"]
+    marker = get_in(resynced.record, ["event_positions", "issue"])
+    assert marker != previous
+    assert marker["generation"] == resynced.record["generation"]
+    assert String.starts_with?(marker["event_id"], "snapshot:")
+    assert {:ok, reopened} = open(c)
+    assert get_in(reopened.record, ["event_positions", "issue"]) == marker
     assert Session.reconfigure(resynced, "binding") == resynced
     changed = Session.reconfigure(resynced, "new-binding")
     assert changed.status == :resyncing

@@ -94,7 +94,7 @@ defmodule SymphonyElixir.Yolo.Runner do
     lease.(issue, fn -> with_members(rest, callback, lease) end)
   end
 
-  defp run_locked(group, issues, _project_issues, run_id, record, opts) do
+  defp run_locked(group, issues, project_issues, run_id, record, opts) do
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
@@ -102,7 +102,7 @@ defmodule SymphonyElixir.Yolo.Runner do
          {:ok, fresh} <- Dependencies.refresh(fresh, opts),
          true <- Enum.all?(fresh, &Dependencies.dispatchable?/1),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))),
-         {:ok, project_issues} <- current_project(group, fresh, opts),
+         {:ok, project_issues} <- current_project(group, fresh, project_issues, opts),
          observation_issues = if(group == "review", do: Group.groups(project_issues)["review"] || [], else: fresh),
          {:ok, all_observations, fingerprint} <-
            Observation.capture(observation_issues, %{}, Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
@@ -278,7 +278,7 @@ defmodule SymphonyElixir.Yolo.Runner do
 
   defp execute_session(group, issues, project_issues, workspace, run_id, {record, observations, _fingerprint}, opts) do
     with {:ok, prompt} <- prompt(group, issues, project_issues, workspace, opts),
-         :ok <- verify_start(group, issues, workspace, opts),
+         :ok <- verify_start(group, issues, project_issues, workspace, opts),
          delivery_opts =
            Keyword.merge(opts,
              before_delivery: fn -> reserve_delivery(group, issues, run_id, observations, opts) end,
@@ -298,6 +298,7 @@ defmodule SymphonyElixir.Yolo.Runner do
         Map.merge(finished, %{
           "decisions" => Map.merge(finished["decisions"] || %{}, Map.new(observations, fn {id, data} -> {id, data["semantic"]} end)),
           "decision_sources" => Map.merge(finished["decision_sources"] || %{}, Map.new(observations, fn {id, data} -> {id, data["source"]} end)),
+          "decision_versions" => Map.merge(finished["decision_versions"] || %{}, Map.new(observations, fn {id, data} -> {id, data["member_semantic"]} end)),
           "observations" => observations,
           "processed_epoch" => record["capture_epoch"],
           "processed" => observations |> Map.take(Enum.map(retained, & &1.id)) |> Observation.fingerprint(),
@@ -346,12 +347,12 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
   end
 
-  defp verify_start(group, issues, workspace, opts) do
+  defp verify_start(group, issues, project_issues, workspace, opts) do
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
     # Fetch/checkpoints and checkout creation may take time. Keep all leases held
     # and recheck the exact frozen members immediately before starting Codex.
-    with {:ok, _} <- current_project(group, issues, opts),
+    with {:ok, _} <- current_project(group, issues, project_issues, opts),
          true <- Keyword.get(opts, :unchanged, &Workspace.unchanged?/1).(workspace),
          {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
          {:ok, fresh} <- Dependencies.refresh(fresh, opts),
@@ -365,12 +366,12 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
   end
 
-  defp current_project("review", members, opts) do
+  defp current_project("review", members, expected, opts) do
     fetch = Keyword.get(opts, :project, &Client.fetch_candidate_issues/0)
 
     with {:ok, issues} <- fetch.(),
          {:ok, issues} <- Dependencies.refresh(issues, opts),
-         true <- review_members_ready?(members, issues) do
+         true <- review_chain_unchanged?(members, expected, issues) do
       {:ok, issues}
     else
       {:error, _} = error -> error
@@ -378,17 +379,27 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
   end
 
-  defp current_project(_, previous, _opts), do: {:ok, previous}
+  defp current_project(_, previous, _expected, _opts), do: {:ok, previous}
 
-  defp review_members_ready?(members, project) do
-    ready = MapSet.new(Dependencies.review_members(project), & &1.id)
-    Enum.all?(members, &MapSet.member?(ready, &1.id))
+  defp review_chain_unchanged?(members, expected, current) do
+    selected = MapSet.new(members, & &1.id)
+
+    frozen =
+      expected
+      |> Dependencies.review_members()
+      |> Dependencies.components()
+      |> Enum.filter(fn chain -> Enum.any?(chain, &MapSet.member?(selected, &1.id)) end)
+      |> List.flatten()
+
+    MapSet.subset?(selected, MapSet.new(frozen, & &1.id)) and Dependencies.review_ready?(frozen, current)
   end
 
   defp run_session(workspace, prompt, [lead | _] = issues, run_id, opts) do
     Enum.each(issues, &Logger.info("YOLO group member issue_id=#{&1.id} issue_identifier=#{&1.identifier} run_id=#{run_id}"))
 
     on_message = fn message ->
+      record_terminal_delivery(run_id, message)
+
       if recipient = opts[:recipient], do: send(recipient, {:yolo_event, Scope.current()["group"], Map.merge(message, %{workspace_path: workspace.path, worker_pid: self()})})
       if message[:session_id], do: Enum.each(issues, &Logger.info("YOLO member event issue_id=#{&1.id} issue_identifier=#{&1.identifier} run_id=#{run_id} session_id=#{message[:session_id]}"))
     end
@@ -402,6 +413,20 @@ defmodule SymphonyElixir.Yolo.Runner do
         OpenClaw.run(workspace, prompt, issues, run_id, opts)
     end
   end
+
+  defp record_terminal_delivery(run_id, %{event: event, session_id: session_id} = message)
+       when event in [:turn_failed, :turn_cancelled] and is_binary(session_id) do
+    if is_nil(Config.openclaw_yolo_agent()) do
+      group = Scope.current()["group"]
+
+      case session_ended(group, run_id, message) do
+        :ok -> :ok
+        {:error, reason} -> Logger.warning("YOLO terminal delivery evidence unavailable group=#{group} run_id=#{run_id} reason=#{inspect(reason)}")
+      end
+    end
+  end
+
+  defp record_terminal_delivery(_run_id, _message), do: :ok
 
   defp retained_members(issues, opts) do
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)

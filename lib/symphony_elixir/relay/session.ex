@@ -240,6 +240,11 @@ defmodule SymphonyElixir.Relay.Session do
     case session.snapshot.(session.record["known"]) do
       {:ok, issues} ->
         record = replace_issues(session.record, issues, Map.keys(session.record["issues"]) ++ Enum.map(issues, & &1["id"]))
+        # A snapshot can span a short withdrawal and reassignment without an
+        # issue event. Change the durable marker so YOLO verifies issue history.
+        marker = %{"generation" => record["generation"], "position" => record["cursor"], "event_id" => "snapshot:" <> record["token"]}
+        positions = Map.new(issues, &{&1["id"], marker})
+        record = Map.put(record, "event_positions", positions)
         record = Map.merge(record, %{"phase" => "complete", "reconcile_at" => next_reconcile(session)})
         continue_saved(session, record, &complete/1)
 

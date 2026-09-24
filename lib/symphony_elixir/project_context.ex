@@ -74,7 +74,7 @@ defmodule SymphonyElixir.ProjectContext do
              EnvFile.config_dir(root),
              get_in(workflow.config, ["tracker", "app", "client_secret_env"]),
              get_in(workflow.config, ["tracker", "relay", "key_env"]),
-             get_in(workflow.config, ["tracker", "openclaw_linear_bridge", "secret_env"])
+             bridge_secret_reference(workflow.config)
            ) do
       env =
         public_env
@@ -118,6 +118,11 @@ defmodule SymphonyElixir.ProjectContext do
 
     accept_refreshed_context(candidate, context)
   end
+
+  defp bridge_secret_reference(%{"tracker" => %{"openclaw_linear_bridge" => %{"secret_env" => reference}}}) when is_binary(reference),
+    do: reference
+
+  defp bridge_secret_reference(_config), do: nil
 
   defp refreshed_root_env(%{code_root: nil, root_env: env}), do: {:ok, env}
 

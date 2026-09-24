@@ -41,7 +41,10 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
 
     transport = fn ["gateway", "call", method, "--params", _raw, "--json", "--timeout", "10000", "--port", "18789"] ->
       send(parent, {:standard_target, method})
-      {:ok, ~s({"ok":true})}
+
+      if method == "sessions.abort",
+        do: {:ok, ~s({"ok":true,"status":"aborted","abortedRunId":"run"})},
+        else: {:ok, ~s({"ok":true})}
     end
 
     opts = [transport: transport, bridge_gateway_port: 19_892]

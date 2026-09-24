@@ -69,13 +69,13 @@ werden; aufzeichnende Testtransporte sind nur synthetische Nachweise.
 
 ## Implementierungsstand der Recoverybelege
 
-Der aktuelle Betreiberpfad unterstützt belegte Vorab-Ablehnung und
-Originalterminal gemäß [OpenClaw-Recovery](openclaw-yolo.md).
-`retirement` und `state=retired` sind eine vorbereitete Protokollreserve:
-Schema und Projektion beschreiben sie, aber Recovery und Journal erzeugen
-derzeit keinen solchen Stilllegungsbeleg. Der synthetische Projektionstest
-belegt nur dessen Darstellung. Bis zur Integration eines gesondert geprüften
-Recoverypfads bleibt ein Abbruch ohne Originalterminal offen.
+Der Betreiberpfad unterstützt belegte Vorab-Ablehnung, Originalterminal und
+die technische Stilllegung neuer, schreibgesperrter Unterbrechungen gemäß
+[OpenClaw-Recovery](openclaw-yolo.md). `Recovery.retire/4` prüft dafür die
+Originalbindung, eine frische inaktive Sitzung, den Eingabestand und entweder
+eine bestätigte Abbruchquittung oder das belegte Ende des Originallaufs.
+`Journal.transition/2` erfasst den Stilllegungsbeleg mit dem Bridge-Snapshot.
+Ein bloßer Abbruchversuch oder ein Timeout ohne diese Belege bleibt offen.
 
 ## Wire-Vertrag
 
@@ -86,7 +86,7 @@ Die Portauswahl verwendet den bestehenden `localPortOverride` des
 und dessen
 [Zielauflösung](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/connection-details.ts).
 
-**Quellen:** OpenClaw 2026.9.4, Commit `3a9d69db306cd7f081e06254cb89c4bcc14a7107`: [öffentliche Plugin-API](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugins/plugin-api.types.ts), [Gateway-Router/Scopeprüfung](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/server-methods.ts), [Handlervertrag](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/server-methods/shared-types.ts), [Agent-RPC](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/agent.ts). Repoquellen: `lib/symphony_elixir/yolo/openclaw.ex`, `openclaw/gateway.ex`, `openclaw/journal.ex`, `ProjectContext.load/4`; die Projektion von Stilllegungen ist als Protokollreserve vorbereitet (siehe Implementierungsstand oben). Öffentliche Schnittstelle ist belegt; Registrierung, Schlüssel und isolierte Consumerinstanz sind Bereitstellungsarbeit im Gegenprojekt.
+**Quellen:** OpenClaw 2026.9.4, Commit `3a9d69db306cd7f081e06254cb89c4bcc14a7107`: [öffentliche Plugin-API](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugins/plugin-api.types.ts), [Gateway-Router/Scopeprüfung](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/server-methods.ts), [Handlervertrag](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/server-methods/shared-types.ts), [Agent-RPC](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/agent.ts). Repoquellen: `lib/symphony_elixir/yolo/openclaw.ex`, `openclaw/gateway.ex`, `openclaw/journal.ex`, `openclaw/recovery.ex`, `ProjectContext.load/4`; Stilllegungen werden aus dem vorhandenen Journalbeleg projiziert. Öffentliche Schnittstelle ist belegt; Registrierung, Schlüssel und isolierte Consumerinstanz sind Bereitstellungsarbeit im Gegenprojekt.
 
 **Authentisierungsgrenze:** Gatewayauthentisierung transportiert die Meldung; eine Producer-ID im JSON allein ist keine Autorisierung. Zusätzlich HMAC-SHA256 mit separatem installations-/produzentengebundenem Schlüssel (mindestens 32 zufällige Bytes, Base64-Konfiguration). Keine Wiederverwendung von Linear-App-/Relay-/Gatewaycredentials. Schlüssel nur beim vertrauenswürdigen Symphony-Dienst und Consumer; weder Modelle noch Prompts, Journale, Logs oder CLI-Umgebung erhalten ihn. Signieren erfolgt im Dienst vor dem vorhandenen geheimnisbereinigten Transport.
 
@@ -106,9 +106,9 @@ Consumerkonfiguration bindet `key_id` fest an erlaubten `producer_id`, `consumer
 - `observation`: `state` aus intent/accepted/running/unknown/cancel_pending/completed/failed/cancelled/rejected/retired; die fünf dargestellten Booleschen Felder und die drei Belegfelder sind verpflichtend, fehlende Belege als null. `acceptance_observed`/`execution_observed` bleiben monoton. Fehlende historische Flags dürfen keinen erfundenen Nachweis erzeugen.
 - `terminal`: null oder diskriminierter Producerbeleg. `kind=gateway`: `{kind,runId,status,endedAt,startedAt?,stopReason?}`, status=ok/error/timeout. `kind=operator_terminal_original`: `{kind,runId,status,state,startedAt,endedAt,evidence_sha256,source_sha256,execution_source_sha256}` aus bestätigtem V2-Recoveryjournal; status=done/failed/timeout/killed, zugehöriger state=completed/failed/cancelled. runId exakt order_id, echte Originalzeiten; yielded/pendingError niemals terminal. kind ist ein Protokollfeld, kein behauptetes Hostfeld.
 - `rejection`: null oder `kind=gateway` mit `{kind,method,phase,code,reason,request_sha256,id,session_id,agent,payload_sha256}`; method=agent, phase=pre_acceptance, code=INVALID_REQUEST, reason=cwd_reserved/cwd_not_absolute. Alternativ bestätigte V1-Recovery: `{kind:"operator_pre_acceptance",code,reason,request_id,source_sha256,execution_source_sha256,evidence_sha256}` aus rejection/recovery, reason=cwd_reserved. Keine erfundenen request_sha256; Originalbindung und fehlende Annahme/Ausführung bereits durch Recovery geprüft.
-- `retirement`: derzeit null; reservierte Projektion `{kind,stop_basis,retired_at,history_sha256,physical_session_id,last_run_id,session_end}`; kind=fenced_interruption, stop_basis=abort_acknowledged/terminal_original/terminal_original_history. Eine spätere Recoveryintegration muss den Beleg vor seiner Journalisierung bestätigen; die Bridge führt keine eigene History-Recovery aus. session_end enthält die tatsächlich gespeicherten lastRunId/status/startedAt/endedAt. Abweichende physische Folgegenerationen sind kein ursprüngliches Erfolgs-/Enddatum. Für Retirement verlangt der Consumer state=retired, writable=false und cancel_requested=true; fehlende Stilllegung bleibt offen. Dieser technische Ausgang behauptet keinen fachlichen Erfolg.
+- `retirement`: null oder die Projektion des journalisierten Belegs `{kind,stop_basis,retired_at,history_sha256,physical_session_id,last_run_id,session_end}`; kind=fenced_interruption, stop_basis=abort_acknowledged/terminal_original/terminal_original_history. Die vorhandene Recovery prüft den Beleg vor seiner Journalisierung; die Bridge führt keine eigene History-Recovery aus. session_end enthält die tatsächlich gespeicherten lastRunId/status/startedAt/endedAt. Abweichende physische Folgegenerationen sind kein ursprüngliches Erfolgs-/Enddatum. Für Retirement verlangt der Consumer state=retired, writable=false und cancel_requested=true; fehlende Stilllegung bleibt offen. Dieser technische Ausgang behauptet keinen fachlichen Erfolg.
 
-**Semantik und Quittung:** Der erste gültige Snapshot fixiert die gesamte Bindung unter (producer_id, consumer_account_id, order_id). Weitere Snapshots müssen exakt dieselbe Bindung besitzen. intent/Delegation allein setzt keinen Marker. Erst bestätigte native Annahme (auch Warteschlange) oder tatsächlicher Startbeleg aktiviert sämtliche Mitglieder. unknown/timeout/abort-Ack allein löschen nichts. Ein gültiges Originalterminal oder belegte Nichtannahme beendet exakt diesen Auftrag. Der Vertrag sieht außerdem ein bestätigtes journalisiertes Retirement vor, sobald der dafür reservierte Recoverypfad implementiert ist. Tool-/Checkoutbeleg belegt Ausführung, keinen Abschluss.
+**Semantik und Quittung:** Der erste gültige Snapshot fixiert die gesamte Bindung unter (producer_id, consumer_account_id, order_id). Weitere Snapshots müssen exakt dieselbe Bindung besitzen. intent/Delegation allein setzt keinen Marker. Erst bestätigte native Annahme (auch Warteschlange) oder tatsächlicher Startbeleg aktiviert sämtliche Mitglieder. unknown/timeout/abort-Ack allein löschen nichts. Ein gültiges Originalterminal, belegte Nichtannahme oder bestätigte journalisierte Stilllegung beendet exakt diesen Auftrag. Tool-/Checkoutbeleg belegt Ausführung, keinen Abschluss.
 
 Der Consumer führt pro Issue die Menge offener Auftragskennungen; ein alter Abschluss darf einen neueren/überlappenden Marker nicht löschen. Sequenzen unterhalb der zuletzt gespeicherten werden wirkungslos quittiert; identische Sequenz+Bytes ist wirkungslos, gleiche Sequenz mit anderen Bytes ein Konflikt. Terminale Tombstones dürfen durch keine spätere aktive Meldung wieder geöffnet werden. Keine Altersfrist, die notwendige Restart-Replays nachträglich zur neuen Arbeit macht.
 
@@ -156,9 +156,9 @@ Neutrale, synthetische Vollbeispiele:
 [Review mit zwei Mitgliedern](../test/fixtures/openclaw/linear_bridge/review.json),
 [dessen Ende](../test/fixtures/openclaw/linear_bridge/review-completed.json).
 Die Gateway-Abortquittung allein bleibt auch bei `abort_acknowledged=true`
-nichtterminal. Die derzeit verfügbaren Recoverypfade liefern Vorab-Ablehnung
-oder Originalterminal; die vorbereitete Retirementprojektion ergänzt keinen
-weiteren Betreiberpfad.
+nichtterminal. Die Recovery liefert Vorab-Ablehnung, Originalterminal oder
+eine nach Inaktivitäts- und Eingabeprüfung journalisierte technische
+Stilllegung; deren Projektion bleibt an den Originalauftrag gebunden.
 
 ## Isolierter Integrationsnachweis
 

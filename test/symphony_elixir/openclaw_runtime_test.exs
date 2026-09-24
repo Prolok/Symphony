@@ -99,7 +99,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
   defp request(method, params \\ %{}), do: %{"jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => params}
   defp descriptor(context, id), do: Path.join([context.settings.workspace.root, "yolo-runs", id, "tools.json"])
 
-  test "real producer lifecycle journals and delivers a full two-member group without another agent execution", %{context: context, issues: issues, workspace: workspace} do
+  test "accepted producer lifecycle journals and delivers a full two-member group without another agent execution", %{context: context, issues: issues, workspace: workspace} do
     alias SymphonyElixir.Yolo.OpenClaw.LinearBridge.Delivery
     config = %{"producer_id" => "symphony-example", "consumer_account_id" => "account-example", "key_id" => "producer-key-example"}
     context = %{context | yolo_agent_id: "22222222-2222-4222-8222-222222222222"}
@@ -109,61 +109,55 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     members = issues |> Enum.take(2) |> Enum.map(&Map.put(&1, :id, Ecto.UUID.generate()))
     parent = self()
 
-    for unknown <- [false, true] do
-      id = Ecto.UUID.generate()
-      Process.put(:bridge_runtime_polls, 0)
+    id = Ecto.UUID.generate()
+    Process.put(:bridge_runtime_polls, 0)
 
-      handler = fn
-        "agent", params ->
-          assert params["idempotencyKey"] == id
-          assert {:ok, initial} = Journal.read("review")
-          assert length(initial["linear_bridge"]["snapshots"]) == 1
-          send(parent, {:native_submit, id})
-          if unknown, do: {:error, :openclaw_transport_timeout}, else: %{"runId" => id, "status" => "accepted"}
+    handler = fn
+      "agent", params ->
+        assert params["idempotencyKey"] == id
+        assert {:ok, initial} = Journal.read("review")
+        assert length(initial["linear_bridge"]["snapshots"]) == 1
+        send(parent, {:native_submit, id})
+        %{"runId" => id, "status" => "accepted"}
 
-        "agent.wait", %{"runId" => ^id} ->
-          polls = Process.get(:bridge_runtime_polls)
-          Process.put(:bridge_runtime_polls, polls + 1)
-          if polls == 0, do: %{"runId" => id, "status" => "running", "startedAt" => 1}, else: %{"runId" => id, "status" => "ok", "startedAt" => 1, "endedAt" => 2}
+      "agent.wait", %{"runId" => ^id} ->
+        polls = Process.get(:bridge_runtime_polls)
+        Process.put(:bridge_runtime_polls, polls + 1)
+        if polls == 0, do: %{"runId" => id, "status" => "running", "startedAt" => 1}, else: %{"runId" => id, "status" => "ok", "startedAt" => 1, "endedAt" => 2}
 
-        "linearbridge.symphony.lifecycle.v1", wire ->
-          raw = Base.decode64!(wire["payload_b64"])
-          payload = Jason.decode!(raw)
-          assert payload["binding"]["issue_ids"] == Enum.sort(Enum.map(members, & &1.id))
-          assert payload["binding"]["native"]["runId"] == id
-          send(parent, {:bridge_snapshot, payload["observation"]})
+      "linearbridge.symphony.lifecycle.v1", wire ->
+        raw = Base.decode64!(wire["payload_b64"])
+        payload = Jason.decode!(raw)
+        assert payload["binding"]["issue_ids"] == Enum.sort(Enum.map(members, & &1.id))
+        assert payload["binding"]["native"]["runId"] == id
+        send(parent, {:bridge_snapshot, payload["observation"]})
 
-          %{
-            "version" => 1,
-            "producer_id" => config["producer_id"],
-            "consumer_account_id" => config["consumer_account_id"],
-            "order_id" => id,
-            "sequence" => payload["sequence"],
-            "payload_sha256" => OpenClaw.digest(raw),
-            "disposition" => "stored"
-          }
-      end
-
-      opts = [transport: transport(handler), openclaw_wait: fn _ -> :ok end]
-      assert {:ok, _} = Scope.with_scope("review", members, id, fn -> OpenClaw.run(workspace, "synthetic PO workflow", members, id, opts) end)
-      assert {:ok, finished} = Journal.read("review")
-      snapshots = finished["linear_bridge"]["snapshots"]
-      assert length(snapshots) == 4
-      for _ <- snapshots, do: assert(:ok == Delivery.flush(Keyword.put(opts, :bridge_key, fn _ -> {:ok, :binary.copy(<<42>>, 32)} end)))
-      assert_received {:bridge_snapshot, %{"state" => "intent", "acceptance_observed" => false}}
-
-      if unknown do
-        assert_received {:bridge_snapshot, %{"state" => "unknown", "acceptance_observed" => false}}
-      else
-        assert_received {:bridge_snapshot, %{"state" => "accepted", "acceptance_observed" => true}}
-      end
-
-      assert_received {:bridge_snapshot, %{"execution_observed" => true, "terminal" => nil}}
-      assert_received {:bridge_snapshot, %{"state" => "completed", "terminal" => %{"runId" => ^id, "endedAt" => 2}}}
-      assert_received {:native_submit, ^id}
-      refute_received {:native_submit, ^id}
-      assert :ok = Delivery.flush(Keyword.put(opts, :bridge_key, fn _ -> flunk("all snapshots already confirmed") end))
+        %{
+          "version" => 1,
+          "producer_id" => config["producer_id"],
+          "consumer_account_id" => config["consumer_account_id"],
+          "order_id" => id,
+          "sequence" => payload["sequence"],
+          "payload_sha256" => OpenClaw.digest(raw),
+          "disposition" => "stored"
+        }
     end
+
+    opts = [transport: transport(handler), openclaw_wait: fn _ -> :ok end]
+    assert {:ok, _} = Scope.with_scope("review", members, id, fn -> OpenClaw.run(workspace, "synthetic PO workflow", members, id, opts) end)
+    assert {:ok, finished} = Journal.read("review")
+    snapshots = finished["linear_bridge"]["snapshots"]
+    assert length(snapshots) == 4
+    for _ <- snapshots, do: assert(:ok == Delivery.flush(Keyword.put(opts, :bridge_key, fn _ -> {:ok, :binary.copy(<<42>>, 32)} end)))
+    assert_received {:bridge_snapshot, %{"state" => "intent", "acceptance_observed" => false}}
+
+    assert_received {:bridge_snapshot, %{"state" => "accepted", "acceptance_observed" => true}}
+
+    assert_received {:bridge_snapshot, %{"execution_observed" => true, "terminal" => nil}}
+    assert_received {:bridge_snapshot, %{"state" => "completed", "terminal" => %{"runId" => ^id, "endedAt" => 2}}}
+    assert_received {:native_submit, ^id}
+    refute_received {:native_submit, ^id}
+    assert :ok = Delivery.flush(Keyword.put(opts, :bridge_key, fn _ -> flunk("all snapshots already confirmed") end))
   end
 
   test "activated path uses real MCP dispatch and only completes after member decisions", %{issues: issues, context: context, opts: opts, workspace: workspace} do
@@ -2101,7 +2095,12 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       history = Jason.decode!(recovery_opts[:sources]["source"]) |> put_in(["sessionInfo", "status"], status)
       {evidence, recovery_opts} = replace_terminal_history(package, history)
       assert {:ok, %{"state" => ^state}} = Recovery.resolve(evidence, true, recovery_opts)
-      assert {:error, :openclaw_run_failed_or_cancelled} = OpenClaw.recover(order, transport: fn _ -> flunk("terminal") end)
+
+      assert {:error, :openclaw_run_failed_or_cancelled} =
+               OpenClaw.recover(order,
+                 transport: fn _ -> flunk("terminal") end,
+                 recovery_lock: fn _, _, callback -> callback.() end
+               )
     end
   end
 

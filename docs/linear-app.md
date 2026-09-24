@@ -284,6 +284,40 @@ die reservierten IDs und den erforderlichen Abgleich, ohne die Operationen als
 erledigt zu markieren. Review-Übergaben verlangen weiterhin abgeschlossene
 Anlagen und Links.
 
+### Verwaiste PO-Reviewcheckouts
+
+Ein technischer Nichtstart vor bestätigter Zustellung entfernt seinen eigenen
+unveränderten Reviewcheckout. Der Gruppen-Store hält Grund, Lauf-ID,
+Bereinigungsergebnis und ein auf 15 Minuten begrenztes wachsendes `retry_at` für
+dieselbe Gruppenbeobachtung. Ist die sichere Entfernung nicht bestätigt, bleibt
+der Gruppenstart gesperrt. Eine aktive oder unklare Zustellung bleibt erhalten.
+
+Für Altbestände erstellt der Betreiber nach Prüfung ein JSON-Inventar mit
+expliziten Pfaden und dem jeweils dokumentierten vollständigen Commit-SHA:
+
+```json
+{"version":1,"checkouts":[{"path":"/ABS/WORKSPACE-ROOT/yolo/review/UUID","sha":"0123456789abcdef0123456789abcdef01234567"}]}
+```
+
+Aus dem Symphony-Checkout mit dem gebundenen Projektroot und funktionsfähigem
+Linear-App-Zugang ausführen; der Befehl verifiziert die Projekt-/Agentenbindung:
+
+```bash
+mix yolo.review_checkouts --project /ABS/PROJECT-ROOT --inventory /ABS/inventory.json
+mix yolo.review_checkouts --project /ABS/PROJECT-ROOT --inventory /ABS/inventory.json --apply
+```
+
+Der erste Aufruf ist ein Trockenlauf. Beide Aufrufe geben die Anzahl registrierter
+Reviewcheckouts vor und nach der Prüfung sowie jeden Kandidatenstatus aus.
+`--apply` entfernt ausschließlich registrierte, saubere, unveränderte und nicht
+journalierte Reviewcheckouts des gebundenen Projekts per `git worktree remove`.
+Der Gruppen-Lock muss frei sein; aktuelle Gruppenversuche, Zustellreservierungen,
+OpenClaw-Journale, Laufartefakte, falsche SHAs, veränderte oder nicht im Inventar genannte Pfade
+bleiben erhalten. `protected` verlangt Einzelprüfung und ist keine
+Löschfreigabe. Vor und nach der einmaligen Altbereinigung `git worktree list`
+zählen und Hauptcheckout sowie aktive Läufe abgleichen. Der Betreiberbeleg wird
+im Workpad der fälligen `Yolo Review`-Phase dokumentiert.
+
 ### Snapshot und Ereignisabgleich
 
 Die Subscription bzw. `resync begin` wird vor dem Initialsnapshot registriert.

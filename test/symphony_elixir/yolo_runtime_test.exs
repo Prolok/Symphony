@@ -1396,6 +1396,229 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Process.get(:project_checks) == 2
   end
 
+  test "failed review start removes its newly created checkout", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    workspace_root = Path.join(root, "worktrees")
+    ProjectContext.bind(put_in(context.settings.workspace.root, workspace_root))
+    assert {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: root)
+    File.write!(Path.join(root, "tracked"), "merged")
+    assert {_, 0} = System.cmd("git", ["add", "tracked"], cd: root)
+    assert {_, 0} = System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cd: root)
+    assert {_, 0} = System.cmd("git", ["remote", "add", "origin", root], cd: root)
+    project_checks = :ets.new(:project_checks, [:set, :private])
+    :ets.insert(project_checks, {:count, 0})
+
+    project = fn ->
+      count = :ets.update_counter(project_checks, :count, 1)
+      {:ok, if(count == 1, do: [review], else: [%{review | state: "Review"}])}
+    end
+
+    opts = [
+      fetch: fn _ -> {:ok, [review]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      project: project,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      session: fn _, _, _, _ -> flunk("verify_start must reject this group") end
+    ]
+
+    assert {:error, :yolo_review_waiting} = run_group("review", [review], [review], opts)
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+    assert {:ok, first} = Store.read("review")
+    assert first["nonstart"]["count"] == 1
+    assert first["attempt"]["checkout_cleanup"] == "removed"
+    assert first["retry_at"] > System.system_time(:millisecond) + 20_000
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    tick(state, [review], scan: &scan/1, start: fn _, _ -> flunk("retry must wait") end)
+    :ok = Store.write("review", %{first | "retry_at" => nil})
+    :ets.insert(project_checks, {:count, 0})
+    assert {:error, :yolo_review_waiting} = run_group("review", [review], [review], opts)
+    assert {:ok, second} = Store.read("review")
+    assert second["nonstart"]["count"] == 2
+    assert second["retry_at"] > System.system_time(:millisecond) + 50_000
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+
+    for expected_count <- 3..7 do
+      {:ok, current} = Store.read("review")
+      :ok = Store.write("review", %{current | "retry_at" => nil})
+      :ets.insert(project_checks, {:count, 0})
+      assert {:error, :yolo_review_waiting} = run_group("review", [review], [review], opts)
+      assert {:ok, repeated} = Store.read("review")
+      assert repeated["nonstart"]["count"] == expected_count
+
+      if expected_count >= 6 do
+        assert repeated["retry_at"] > System.system_time(:millisecond) + 890_000
+        assert repeated["retry_at"] <= System.system_time(:millisecond) + 900_000
+      end
+    end
+
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+
+    changed = %{review | title: "changed review"}
+
+    tick(state, [changed],
+      scan: &scan/1,
+      start: fn group, _ ->
+        send(self(), {:started, group})
+        {:error, :capacity}
+      end
+    )
+
+    assert_receive {:started, "review"}
+    assert {:ok, reset} = Store.read("review")
+    assert reset["nonstart"] == nil
+  end
+
+  test "rejected review delivery releases its checkout", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "worktrees")))
+    assert {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: root)
+    File.write!(Path.join(root, "tracked"), "merged")
+    assert {_, 0} = System.cmd("git", ["add", "tracked"], cd: root)
+    assert {_, 0} = System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cd: root)
+    assert {_, 0} = System.cmd("git", ["remote", "add", "origin", root], cd: root)
+
+    opts = [
+      fetch: fn _ -> {:ok, [review]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      project: fn -> {:ok, [review]} end,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      session: fn _, _, _, session_opts ->
+        assert :ok = session_opts[:on_session_start_failure].()
+        {:error, :prestart_rejected}
+      end
+    ]
+
+    assert {:error, :prestart_rejected} = run_group("review", [review], [review], opts)
+    assert {:ok, record} = Store.read("review")
+    assert record["attempt"]["checkout_cleanup"] == "removed"
+    assert record["deliveries"] == %{}
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+  end
+
+  test "dirty failed review checkout blocks another start", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "worktrees")))
+    assert {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: root)
+    File.write!(Path.join(root, "tracked"), "merged")
+    assert {_, 0} = System.cmd("git", ["add", "tracked"], cd: root)
+    assert {_, 0} = System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cd: root)
+    assert {_, 0} = System.cmd("git", ["remote", "add", "origin", root], cd: root)
+    Process.put(:project_checks, 0)
+
+    opts = [
+      fetch: fn _ -> {:ok, [review]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      workspace: fn group, id ->
+        {:ok, workspace} = Yolo.Workspace.create(group, id)
+        Process.put(:review_workspace, workspace)
+        {:ok, workspace}
+      end,
+      project: fn ->
+        count = Process.get(:project_checks) + 1
+        Process.put(:project_checks, count)
+        if count == 2, do: File.write!(Path.join(Process.get(:review_workspace).path, "tracked"), "changed")
+        {:ok, if(count == 1, do: [review], else: [%{review | state: "Review"}])}
+      end,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      session: fn _, _, _, _ -> flunk("dirty checkout must not start") end
+    ]
+
+    assert {:error, :yolo_review_waiting} = run_group("review", [review], [review], opts)
+    assert {:ok, record} = Store.read("review")
+    assert record["checkout_cleanup_blocked"] == true
+    assert record["attempt"]["checkout_cleanup"] == "blocked"
+    assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = run_group("review", [review], [review], opts)
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 2
+  end
+
+  test "interrupted cleanup cannot create another review checkout", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "worktrees")))
+    assert {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: root)
+    File.write!(Path.join(root, "tracked"), "merged")
+    assert {_, 0} = System.cmd("git", ["add", "tracked"], cd: root)
+    assert {_, 0} = System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cd: root)
+    assert {_, 0} = System.cmd("git", ["remote", "add", "origin", root], cd: root)
+    run_id = Ecto.UUID.generate()
+    assert {:ok, workspace} = Yolo.Workspace.create("review", run_id)
+    assert {:ok, record} = Store.read("review")
+    attempt = %{"id" => run_id, "members" => [review.id], "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1}
+    assert :ok = Store.write("review", Map.put(record, "attempt", attempt))
+
+    assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = run_group("review", [review], [review])
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 2
+  end
+
+  test "failed checkout creation without a worktree remains retryable", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "worktrees")))
+    assert {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: root)
+    File.write!(Path.join(root, "tracked"), "merged")
+    assert {_, 0} = System.cmd("git", ["add", "tracked"], cd: root)
+    assert {_, 0} = System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cd: root)
+    assert {_, 0} = System.cmd("git", ["remote", "add", "origin", root], cd: root)
+
+    opts = [
+      fetch: fn _ -> {:ok, [review]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      project: fn -> {:ok, [review]} end,
+      workspace: fn _, _ -> {:error, :synthetic_create_failure} end
+    ]
+
+    for _ <- 1..2 do
+      assert {:error, :synthetic_create_failure} = run_group("review", [review], [review], opts)
+      assert {:ok, record} = Store.read("review")
+      assert record["attempt"]["checkout_cleanup"] == "none"
+      assert record["checkout_cleanup_blocked"] == false
+      assert :ok = Store.write("review", %{record | "retry_at" => nil})
+    end
+
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+  end
+
+  test "exception after review checkout creation is recorded and cleaned", %{issues: [issue | _], root: root, context: context} do
+    review = %{issue | state: "Yolo Review"}
+    ProjectContext.bind(put_in(context.settings.workspace.root, Path.join(root, "worktrees")))
+    assert {_, 0} = System.cmd("git", ["init", "-b", "main"], cd: root)
+    File.write!(Path.join(root, "tracked"), "merged")
+    assert {_, 0} = System.cmd("git", ["add", "tracked"], cd: root)
+    assert {_, 0} = System.cmd("git", ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "fixture"], cd: root)
+    assert {_, 0} = System.cmd("git", ["remote", "add", "origin", root], cd: root)
+    Process.put(:project_checks, 0)
+
+    opts = [
+      fetch: fn _ -> {:ok, [review]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: &scan/1,
+      project: fn ->
+        count = Process.get(:project_checks) + 1
+        Process.put(:project_checks, count)
+        if count == 1, do: {:ok, [review]}, else: raise("synthetic project failure")
+      end,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      session: fn _, _, _, _ -> flunk("failed project must not start") end
+    ]
+
+    assert {:error, {:yolo_review_start_exception, RuntimeError}} = run_group("review", [review], [review], opts)
+    assert {:ok, record} = Store.read("review")
+    assert record["failure"]["run_id"] == record["attempt"]["id"]
+    assert record["attempt"]["checkout_cleanup"] == "removed"
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+  end
+
   test "withdrawal retains other members but cannot mark the withdrawn observation processed", %{issues: issues, root: root} do
     first = hd(issues)
     Process.put(:withdraw_member, false)

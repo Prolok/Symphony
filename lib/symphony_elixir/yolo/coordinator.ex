@@ -217,8 +217,10 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     with :ok <- Journal.available(group),
          :ok <- Delivery.reconcile(group),
          {:ok, record} <- Store.read(group),
-         true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
          {:ok, observations, _fingerprint} <- Observation.capture(members, record["observations"], opts),
+         record = reset_changed_nonstart(record, members, observations),
+         true <- record["checkout_cleanup_blocked"] != true,
+         true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
          record = Delivery.migrate(record, observations),
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          :ok <- Store.write(group, Map.put(record, "observations", observations)) do
@@ -234,6 +236,16 @@ defmodule SymphonyElixir.Yolo.Coordinator do
         :waiting
     end
   end
+
+  defp reset_changed_nonstart(%{"nonstart" => %{"fingerprint" => fingerprint, "members" => ids}} = record, members, observations) do
+    if fingerprint == Observation.fingerprint(observations) and ids == Enum.map(members, & &1.id) do
+      record
+    else
+      Map.merge(record, %{"nonstart" => nil, "retry_at" => nil})
+    end
+  end
+
+  defp reset_changed_nonstart(record, _, _), do: record
 
   defp prepare_pending(group, pending, opts) do
     result = if group == "blocker", do: BlockerBrake.check(pending, opts), else: {:ok, pending}

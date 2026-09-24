@@ -66,6 +66,8 @@ defmodule SymphonyElixir.LinearDescriptionTest do
           {"`#{url}`", "`[PRO-854](#{url})`"},
           {"`begin\n#{url}\nend`", "`begin\n[PRO-854](#{url})\nend`"},
           {"```\n#{url}\n```", "```\n[PRO-854](#{url})\n```"},
+          {"- ~~~\n  Text #{url} weiter\n  ~~~", "- ~~~\n  Text [PRO-854](#{url}) weiter\n  ~~~"},
+          {"> ~~~\n> Text #{url} weiter\n> ~~~", "> ~~~\n> Text [PRO-854](#{url}) weiter\n> ~~~"},
           {"[outer #{url}]", "[outer [PRO-854](#{url})]"},
           {"\\#{url}", "\\[PRO-854](#{url})"},
           {"Text #{url} danach", "Text [PRO-855](#{url}) danach"},
@@ -74,6 +76,15 @@ defmodule SymphonyElixir.LinearDescriptionTest do
         ] do
       refute Description.equivalent?(before, returned), inspect({before, returned})
     end
+  end
+
+  test "terminal issue links in unchanged checkbox lists retain the existing comparison" do
+    url = "https://linear.app/prolok/issue/PRO-854/yolo-review"
+
+    assert Description.equivalent?("- [ ] Quelle: #{url}", "* [ ] Quelle: [PRO-854](#{url})")
+    assert Description.equivalent?("- [ ] `Pflicht` Quelle: #{url}", "* [ ] `Pflicht` Quelle: [PRO-854](#{url})")
+    refute Description.equivalent?("- [ ] Quelle: #{url}", "* [x] Quelle: [PRO-854](#{url})")
+    refute Description.equivalent?("- [ ] [offen] Quelle: #{url}", "* [ ] [offen] Quelle: [PRO-854](#{url})")
   end
 
   test "inline link destination brackets are bounded to unambiguous prose paragraphs" do

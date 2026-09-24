@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Linear.Description do
 
   @inline_link ~r/(?<!!)\[([^\[\]\\`<>\r\n]+)\]\((<?)(https:\/\/linear\.app\/[a-zA-Z0-9_-]+\/issue\/[A-Z][A-Z0-9]*-\d+(?:\/[a-zA-Z0-9_-]+)?)(>?)\)/
   @issue_link ~r/(\A|[ \n])\[([A-Z][A-Z0-9]*-\d+)\]\((https:\/\/linear\.app\/[a-zA-Z0-9_-]+\/issue\/([A-Z][A-Z0-9]*-\d+)(?:\/[a-zA-Z0-9_-]+)?)\)(?=\z|[ \n])/
+  @nested_fence ~r/^[ \t]*(?:(?:[-*+]|\d+[.)]) +|> ?)+(?:`{3,}|~{3,})/m
 
   @spec equivalent?(term(), term()) :: boolean()
   def equivalent?(value, value), do: true
@@ -10,7 +11,10 @@ defmodule SymphonyElixir.Linear.Description do
   def equivalent?(expected, actual) when is_binary(expected) and is_binary(actual) do
     # Indented blocks and raw HTML have context-sensitive whitespace. Until their
     # serialization is evidenced, require the original bytes for these documents.
-    not Regex.match?(~r/^(?: {4}|\t| {0,3}<)/m, expected <> "\n" <> actual) and canonical(expected) == canonical(actual)
+    text = expected <> "\n" <> actual
+
+    not Regex.match?(~r/^(?: {4}|\t| {0,3}<)/m, text) and
+      not Regex.match?(@nested_fence, text) and canonical(expected) == canonical(actual)
   end
 
   def equivalent?(_, _), do: false
@@ -115,30 +119,41 @@ defmodule SymphonyElixir.Linear.Description do
   end
 
   defp issue_links(lines) do
-    normalized = lines |> Enum.map_join("\n", &elem(&1, 1)) |> normalize_issue_links()
+    normalized = lines |> Enum.map_join("\n", &elem(&1, 1)) |> normalize_issue_links(lines)
     Enum.zip_with(lines, String.split(normalized, "\n"), fn {kind, _}, text -> {kind, text} end)
   end
 
   # Normalize only a complete, unambiguous issue link in prose. Paired code
   # spans may cross lines; unmatched backticks and other link syntax stay exact.
-  defp normalize_issue_links(text) do
+  defp normalize_issue_links(text, lines) do
     runs = Regex.scan(~r/`+/, text, return: :index) |> Enum.map(&hd/1)
 
     case code_chunks(text, runs) do
       {:ok, chunks} ->
-        if ambiguous_issue_links?(chunks), do: text, else: Enum.map_join(chunks, &normalize_issue_chunk/1)
+        if ambiguous_issue_links?(chunks, lines), do: text, else: Enum.map_join(chunks, &normalize_issue_chunk/1)
 
       :error ->
         text
     end
   end
 
-  defp ambiguous_issue_links?(chunks) do
-    remainder = Enum.map_join(chunks, &issue_remainder_chunk/1)
+  defp ambiguous_issue_links?(chunks, lines) do
+    remainder =
+      chunks
+      |> Enum.map_join(&issue_remainder_chunk/1)
+      |> String.split("\n")
+      |> Enum.zip(lines)
+      |> Enum.map_join("\n", fn
+        {"[ ] " <> rest, {:list, _}} -> rest
+        {"[x] " <> rest, {:list, _}} -> rest
+        {"[X] " <> rest, {:list, _}} -> rest
+        {text, _} -> text
+      end)
+
     Regex.match?(~r/[\[\]\\<>]/, remainder)
   end
 
-  defp issue_remainder_chunk({:code, _}), do: ""
+  defp issue_remainder_chunk({:code, part}), do: Regex.replace(~r/[^\n]/, part, "")
   defp issue_remainder_chunk(chunk), do: normalize_issue_chunk(chunk)
   defp normalize_issue_chunk({:code, part}), do: part
   defp normalize_issue_chunk({:prose, part}), do: Regex.replace(@issue_link, part, &link(&1, &2, &3, &4, &5))

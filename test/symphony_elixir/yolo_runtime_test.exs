@@ -169,6 +169,60 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     refute_receive :operator_decision
   end
 
+  test "operator runner releases a delivery when its source-bound cause disappears before reservation", %{issues: [issue | _], root: root} do
+    issue = %{issue | state: "BLOCKER"}
+    duty = operator_workpad("duty", "a")
+    snapshot = Map.put(inbox(%{"duty" => duty}), "current", %{"workpad" => "duty"})
+    Process.put(:brake_reads, 0)
+
+    comments = fn _ ->
+      reads = Process.get(:brake_reads) + 1
+      Process.put(:brake_reads, reads)
+      body = if reads == 1, do: duty["source"]["body"], else: "## Symphony Workpad\n"
+      {:ok, [%{id: "workpad", body: body}]}
+    end
+
+    opts = [
+      fetch: fn _ -> {:ok, [issue]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: fn _ -> {:ok, snapshot} end,
+      workpad_comments: comments,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      before_action: fn _ -> :ok end,
+      session: fn _, _, _, _ -> flunk("failed reservation must not start the PO session") end
+    ]
+
+    assert {:error, :blocker_cause_missing} = run_group("blocker", [issue], [issue], opts)
+    assert Process.get(:brake_reads) == 2
+  end
+
+  test "operator runner surfaces a failed delivery release after a corrupt journal", %{issues: [issue | _], root: root} do
+    issue = %{issue | state: "BLOCKER"}
+    duty = operator_workpad("duty", "a")
+    snapshot = Map.put(inbox(%{"duty" => duty}), "current", %{"workpad" => "duty"})
+
+    opts = [
+      fetch: fn _ -> {:ok, [issue]} end,
+      lease: fn _, fun -> fun.() end,
+      scan: fn _ -> {:ok, snapshot} end,
+      workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: duty["source"]["body"]}]} end,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{}} end,
+      before_action: fn _ -> :ok end,
+      session: fn _, _, _, session_opts ->
+        File.write!(Store.path("blocker"), "corrupt")
+        send(self(), {:release, session_opts[:on_session_start_failure].()})
+        {:error, :prestart}
+      end
+    ]
+
+    assert {:error, :prestart} = run_group("blocker", [issue], [issue], opts)
+    assert_receive {:release, {:error, :yolo_state_corrupt}}
+  end
+
   test "only complete confirmed operator workpads extend BLOCKER semantics", %{issues: [issue | _]} do
     issue = %{issue | state: "BLOCKER"}
     duty = operator_workpad("duty", "a")
@@ -622,7 +676,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert :ok = BlockerBrake.release([issue], "structured")
     assert {:ok, [^issue]} = BlockerBrake.check([issue], opts)
 
-    for invalid <- ["not-json", Jason.encode!(%{"cause" => "only-cause"})] do
+    for invalid <- ["{oops}", Jason.encode!(%{"cause" => "only-cause"})] do
       Process.put(:brake_body, "## Symphony Workpad\n\nEskalation:\n```json\n#{invalid}\n```\n")
       assert {:error, :blocker_cause_missing} = BlockerBrake.reserve([issue], "invalid", opts)
     end

@@ -1,0 +1,557 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:symphony:linearbridge:lifecycle:v1",
+  "title": "Symphony → LinearBridge lifecycle v1",
+  "$ref": "#/$defs/envelope",
+  "$defs": {
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "key_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "payload_b64": {
+          "type": "string",
+          "contentEncoding": "base64",
+          "maxLength": 349528
+        },
+        "mac": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "version",
+        "key_id",
+        "payload_b64",
+        "mac"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "producer_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "consumer_account_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "binding": {
+          "$ref": "#/$defs/binding"
+        },
+        "observation": {
+          "$ref": "#/$defs/observation"
+        }
+      },
+      "required": [
+        "version",
+        "producer_id",
+        "consumer_account_id",
+        "sequence",
+        "binding",
+        "observation"
+      ]
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "order_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "group": {
+          "enum": [
+            "incoming",
+            "planning",
+            "in_progress",
+            "blocker",
+            "review"
+          ]
+        },
+        "project_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "linear_workspace_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "linear_agent_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "openclaw_agent_id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]*$"
+        },
+        "workspace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sha": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "issue_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          }
+        },
+        "native": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "runId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "sessionKey": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "runId",
+            "sessionKey"
+          ]
+        }
+      },
+      "required": [
+        "order_id",
+        "group",
+        "project_id",
+        "linear_workspace_id",
+        "linear_agent_id",
+        "openclaw_agent_id",
+        "workspace",
+        "source_sha",
+        "payload_sha256",
+        "issue_ids",
+        "native"
+      ]
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state": {
+          "enum": [
+            "intent",
+            "accepted",
+            "running",
+            "unknown",
+            "cancel_pending",
+            "completed",
+            "failed",
+            "cancelled",
+            "rejected",
+            "retired"
+          ]
+        },
+        "writable": {
+          "type": "boolean"
+        },
+        "acceptance_observed": {
+          "type": "boolean"
+        },
+        "execution_observed": {
+          "type": "boolean"
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "abort_acknowledged": {
+          "type": "boolean"
+        },
+        "terminal": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/terminal"
+            }
+          ]
+        },
+        "rejection": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/rejection"
+            }
+          ]
+        },
+        "retirement": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/retirement"
+            }
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "writable",
+        "acceptance_observed",
+        "execution_observed",
+        "cancel_requested",
+        "abort_acknowledged",
+        "terminal",
+        "rejection",
+        "retirement"
+      ]
+    },
+    "terminal": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "gateway"
+            },
+            "runId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "status": {
+              "enum": [
+                "ok",
+                "error",
+                "timeout"
+              ]
+            },
+            "endedAt": {
+              "type": "number"
+            },
+            "startedAt": {
+              "type": "number"
+            },
+            "stopReason": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "kind",
+            "runId",
+            "status",
+            "endedAt"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operator_terminal_original"
+            },
+            "runId": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "status": {
+              "enum": [
+                "done",
+                "failed",
+                "timeout",
+                "killed"
+              ]
+            },
+            "state": {
+              "enum": [
+                "completed",
+                "failed",
+                "cancelled"
+              ]
+            },
+            "startedAt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "endedAt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "evidence_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "source_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "execution_source_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "kind",
+            "runId",
+            "status",
+            "state",
+            "startedAt",
+            "endedAt",
+            "evidence_sha256",
+            "source_sha256",
+            "execution_source_sha256"
+          ]
+        }
+      ]
+    },
+    "rejection": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "gateway"
+            },
+            "method": {
+              "const": "agent"
+            },
+            "phase": {
+              "const": "pre_acceptance"
+            },
+            "code": {
+              "const": "INVALID_REQUEST"
+            },
+            "reason": {
+              "enum": [
+                "cwd_reserved",
+                "cwd_not_absolute"
+              ]
+            },
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "session_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "agent": {
+              "type": "string",
+              "minLength": 1
+            },
+            "payload_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "kind",
+            "method",
+            "phase",
+            "code",
+            "reason",
+            "request_sha256",
+            "id",
+            "session_id",
+            "agent",
+            "payload_sha256"
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operator_pre_acceptance"
+            },
+            "code": {
+              "const": "INVALID_REQUEST"
+            },
+            "reason": {
+              "const": "cwd_reserved"
+            },
+            "request_id": {
+              "type": "string",
+              "minLength": 1
+            },
+            "source_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "execution_source_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "evidence_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "kind",
+            "code",
+            "reason",
+            "request_id",
+            "source_sha256",
+            "execution_source_sha256",
+            "evidence_sha256"
+          ]
+        }
+      ]
+    },
+    "retirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "fenced_interruption"
+        },
+        "stop_basis": {
+          "enum": [
+            "abort_acknowledged",
+            "terminal_original",
+            "terminal_original_history"
+          ]
+        },
+        "retired_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "history_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "physical_session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "last_run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_end": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "lastRunId": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status": {
+              "enum": [
+                "done",
+                "failed",
+                "timeout",
+                "killed"
+              ]
+            },
+            "startedAt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "endedAt": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "lastRunId",
+            "status",
+            "startedAt",
+            "endedAt"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "stop_basis",
+        "retired_at",
+        "history_sha256",
+        "physical_session_id",
+        "last_run_id",
+        "session_end"
+      ]
+    },
+    "ack": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "producer_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "consumer_account_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"
+        },
+        "order_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "payload_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "disposition": {
+          "enum": [
+            "stored",
+            "duplicate",
+            "stale"
+          ]
+        }
+      },
+      "required": [
+        "version",
+        "producer_id",
+        "consumer_account_id",
+        "order_id",
+        "sequence",
+        "payload_sha256",
+        "disposition"
+      ]
+    }
+  }
+}

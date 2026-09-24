@@ -24,6 +24,51 @@ defmodule SymphonyElixir.ProjectContextTest do
     assert projects == [Path.join(first, "One"), Path.join(first, "Two"), Path.join(second, "Three")]
   end
 
+  test "invalid bridge blocks on reload retain the last accepted project context", %{root: root} do
+    workflow = Path.join(root, "WORKFLOW.md")
+    project = Path.join(root, "project")
+    File.mkdir_p!(Path.join(project, ".symphony"))
+
+    valid_workflow = """
+    ---
+    tracker:
+      kind: linear
+      auth_mode: app
+      app:
+        client_id: $LINEAR_APP_CLIENT_ID
+        workspace_id: $LINEAR_APP_WORKSPACE_ID
+        user_id: $LINEAR_APP_USER_ID
+        client_secret_env: LINEAR_APP_SECRET
+        installation_id: symphony
+      project_slug: $LINEAR_PROJECT_SLUG
+      assignee: $LINEAR_ASSIGNEE
+    workspace:
+      root: $SYMPHONY_PROJECT_WORKTREES_ROOT
+    ---
+    A fixture workflow.
+    """
+
+    File.write!(workflow, valid_workflow)
+
+    File.write!(Path.join(project, ".symphony/.env"), """
+    LINEAR_PROJECT_SLUG=project
+    LINEAR_APP_CLIENT_ID=client
+    LINEAR_APP_WORKSPACE_ID=workspace
+    LINEAR_APP_USER_ID=app-user
+    LINEAR_ASSIGNEE=first@example.com
+    LINEAR_APP_SECRET=fixture-secret
+    """)
+
+    assert {:ok, context} = ProjectContext.load(project, workflow, %{})
+
+    for bridge <- ["false", "disabled", "[]"] do
+      invalid_workflow = String.replace(valid_workflow, "assignee: $LINEAR_ASSIGNEE", "assignee: $LINEAR_ASSIGNEE\n  openclaw_linear_bridge: #{bridge}")
+      File.write!(workflow, invalid_workflow)
+      assert {:error, {:invalid_workflow_config, _message}} = ProjectContext.load(project, workflow, %{})
+      assert ProjectContext.refresh(context) == context
+    end
+  end
+
   test "concurrent contexts bind scope, paths and state without changing environment or cwd", %{root: root} do
     workflow = Path.join(root, "WORKFLOW.md")
 

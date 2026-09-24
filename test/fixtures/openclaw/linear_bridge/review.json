@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "producer_id": "symphony-example",
+  "consumer_account_id": "account-example",
+  "sequence": 2,
+  "binding": {
+    "order_id": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    "group": "review",
+    "project_id": "/srv/projects/example",
+    "linear_workspace_id": "11111111-1111-4111-8111-111111111111",
+    "linear_agent_id": "22222222-2222-4222-8222-222222222222",
+    "openclaw_agent_id": "po-example",
+    "workspace": "/srv/worktrees/example/po-review",
+    "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "payload_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "issue_ids": [
+      "33333333-3333-4333-8333-333333333333",
+      "44444444-4444-4444-8444-444444444444"
+    ],
+    "native": {
+      "runId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      "sessionKey": "agent:po-example:symphony:a31928515822ddc768d58d764ba4562cf31ebb6777f38cfc0ee449e767d59ba1:review:bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    }
+  },
+  "observation": {
+    "state": "accepted",
+    "writable": true,
+    "acceptance_observed": true,
+    "execution_observed": false,
+    "cancel_requested": false,
+    "abort_acknowledged": false,
+    "terminal": null,
+    "rejection": null,
+    "retirement": null
+  }
+}

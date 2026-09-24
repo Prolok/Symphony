@@ -139,15 +139,15 @@ defmodule SymphonyElixir.EnvFile do
   end
 
   @doc "Read project settings without exporting variables or interpreting secret values."
-  @spec read_public(Path.t(), String.t() | nil, String.t() | nil) :: {:ok, map()} | {:error, term()}
-  def read_public(config_dir, secret_reference \\ "LINEAR_APP_SECRET", relay_reference \\ "LINEAR_RELAY_KEY") do
+  @spec read_public(Path.t(), String.t() | nil, String.t() | nil, String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def read_public(config_dir, secret_reference \\ "LINEAR_APP_SECRET", relay_reference \\ "LINEAR_RELAY_KEY", bridge_reference \\ "SYMPHONY_LINEAR_BRIDGE_KEY") do
     paths = Enum.map(@env_files, fn {name, _} -> Path.join(config_dir, name) end)
 
     with {:ok, names} <- public_names(paths),
          {:ok, selected_secrets} <- selected_secret_names(paths, secret_reference),
          {:ok, relay_secrets} <- selected_secret_names(paths, relay_reference) do
-      excluded = ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_RELAY_KEY", "LINEAR_APP_INSTALLATION_ID" | selected_secrets ++ relay_secrets]
-      read_selected(paths, Enum.reject(names, &(&1 in excluded)))
+      excluded = ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_RELAY_KEY", "LINEAR_APP_INSTALLATION_ID", "SYMPHONY_LINEAR_BRIDGE_KEY", bridge_reference | selected_secrets ++ relay_secrets]
+      read_selected(paths, Enum.reject(names, &(&1 in excluded or String.starts_with?(&1, "SYMPHONY_LINEAR_BRIDGE_"))))
     end
   end
 
@@ -205,7 +205,8 @@ defmodule SymphonyElixir.EnvFile do
 
     with {:ok, linear} <- selected_secret_names(paths, SymphonyElixir.Config.linear_secret_reference()),
          {:ok, relay} <- selected_secret_names(paths, SymphonyElixir.Config.relay_secret_reference()),
-         do: {:ok, linear ++ relay}
+         {:ok, names} <- public_names(paths),
+         do: {:ok, linear ++ relay ++ [SymphonyElixir.Config.bridge_secret_reference()] ++ Enum.filter(names, &String.starts_with?(&1, "SYMPHONY_LINEAR_BRIDGE_"))}
   end
 
   defp load_public(config_dir, opts, selected_secrets) do
@@ -241,7 +242,7 @@ defmodule SymphonyElixir.EnvFile do
 
     names =
       if System.get_env("SYMPHONY_LINEAR_AUTH_MODE") == "app",
-        do: names ++ ~w(SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_CLIENT_SECRET_ENV SYMPHONY_RELAY_KEY_ENV SYMPHONY_LINEAR_BINDING_HASH
+        do: names ++ ~w(SYMPHONY_LINEAR_AUTH_MODE SYMPHONY_LINEAR_CLIENT_SECRET_ENV SYMPHONY_RELAY_KEY_ENV SYMPHONY_BRIDGE_SECRET_ENV SYMPHONY_LINEAR_BINDING_HASH
         SYMPHONY_PROJECT_CONTEXT SYMPHONY_WORKFLOW_FILE SYMPHONY_WORKFLOW_DIR SYMPHONY_CODEX_STATE_ROOT),
         else: names
 

@@ -99,6 +99,67 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
   defp request(method, params \\ %{}), do: %{"jsonrpc" => "2.0", "id" => 1, "method" => method, "params" => params}
   defp descriptor(context, id), do: Path.join([context.settings.workspace.root, "yolo-runs", id, "tools.json"])
 
+  test "accepted producer lifecycle journals and delivers a full two-member group without another agent execution", %{context: context, issues: issues, workspace: workspace} do
+    alias SymphonyElixir.Yolo.OpenClaw.LinearBridge.Delivery
+    config = %{"producer_id" => "symphony-example", "consumer_account_id" => "account-example", "key_id" => "producer-key-example"}
+    context = %{context | yolo_agent_id: "22222222-2222-4222-8222-222222222222"}
+    context = put_in(context.settings.tracker.app["workspace_id"], "11111111-1111-4111-8111-111111111111")
+    context = put_in(context.settings.tracker.openclaw_linear_bridge, config)
+    ProjectContext.bind(context)
+    members = issues |> Enum.take(2) |> Enum.map(&Map.put(&1, :id, Ecto.UUID.generate()))
+    parent = self()
+
+    id = Ecto.UUID.generate()
+    Process.put(:bridge_runtime_polls, 0)
+
+    handler = fn
+      "agent", params ->
+        assert params["idempotencyKey"] == id
+        assert {:ok, initial} = Journal.read("review")
+        assert length(initial["linear_bridge"]["snapshots"]) == 1
+        send(parent, {:native_submit, id})
+        %{"runId" => id, "status" => "accepted"}
+
+      "agent.wait", %{"runId" => ^id} ->
+        polls = Process.get(:bridge_runtime_polls)
+        Process.put(:bridge_runtime_polls, polls + 1)
+        if polls == 0, do: %{"runId" => id, "status" => "running", "startedAt" => 1}, else: %{"runId" => id, "status" => "ok", "startedAt" => 1, "endedAt" => 2}
+
+      "linearbridge.symphony.lifecycle.v1", wire ->
+        raw = Base.decode64!(wire["payload_b64"])
+        payload = Jason.decode!(raw)
+        assert payload["binding"]["issue_ids"] == Enum.sort(Enum.map(members, & &1.id))
+        assert payload["binding"]["native"]["runId"] == id
+        send(parent, {:bridge_snapshot, payload["observation"]})
+
+        %{
+          "version" => 1,
+          "producer_id" => config["producer_id"],
+          "consumer_account_id" => config["consumer_account_id"],
+          "order_id" => id,
+          "sequence" => payload["sequence"],
+          "payload_sha256" => OpenClaw.digest(raw),
+          "disposition" => "stored"
+        }
+    end
+
+    opts = [transport: transport(handler), openclaw_wait: fn _ -> :ok end]
+    assert {:ok, _} = Scope.with_scope("review", members, id, fn -> OpenClaw.run(workspace, "synthetic PO workflow", members, id, opts) end)
+    assert {:ok, finished} = Journal.read("review")
+    snapshots = finished["linear_bridge"]["snapshots"]
+    assert length(snapshots) == 4
+    for _ <- snapshots, do: assert(:ok == Delivery.flush(Keyword.put(opts, :bridge_key, fn _ -> {:ok, :binary.copy(<<42>>, 32)} end)))
+    assert_received {:bridge_snapshot, %{"state" => "intent", "acceptance_observed" => false}}
+
+    assert_received {:bridge_snapshot, %{"state" => "accepted", "acceptance_observed" => true}}
+
+    assert_received {:bridge_snapshot, %{"execution_observed" => true, "terminal" => nil}}
+    assert_received {:bridge_snapshot, %{"state" => "completed", "terminal" => %{"runId" => ^id, "endedAt" => 2}}}
+    assert_received {:native_submit, ^id}
+    refute_received {:native_submit, ^id}
+    assert :ok = Delivery.flush(Keyword.put(opts, :bridge_key, fn _ -> flunk("all snapshots already confirmed") end))
+  end
+
   test "activated path uses real MCP dispatch and only completes after member decisions", %{issues: issues, context: context, opts: opts, workspace: workspace} do
     parent = self()
     skill = Path.join(workspace.path, ".codex/skills/sym-yolo-review/SKILL.md")
@@ -1168,7 +1229,10 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     refute finished["writable"]
     assert finished["acceptance_observed"] and finished["execution_observed"]
     assert {:ok, ^finished} = Recovery.resolve(evidence, true, recovery_opts)
-    assert {:error, :openclaw_run_failed_or_cancelled} = OpenClaw.recover(order, transport: fn _ -> flunk("no new external work") end)
+
+    assert {:error, :openclaw_run_failed_or_cancelled} =
+             recover_after_owner_exit(order, transport: fn _ -> flunk("no new external work") end)
+
     assert {:ok, ^decisions} = Store.read("incoming")
     assert {:ok, []} = Journal.pending()
     assert :ok = Journal.member_available(hd(issues).id)
@@ -1177,6 +1241,20 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, ^finished} = Recovery.resolve(evidence, true, recovery_opts)
     assert {:ok, ^following} = Journal.read("incoming")
     assert {:ok, ^finished} = Journal.history("incoming", order["id"])
+  end
+
+  defp recover_after_owner_exit(order, opts, retries \\ 50)
+
+  defp recover_after_owner_exit(order, opts, retries) do
+    case OpenClaw.recover(order, opts) do
+      {:error, :issue_already_owned} when retries > 0 ->
+        # The Python lease helper can release the pipe just after the interrupted run exits.
+        Process.sleep(20)
+        recover_after_owner_exit(order, opts, retries - 1)
+
+      result ->
+        result
+    end
   end
 
   defp executed_order(issues, opts) do
@@ -2034,7 +2112,12 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       history = Jason.decode!(recovery_opts[:sources]["source"]) |> put_in(["sessionInfo", "status"], status)
       {evidence, recovery_opts} = replace_terminal_history(package, history)
       assert {:ok, %{"state" => ^state}} = Recovery.resolve(evidence, true, recovery_opts)
-      assert {:error, :openclaw_run_failed_or_cancelled} = OpenClaw.recover(order, transport: fn _ -> flunk("terminal") end)
+
+      assert {:error, :openclaw_run_failed_or_cancelled} =
+               OpenClaw.recover(order,
+                 transport: fn _ -> flunk("terminal") end,
+                 recovery_lock: fn _, _, callback -> callback.() end
+               )
     end
   end
 

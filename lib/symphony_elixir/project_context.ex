@@ -69,7 +69,13 @@ defmodule SymphonyElixir.ProjectContext do
   def load(root, workflow_path, root_env, code_root \\ nil) do
     with {:ok, root} <- PathSafety.canonicalize(root),
          {:ok, workflow} <- Workflow.load(workflow_path),
-         {:ok, public_env} <- EnvFile.read_public(EnvFile.config_dir(root), get_in(workflow.config, ["tracker", "app", "client_secret_env"]), get_in(workflow.config, ["tracker", "relay", "key_env"])) do
+         {:ok, public_env} <-
+           EnvFile.read_public(
+             EnvFile.config_dir(root),
+             get_in(workflow.config, ["tracker", "app", "client_secret_env"]),
+             get_in(workflow.config, ["tracker", "relay", "key_env"]),
+             bridge_secret_reference(workflow.config)
+           ) do
       env =
         public_env
         |> Map.drop(EnvFile.root_config_names() ++ SymphonyElixir.RuntimePaths.runtime_env_names())
@@ -112,6 +118,11 @@ defmodule SymphonyElixir.ProjectContext do
 
     accept_refreshed_context(candidate, context)
   end
+
+  defp bridge_secret_reference(%{"tracker" => %{"openclaw_linear_bridge" => %{"secret_env" => reference}}}) when is_binary(reference),
+    do: reference
+
+  defp bridge_secret_reference(_config), do: nil
 
   defp refreshed_root_env(%{code_root: nil, root_env: env}), do: {:ok, env}
 
@@ -181,7 +192,7 @@ defmodule SymphonyElixir.ProjectContext do
   defp accept_refreshed_context({:ok, %{workflow: workflow, env: env}}, %{workflow: workflow, env: env} = context), do: context
 
   defp accept_refreshed_context({:ok, updated}, context) do
-    keys = ~w(auth_mode app relay assignee yolo_agent advisory_agent_ids openclaw_yolo_agent endpoint kind project_slug team_key)a
+    keys = ~w(auth_mode app relay assignee yolo_agent advisory_agent_ids openclaw_yolo_agent openclaw_linear_bridge endpoint kind project_slug team_key)a
 
     if Map.take(updated.settings.tracker, keys) == Map.take(context.settings.tracker, keys) and
          updated.settings.workspace.root == context.settings.workspace.root and

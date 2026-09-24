@@ -3,6 +3,63 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
 
+  test "lifecycle uses the selected local port" do
+    parent = self()
+
+    transport = fn args ->
+      send(parent, {:lifecycle_args, args})
+      {:ok, "{}"}
+    end
+
+    assert {:ok, %{}} = Gateway.lifecycle(%{}, transport: transport, bridge_gateway_port: 19_892)
+    assert_received {:lifecycle_args, ["gateway", "call", "linearbridge.symphony.lifecycle.v1", "--params", "{}", "--json", "--timeout", "10000", "--port", "19892"]}
+  end
+
+  test "invalid lifecycle ports fail before transport and unavailable isolated targets have no fallback" do
+    deny = fn _ -> flunk("invalid endpoint must not access transport") end
+
+    for port <- [nil, false, 0, -1, 65_536, 19_892.0, "19892", "ws://remote:19892", "19892 --token secret"] do
+      result = Gateway.lifecycle(%{}, bridge_gateway_port: port, transport: deny)
+      assert {:error, :openclaw_bridge_gateway_port_invalid} = result
+    end
+
+    parent = self()
+
+    offline = fn args ->
+      send(parent, {:attempt, List.last(args)})
+      {:error, :openclaw_gateway_unavailable}
+    end
+
+    result = Gateway.lifecycle(%{}, bridge_gateway_port: 19_892, transport: offline)
+    assert {:error, :openclaw_gateway_unavailable} = result
+    assert_received {:attempt, "19892"}
+    refute_received {:attempt, _}
+  end
+
+  test "the bridge port cannot change agent, status, abort, history or notification targets" do
+    parent = self()
+
+    transport = fn ["gateway", "call", method, "--params", _raw, "--json", "--timeout", "10000", "--port", "18789"] ->
+      send(parent, {:standard_target, method})
+
+      if method == "sessions.abort",
+        do: {:ok, ~s({"ok":true,"status":"aborted","abortedRunId":"run"})},
+        else: {:ok, ~s({"ok":true})}
+    end
+
+    opts = [transport: transport, bridge_gateway_port: 19_892]
+    order = %{"id" => "run", "agent" => "po", "session_id" => "session", "timeout_seconds" => 3600}
+    assert {:ok, _} = Gateway.submit(order, "workflow", opts)
+    assert {:ok, _} = Gateway.status(order, opts)
+    assert :ok = Gateway.cancel(order, opts)
+    assert {:ok, _} = Gateway.history(order, opts)
+    assert {:ok, _} = Gateway.notify(%{}, "notification", opts)
+    assert {:ok, _} = Gateway.lifecycle(%{}, transport: transport)
+
+    for method <- ~w(agent agent.wait sessions.abort chat.history send linearbridge.symphony.lifecycle.v1),
+        do: assert_received({:standard_target, ^method})
+  end
+
   test "an explicit existing normal-channel session stays bound to the configured agent" do
     alias SymphonyElixir.ProjectContext
     key = "agent:po:slack:channel:normal"

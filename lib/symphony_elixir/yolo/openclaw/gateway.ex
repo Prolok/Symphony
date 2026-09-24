@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @behaviour SymphonyElixir.Yolo.OpenClaw.Adapter
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.OpenClaw
-  alias SymphonyElixir.Yolo.OpenClaw.Transport
+  alias SymphonyElixir.Yolo.OpenClaw.{LinearBridge, Transport}
   @owner_unavailable [:openclaw_owner_connection_lost, :openclaw_owner_credentials_unavailable]
 
   @impl true
@@ -79,9 +79,18 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @spec notify(map(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def notify(destination, message, opts), do: rpc("send", Map.put(destination, "message", message), opts)
 
-  defp rpc(method, params, opts) do
+  @spec lifecycle(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def lifecycle(envelope, opts) do
+    port = Keyword.get(opts, :bridge_gateway_port, 18_789)
+
+    if LinearBridge.valid_gateway_port?(port),
+      do: rpc("linearbridge.symphony.lifecycle.v1", envelope, opts, port),
+      else: {:error, :openclaw_bridge_gateway_port_invalid}
+  end
+
+  defp rpc(method, params, opts, port \\ 18_789) do
     raw = Jason.encode!(params)
-    args = ["gateway", "call", method, "--params", raw, "--json", "--timeout", "10000", "--port", "18789"]
+    args = ["gateway", "call", method, "--params", raw, "--json", "--timeout", "10000", "--port", Integer.to_string(port)]
 
     with {:ok, output} <- command(args, opts),
          {:ok, response} when is_map(response) <- Jason.decode(output) do

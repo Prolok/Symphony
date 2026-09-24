@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
   alias SymphonyElixir.{Config, ProjectContext}
   alias SymphonyElixir.Linear.{DurableState, IssueLease}
   alias SymphonyElixir.Relay.Store, as: Digest
+  alias SymphonyElixir.Yolo.OpenClaw.LinearBridge
   @groups ~w(incoming planning in_progress blocker review)
   @terminal ~w(completed failed cancelled rejected retired)
   @mutable ~w(state writable error cancel_requested abort_acknowledged abort_error terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery resumed retirement)
@@ -49,6 +50,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
            true <- is_nil(previous) or previous["id"] != order["id"],
            {:error, :enoent} <- history(order["group"], order["id"]),
            :ok <- archive(previous),
+           {:ok, order} <- LinearBridge.bind(order),
            :ok <- DurableState.write(path(order["group"]), order) do
         :ok
       else
@@ -102,6 +104,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
          {:ok, changes} <- callback.(current),
          :ok <- validate_changes(changes),
          {:ok, updated} <- change(current, changes),
+         {:ok, updated} <- LinearBridge.capture(updated),
          :ok <- if(apply?, do: persist_change(current, updated), else: :ok) do
       {:ok, updated}
     else
@@ -142,6 +145,32 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
 
   defp persist_change(current, current), do: :ok
   defp persist_change(_current, updated), do: DurableState.write(path(updated["group"]), updated)
+
+  @doc "Include terminal and archived generations whose independent bridge receipts may still be open."
+  @spec bridge_orders() :: {:ok, [map()]} | {:error, term()}
+  def bridge_orders do
+    paths = Enum.flat_map(@groups, fn group -> [path(group) | Path.wildcard(path(group) <> ".history/*.json")] end)
+
+    Enum.reduce_while(paths, {:ok, %{}}, fn path, {:ok, orders} ->
+      case DurableState.read(path) do
+        {:ok, %{"linear_bridge" => %{"snapshots" => snapshots}, "id" => id} = order} when is_list(snapshots) ->
+          {:cont, {:ok, Map.put_new(orders, id, order)}}
+
+        {:ok, _} ->
+          {:cont, {:ok, orders}}
+
+        {:error, :enoent} ->
+          {:cont, {:ok, orders}}
+
+        error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, orders} -> {:ok, Map.values(orders)}
+      error -> error
+    end
+  end
 
   @spec pending?(map() | nil) :: boolean()
   def pending?(nil), do: false

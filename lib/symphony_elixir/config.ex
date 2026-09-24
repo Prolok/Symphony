@@ -127,7 +127,19 @@ defmodule SymphonyElixir.Config do
         name -> name
       end
 
-    ["LINEAR_APP_SECRET", "LINEAR_API_KEY", "LINEAR_RELAY_KEY", relay, configured, System.get_env("SYMPHONY_RELAY_KEY_ENV"), System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")]
+    [
+      "LINEAR_APP_SECRET",
+      "LINEAR_API_KEY",
+      "LINEAR_RELAY_KEY",
+      "SYMPHONY_LINEAR_BRIDGE_KEY",
+      bridge_secret_reference(),
+      System.get_env("SYMPHONY_BRIDGE_SECRET_ENV"),
+      relay,
+      configured,
+      System.get_env("SYMPHONY_RELAY_KEY_ENV"),
+      System.get_env("SYMPHONY_LINEAR_CLIENT_SECRET_ENV")
+    ]
+    |> Kernel.++(Enum.filter(Map.keys(System.get_env()), &String.starts_with?(&1, "SYMPHONY_LINEAR_BRIDGE_")))
     |> Enum.filter(&(is_binary(&1) and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, &1)))
     |> Enum.uniq()
   end
@@ -157,6 +169,7 @@ defmodule SymphonyElixir.Config do
         "SYMPHONY_LINEAR_AUTH_MODE" => tracker.auth_mode,
         "SYMPHONY_LINEAR_CLIENT_SECRET_ENV" => tracker.app["client_secret_env"],
         "SYMPHONY_RELAY_KEY_ENV" => if(tracker.relay, do: tracker.relay["key_env"], else: "LINEAR_RELAY_KEY"),
+        "SYMPHONY_BRIDGE_SECRET_ENV" => bridge_secret_reference(),
         "SYMPHONY_CODEX_STATE_ROOT" => Path.join([tracker.app["state_root"], "codex", tracker.app["installation_id"]]),
         "SYMPHONY_LINEAR_BINDING_HASH" => binding_hash(tracker),
         "SYMPHONY_RUN_ID" => WriteContext.current()["run_id"] || "",
@@ -187,11 +200,15 @@ defmodule SymphonyElixir.Config do
 
     if(tracker.yolo_agent, do: {identity, tracker.yolo_agent}, else: identity)
     |> then(fn binding -> if tracker.openclaw_yolo_agent, do: {binding, tracker.openclaw_yolo_agent}, else: binding end)
+    |> bridge_binding(tracker.openclaw_linear_bridge)
     |> advisory_binding(tracker.advisory_agent_ids)
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
   end
+
+  defp bridge_binding(binding, nil), do: binding
+  defp bridge_binding(binding, config), do: {binding, config}
 
   defp advisory_binding(binding, []), do: binding
   defp advisory_binding(binding, ids), do: {binding, ids}
@@ -328,6 +345,34 @@ defmodule SymphonyElixir.Config do
 
   @spec yolo_agent_name() :: String.t() | nil
   def yolo_agent_name, do: settings!().tracker.yolo_agent
+
+  @spec openclaw_linear_bridge() :: map() | nil
+  def openclaw_linear_bridge, do: settings!().tracker.openclaw_linear_bridge
+
+  @spec bridge_secret_reference() :: String.t()
+  def bridge_secret_reference do
+    # Read raw workflow data to avoid recursion while loading/sanitizing a project.
+    case Workflow.current() do
+      {:ok, %{config: %{"tracker" => %{"openclaw_linear_bridge" => bridge}}}} when is_map(bridge) ->
+        bridge["secret_env"] || "SYMPHONY_LINEAR_BRIDGE_KEY"
+
+      _ ->
+        "SYMPHONY_LINEAR_BRIDGE_KEY"
+    end
+  end
+
+  @spec openclaw_bridge_key(map()) :: {:ok, binary()} | {:error, atom()}
+  def openclaw_bridge_key(bridge) do
+    app = settings!().tracker.app
+
+    with {:ok, encoded} <- EnvFile.linear_secret(bridge["secret_env"] || "SYMPHONY_LINEAR_BRIDGE_KEY", app["env_dir"]),
+         {:ok, key} <- Base.decode64(encoded),
+         true <- byte_size(key) >= 32 do
+      {:ok, key}
+    else
+      _ -> {:error, :openclaw_bridge_key_unavailable}
+    end
+  end
 
   @spec openclaw_yolo_agent() :: String.t() | nil
   def openclaw_yolo_agent, do: settings!().tracker.openclaw_yolo_agent

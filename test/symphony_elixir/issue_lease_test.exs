@@ -51,6 +51,33 @@ defmodule SymphonyElixir.IssueLeaseTest do
     assert {:error, :comment_journal_unavailable} = IssueLease.with_journal_lock("project", fn -> flunk("no journal") end)
   end
 
+  test "exiting helpers preserve rejected issue and journal lock results", %{helper_dir: helper_dir} do
+    for {reply, issue_error, journal_error} <- [
+          {"busy", :issue_already_owned, :comment_journal_busy},
+          {"unavailable", :issue_lease_unavailable, :comment_journal_unavailable}
+        ] do
+      File.write!(Path.join(helper_dir, "issue_lease.py"), "import sys\nsys.stdin.readline()\nprint('#{reply}', flush=True)\n")
+
+      for _ <- 1..20 do
+        assert {:error, ^issue_error} = IssueLease.with_lock("workspace", "issue", fn -> flunk("no lease") end)
+        assert {:error, ^journal_error} = IssueLease.with_journal_lock("project", fn -> flunk("no journal") end)
+      end
+    end
+  end
+
+  test "port cleanup does not swallow callback exceptions", %{helper_dir: helper_dir} do
+    File.write!(Path.join(helper_dir, "issue_lease.py"), "import sys\nsys.stdin.readline()\nprint('locked', flush=True)\n")
+
+    assert_raise ArgumentError, "callback failure", fn ->
+      IssueLease.with_lock("workspace", "issue", fn ->
+        # Let the helper close before raising; only cleanup errors are ignored.
+        assert_receive {port, {:exit_status, 0}}, 2000
+        assert is_port(port)
+        raise ArgumentError, "callback failure"
+      end)
+    end
+  end
+
   @tag timeout: 20_000
   test "missing executable and unresponsive helper fail visibly", %{root: root, helper_dir: helper_dir} do
     previous = System.get_env("PATH")

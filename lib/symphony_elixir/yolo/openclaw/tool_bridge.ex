@@ -69,8 +69,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.ToolBridge do
       with {:ok, line} <- :gen_tcp.recv(client, 0, 5000),
            {:ok, %{"token" => ^token, "checkout" => proof, "request" => %{"jsonrpc" => "2.0", "id" => id} = request}} <- Jason.decode(line),
            false <- is_nil(id),
-           {:ok, _} <- authorize(order, proof) do
-        dispatch(request, opts)
+           %{} = result <- Journal.dispatch(order, &authorize(&1, proof), fn -> dispatch(request, opts) end) do
+        result
       else
         _ -> %{"error" => %{"code" => -32_603, "message" => "Expired Symphony run binding or unverified checkout; use the bound clean checkout and SHA"}}
       end
@@ -79,14 +79,12 @@ defmodule SymphonyElixir.Yolo.OpenClaw.ToolBridge do
   end
 
   defp authorize(order, proof) do
-    Journal.transition(order, fn current ->
-      with true <- current["writable"] == true and current["state"] in ~w(intent accepted running),
-           {:ok, measured} <- Checkout.verify(current, proof) do
-        {:ok, %{"execution_observed" => true, "checkout_proof" => measured}}
-      else
-        _ -> {:error, :openclaw_checkout_or_binding_invalid}
-      end
-    end)
+    with true <- order["writable"] == true and order["state"] in ~w(intent accepted running),
+         {:ok, measured} <- Checkout.verify(order, proof) do
+      {:ok, %{"execution_observed" => true, "checkout_proof" => measured}}
+    else
+      _ -> {:error, :openclaw_checkout_or_binding_invalid}
+    end
   end
 
   defp dispatch(%{"method" => "tools/list"} = request, opts) do

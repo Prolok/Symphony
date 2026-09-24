@@ -28,9 +28,25 @@ defmodule SymphonyElixir.Yolo.Delivery do
   def reconcile(group) do
     case Journal.read(group) do
       {:ok, %{"state" => "rejected", "id" => id}} -> rejected(group, id)
+      {:ok, %{"state" => "retired", "retirement" => %{"kind" => "fenced_interruption"} = proof}} -> interrupted(group, proof)
       {:ok, _} -> :ok
       error -> error
     end
+  end
+
+  defp interrupted(group, proof) do
+    update(group, fn record ->
+      completed = proof["attempt"]["completed"] || %{}
+
+      # Keep completed decisions suppressed; only the unfinished deliveries of
+      # this exact generation can be scheduled again. Newer receipts survive.
+      deliveries =
+        Map.reject(record["deliveries"] || %{}, fn {id, receipt} ->
+          receipt == proof["deliveries"][id] and not is_binary(completed[id])
+        end)
+
+      Map.put(record, "deliveries", deliveries)
+    end)
   end
 
   @spec pending([map()], map(), map()) :: [map()]

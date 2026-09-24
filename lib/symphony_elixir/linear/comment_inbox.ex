@@ -255,7 +255,8 @@ defmodule SymphonyElixir.Linear.CommentInbox do
       case check_absent(versions, ids, baseline, opts) do
         {:ok, versions} ->
           baseline = mark_deleted_baseline_sources(baseline, versions)
-          {:ok, Map.merge(state, %{"baseline" => baseline, "versions" => versions, "last_successful_scan" => now, "scan_error" => nil})}
+          current = Map.new(observed, &{&1["source"]["id"], &1["key"]})
+          {:ok, Map.merge(state, %{"baseline" => baseline, "versions" => versions, "current" => current, "last_successful_scan" => now, "scan_error" => nil})}
 
         {:error, reason} ->
           save_partial_observations(state, observed, reason)

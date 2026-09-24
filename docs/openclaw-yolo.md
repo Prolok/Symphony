@@ -17,15 +17,42 @@ Installation, Build und Standardgates installieren/starten kein OpenClaw.
 
 ## Unterstützte Schnittstelle
 
-Der austauschbare Elixir-Adapter `Yolo.OpenClaw.Adapter` verwendet standardmäßig
-`openclaw gateway call`, ohne `--local`, Gatewaystart oder anderen Agenten als
-Ersatz. `--port 18789` bindet sämtliche RPCs an den lokalen Standardgateway und
-überschreibt eine eventuell konfigurierte Remote-Auswahl; der Toolzugang bleibt
-auf demselben Rechner. Andere Gatewayports werden derzeit nicht unterstützt.
-Die CLI muss auf dem PATH des Dienstes liegen. Gateway und CLI müssen
-zum unterstützten Release **2026.9.4** gehören. Die CLI-Version wird vor jedem
-neuen externen Auftrag geprüft; die Gleichheit der Gatewayversion ist Teil der
-Betreiberabnahme. Andere Versionen benötigen eine erneute Schnittstellenprüfung.
+Der austauschbare Elixir-Adapter `Yolo.OpenClaw.Adapter` verwendet die vorhandene
+CLI und deren öffentlichen Export `openclaw/plugin-sdk/gateway-runtime`.
+`agents.list`, `agent`, die laufenden `agent.wait`-Abfragen und `sessions.abort`
+teilen innerhalb eines Workers dessen `GatewayClient`-Verbindung. Sonstige
+Lesezugriffe und Benachrichtigungen verwenden weiterhin `openclaw gateway call`.
+Alle Aufrufe bleiben am lokalen Standardgateway `127.0.0.1:18789`, ohne
+Remote-Auswahl, `--local`, Gatewaystart oder Ersatzagent. Andere Ports werden
+nicht unterstützt. CLI und Node müssen auf dem PATH des Dienstes liegen; der
+SDK wird über die öffentliche Exportauflösung derselben CLI-Installation geladen.
+Gateway und CLI müssen zum unterstützten Release **2026.9.4** gehören. Die
+CLI-Version wird vor jedem neuen Auftrag geprüft; Gatewayversion und vorhandener
+SDK-Vertrag sind Teil der Betreiberabnahme. Andere Versionen benötigen eine
+erneute Schnittstellenprüfung.
+
+Der SDK-Client nutzt den vorhandenen normalen lokalen Token-/Passwortzugang,
+`sharedStateMode=read-only` und ausschließlich `operator.write`. Die öffentlichen
+SDK-Funktionen `health.readConfigFileSnapshot` (`observe=false`, keine Recovery)
+und `resolveGatewayAuth` lesen
+Profil/Umgebung; Zugangsdaten bleiben im Kindprozess. Nicht auflösbare Zugänge,
+Remote- und andere Authmodi scheitern vor der Vorprüfung. Keine Kopplung,
+Identitätserzeugung, neuen Tokens, Konfigurationsschreibzugriffe oder Authfallbacks.
+Wie die normale lokale CLI sendet dieser Weg keine Geräteidentität. Stattdessen
+bleibt dieselbe Verbindung von der Vorprüfung bis zum eigenen Abbruch/Ende offen;
+der Host prüft ihren `ownerConnId`. Ein Kindprozess pro Worker, ohne zusätzlichen
+Dienst oder Registry. Sitzung **und** Originallauf-ID sind auch lokal gebunden;
+ein weiterer Start in derselben Verbindung ist ausgeschlossen.
+
+Bei Verbindungs-/Prozessverlust wird diese Besitzerbindung nicht neu aufgebaut.
+Die erste fehlgeschlagene Beobachtung entzieht die Schreibrechte; Reservierung
+und bestätigte Entscheidungen bleiben erhalten. Weitere lesende CLI-Abfragen
+dürfen einen tatsächlichen Originalabschluss samt Inaktivität/Eingaben belegen.
+Abbruch ohne ursprüngliche Verbindung bleibt ein sanitierter terminaler Fehler,
+keine Quittung. Neustart oder neue Verbindung verleihen keine rückwirkenden
+Abbruchrechte. Der bestehende Recoveryvertrag bleibt maßgeblich.
+Öffentliche Verträge: [Gateway-SDK](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugin-sdk/gateway-runtime.ts),
+[schreibgeschützter Client](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/client.ts).
 
 Geprüfte Quelle: offizielles Tag `v2026.9.4`, Commit
 [`3a9d69db306cd7f081e06254cb89c4bcc14a7107`](https://github.com/openclaw/openclaw/tree/3a9d69db306cd7f081e06254cb89c4bcc14a7107).
@@ -38,8 +65,9 @@ Das ist ein Quellnachweis, kein Beleg für eine lokale Installation.
 | Annahme | Antwort `runId` gleich Auftrags-ID und `status=accepted`; noch kein Arbeitsabschluss |
 | Nichtstart | Typisierte erste Gateway-Fehlerantwort mit belegtem Vorab-Grund; eigener Ablehnungsbeleg, kein erfundenes `endedAt` |
 | Beobachtung | `agent.wait` mit derselben `runId`; `timeout` ohne Endbeleg bleibt ungeklärt |
-| Abbruch | `sessions.abort` mit Sitzungsschlüssel **und** `runId`; Bestätigung ersetzt keinen Endbeleg |
+| Abbruch | `sessions.abort` mit Sitzungsschlüssel **und** `runId`; nur `ok=true`, `status=aborted` und die exakte `abortedRunId` quittieren den Abbruch; Bestätigung ersetzt keinen Endbeleg |
 | Ende | Passende `runId`, terminaler Status und `endedAt`; `yielded`/`pendingError` sind kein Ende |
+| Technische Aufgabe | Neue Aufträge: entzogene Werkzeugbindung, bestätigter gezielter Abbruch oder korrelierter natürlicher Originalabschluss; zusätzlich frisches `chat.history` mit vollständigem Inaktivitäts-/Eingabebefund, kein fachlicher Erfolg |
 
 Schemas: [Agent-RPC](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/agent.ts),
 [Sitzungen](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/sessions.ts).
@@ -54,9 +82,24 @@ Quellhash. Symphony weist das Arbeitsverzeichnis über die Werkzeugausführung n
 
 Fehler heißen unter anderem `openclaw_requires_linear_yolo_agent`,
 `openclaw_binary_missing`, `openclaw_gateway_unavailable`,
-`openclaw_agent_not_found`, `openclaw_version_unsupported` oder
+`openclaw_agent_not_found`, `openclaw_owner_credentials_unavailable`,
+`openclaw_owner_connection_lost`,
+`openclaw_owner_access_rejected`,
+`openclaw_version_unsupported` oder
 `openclaw_invalid_response`. Rohes CLI-stderr und Credentials werden nicht
 in Prompt oder Logs übernommen. Kein Fehler startet einen Ersatzlauf.
+
+Typisierte Abbruchfehler werden auf Code, erlaubten Grund, `retryable` und den
+Hash der konkreten Anfrage reduziert. `abort_error` bleibt im Originaljournal,
+der Laufbeobachtung und dem isolierten Testbeleg erhalten, auch wenn spätere
+Zustandsabfragen scheitern. `retryable=false` verhindert weitere automatische
+Abbruchversuche derselben Generation, einschließlich Wiederaufnahme. Transiente
+oder ungeklärte Transportfehler bleiben wiederholbar. Eine Ablehnung, ein Timeout
+oder eine Abbruchquittung allein gibt keine Reservierung frei; der bestehende
+End-/Inaktivitäts-/Eingabevertrag gilt unverändert.
+`status=no-active-run`, eine fehlende oder fremde `abortedRunId` sind keine
+Abbruchquittung. Ein frisch belegtes natürliches Originalende bleibt davon
+getrennt für sicheren Cleanup nutzbar, erfüllt aber keinen Live-Unterbrechungspass.
 
 ## Auftrag, Werkzeuge und Wissen
 
@@ -128,23 +171,109 @@ auf der aktuellen `origin/main`-SHA. Auftragsartefakte liegen getrennt unter
 Vor Versand wird eine unveränderliche Auftragsabsicht mit Agent, Sitzung,
 Mitgliedern, Payload-Hash und Checkout/SHA synchron gespeichert. Eine Gruppe
 behält Mitgliederleases, lokale Sperren und einen gemeinsamen Kapazitätsplatz
-bis zum bestätigten externen Ende oder belegten Nichtstart. Beim Neustart werden Reservierungen aus dem
+bis zum bestätigten externen Ende, belegten Nichtstart oder zur unten beschriebenen
+kontrollierten technischen Aufgabe. Beim Neustart werden Reservierungen aus dem
 Symphony-Journal rekonstruiert; alte Werkzeuge bekommen keine neue Schreibfreigabe.
 Die Wiederaufnahme beobachtet denselben Auftrag und fordert dessen gezielten
 Abbruch an. Sie sendet den Arbeitsauftrag **niemals erneut**.
 
 Verlorene Annahme, Prozessabbruch, Gateway-/Verbindungsverlust oder fehlender
-Endbeleg bleiben reserviert. Nach einer Stunde wird Abbruch verlangt. Auch ein
-bestätigter Abbruchaufruf gibt den Platz erst nach einem Endbeleg frei.
+Endbeleg bleiben zunächst reserviert. Nach einer Stunde wird Abbruch verlangt.
+Eine Abbruchbestätigung oder abgelaufene Wartezeit allein gibt keinen Platz frei.
 Nach Deaktivierung oder Agentenwechsel erfolgen keine Zugriffe auf den alten
 Agenten; die lokale Reservierung verhindert den konkurrierenden Codex-Ersatzlauf.
 Eine ungeklärte Reservierung muss mit dem ursprünglichen Agenten/Gateway und
 seiner Lauf-ID abgeglichen werden. Fehlender Verlauf oder Wartezeit rechtfertigen
-weder Journal-Löschung noch einen neuen Auftrag. Ist kein Endbeleg mehr verfügbar,
-bleibt eine sichtbare Betreiberklärung erforderlich.
+weder Journal-Löschung noch einen neuen Auftrag. Neue Aufträge können nach dem
+folgenden Verfahren technisch aufgegeben werden; ungeklärte Befunde bleiben
+reserviert und benötigen sichtbare Betreiberklärung.
 
-`openclaw-rpc.py` akzeptiert ausschließlich JSON-Fehler auf stdout aus dem
-geprüften CLI-Pfad: Exit 1, `ok=false`, `error.type=gateway_request_error`,
+### Kontrollierte Aufgabe unterbrochener Aufträge
+
+Neue Aufträge tragen `interruption_contract=1`. Bei Wiederaufnahme oder angefordertem
+Abbruch bleiben ihre Werkzeuge dauerhaft gesperrt. Auch nach einem Transportfehler
+bleibt der Schreibentzug bestehen: Ein späterer Originalabschluss wird über dieselbe
+Abbruch-/Inaktivitätsprüfung technisch abgewickelt, damit unerledigte Zustellungen
+wieder planbar werden. Autorisierung und gesamte
+Werkzeugausführung verwenden dieselbe Journalsperre wie der Rechteentzug: Ein bereits
+autorisierter Aufruf muss enden, bevor Symphony die Generation freigeben kann.
+Auch beim regulären Dienststopp wartet der Orchestrator auf diesen Drain und den
+gespeicherten Schreibentzug, bevor er Worker und Bridge beendet. Locktimeouts oder
+Journalfehler erlauben kein vorzeitiges Beenden; der Shutdown wartet mit Diagnose
+bis zur erfolgreichen Sperrung. Ein erzwungener Prozessabbruch ist kein Drainbeleg.
+Laufende oder spätere Host-Fortsetzungen erhalten keine neue Symphony-Schreibbindung.
+Die bestehenden Grenzen für unveränderten Prüfcheckout, keine Unteragenten und
+keine direkten Ersatz-Schreibwege bleiben Teil des Agentenvertrags.
+
+Der Beobachter prüft die eigene, pro Auftrag einmalige Sitzung über `chat.history`.
+Regulär ist dafür ein bestätigtes `sessions.abort` erforderlich. Verweigert der Host
+den Abbruch, bleiben Schreibrechte entzogen und aktive oder ungeklärte Ausführungen
+reserviert. Ein danach natürlich beendeter Originalauftrag darf ebenfalls technisch
+stillgelegt werden: Die frische Sitzungsprojektion muss den Originalauftrag als
+`lastRunId` mit plausiblem Endzustand und ohne aktive Laufbindung ausweisen. Ein
+vorhandener Original-Endbeleg aus `agent.wait` muss dazu fachlich konsistent sein;
+seine Zeitfelder werden separat plausibilisiert, nicht mit den unabhängig erzeugten
+Sitzungszeiten gleichgesetzt. Symphony erhält beide unverändert (`terminal` und
+`retirement.session_end`) und dokumentiert `retirement.stop_basis=terminal_original`.
+Ist der flüchtige Wartebeleg bereits verfallen, erlaubt dieselbe frische
+Originalprojektion die technische Stilllegung mit `stop_basis=terminal_original_history`;
+`terminal` bleibt dabei leer. Weder Abbruchquittung noch fachlicher Erfolg werden
+erzeugt. Ein anderer letzter Lauf erfüllt diese Ausnahme nicht: Ohne Originalende
+bleibt die echte Abbruchquittung erforderlich (`stop_basis=abort_acknowledged`).
+
+`agent.wait` muss entweder einen belegten
+Originalabschluss oder einen Timeout ohne Start-/End-/Yield-/Fehlerfortsetzungsbeleg
+liefern. Ein Abfragefehler ist kein Inaktivitätsnachweis. Die History muss konsistente
+Sitzungskennungen, eine aktuelle physische Sitzung und einen beendeten letzten Lauf
+mit plausiblen Zeitfeldern nennen. `hasActiveRun=false`, die vollständige leere
+`activeRunIds`-Menge, keine aktive Unterausführung und kein `inFlightRun`, `yielded`
+oder `pendingError` sind erforderlich. Ein anderer letzter Lauf wird nicht als
+Originalabschluss importiert. Aktive oder unklare Original-/Folgeläufe bleiben geschützt.
+Transcriptseiten sind kein Laufregister; maßgeblich sind die vollständigen
+Sitzungs- und Pending-Input-Felder, nicht die Anzahl sichtbarer Transcriptnachrichten.
+
+Die Eingabewarteschlange muss nach Gesamtzahl und Seitenkennung vollständig leer
+sein. Genau ein `interrupted` Eingang ist ebenfalls zulässig, wenn Lauf-ID und
+vollständiger Text exakt dem SHA-256 des ursprünglichen Symphony-Payloads entsprechen.
+Dieser Eingang enthält den bereits bekannten Auftrag; dessen noch offene Arbeit
+wird aus frischen Tickets, Kommentaren und Aktionsjournalen neu geplant. Sein
+Hosteintrag bleibt erhalten, seine Kennung und Inhaltsbindung werden dokumentiert.
+Zusätzliche, wartende, fremde, ausgeblendete oder gekürzte Eingaben werden nicht
+automatisch erledigt oder gelöscht. Sie halten die Reservierung geschlossen,
+bis die Betreiberprüfung den Inhalt mit offenen Aufgaben abgeglichen hat.
+Der Historyaufruf fordert bis zu 500.000 Zeichen an; Größenkürzungen werden durch
+den exakten Inhaltsvergleich nicht als vollständiger Eingang akzeptiert.
+
+Unter der Journalsperre speichert Symphony `state=retired`, eigene Stilllegungszeit,
+Prüfhash, aktuelle Sitzungs-/Laufkennung, Eingabequittungen und den bisherigen
+Entscheidungsversuch. Ein vorhandener Original-Endbeleg bleibt erhalten; ohne ihn
+bleibt `terminal` leer. Fremde Lauf-IDs oder Endzeiten werden niemals in das
+Original kopiert. `retired` liefert einen technischen Fehlerausgang und keine
+Produktfreigabe. Späte Antworten können diesen Zustand nicht wieder öffnen.
+
+Der normale Beobachter beendet sich und gibt Mitgliederleases und Kapazität frei.
+Die bestehende Zustellungs-Reconciliation löst ausschließlich unerledigte
+Zustellquittungen dieser Generation. Bestätigte Mitgliedsentscheidungen und neuere
+Quittungen bleiben erhalten; vollständige Originalaufträge werden vor dem nächsten
+Auftrag wie bisher archiviert. Der Coordinator und Runner prüfen Status, Delegation,
+Kommentare und offene Aktionen erneut. Ein neuer Auftrag erhält eine neue Sitzung
+und bearbeitet nur noch offene Arbeit. Es gibt keine Wiederholung des alten
+`agent`-Aufrufs und keine zusätzliche Recovery-Infrastruktur.
+
+Neue fällige Betreiberarbeit nach technischen Zwischenphasen verwendet auch mit
+OpenClaw den [quellengebundenen Workpadauftrag](linear-app.md#quellengebundener-betreiberauftrag).
+Er unterscheidet die neue Pflicht vom früheren BLOCKER-Entscheid; bestehende
+Reservierungen bleiben geschützt. Dieser Zustellbeleg ist kein Live-Testpass.
+
+Das ist eine begrenzte aktuelle Schnittstellenprüfung mit dauerhaftem lokalem
+Rechteentzug, keine atomare Sperre des OpenClaw-Hosts. Zustandsabfragen können
+fehlschlagen; dann bleibt die Reservierung bestehen. Ältere Aufträge ohne diesen
+Vertrag werden nicht automatisch migriert. V1-/V2-Importe behalten ihre bisherigen
+Voraussetzungen; eine ausdrücklich beauftragte administrative Einmalbereinigung
+ist davon getrennt.
+
+Für einen Nichtstartbeleg akzeptiert `openclaw-rpc.py` ausschließlich typisierte
+erste JSON-Fehler aus dem geprüften CLI-/SDK-Pfad: Exit 1, `ok=false`, `error.type=gateway_request_error`,
 `code=INVALID_REQUEST`, `retryable=false` und den exakten Vorab-Grund
 `cwd is reserved for plugin-owned subagent runs` oder `cwd must be absolute`.
 Die erste Antwort wird ohne `--expect-final` angefordert. Maximal 16 KiB Fehler-JSON
@@ -368,12 +497,53 @@ erhalten. Kein Import reaktiviert alte Schreibbindungen, wiederholt PO-Entscheid
 oder verändert Linear. Reguläre Disposition prüft Status und Delegation frisch.
 Ein technisches `completed` ist keine fachliche Produktfreigabe.
 
+### Grenze bei Neustart mit anderer Laufgeneration
+
+Eine terminale Host-Fortsetzung unter anderer `runId` ist kein terminales Original.
+V2 verweigert sie auch bei identischer physischer Sitzung mit
+`openclaw_terminal_identity_mismatch`. Original-ID oder fremdes `endedAt` dürfen
+nicht umgeschrieben werden. Beim V2-Import bleibt ein zusätzlicher unterbrochener
+Pending-Input ein eigener Sperrgrund; `items=[]` bei `total>0` bedeutet keine leere
+Warteschlange.
+
+Im oben gebundenen OpenClaw-Quellstand setzt der
+[Restart-Dispatch](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/agents/main-session-recovery/main-session-restart-dispatch.ts)
+intern `restartRecoveryDeliveryRunId` bei unverändertem
+`restartRecoveryDeliverySourceRunId` und prüft dabei die physische `sessionId`.
+Diese Felder sind eine aktive Besitzerzuordnung. Das
+[Claim-Cleanup](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/config/sessions/restart-recovery-state.ts)
+entfernt sie beim Abschluss; `restartRecoveryTerminalRunIds` bewahrt nur eine
+begrenzte ID-Menge, keine gerichtete Fortsetzungskette.
+
+Die von `chat.history` und `sessions.describe` verwendete
+[Sitzungsprojektion](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/session-utils-row.ts)
+exportiert diese Zuordnung nicht. Das hosterzeugte
+[Recovery-Terminal-Log](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/session-lifecycle-state.ts)
+nennt Sitzung, Fortsetzungslauf und Ergebnis, aber nicht dessen Originalgeneration.
+Weder dieser Eintrag allein noch eine Nachricht über einen Neustart beweist daher
+die benötigte Verknüpfung. Dies ist ein Quellbefund, kein Live-Nachweis für eine
+Installation oder einen bestimmten Auftrag.
+
+V1/V2 bieten keinen Ersatzimport für einen fremden Abschluss. Eine ausdrücklich
+beauftragte administrative Einmalbereinigung darf den alten Auftrag dagegen als
+aufgegeben/abgebrochen behandeln, ohne eine verlorene Fortsetzungskette zu erfinden.
+Sie verlangt eine rückspielbare Sicherung, frische Prüfung der exakten Generation,
+Sitzung, aktiver und neuerer Ausführung sowie vollständiger Eingaben, wirksamen
+Rechteentzug und einen Vorher-/Nachherbeleg. Nur die beauftragten Reservierungen
+ändern, vorhandene Aktionen/Entscheidungen erhalten und über den regulären
+Beobachter-/Zustellungsweg freigeben. Unterbrochene Eingänge inhaltlich abgleichen
+und offene Aufgaben übernehmen; historischen Eingang erhalten oder dokumentiert
+erledigen. Technische Stilllegung und tatsächliche Folgeaufnahme separat belegen;
+fachliche Findings bleiben offen. Dies erteilt weder zusätzliche Hostrechte noch
+eine Installation, einen produktiven Neustart oder pauschale Löschfreigaben.
+
 Status-API und Dashboards unterscheiden die Belegung von aktiver Modellarbeit:
 `status=reserved` beim Issue, `external.reserved`, `resumed`, `execution_state`,
 `missing_evidence`, ursprüngliche Gruppe/Status und aktueller Linear-Status mit
 `current_state_known`. Fehlende Tickets werden im bestehenden Coordinator-Tick
 gebündelt nachgelesen; fehlgeschlagene Abfragen ergeben unbekannten Status.
-Bei belegter Annahme oder Ausführung lautet `missing_evidence` auf
+Bei neuen unterbrochenen Aufträgen lautet `missing_evidence`
+`inactive_session_or_input_resolution_required`. Sonst lautet es bei belegter Annahme oder Ausführung auf
 `terminal_original_required`; andernfalls auf
 `terminal_or_pre_acceptance_original_required`, damit die bestehende
 Vorab-Ablehnungs-Recovery sichtbar bleibt. Die Anzeige ersetzt keinen Beleg und
@@ -460,6 +630,18 @@ setzen dieselbe Sperre. Aktivierte Testfälle injizieren Antworten und verwenden
 temporäre Bindungen, lokale Sockets sowie simulierte Prozesse, keine persönlichen
 Agentendateien/Gateways. Ein fehlendes Binary überspringt keinen Test.
 
+Der zusätzliche Vertragstest `node test/openclaw_owner_integration.mjs
+/PFAD/ZUM/openclaw/package.json` wird ausdrücklich außerhalb der Standardgates
+mit dem veröffentlichten SDK 2026.9.4 ausgeführt. Er verwendet nur einen lokalen
+Fixture-Server und ein synthetisches Profil mit normalem lokalem Zugang,
+vorhandener ungekoppelter Identität und leerem Gerätecache. Die echte öffentliche
+Konfigurationsauflösung und SDK-Verbindung müssen eigenen Start/Abbruch über
+dieselbe Verbindung erlauben; fremde Besitzer/Sitzungen, Wiederholungen und
+Verbindungsverlust bleiben gesperrt. Er fordert nur `operator.write` an und
+prüft die echte Upstream-Besitzerfunktion sowie unveränderten Profilzustand. Standardgates
+laden kein SDK. Dieser Vertragstest ersetzt weder die Prüfung vorhandener
+Betreiberzugänge noch den folgenden echten Unterbrechungs-/Folgegenerationstest.
+
 Vor **erstmaliger produktiver Aktivierung** führt die autorisierte Betreiberrolle
 außerhalb der Gates einen Live-Nachweis aus. Ein bereits dafür beauftragter
 OpenClaw-Agent übernimmt Bereitstellung, Prüfung und belegte Fortsetzung autonom;
@@ -516,6 +698,87 @@ ausdrücklich dort fällig sind.
 Bei Fehlern denselben Auftrag erhalten. Der vorhandene isolierte Runner unterstützt
 `--resume --cleanup-only` mit unveränderten Lauf-/Quellparametern; dies ist nur
 Cleanup, kein nachträglicher Pass. Unbestätigtes externes Ende verhindert Cleanup.
+
+### Neuer Unterbrechungsfall im vorhandenen Live-Test
+
+Für den aktuellen `interruption_contract=1`-Ablauf erhält das bestehende
+`po_incoming`-Szenario die explizite Option `--openclaw-interruption`. Der autorisierte
+Betreiber nutzt dasselbe freigegebene Manifest und dieselbe isolierte Testbereitstellung:
+
+```sh
+python3 scripts/test-instance.py source /ABS/PRUEFCHECKOUT
+scripts/openclaw-live-test --execute-live --agent po -- \
+  --checkout /ABS/PRUEFCHECKOUT --source-mode development \
+  --test-instance openclaw-proof --manifest /ABS/manifest.json \
+  --run-id interruption-proof --expected-sha COMMIT --expected-source SOURCE_SHA256 \
+  --port 4099 --timeout 900 --result-dir /ABS/BELEGE/interruption \
+  --scenario po_incoming --openclaw-interruption
+```
+
+`COMMIT` und `SOURCE_SHA256` stammen aus dem ersten Aufruf; sie binden auch offene
+Entwicklungsänderungen. Vorhandene Läufe nur mit identischen Parametern und `--resume`
+fortsetzen. Die Unterbrechungsoption gehört dauerhaft zum Laufplan und lässt sich
+bei Wiederaufnahme nicht hinzufügen oder entfernen. Sie wird nicht mit
+`--openclaw-previous-incoming-result` kombiniert. Der Routineexecutor mit
+`bootstrap`/`workflow`/`failure-probe` führt diesen besonderen Betreiberlauf nicht aus.
+
+Der Runner erstellt seine regulären drei PO-Fixtures sowie die Bootstrap-Fixture.
+Neue Unterbrechungsbeschreibungen enthalten kein abschließendes LF. Bei bestehenden
+Unterbrechungs-Fixtures akzeptieren Probe und Cleanup auch die beobachtete
+Linear-Rücklesung ohne genau dieses eine Schluss-LF; der ursprüngliche Journaltext
+bleibt erhalten. Andere Inhaltsabweichungen und fremde Fixtureidentitäten sperren
+die Operation weiterhin.
+Der neue Auftrag entscheidet zunächst nur das anfängliche Backlog-Mitglied und
+wartet danach in seiner eigenen aktiven Ausführung. Der Testschritt `interrupt`
+verlangt beobachtete Annahme, einen durch echte Werkzeugnutzung bestätigten Checkout,
+die erste dauerhafte Entscheidung und eine frische, eindeutig aktive Originalsitzung.
+Die Laufidentität stammt aus `lastRunId` plus genau dieser `activeRunIds`-Menge oder
+bei `status=running` aus dem aktuellen `observerDigest.runId` der Hostprojektion.
+Letzteres berücksichtigt aktive eingebettete Läufe ohne sichtbaren Chat-Abbruchcontroller;
+fehlende Felder werden nicht als leere Laufmenge interpretiert. Vorhandene widersprüchliche
+Laufkennungen, inaktive Zustände und fremde physische Sitzungen verhindern den Eingriff.
+Unter der Werkzeug-Journalsperre sichert er den Ausgangsbeleg und setzt ausschließlich
+`writable=false` und `cancel_requested=true` für diese Generation. Der normale
+Beobachter führt `sessions.abort`, Inaktivitäts-/Eingabeprüfung und Stilllegung aus.
+Kein Gateway-Neustart, kein Eingriff in den Hauptdienst, kein künstlicher Abschluss
+und keine direkte Reservierungs-/Kapazitätsfreigabe. Wiederholungen des Testschritts
+beobachten den gesicherten Originalauftrag; neuere Generationen werden nicht abgebrochen.
+
+Ein Pass verlangt in `result.json` unter `openclaw.interruption` die erhaltene erste
+Entscheidung, aktive Vorprüfung, `original.state=retired`, entzogene Schreibrechte,
+Abbruchquittung und Stilllegungsbeleg. Dazu muss genau eine neue Lauf-/Sitzungskennung
+mit echten abgeschlossenen Entscheidungen ausschließlich für die beiden restlichen
+Mitglieder vorliegen. Nach ihren Entscheidungen wartet die Probe weiterhin auf den
+terminalen OpenClaw-Laufbeleg. Deren Aufnahme über den normalen Coordinator belegt die
+Freigabe der alten Mitglieder-/Gruppenreservierung. Die erste Entscheidung bleibt
+an den alten Auftrag gebunden; sie darf nicht in der neuen Mitgliedermenge auftauchen.
+Auch für dieses Mitglied prüft jede Probe die beiden Skip-Labels und die konfigurierte
+menschliche Zuweisung frisch; der archivierte Laufbeleg ersetzt diese Bedingungen nicht.
+Die üblichen Prüfungen von frischen Linear-Daten, Quellstand, Cleanup,
+`main_preserved` und `originals_preserved` bleiben erforderlich. Der interne Beleg
+`openclaw-interruption.json` bleibt zusammen mit dem Fixturejournal erhalten, auch
+wenn ein Aufruf nach gesicherter Absicht abbricht. Fehler oder unbestätigte Abfragen
+liefern keinen Pass; ungeklärte externe Aufträge verhindern weiterhin Cleanup.
+
+Beim regulären Cleanup eines gestoppten Testdiensts darf Symphony einen bereits
+schreibgesperrten, zum Abbruch vorgemerkten Auftrag einmalig mit den normalen
+Originalterminal-/Inaktivitätsprüfungen abgleichen. Projekt, Lauf-ID, SHA und Checkout
+müssen zur eigenen unveränderten Workspacequittung passen; laufende Besitzer werden
+über dieselben Recovery-/Mitgliederleases geschützt. Dieser begrenzte Abgleich startet
+oder unterbricht keinen Auftrag und wartet nicht in einer Schleife. Fehler, offene
+Eingaben und aktive oder neuere Generationen lassen Checkout und Reservierung erhalten.
+Ein verfallener `agent.wait`-Beleg verhindert diesen Abgleich nicht, wenn die frische
+History das ursprüngliche Ende samt vollständiger Inaktivitäts-/Eingabeprüfung belegt.
+Danach kann der bestehende Cleanupweg den eigenen Checkout entfernen. Historische
+Fehlerresultate und fehlende Abbruchbelege bleiben bestehen: Natürliches Ende und
+erfolgreicher Cleanup ersetzen den oben geforderten Live-Unterbrechungspass nicht.
+
+Dieser Livefall belegt eine gezielt unterbrochene aktuelle Ausführung und ihre
+reguläre Folgeaufnahme. Er simuliert keinen Gateway-Neustart und rekonstruiert keine
+verlorene Hosthistorie. Die Gegenproben für unvollständige Eingaben, aktive/neuere
+Läufe und Abfragefehler bleiben separat als synthetische Tests ausgewiesen. Ein
+bestandener synthetischer Runner-/Journaltest oder ein alter V2-Import ersetzt den
+hier beschriebenen realen Lauf nicht.
 
 ## Projektintegration und Lernrückkopplung
 

@@ -77,6 +77,68 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
     end
   end
 
+  test "only an actual abort of the requested original acknowledges cancellation" do
+    order = %{"id" => "original", "session_id" => "session"}
+    confirmed = %{"ok" => true, "status" => "aborted", "abortedRunId" => "original"}
+
+    assert :ok = Gateway.cancel(order, transport: fn _ -> {:ok, Jason.encode!(confirmed)} end)
+
+    for reply <- [
+          %{"ok" => true, "status" => "no-active-run", "abortedRunId" => nil},
+          Map.put(confirmed, "abortedRunId", "newer-or-foreign"),
+          Map.put(confirmed, "status", "no-active-run"),
+          Map.put(confirmed, "ok", false),
+          Map.delete(confirmed, "abortedRunId"),
+          %{"ok" => true}
+        ] do
+      assert {:error, :openclaw_abort_unconfirmed} = Gateway.cancel(order, transport: fn _ -> {:ok, Jason.encode!(reply)} end)
+    end
+  end
+
+  test "typed abort failures retain only correlated sanitized evidence" do
+    order = %{"id" => "original", "session_id" => "session"}
+
+    for retryable <- [true, false] do
+      transport = fn ["gateway", "call", "sessions.abort", "--params", raw | _] ->
+        {:ok,
+         Jason.encode!(%{
+           "symphony_openclaw_abort_error" => 1,
+           "method" => "sessions.abort",
+           "code" => "INVALID_REQUEST",
+           "reason" => "unauthorized",
+           "retryable" => retryable,
+           "request_sha256" => OpenClaw.digest(raw),
+           "details" => "SECRET"
+         })}
+      end
+
+      assert {:error, {:openclaw_abort_failed, proof}} = Gateway.cancel(order, transport: transport)
+      assert proof["retryable"] == retryable
+      assert proof["reason"] == "unauthorized"
+      refute inspect(proof) =~ "SECRET"
+    end
+
+    for changed <- [%{"symphony_openclaw_abort_error" => 2}, %{"request_sha256" => "foreign"}, %{"retryable" => nil}, %{"reason" => "SECRET"}, %{"method" => "agent"}] do
+      transport = fn ["gateway", "call", "sessions.abort", "--params", raw | _] ->
+        proof = %{
+          "symphony_openclaw_abort_error" => 1,
+          "method" => "sessions.abort",
+          "code" => "INVALID_REQUEST",
+          "reason" => "unauthorized",
+          "retryable" => false,
+          "request_sha256" => OpenClaw.digest(raw)
+        }
+
+        {:ok, Jason.encode!(Map.merge(proof, changed))}
+      end
+
+      assert {:error, :openclaw_invalid_response} = Gateway.cancel(order, transport: transport)
+    end
+
+    foreign_method = fn _ -> {:ok, Jason.encode!(%{"symphony_openclaw_abort_error" => 1})} end
+    assert {:error, :openclaw_invalid_response} = Gateway.status(order, transport: foreign_method)
+  end
+
   test "escalations resolve only the bound normal session and send with a stable key" do
     route = %{"channel" => "signal", "to" => "human", "accountId" => "account"}
 
@@ -130,7 +192,8 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
                "sessionKey" => order["session_id"],
                "offset" => 0,
                "limit" => 200,
-               "maxBytes" => 1_048_576
+               "maxBytes" => 1_048_576,
+               "maxChars" => 500_000
              }
 
       {:ok, "{}"}

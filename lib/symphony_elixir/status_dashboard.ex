@@ -663,7 +663,13 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp reservation_message(%{external: %{reserved: true} = external}) do
-    missing = if external.missing_evidence == "terminal_or_pre_acceptance_original_required", do: "End-/Nichtstartbeleg fehlt", else: "Endbeleg fehlt"
+    missing =
+      case external.missing_evidence do
+        "inactive_session_or_input_resolution_required" -> "Inaktivität/Eingaben prüfen"
+        "terminal_or_pre_acceptance_original_required" -> "End-/Nichtstartbeleg fehlt"
+        _ -> "Endbeleg fehlt"
+      end
+
     "Altreservierung (#{external.original_group}); #{missing}; Platz reserviert"
   end
 

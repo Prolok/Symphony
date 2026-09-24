@@ -180,6 +180,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                         <span :if={!entry.external.current_state_known}>Linear-Status unbekannt</span>
                         <span :if={entry.external.missing_evidence == "terminal_original_required"}>Fehlender Endbeleg · Recovery gemäß Betreibervertrag</span>
                         <span :if={entry.external.missing_evidence == "terminal_or_pre_acceptance_original_required"}>End- oder Vorab-Ablehnungsbeleg fehlt · Recovery gemäß Betreibervertrag</span>
+                        <span :if={entry.external.missing_evidence == "inactive_session_or_input_resolution_required"}>Inaktivität und offene Eingaben werden geprüft</span>
                       </div>
                     </td>
                     <td>

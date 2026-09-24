@@ -120,6 +120,9 @@ Löse autonom bearbeitbare Ursachen einschließlich autorisierter Betreiberprüf
 vollständig; danach Belege prüfen und in die passende Phase zurückführen. Eine
 fehlende Testbereitstellung nicht ungeprüft als fehlende Freigabe an den Menschen
 weiterreichen. Die Agentdelegation während eigener Nacharbeit erhalten.
+Ein [quellengebundener Betreiberauftrag](docs/linear-app.md#quellengebundener-betreiberauftrag)
+im Workpad bezeichnet die neue Pflicht; er ersetzt weder ihre Autorisierung noch
+einen Ausführungs-/Abnahmebeleg. Bereits ausgeführte Aktionen nicht wiederholen.
 Nur an der Eskalationsgrenze des Laufvertrags Ursache/Versuche/Empfehlung und
 menschliche Aktion übergeben, den konfigurierten ersten menschlichen Assignee
 setzen und die Agentdelegation entfernen. Der Status bleibt `BLOCKER`, solange
@@ -262,13 +265,18 @@ Verknüpfung müssen vor einer Erfolgsmeldung bestätigt sein.
 
 Symphony speichert die Zustellung pro Mitglied und fachlicher Phase dauerhaft
 vor dem Modellaufruf. Unveränderte Tickets, Status-Rundläufe, Gruppenwechsel,
-eigene Workpad-Ausgaben und Neustarts erzeugen keine erneuten Aufträge. Neue
+eigene Workpad-Ausgaben und Neustarts allein erzeugen keine erneuten Aufträge. Neue
 Inhalte, externe Kommentare oder wirksame Kettenänderungen erlauben neue Arbeit.
 Zustellung ist kein Abschlussbeleg; offene Entscheidungen bleiben sichtbar.
 Offene journalisierte Anlagen setzt Symphony unter den bestehenden Leases ohne
 erneute Modellzustellung fort; ausdrücklich eskalierte Operationen bleiben offen.
 Unklare OpenClaw-Annahme bleibt reserviert, ein belegter Nichtstart darf denselben
-technischen Retrypfad nutzen. Keine Ersatzanlage oder eigene Neuzustellung.
+technischen Retrypfad nutzen. Neue unterbrochene OpenClaw-Aufträge darf Symphony
+nach wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung technisch
+aufgeben und nur unerledigte Arbeit aus frischen Ticketdaten neu planen;
+bestätigte Entscheidungen und neuere Zustellungen bleiben erhalten. Voraussetzungen:
+[kontrollierte Aufgabe](docs/openclaw-yolo.md#kontrollierte-aufgabe-unterbrochener-aufträge).
+Keine Ersatzanlage oder eigene Neuzustellung durch den Agenten.
 
 Für echte externe Hindernisse `kind=escalate` (in `Yolo Review`) bzw. die bestehende
 BLOCKER-Übergabe mit `escalation: {cause, attempts, proposal, decision}` verwenden.

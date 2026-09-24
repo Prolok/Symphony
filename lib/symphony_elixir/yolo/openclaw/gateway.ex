@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Transport
+  @owner_unavailable [:openclaw_owner_connection_lost, :openclaw_owner_credentials_unavailable]
 
   @impl true
   def preflight(agent, opts) do
@@ -42,15 +43,17 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   @impl true
   def status(order, opts), do: rpc("agent.wait", %{"runId" => order["id"], "timeoutMs" => 1000}, opts)
 
-  @spec history(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  @impl true
   def history(order, opts) do
-    rpc("chat.history", %{"agentId" => order["agent"], "sessionKey" => order["session_id"], "offset" => 0, "limit" => 200, "maxBytes" => 1_048_576}, opts)
+    rpc("chat.history", %{"agentId" => order["agent"], "sessionKey" => order["session_id"], "offset" => 0, "limit" => 200, "maxBytes" => 1_048_576, "maxChars" => 500_000}, opts)
   end
 
   @impl true
   def cancel(order, opts) do
+    id = order["id"]
+
     case rpc("sessions.abort", %{"key" => order["session_id"], "runId" => order["id"]}, opts) do
-      {:ok, %{"ok" => true}} -> :ok
+      {:ok, %{"ok" => true, "status" => "aborted", "abortedRunId" => ^id}} when is_binary(id) and id != "" -> :ok
       {:error, _} = error -> error
       _ -> {:error, :openclaw_abort_unconfirmed}
     end
@@ -84,10 +87,29 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
          {:ok, response} when is_map(response) <- Jason.decode(output) do
       decode_response(response, method, raw)
     else
-      {:error, reason} when is_atom(reason) -> {:error, reason}
-      _ -> {:error, :openclaw_invalid_response}
+      {:error, reason} when method == "sessions.abort" and reason in @owner_unavailable ->
+        reason = if reason == :openclaw_owner_connection_lost, do: "owner_connection_lost", else: "credentials_unavailable"
+        {:error, {:openclaw_abort_failed, %{"method" => method, "code" => "NOT_LINKED", "reason" => reason, "retryable" => false, "request_sha256" => OpenClaw.digest(raw)}}}
+
+      {:error, reason} when is_atom(reason) ->
+        {:error, reason}
+
+      _ ->
+        {:error, :openclaw_invalid_response}
     end
   end
+
+  defp decode_response(%{"symphony_openclaw_abort_error" => 1} = proof, "sessions.abort", raw) do
+    if proof["method"] == "sessions.abort" and proof["code"] in ~w(INVALID_REQUEST UNAVAILABLE NOT_LINKED OTHER) and
+         proof["reason"] in ~w(unauthorized request_rejected owner_connection_lost owner_mismatch credentials_unavailable) and is_boolean(proof["retryable"]) and
+         proof["request_sha256"] == OpenClaw.digest(raw) do
+      {:error, {:openclaw_abort_failed, Map.take(proof, ~w(method code reason retryable request_sha256))}}
+    else
+      {:error, :openclaw_invalid_response}
+    end
+  end
+
+  defp decode_response(%{"symphony_openclaw_abort_error" => _}, _, _), do: {:error, :openclaw_invalid_response}
 
   defp decode_response(%{"symphony_openclaw_rejection" => 1} = proof, "agent", raw) do
     if proof["method"] == "agent" and proof["phase"] == "pre_acceptance" and

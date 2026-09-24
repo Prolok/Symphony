@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Orchestrator do
   Polls Linear and dispatches repository copies to Codex-backed workers.
   """
 
-  use GenServer
+  use GenServer, shutdown: :infinity
   require Logger
   import Bitwise, only: [<<<: 2]
 
@@ -103,7 +103,7 @@ defmodule SymphonyElixir.Orchestrator do
     context = Keyword.get(opts, :context)
     context = if Keyword.get(opts, :external_poll, false), do: SymphonyElixir.ProjectPoller.context(context), else: context
     :ok = SymphonyElixir.ProjectContext.bind(context)
-    if Keyword.get(opts, :external_poll, false), do: Process.flag(:trap_exit, true)
+    Process.flag(:trap_exit, true)
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
     idle_shutdown_ms_override = Keyword.get(opts, :idle_shutdown_ms)

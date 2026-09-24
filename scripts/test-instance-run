@@ -54,6 +54,7 @@ def parser():
     result.add_argument("--scenario", choices=("bootstrap", "failure-probe", "delegation", "po_incoming", "po_handoff", "po_aggregation", "po_followup"), default="bootstrap")
     result.add_argument("--yolo", action="store_true", help="Folgeticket-Zuweisungsmatrix im isolierten Testlauf")
     result.add_argument("--openclaw-agent", help="Ausdrücklicher Live-Opt-in für genau diesen OpenClaw-Agenten; nur PO-Szenarien")
+    result.add_argument("--openclaw-interruption", action="store_true", help="Eigene aktive incoming-Ausführung nach erster Entscheidung unterbrechen und neue Folgeaufnahme prüfen")
     result.add_argument("--openclaw-knowledge-question", help="Nichtgeheime Wissensfrage für den Review-Live-Nachweis; Antwort wird vom Betreiber geprüft")
     result.add_argument("--openclaw-previous-incoming-result", type=Path, help="Bestandener vorheriger incoming-Live-Beleg für den Nachweis weiterer Eingangsarbeit")
     result.add_argument("--source-mode", choices=("development", "merged"), default="development")
@@ -97,6 +98,13 @@ class Run:
         atomic(self.result_path, self.result)
 
     def verify_openclaw(self, fixtures):
+        interruption = None
+        if getattr(self.args, "openclaw_interruption", False):
+            interruption = self.result.get("interruption", {})
+            try:
+                fixtures = module("openclaw-interruption").verify(interruption, fixtures, self.result["source"], self.args.run_id, self.args.openclaw_agent)
+            except (ValueError, KeyError, TypeError) as error:
+                raise RunFailure("openclaw_interruption_unconfirmed") from error
         receipts = [f.get("po_receipt", f.get("handoff_receipt", {}))
                     for f in fixtures if f.get("po_incoming") or f.get("po_handoff")]
         proofs = [r.get("openclaw", {}) for r in receipts]
@@ -108,6 +116,8 @@ class Run:
             raise RunFailure("openclaw_execution_unconfirmed")
         self.result["openclaw"] = {"agent": self.args.openclaw_agent, "executions": proofs,
                                   "knowledge_and_instruction_review": "operator_evidence_required"}
+        if interruption:
+            self.result["openclaw"]["interruption"] = interruption
         previous = getattr(self.args, "openclaw_previous_incoming_result", None)
         if previous:
             self.verify_subsequent_incoming(previous, proofs)
@@ -174,7 +184,7 @@ class Run:
     def invoke(self, stage, timeout=None):
         if timeout is None:
             self.remaining()
-        child = self.start(stage, direct=stage in ("probe", "cleanup", "delegate", "withdraw"))
+        child = self.start(stage, direct=stage in ("probe", "cleanup", "delegate", "withdraw", "interrupt"))
         try:
             output, _ = child.communicate(timeout=timeout if timeout is not None else self.remaining())
         except subprocess.TimeoutExpired as error:
@@ -381,11 +391,14 @@ class Run:
                 owner_source = capsule.get("cleanup_recovery", {}).get("source", capsule["source"])
                 if not self.args.resume or existing["source"] != owner_source or existing["run_id"] != self.args.run_id or existing.get("scenario", "bootstrap") != self.args.scenario or existing.get("yolo", False) != self.args.yolo or existing.get("openclaw_agent") != getattr(self.args, "openclaw_agent", None):
                     raise RunFailure("run_already_exists_or_changed")
+                if existing.get("openclaw_interruption", False) != getattr(self.args, "openclaw_interruption", False):
+                    raise RunFailure("openclaw_interruption_changed")
                 if existing.get("openclaw_knowledge_question") != getattr(self.args, "openclaw_knowledge_question", None):
                     raise RunFailure("openclaw_knowledge_question_changed")
             else:
                 atomic(self.plan_path, {"evidence": "live", "instance": self.args.test_instance,
                                         "run_id": self.args.run_id, "source": capsule["source"], "scenario": self.args.scenario, "yolo": self.args.yolo,
+                                        "openclaw_interruption": getattr(self.args, "openclaw_interruption", False),
                                         "openclaw_agent": getattr(self.args, "openclaw_agent", None),
                                         "openclaw_knowledge_question": getattr(self.args, "openclaw_knowledge_question", None)})
             self.save()
@@ -430,6 +443,9 @@ class Run:
                     last_probe = time.monotonic()
                     if self.fixture_ids(probed, capsule["manifest"]["projects"], self.args.scenario) != fixture_ids:
                         raise RunFailure("changed_fixture_mapping")
+                    if getattr(self.args, "openclaw_interruption", False):
+                        self.result["interruption"] = self.invoke("interrupt")["interruption"]
+                        self.save()
                     if all(f["complete"] for f in probed):
                         if getattr(self.args, "openclaw_agent", None):
                             self.verify_openclaw(probed)
@@ -442,7 +458,8 @@ class Run:
                             receipts = [f.get("po_receipt", {}) for f in po]
                             if len(po) != 3 or {f["initial_state"] for f in po} != {"Backlog", "Todo", "Definiert"}:
                                 raise RunFailure("po_membership_unconfirmed")
-                            if len({r.get("session_id") for r in receipts}) != 1 or not all(r.get("session_id") and r.get("sha") for r in receipts):
+                            expected_sessions = 2 if getattr(self.args, "openclaw_interruption", False) else 1
+                            if len({r.get("session_id") for r in receipts}) != expected_sessions or not all(r.get("session_id") and r.get("sha") for r in receipts):
                                 raise RunFailure("po_shared_session_unconfirmed")
                             for fixture in po:
                                 sessions[fixture["id"]] = fixture["po_receipt"]["session_id"]
@@ -545,6 +562,8 @@ def main():
         raise SystemExit("OpenClaw-Live-Aufruf verlangt ein PO-Szenario außerhalb der Standardgates")
     if args.openclaw_agent and args.scenario == "po_handoff" and not (args.openclaw_knowledge_question or "").strip():
         raise SystemExit("OpenClaw-Abnahme verlangt --openclaw-knowledge-question")
+    if args.openclaw_interruption and (not args.openclaw_agent or args.scenario != "po_incoming" or args.openclaw_previous_incoming_result):
+        raise SystemExit("Unterbrechungsnachweis verlangt OpenClaw und po_incoming ohne vorherigen Eingangsbeleg")
     if args.openclaw_previous_incoming_result and (not args.openclaw_agent or args.scenario != "po_incoming"):
         raise SystemExit("Vorheriger Eingangsbeleg verlangt OpenClaw und po_incoming")
     if not test.NAME.fullmatch(args.test_instance) or not test.NAME.fullmatch(args.run_id) or not 0 < args.timeout <= 3600 or not 0 < args.port <= 65535:
@@ -568,7 +587,8 @@ def main():
                 or plan.get("source", {}).get("checkout") != str(args.checkout)
                 or plan.get("scenario", "bootstrap") != args.scenario
                 or plan.get("yolo", False) != args.yolo
-                or plan.get("openclaw_agent") != args.openclaw_agent):
+                or plan.get("openclaw_agent") != args.openclaw_agent
+                or plan.get("openclaw_interruption", False) != args.openclaw_interruption):
             raise SystemExit("Wiederaufnahme gehört nicht zum bestehenden Lauf; Resultate erhalten")
     signalled = []
     def interrupted(signum, _frame):

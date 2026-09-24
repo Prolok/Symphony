@@ -4,8 +4,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
   alias SymphonyElixir.Linear.{DurableState, IssueLease}
   alias SymphonyElixir.Relay.Store, as: Digest
   @groups ~w(incoming planning in_progress blocker review)
-  @terminal ~w(completed failed cancelled rejected)
-  @mutable ~w(state writable error cancel_requested abort_acknowledged terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery resumed)
+  @terminal ~w(completed failed cancelled rejected retired)
+  @mutable ~w(state writable error cancel_requested abort_acknowledged abort_error terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery resumed retirement)
 
   @spec path(String.t()) :: Path.t()
   def path(group) do
@@ -88,6 +88,14 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
     locked(order["group"], fn -> update_locked(order, callback, apply?) end)
   end
 
+  @doc "Drain authorized tool calls before revocation or retirement can acquire the same journal lock."
+  @spec dispatch(map(), (map() -> {:ok, map()} | {:error, term()}), (-> term())) :: term()
+  def dispatch(order, authorize, callback) do
+    locked(order["group"], fn ->
+      with {:ok, _} <- update_locked(order, authorize, true), do: callback.()
+    end)
+  end
+
   defp update_locked(order, callback, apply?) do
     with {:ok, %{"id" => id} = current} <- read(order["group"]),
          true <- id == order["id"],
@@ -121,6 +129,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
 
   defp change(current, changes) do
     updated = Map.merge(current, changes)
+    updated = if get_in(current, ["abort_error", "retryable"]) == false, do: Map.put(updated, "abort_error", current["abort_error"]), else: updated
+    updated = if current["interruption_contract"] == 1 and current["writable"] == false, do: Map.put(updated, "writable", false), else: updated
 
     updated =
       Enum.reduce(~w(acceptance_observed execution_observed), updated, fn key, acc ->

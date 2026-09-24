@@ -46,9 +46,10 @@ defmodule SymphonyElixir.TestRun.Scenario do
   end
 
   defp check_openclaw(plan) do
-    if Config.openclaw_yolo_agent() == plan["openclaw_agent"],
-      do: :ok,
-      else: {:error, :test_openclaw_explicit_agent_mismatch}
+    if Config.openclaw_yolo_agent() == plan["openclaw_agent"] and
+         (plan["openclaw_interruption"] != true or (plan["scenario"] == "po_incoming" and is_binary(plan["openclaw_agent"]))),
+       do: :ok,
+       else: {:error, :test_openclaw_explicit_agent_mismatch}
   end
 
   defp result_states(%{"scenario" => "po_incoming"}), do: ["Verworfen"]

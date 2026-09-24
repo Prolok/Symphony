@@ -675,7 +675,7 @@ defmodule SymphonyElixir.YoloActionsTest do
       runner_opts =
         Keyword.merge(opts(),
           lease: fn _, fun -> fun.() end,
-          scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
+          scan: fn _ -> {:ok, %{"versions" => %{}, "current" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
           workspace: fn _, _ -> {:ok, ctx.workspace} end,
           unchanged: fn _ -> true end,
           checkpoint: fn _ -> {:ok, %{"inputs" => [input]}} end,

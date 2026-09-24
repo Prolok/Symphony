@@ -256,6 +256,8 @@ bleibt das Gate offen; negative Befunde erlauben Nacharbeit im Scope und erneute
 dieselbe Übergabe erhalten und nach `BLOCKER` zurückgeben; keinen unerfüllbaren
 Betreiberauftrag oder zusätzlichen Review allein wegen Wartezeit neu starten.
 Details und synthetische Fälle: [Betreiberpflichten und Wiederaufnahme](docs/linear-app.md#betreiberpflichten-und-wiederaufnahme).
+Neue fällige Betreiberarbeit nach Zwischenarbeit im Workpad zusätzlich als
+[quellengebundenen Betreiberauftrag](docs/linear-app.md#quellengebundener-betreiberauftrag) festhalten; unveränderte Pflichten nicht neu ausstellen.
 Freigegebene Routinetests nach einmaliger Einrichtung über `symphony_test`
 aufrufen; `worker.test_executor` verwaltet den lokalen Executor an
 `worker.test_executor_socket` im regulären Dienst. Keine zusätzliche Bestätigung
@@ -307,8 +309,11 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   ohne Wert erfolgen keine OpenClaw-Zugriffe. Aktivierung verlangt den separaten
   Live-Nachweis, Standardgates bleiben unabhängig; [Vertrag](docs/openclaw-yolo.md).
   Belegte OpenClaw-Vorab-Ablehnung gibt nur den nicht gestarteten Auftrag frei;
-  unklare Annahme bleibt reserviert. Altauftrags-Recovery erfolgt beleggebunden
-  durch den Betreiber gemäß diesem Vertrag.
+  unklare Annahme bleibt reserviert. Neue unterbrochene Aufträge dürfen nach
+  wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung technisch
+  aufgegeben werden; offene Arbeit wird regulär neu geplant, kein Erfolg fingiert.
+  Belegimporte und ausdrücklich beauftragte administrative Altfallbereinigungen
+  erfolgen getrennt durch den Betreiber gemäß diesem Vertrag.
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
   `config.toml` oder der geprüften Repository-Skills blockieren den

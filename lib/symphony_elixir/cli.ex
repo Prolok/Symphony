@@ -51,7 +51,7 @@ defmodule SymphonyElixir.CLI do
 
   defp evaluate_or_test_stage(args) do
     case SymphonyElixir.TestRun.stage() do
-      stage when stage in ["prepare", "probe", "cleanup", "delegate", "withdraw"] ->
+      stage when stage in ["prepare", "probe", "cleanup", "delegate", "withdraw", "interrupt"] ->
         case run_test_stage(stage, &prepare_test_projects/0, args) do
           :ok -> System.halt(0)
           error -> error

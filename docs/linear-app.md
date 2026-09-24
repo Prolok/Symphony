@@ -218,7 +218,11 @@ Beobachtete Blockierung und erneute Freigabe werden je Mitglied und Phase
 dauerhaft gezählt; auch ein identischer freier Endstand erlaubt genau eine neue Bewertung.
 Ein belegter lokaler App-Server-Fehler vor `turn/start` gibt den Zustellversuch
 für einen technischen Retry frei. Unklare oder bereits gestartete Turns bleiben
-reserviert.
+zunächst reserviert. Neue unterbrochene OpenClaw-Aufträge darf Symphony nach
+wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung
+[kontrolliert technisch aufgeben](openclaw-yolo.md#kontrollierte-aufgabe-unterbrochener-aufträge).
+Danach wird nur unerledigte Arbeit aus frischen Ticketdaten neu geplant;
+bestätigte Entscheidungen und neuere Zustellungen bleiben erhalten.
 Fehler-/Teilresultate erhalten
 ihren Lauf-/Sessionbezug. Der Sammelvertrag steht in
 [WORKFLOW_YOLO_AGENT.md](../WORKFLOW_YOLO_AGENT.md).
@@ -426,6 +430,55 @@ Kommentar-/Statusweg, führt sie in seinem Zuständigkeitsbereich aus und liefer
 Ergebnis, Belegquelle, Geltungsbereich und Quell-/Paketstand. Ein Statuswechsel
 allein bestätigt weder Ausführung noch Abnahme. Ein Worker darf keine
 Betreiberübernahme oder erfolgreiche externe Aktion erfinden.
+
+### Quellengebundener Betreiberauftrag
+
+Wird nach ausgeführter Zwischenarbeit eine neue Betreiberpflicht fällig, hält der
+Worker sie im einen Workpad unter `### Betreiberauftrag` zusätzlich in genau einem
+Block fest. Dieser Beleg macht die neue Arbeit auch bei unverändertem Titel,
+Beschreibung und menschlichem Eingang für die bestehende BLOCKER-Zustellung
+unterscheidbar. Nur fällige, bereits autorisierte Arbeit eintragen; keine Entwürfe,
+Zufallskennungen oder Zeitstempel zum Wecken. Beispiel mit synthetischen Quellhashes:
+
+````text
+### Betreiberauftrag
+
+```symphony-operator-handoff
+{
+  "version": 1,
+  "action": "Isolierten Unterbrechungstest am geprüften Kandidaten ausführen",
+  "head_sha": "1111111111111111111111111111111111111111",
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expected": "Neue Annahme, Schreibentzug, einmalige Folgeentscheidung und Cleanup belegen",
+  "resume_state": "Test (AI)"
+}
+```
+````
+
+Alle sechs Felder sind erforderlich; keine Zusatzfelder. `head_sha` ist der volle
+Commit, `source_sha256` der tatsächliche Quell-/Paketfingerprint einschließlich
+relevanter offener Änderungen. Aktion und erwarteter Nachweis sind konkrete,
+stabile Beschreibungen der Pflicht. `resume_state` nennt eine reguläre Phase von
+Planung (AI) bis Merge (AI), ausgenommen Todo und Abbruch. Rolle, Fälligkeitsquelle,
+lokale Prüfungen und Ergebnisse stehen weiterhin im normalen Übergabetext.
+Ein neuer Kandidat oder fachlich anderer Prüfumfang verlangt einen aktualisierten
+Beleg. Bloße Wartezeit, Statusrundläufe und redaktionelle Pflege tun das nicht.
+Nach Ausführung den letzten Beleg samt Ergebnis erhalten, erst für eine neue
+fällige Pflicht ersetzen. Keine neue Freigabe oder Scheduler-Infrastruktur entsteht.
+
+Symphony berücksichtigt dafür ausschließlich bestätigte eigene Workpadversionen
+aus einem vollständigen Kommentareingang. Aktuelle mehrdeutige/ungültige Belege
+oder fehlgeschlagene Scans sperren die Beobachtung. Normale Eigenkommentare und
+Integrationsausgaben bleiben ohne Wiederanlaufwirkung. Die Menge der bereits
+beobachteten fachlichen Aufträge geht stabil in die bestehenden Deliverybelege ein:
+Polls, Neustarts, Formatierung sowie Entfernen oder Wiederherstellen alter Belege
+setzen Entscheidungen nicht zurück. Alte Belege bleiben Historie, keine erneut
+auszuführende Liste. Laufende Reservierungen, Leases, frische Ticketprüfung und
+offene Eingaben behalten ihre bisherigen Schutzregeln; eine Zustellung bestätigt
+weder Ausführung noch Abnahme. Historische Übergaben ohne Block werden nicht
+automatisch rekonstruiert.
+
+### Prüfung bei Wiederaufnahme
 
 Bei Wiederaufnahme prüft der Hauptworker zuerst die Fälligkeitsquelle und dann
 für tatsächlich fällige Pflichten diese Belege vor weiterer Phasenarbeit:

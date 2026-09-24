@@ -57,7 +57,13 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       members = Enum.map(order["members"], fn member -> %{id: member["id"], identifier: member["identifier"], state: member["state"]} end)
       recovery_opts = Keyword.put(opts, :recipient, self())
       runner = fn _, _, _ -> OpenClaw.recover(order, recovery_opts) end
-      event = %{external: OpenClaw.observation(Map.merge(order, %{"writable" => false, "resumed" => true})), session_id: order["session_id"], workspace_path: order["workspace"]}
+
+      event = %{
+        external: OpenClaw.observation(Map.merge(order, %{"writable" => false, "resumed" => true, "cancel_requested" => true})),
+        session_id: order["session_id"],
+        workspace_path: order["workspace"]
+      }
+
       start(state, group, members, [], Keyword.merge(opts, runner: runner, recovering: true, initial_event: event))
     end
   end
@@ -314,14 +320,37 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   @spec stop(map()) :: :ok
   def stop(runs) do
     Enum.each(runs, fn {group, run} ->
-      case Journal.read(group) do
-        {:ok, order} when is_map(order) -> Journal.update(order, %{"writable" => false, "cancel_requested" => true})
-        _ -> :ok
-      end
-
+      revoke_before_stop(group, run)
       Process.exit(run.pid, :shutdown)
     end)
 
     :ok
+  end
+
+  defp revoke_before_stop(group, run) do
+    case Journal.read(group) do
+      {:ok, nil} -> :ok
+      {:ok, order} -> await_revocation(order, run)
+      {:error, reason} -> retry_stop(group, run, reason, fn -> revoke_before_stop(group, run) end)
+    end
+  end
+
+  defp await_revocation(order, run) do
+    # Keep the original generation through retries. Acquiring its journal lock
+    # drains authorized calls; a timeout or failed write never permits a kill.
+    case Journal.update(order, %{"writable" => false, "cancel_requested" => true}) do
+      {:ok, _} -> :ok
+      {:error, :openclaw_generation_changed} -> :ok
+      {:error, reason} -> retry_stop(order["group"], run, reason, fn -> await_revocation(order, run) end)
+    end
+  end
+
+  defp retry_stop(group, run, reason, retry) do
+    Enum.each(Map.get(run, :issues, [%{id: nil, identifier: nil}]), fn issue ->
+      Logger.warning("OpenClaw shutdown waiting group=#{group} issue_id=#{issue.id} issue_identifier=#{issue.identifier} session_id=#{get_in(run, [:event, :session_id])} reason=#{inspect(reason)}")
+    end)
+
+    Process.sleep(1000)
+    retry.()
   end
 end

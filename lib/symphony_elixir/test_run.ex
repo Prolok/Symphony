@@ -7,7 +7,7 @@ defmodule SymphonyElixir.TestRun do
   alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, PathSafety, ProjectContext, Projects, TestInstance, Workspace}
   alias SymphonyElixir.Linear.{Client, DurableState}
-  alias SymphonyElixir.TestRun.{Delegation, Derived, PoActions, PoHandoff, Readiness, Scenario}
+  alias SymphonyElixir.TestRun.{Delegation, Derived, OpenClawInterruption, PoActions, PoHandoff, Readiness, Scenario}
   alias SymphonyElixir.Yolo.Operations, as: YoloOperations
 
   @spec stage() :: String.t() | nil
@@ -89,7 +89,7 @@ defmodule SymphonyElixir.TestRun do
   end
 
   @spec execute(String.t()) :: {:ok, map()} | {:error, term()}
-  def execute(stage) when stage in ["prepare", "probe", "cleanup", "delegate", "withdraw"] do
+  def execute(stage) when stage in ["prepare", "probe", "cleanup", "delegate", "withdraw", "interrupt"] do
     with %{} = instance <- instance(),
          {:ok, plan} <- plan(),
          true <- valid_source?(stage, plan, instance),
@@ -253,6 +253,8 @@ defmodule SymphonyElixir.TestRun do
       Enum.reduce_while(contexts(), {:ok, journal}, &prepare_context(&1, &2, plan))
     end
   end
+
+  defp execute_stage("interrupt", plan, journal), do: OpenClawInterruption.execute(contexts(), plan, journal)
 
   defp execute_stage(stage, plan, journal) do
     with {:ok, derived} <- inspect_derived(stage, plan),
@@ -471,6 +473,13 @@ defmodule SymphonyElixir.TestRun do
       fixture_assignee?(issue, fixture) and get_in(issue, ["delegate", "id"]) in [nil, fixture["test_delegate_id"]]
   end
 
+  defp description_matches?(description, %{"po_interruption" => true, "description" => expected}, %{"scenario" => "po_incoming", "openclaw_interruption" => true})
+       when is_binary(description) and is_binary(expected) do
+    # Linear removes the final heredoc LF. Accept that observed roundtrip for
+    # existing interruption journals without rewriting their creation intent.
+    description == expected or description <> "\n" == expected
+  end
+
   defp description_matches?(description, fixture, plan) do
     if routine() && plan["scenario"] == "workflow" do
       case DurableState.read(description_receipt_path(plan, fixture)) do
@@ -545,6 +554,7 @@ defmodule SymphonyElixir.TestRun do
 
       with {:ok, fixture} <- Delegation.probe(context, fixture),
            {:ok, fixture} <- PoIncoming.probe(issue, fixture),
+           {:ok, fixture} <- OpenClawInterruption.probe(issue, fixture, plan),
            {:ok, fixture} <- PoHandoff.probe(issue, fixture) do
         complete = complete and fixture_receipts?(fixture)
 
@@ -596,6 +606,12 @@ defmodule SymphonyElixir.TestRun do
       fixture["po_handoff"] -> if(fixture["initial_state"] == "Yolo Review", do: "Review", else: fixture["initial_state"])
       true -> "Planung (AI)"
     end
+  end
+
+  # Decisions arrive before agent.wait confirms the successor's end. Keep the
+  # live interruption probe pending until its execution receipt is available.
+  defp fixture_receipts?(%{"po_interruption" => true, "initial_state" => state} = fixture) when state != "Backlog" do
+    match?(%{"state" => "completed"}, get_in(fixture, ["po_receipt", "openclaw"]))
   end
 
   defp fixture_receipts?(fixture) do

@@ -48,7 +48,7 @@ defmodule SymphonyElixir.RelayCacheTest do
   test "invalid persisted event positions fail closed", c do
     {:ok, session} = open(c)
 
-    for positions <- [%{"issue" => %{"generation" => nil, "position" => 1, "event_id" => "event"}}, []] do
+    for positions <- [%{"issue" => %{"generation" => nil, "position" => 1, "event_id" => "event"}}, %{"issue" => 42}, []] do
       :ok = DurableState.write(session.path, Map.put(session.record, "event_positions", positions))
       assert {:error, :relay_cache_corrupt} = open(c)
     end

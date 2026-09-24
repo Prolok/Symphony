@@ -2322,6 +2322,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     }
 
     assert Delivery.pending([issue], %{issue.id => current}, record) == []
+
+    decided = record |> Map.put("decision_sources", %{issue.id => "same-source"}) |> Map.put("decision_versions", %{issue.id => "same-member"})
+    assert Delivery.pending([issue], %{issue.id => current}, decided) == []
   end
 
   test "a late terminal journal cannot end a newer delivery attempt" do

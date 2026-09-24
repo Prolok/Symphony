@@ -171,8 +171,8 @@ defmodule SymphonyElixir.Yolo.Followup do
   defp verify_created(created, intent, opts) when is_map(created) do
     input = intent["input"]
 
-    with true <- created["id"] == input["id"],
-         :ok <- equal("project.id", input["projectId"], get_in(created, ["project", "id"])),
+    # API.issue/2 already requires the returned issue ID to match the requested ID.
+    with :ok <- equal("project.id", input["projectId"], get_in(created, ["project", "id"])),
          :ok <- equal("team.id", input["teamId"], get_in(created, ["team", "id"])),
          :ok <- equal("title", input["title"], created["title"]),
          :ok <- equal("description", input["description"], created["description"], &Description.equivalent?/2),
@@ -184,7 +184,6 @@ defmodule SymphonyElixir.Yolo.Followup do
       {:ok, created}
     else
       {:error, _} = error -> error
-      false -> {:error, :yolo_created_issue_unconfirmed}
     end
   end
 

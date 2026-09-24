@@ -622,6 +622,9 @@ defmodule SymphonyElixir.YoloActionsTest do
         assert {:error, ^derived_error} = Derived.inspect_fixtures("cleanup", plan, opts())
       end
 
+      change(&%{&1 | created: %{id => Map.put(ticket, "state", nil)}})
+      assert {:error, {:yolo_created_issue_changed, %{field: "state.id", expected: _, actual: "nil"}}} = Followup.invoke(request, opts())
+
       assert writes("YoloUpdate") == []
       assert writes("DeleteDerivedTestFixture") == []
       assert length(writes("YoloCreate")) == 1
@@ -1029,7 +1032,7 @@ defmodule SymphonyElixir.YoloActionsTest do
       assert {:error, :yolo_followup_sources_changed} = Followup.invoke(args(issues), opts())
       assert writes("YoloUpdate") == []
       change(&%{&1 | issues: Map.put(&1.issues, issue.id, issue)})
-      change(&%{&1 | created: Map.new(&1.created, fn {id, node} -> {id, Map.put(node, "title", "external edit")} end)})
+      change(&%{&1 | created: Map.new(&1.created, fn {id, node} -> {id, Map.put(node, "title", node["title"] <> " changed")} end)})
       assert {:error, {:yolo_created_issue_changed, %{field: "title"}}} = Followup.invoke(args(issues), opts())
       assert length(writes("YoloCreate")) == 1
       current_context = ProjectContext.current()

@@ -65,6 +65,8 @@ defmodule SymphonyElixir.LinearDescriptionTest do
     for {before, returned} <- [
           {"`#{url}`", "`[PRO-854](#{url})`"},
           {"`begin\n#{url}\nend`", "`begin\n[PRO-854](#{url})\nend`"},
+          {"Text `offen #{url}", "Text `offen [PRO-854](#{url})"},
+          {"``Code `foo` #{url}``", "``Code `foo` [PRO-854](#{url})``"},
           {"```\n#{url}\n```", "```\n[PRO-854](#{url})\n```"},
           {"- ~~~\n  Text #{url} weiter\n  ~~~", "- ~~~\n  Text [PRO-854](#{url}) weiter\n  ~~~"},
           {"> ~~~\n> Text #{url} weiter\n> ~~~", "> ~~~\n> Text [PRO-854](#{url}) weiter\n> ~~~"},
@@ -83,6 +85,7 @@ defmodule SymphonyElixir.LinearDescriptionTest do
 
     assert Description.equivalent?("- [ ] Quelle: #{url}", "* [ ] Quelle: [PRO-854](#{url})")
     assert Description.equivalent?("- [ ] `Pflicht` Quelle: #{url}", "* [ ] `Pflicht` Quelle: [PRO-854](#{url})")
+    assert Description.equivalent?("- [X] Quelle: #{url}", "* [X] Quelle: [PRO-854](#{url})")
     refute Description.equivalent?("- [ ] Quelle: #{url}", "* [x] Quelle: [PRO-854](#{url})")
     refute Description.equivalent?("- [ ] [offen] Quelle: #{url}", "* [ ] [offen] Quelle: [PRO-854](#{url})")
   end

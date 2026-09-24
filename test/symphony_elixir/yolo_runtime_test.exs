@@ -6,7 +6,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.Linear.WriteContext
-  alias SymphonyElixir.Yolo.{BlockerBrake, Completion, Coordinator, Group, Impulse}
+  alias SymphonyElixir.Yolo.{BlockerBrake, Completion, Coordinator, Escalation, Group, Impulse}
   alias SymphonyElixir.Yolo.{Observation, Operations, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
 
@@ -111,6 +111,31 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Impulse.generations(resumed)[issue.id] == 1
   end
 
+  test "history input stays conservative across missing, malformed and unverified baselines", %{issues: [issue | _]} do
+    assert {:ok, idle} = Impulse.observe([%{issue | relay_event: nil}], %{})
+    assert get_in(idle, ["impulses", issue.id, "reason"]) == "no_relay_event"
+
+    event = fn position -> %{"generation" => "relay", "position" => position, "event_id" => "event-#{position}"} end
+    issue = %{issue | relay_event: event.(1)}
+    node = %{"id" => "assigned", "createdAt" => "2026-09-24T12:00:00Z", "toDelegate" => %{"id" => "pai"}}
+
+    query = fn _, _ ->
+      {:ok, %{"data" => %{"issue" => %{"history" => %{"nodes" => [node], "pageInfo" => %{"hasNextPage" => false}}}}}}
+    end
+
+    assert {:ok, baseline} = Impulse.observe([issue], %{}, query: query)
+    assert Impulse.generations(baseline)[issue.id] == 0
+    assert {:error, :yolo_history_incomplete} = Impulse.observe([issue], %{}, history: fn _ -> {:ok, [%{"id" => "invalid"}]} end)
+
+    prior = %{"impulses" => %{issue.id => %{"history_head" => nil, "generation" => 0, "relay" => event.(0)}}}
+    assert {:ok, resumed} = Impulse.observe([issue], prior, history: fn _ -> {:ok, [node]} end)
+    assert Impulse.generations(resumed)[issue.id] == 1
+
+    prior = %{"impulses" => %{issue.id => %{"reason" => "no_relay_event", "generation" => 0, "relay" => event.(0)}}}
+    assert {:ok, ignored} = Impulse.observe([issue], prior, history: fn _ -> {:ok, [node]} end)
+    assert Impulse.generations(ignored)[issue.id] == 0
+  end
+
   test "only a verified human priority increase creates an impulse", %{issues: [issue | _]} do
     base = %{
       "id" => "baseline",
@@ -144,6 +169,54 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
       assert Impulse.generations(record)[issue.id] == expected
     end
+  end
+
+  test "coordinator retries a pending notification only after a fresh eligible lookup", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, "pai"))
+    issue = %{issue | url: "https://linear.example/PRO-0"}
+    proposal = %{"escalation" => %{"cause" => "Route fehlt", "attempts" => "Review abgeschlossen", "proposal" => "Route prüfen", "decision" => "Benachrichtigen"}}
+    missing = [escalation_route: fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end]
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, proposal, missing)
+    assert {:ok, true} = Escalation.pending(issue.id)
+
+    state = %Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}
+
+    base = [
+      start: fn _, _ -> flunk("notification retry must not start a review") end,
+      escalation_route: fn _, _ -> {:ok, %{"channel" => "bound", "to" => "human"}} end,
+      escalation_send: fn _, _, _ ->
+        send(self(), :notification_sent)
+        {:ok, %{"messageId" => "sent"}}
+      end
+    ]
+
+    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:error, :refresh_unavailable} end))
+    assert {:ok, true} = Escalation.pending(issue.id)
+    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, []} end))
+    assert {:ok, true} = Escalation.pending(issue.id)
+    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, [%{issue | delegate_id: nil}]} end))
+    assert {:ok, true} = Escalation.pending(issue.id)
+    refute_receive :notification_sent
+
+    tick(
+      state,
+      [issue],
+      Keyword.merge(base,
+        fetch: fn _ -> {:ok, [issue]} end,
+        escalation_route: fn _, _ -> {:error, :route_still_missing} end
+      )
+    )
+
+    assert {:ok, true} = Escalation.pending(issue.id)
+
+    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, [issue]} end))
+    assert_receive :notification_sent
+    assert {:ok, false} = Escalation.pending(issue.id)
+
+    key = "escalation:" <> issue.id
+    {:ok, record} = Store.read(key)
+    :ok = Store.write(key, Map.put(record, "messages", []))
+    assert tick(state, [issue], base).yolo_runs == %{}
   end
 
   test "history-backed redelegation restarts an ended, open delivery once across orchestrator restart", %{issues: [issue | _]} do
@@ -1402,6 +1475,36 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Delivery.pending([issue], changed, record) == [issue]
   end
 
+  for damage <- [:attempt_mismatch, :state_corrupt] do
+    @tag damage: damage
+    test "terminal local failure keeps an unprovable delivery reserved (#{damage})", %{issues: [issue | _], root: root, damage: damage} do
+      opts = [
+        fetch: fn _ -> {:ok, [issue]} end,
+        lease: fn _, callback -> callback.() end,
+        scan: &scan/1,
+        workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+        unchanged: fn _ -> true end,
+        checkpoint: fn _ -> {:ok, %{inputs: []}} end,
+        before_action: fn _ -> :ok end,
+        session: fn _, _, _, session_opts ->
+          case damage do
+            :attempt_mismatch ->
+              {:ok, record} = Store.read("incoming")
+              :ok = Store.write("incoming", Map.put(record, "attempt", nil))
+
+            :state_corrupt ->
+              File.write!(Store.path("incoming"), "corrupt")
+          end
+
+          session_opts[:on_message].(%{event: :turn_failed, session_id: "failed-session"})
+          {:error, :turn_failed}
+        end
+      ]
+
+      assert {:error, _} = run_group("incoming", [issue], [issue], opts)
+    end
+  end
+
   test "pending actions reopen an old processed snapshot and cannot hide behind member receipts", %{issues: issues, root: root} do
     ids = Enum.map(issues, & &1.id)
     {:ok, observations, fingerprint} = Observation.capture(issues, %{}, scan: &scan/1)
@@ -2205,6 +2308,31 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     record = %{"observations" => original, "deliveries" => receipts, "delivery_ends" => %{"run" => true}, "completed_sources" => %{first.id => original[first.id]["source"]}}
 
     assert Delivery.pending([first, second], resumed, record) == [second]
+  end
+
+  test "confirmed source decision survives a changed review chain fingerprint", %{issues: [issue | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+    previous = %{"source" => "same-source", "member_semantic" => "same-member", "semantic" => "old-chain"}
+    current = %{previous | "semantic" => "new-chain"}
+
+    record = %{
+      "observations" => %{issue.id => previous},
+      "completed_sources" => %{issue.id => "same-source"},
+      "completed_versions" => %{issue.id => "same-member"}
+    }
+
+    assert Delivery.pending([issue], %{issue.id => current}, record) == []
+  end
+
+  test "a late terminal journal cannot end a newer delivery attempt" do
+    alias SymphonyElixir.Yolo.Delivery
+    {:ok, record} = Store.read("incoming")
+    record = Map.put(record, "attempt", %{"id" => "new", "session_end" => false})
+    :ok = Store.write("incoming", record)
+    :ok = Journal.write(%{"group" => "incoming", "id" => "old", "members" => [], "state" => "completed"})
+
+    assert :ok = Delivery.reconcile("incoming")
+    assert {:ok, ^record} = Store.read("incoming")
   end
 
   test "an unresolved delivery reserves its whole group while another member changes", %{issues: [first, second | _]} do

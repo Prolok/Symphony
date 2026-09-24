@@ -45,6 +45,23 @@ defmodule SymphonyElixir.RelayCacheTest do
     end
   end
 
+  test "invalid persisted event positions fail closed", c do
+    {:ok, session} = open(c)
+
+    for positions <- [%{"issue" => %{"generation" => nil, "position" => 1, "event_id" => "event"}}, []] do
+      :ok = DurableState.write(session.path, Map.put(session.record, "event_positions", positions))
+      assert {:error, :relay_cache_corrupt} = open(c)
+    end
+  end
+
+  test "authenticated resync events without an issue id do not create issue positions", c do
+    {:ok, session} = open(c)
+    session = Session.tick(session)
+    Server.publish(c.server, "workspace", %{"type" => "RelayGap", "action" => "expired_input", "signal" => "resync_required", "issueId" => nil, "broadcast" => true})
+
+    assert Session.tick(session).status == :ready
+  end
+
   test "legacy binding migration keeps the durable receipt and cursor until authenticated registration", c do
     {:ok, s} = open(c)
     s = Session.tick(s)

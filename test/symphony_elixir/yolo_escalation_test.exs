@@ -71,6 +71,7 @@ defmodule SymphonyElixir.YoloEscalationTest do
     opts = [escalation_route: fn _, _ -> {:error, :missing_target} end, escalation_send: fn _, _, _ -> flunk("unexpected send") end]
     assert {:error, :missing_target} = Escalation.notify(issue, request(), opts)
     assert {:ok, true} = Escalation.pending(issue.id)
+    assert {:error, :missing_target} = Escalation.retry_pending(issue, opts)
 
     send = fn _, _, _ ->
       send(self(), :route_repaired)
@@ -85,6 +86,7 @@ defmodule SymphonyElixir.YoloEscalationTest do
     assert {:error, :yolo_escalation_incomplete} = Escalation.notify(issue, %{}, opts)
     ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, nil))
     assert :ok = Escalation.notify(issue, request(), escalation_route: fn _, _ -> flunk("disabled access") end)
+    assert {:error, :openclaw_yolo_agent_unavailable} = Escalation.retry_pending(issue)
   end
 
   test "corrupt notification journal stays visible", %{issue: issue} do

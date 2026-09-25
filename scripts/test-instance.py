@@ -127,6 +127,19 @@ def verified_teams(binding):
     return ids, keys
 
 
+def validate_test_checkout(repo, manifest):
+    """Keep test builds away from the running installation and project roots."""
+    checkout = canonical(repo)
+    main = manifest["main_instance"]
+    protected = [canonical(main["checkout"])]
+    if not protected[0].is_dir():
+        raise ValueError("Aktiver Haupt-Codecheckout fehlt")
+    protected.extend(canonical(scope["root"]) for scope in main["projects"])
+    for occupied in protected:
+        if checkout.is_relative_to(occupied) or occupied.is_relative_to(checkout):
+            raise ValueError("Testquellcode überlappt den aktiven Checkout oder ein Hauptprojektroot")
+
+
 def process_started(pid):
     if type(pid) is not int or pid <= 1:
         raise ValueError("Hauptprozess fehlt")
@@ -188,6 +201,7 @@ def preflight(name, repo, env=None):
     # after loss/restart of the main process; no new worker may start then.
     if env.get("SYMPHONY_TEST_RUN_STAGE") != "cleanup":
         validate_main(manifest)
+        validate_test_checkout(repo, manifest)
         if env.get("SYMPHONY_SERVICE_GUARD_PID"):
             process_started(int(env["SYMPHONY_SERVICE_GUARD_PID"]))
         revision = source(repo)

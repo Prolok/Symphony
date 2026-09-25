@@ -58,6 +58,9 @@ def prepare(args):
         raise ValueError('invalid_fixture_ids')
     output = TEST.canonical(args.result_dir)
     manifest = TEST.canonical(args.manifest)
+    if manifest.stat().st_size > 65536:
+        raise ValueError('test_manifest_too_large')
+    TEST.validate_test_checkout(checkout, json.loads(manifest.read_text()))
     if not output.is_relative_to(checkout / '_build') or output.exists():
         raise ValueError('result_directory_already_exists')
     # Keep every phase rule, technical gate, hook and skill reference intact.

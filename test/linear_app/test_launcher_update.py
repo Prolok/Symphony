@@ -134,10 +134,12 @@ if sys.argv[1] == "escript.build":
                                   teams=[dict(id='team-' + workspace, key='PRO' if workspace == 'prolok' else 'PRI')],
                                   verified_at=time.time())
         manifest = self.root / "manifest.json"
+        (self.root / "main").mkdir()
         manifest.write_text(json.dumps(dict(project_root=str(fixtures), workspace_root=str(self.root / "worktrees"),
                             fixtures_idle=True, projects=projects,
                             main_instance=dict(pid=os.getpid(), started=helper.process_started(os.getpid()), sha="a"*40,
-                            verified_at=time.time(), projects=[dict(workspace_id="other",project_id="main",
+                            verified_at=time.time(), checkout=str(self.root / "main"),
+                            projects=[dict(workspace_id="other",project_id="main",
                             root=str(self.root/"main"),workspace_root=str(self.root/"main-worktrees"))]))))
         revision=helper.source(self.source)
         self.push_update()

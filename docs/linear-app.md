@@ -706,7 +706,11 @@ bereits vor Build und Discovery, beim Runner bis nach dem Cleanup. Shelllauncher
 Ticket-Symlink und direkter Escript verwenden denselben Vertrag. Ein Teststart
 führt kein Autoupdate aus und richtet keine globalen Launcher ein.
 
-Testquellcode liegt außerhalb des Testsammelroots. Dieser enthält direkt genau
+Testquellcode liegt außerhalb des Testsammelroots sowie des aktiven Haupt-Codecheckouts
+und aller Hauptprojektroots. Der öffentliche Hauptbeleg bindet den Codecheckout
+kanonisch; Preflight und Pipeline prüfen Überlappungen vor Build beziehungsweise
+vor dem Schreiben des Workflow-Abbilds. Cleanup bestehender Läufe bleibt möglich.
+Der Testsammelroot enthält direkt genau
 das freigegebene Dummy-Projekt, aber keine eigene `.symphony` und keinen Symphony-Code.
 Discovery bleibt einstufig. Symlink-Aliase und überlappende Roots werden abgewiesen.
 Ein verpflichtendes öffentliches Manifest bindet echte Workspace-/Projekt-IDs;
@@ -777,6 +781,7 @@ sind absolute kanonische Pfade; Platzhalter im folgenden Muster ersetzen:
   },
   "main_instance": {
     "pid": 12345, "started": "EXACT-PS-LSTART", "sha": "FULL-MAIN-COMMIT-SHA",
+    "checkout": "/ABS/QuantHub/Symphony",
     "verified_at": 0,
     "projects": [
       {"workspace_id": "WORKSPACE-UUID-1", "project_id": "OTHER-PROJECT-UUID",
@@ -789,6 +794,9 @@ sind absolute kanonische Pfade; Platzhalter im folgenden Muster ersetzen:
 ```
 
 `started` ist die getrimmte Ausgabe von `ps -p <pid> -o lstart=`;
+`main_instance.checkout` bezeichnet den aktiven Codecheckout des Hauptdiensts;
+ein separater Testcheckout darf ihn und die Hauptprojektroots weder enthalten
+noch darin liegen.
 `verified_at` sind Unix-Sekunden der jeweiligen gebundenen Prüfung, höchstens eine
 Stunde alt und nicht zukünftig; dies gilt für den Hauptbeleg und das Dummy-Projekt.
 `projects.<name>.slug_id` ist die authentifiziert gelesene kanonische API-`slugId`.

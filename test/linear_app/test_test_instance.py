@@ -35,6 +35,7 @@ class TestInstancePreflightTest(unittest.TestCase):
             (self.fixtures / name / ".symphony").mkdir(parents=True)
         self.source = self.root / "source"
         self.source.mkdir()
+        (self.root / "main-code").mkdir()
         self.git("init", "-q")
         (self.source / "code").write_text("first")
         self.git("add", ".")
@@ -49,7 +50,7 @@ class TestInstancePreflightTest(unittest.TestCase):
                 for index, (name, workspace) in enumerate(test_instance.PROJECTS.items(), 1)
             },
             "main_instance": {"pid": os.getpid(), "started": test_instance.process_started(os.getpid()),
-                              "sha": "a" * 40, "verified_at": time.time(),
+                              "sha": "a" * 40, "verified_at": time.time(), "checkout": str(self.root / "main-code"),
                               "projects": [{"workspace_id": "separate", "project_id": "main",
                                             "root": str(self.root / "main"), "workspace_root": str(self.root / "main-worktrees")}]}
         }
@@ -185,6 +186,28 @@ class TestInstancePreflightTest(unittest.TestCase):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 self.check()
 
+    def test_test_source_must_not_overlap_main_checkout_or_project_root(self):
+        main = self.manifest['main_instance']
+        original = main['checkout']
+        (self.source / 'nested').mkdir()
+        for protected in (self.source, self.source / 'nested', self.root):
+            main['checkout'] = str(protected)
+            self.write_manifest()
+            with self.subTest(protected=protected), self.assertRaisesRegex(ValueError, 'überlappt'):
+                self.check()
+        main.pop('checkout')
+        self.write_manifest()
+        with self.assertRaises(KeyError):
+            self.check()
+        main['checkout'] = original
+        main['projects'][0]['root'] = str(self.source)
+        self.write_manifest()
+        with self.assertRaises(ValueError):
+            self.check()
+        main['projects'][0]['root'] = str(self.root / 'main')
+        self.write_manifest()
+        self.assertEqual(self.check()['source']['checkout'], str(self.source))
+
     def test_cleanup_uses_original_build_stamp_after_source_change_and_main_loss(self):
         revision=self.check()['source']
         stamp=self.source/'_build/symphony-source.json'
@@ -192,6 +215,8 @@ class TestInstancePreflightTest(unittest.TestCase):
         stamp.write_text(json.dumps(revision))
         (self.source/'code').write_text('continued development')
         with self.assertRaises(ValueError):self.check()
+        self.manifest['main_instance'].pop('checkout')
+        self.write_manifest()
         self.env['SYMPHONY_TEST_RUN_STAGE']='cleanup'
         with patch.object(test_instance,'normal_service_running',return_value=False):
             self.assertEqual(self.check()['source'],revision)

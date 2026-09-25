@@ -337,6 +337,8 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   auf dem verifizierten Dummy-Projekt `Prolok/symphony-test` mit disjunktem Projektbereich,
   eigenem Zustand/Port und gemeinsamen Issue-Leases/API-Grenzen; Einrichtung und
   Pflichtbelege: [Isolierter Testbetrieb](docs/linear-app.md#isolierter-testbetrieb).
+  Testläufe verwenden einen vom aktiven Haupt-Codecheckout und dessen Projektroots
+  getrennten Quellcheckout; sie dürfen den laufenden Checkout nicht verändern.
   `sym-codex` und `sym-watch` verlangen bei mehrdeutigen Kennungen
   `Projekt:Ticketkennung`.
 - Die interne Zustandskennung ist `symphony`. Abweichenden Altzustand nur gemäß

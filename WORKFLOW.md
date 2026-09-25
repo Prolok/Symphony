@@ -309,6 +309,7 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   Optional wählt `OPENCLAW_YOLO_AGENT` ausschließlich deren PO-Ausführungsweg;
   ohne Wert erfolgen keine OpenClaw-Zugriffe. Aktivierung verlangt den separaten
   Live-Nachweis, Standardgates bleiben unabhängig; [Vertrag](docs/openclaw-yolo.md).
+  Belegte technische Nichtstarts der Review-Gruppe entfernen nur ihren eigenen unveränderten Checkout und erhalten begrenztes wachsendes Retry-Backoff; unklare oder veränderte Checkouts sperren weitere Starts bis zur Prüfung. Verwaiste Altcheckouts nur über den [Betreiberweg](docs/linear-app.md#verwaiste-po-reviewcheckouts) mit Trockenlauf bereinigen.
   Belegte OpenClaw-Vorab-Ablehnung gibt nur den nicht gestarteten Auftrag frei;
   unklare Annahme bleibt reserviert. Neue unterbrochene Aufträge dürfen nach
   wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung technisch

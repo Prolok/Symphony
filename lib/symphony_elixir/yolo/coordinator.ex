@@ -217,13 +217,14 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     with :ok <- Journal.available(group),
          :ok <- Delivery.reconcile(group),
          {:ok, record} <- Store.read(group),
-         true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
          {:ok, observations, _fingerprint} <- Observation.capture(members, record["observations"], opts),
          record = Delivery.migrate(record, observations),
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
+         pending = Delivery.pending(members, observations, if(operations == [], do: record, else: Map.put(record, "processed", nil))),
+         record = reset_changed_nonstart(record, pending, observations),
+         true <- record["checkout_cleanup_blocked"] != true,
+         true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
          :ok <- Store.write(group, Map.put(record, "observations", observations)) do
-      pending = Delivery.pending(members, observations, if(operations == [], do: record, else: Map.put(record, "processed", nil)))
-
       prepare_pending(group, pending, opts)
     else
       {:error, reason} ->
@@ -234,6 +235,18 @@ defmodule SymphonyElixir.Yolo.Coordinator do
         :waiting
     end
   end
+
+  defp reset_changed_nonstart(%{"nonstart" => %{"fingerprint" => fingerprint, "members" => ids}} = record, pending, observations) do
+    pending_ids = Enum.map(pending, & &1.id)
+
+    if fingerprint == Observation.fingerprint(Map.take(observations, pending_ids)) and ids == pending_ids do
+      record
+    else
+      Map.merge(record, %{"nonstart" => nil, "retry_at" => nil})
+    end
+  end
+
+  defp reset_changed_nonstart(record, _, _), do: record
 
   defp prepare_pending(group, pending, opts) do
     result = if group == "blocker", do: BlockerBrake.check(pending, opts), else: {:ok, pending}

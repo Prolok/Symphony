@@ -4,7 +4,8 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
 
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.TestRun.PoIncoming
-  alias SymphonyElixir.Yolo.{Scope, Workspace}
+  alias SymphonyElixir.Yolo.OpenClaw.Journal
+  alias SymphonyElixir.Yolo.{ReviewCheckouts, Scope, Store, Workspace}
 
   setup do
     root = Path.dirname(Workflow.workflow_file_path())
@@ -40,6 +41,8 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     assert {:ok, workspace} = Workspace.create("review", run)
     assert workspace.sha == git(root, ["rev-parse", "main"])
     assert Workspace.unchanged?(workspace)
+    refute Workspace.owned_review?(%{}, run)
+    assert {:error, :yolo_review_checkout_unsafe} = Workspace.remove_review(%{}, run, true)
     assert File.read!(Path.join(workspace.path, "tracked")) == "merged version"
     assert git(root, ["status", "--porcelain"]) == source_status <> "\n?? worktrees/"
     assert {:error, :yolo_workspace_unavailable} = Workspace.create("review", run)
@@ -51,6 +54,117 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     git(root, ["worktree", "remove", workspace.path])
     File.mkdir_p!(workspace.path)
     refute Workspace.unchanged?(workspace)
+  end
+
+  test "inventory dry run and apply preserve dirty, active, reserved, journaled and unknown review checkouts", %{root: root, context: context} do
+    context = %{context | yolo_agent_id: "pai"}
+    context = put_in(context.settings.tracker.app["state_root"], Path.join(root, "state"))
+    ProjectContext.bind(context)
+    workspaces = for _ <- 1..7, do: elem(Workspace.create("review", Ecto.UUID.generate()), 1)
+    [orphan, dirty, active, reserved, journaled, unknown, unlisted] = workspaces
+    File.write!(Path.join(dirty.path, "tracked"), "changed")
+    {:ok, record} = Store.read("review")
+    record = Map.put(record, "attempt", %{"id" => Path.basename(active.path)})
+    record = Map.put(record, "deliveries", %{"member" => %{"run_id" => Path.basename(reserved.path)}})
+    :ok = Store.write("review", record)
+    :ok = Journal.write(%{"id" => Path.basename(journaled.path), "group" => "review", "members" => [], "state" => "completed", "workspace" => journaled.path})
+    entries = Enum.map([orphan, dirty, active, reserved, journaled], &%{"path" => &1.path, "sha" => &1.sha})
+    entries = entries ++ [%{"path" => unknown.path, "sha" => String.duplicate("0", 40)}]
+    inventory = %{"version" => 1, "checkouts" => entries}
+
+    assert {:ok, dry} = ReviewCheckouts.sweep(inventory)
+    assert dry["mode"] == "dry_run"
+    assert dry["before"] == 7 and dry["after"] == 7
+    assert dry["removable"] == 1 and dry["removed"] == 0
+    assert {:ok, applied} = ReviewCheckouts.sweep(inventory, true)
+    assert applied["before"] == 7 and applied["after"] == 6
+    assert applied["removed"] == 1
+    refute File.exists?(orphan.path)
+    assert Enum.all?([dirty, active, reserved, journaled, unknown, unlisted], &File.dir?(&1.path))
+  end
+
+  test "inventory refuses malformed inputs, ambiguous reservations and unavailable Git inventory", %{root: root, context: context} do
+    context = %{context | yolo_agent_id: "pai"}
+    ProjectContext.bind(context)
+    assert {:ok, workspace} = Workspace.create("review", Ecto.UUID.generate())
+    inventory = %{"version" => 1, "checkouts" => [%{"path" => workspace.path, "sha" => workspace.sha}]}
+
+    assert {:error, :review_checkout_inventory_invalid} = ReviewCheckouts.sweep(%{})
+    assert {:error, :review_checkout_inventory_invalid} = ReviewCheckouts.sweep(%{inventory | "checkouts" => [%{"path" => workspace.path}]})
+    assert {:ok, record} = Store.read("review")
+
+    for fields <- [
+          %{"attempt" => %{"id" => nil}},
+          %{"attempt" => nil, "deliveries" => %{"member" => %{}}},
+          %{"attempt" => nil, "deliveries" => ["unknown"]}
+        ] do
+      assert :ok = Store.write("review", Map.merge(record, fields))
+      assert {:ok, %{"entries" => [%{"status" => "protected"}]}} = ReviewCheckouts.sweep(inventory)
+      assert File.dir?(workspace.path)
+    end
+
+    assert :ok = Store.write("review", record)
+    non_repo = Path.join(root, "not-a-repository")
+    File.mkdir_p!(non_repo)
+    File.write!(Path.join(non_repo, ".git"), "invalid")
+    ProjectContext.bind(%{context | root: non_repo})
+    assert {:error, :review_checkout_listing_unavailable} = ReviewCheckouts.sweep(inventory)
+  end
+
+  test "failed receipt removes only its review checkout", %{root: root, context: context} do
+    ProjectContext.bind(%{context | test_instance: %{"name" => "proof"}})
+    System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
+    System.put_env("SYMPHONY_TEST_RUN_PLAN", Path.join(root, "missing-plan.json"))
+    run_id = Ecto.UUID.generate()
+    assert {:error, :yolo_workspace_unavailable} = Workspace.create("review", run_id)
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+
+    assert {:error, :yolo_workspace_unavailable} = Workspace.create("incoming", Ecto.UUID.generate())
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 2
+  end
+
+  test "operator command verifies the project binding before dry run and apply", %{root: root} do
+    File.write!(Path.join(root, ".symphony/.env.local"), "LINEAR_YOLO_AGENT=Pai\n")
+    assert {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    context = %{context | yolo_agent_id: "pai"}
+    ProjectContext.bind(context)
+    assert {:ok, workspace} = Workspace.create("review", Ecto.UUID.generate())
+    inventory_path = Path.join(root, "inventory.json")
+    File.write!(inventory_path, Jason.encode!(%{"version" => 1, "checkouts" => [%{"path" => workspace.path, "sha" => workspace.sha}]}))
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+      query = payload[:query] || payload["query"]
+
+      nodes =
+        if query =~ "SymphonyHumanAssignees" do
+          [%{"id" => "11111111-1111-4111-8111-111111111111", "email" => "human@example.com", "app" => false}]
+        else
+          [%{"id" => "pai", "name" => "Pai", "app" => true, "active" => true, "isAssignable" => true}]
+        end
+
+      {:ok, %{status: 200, body: %{"data" => %{"users" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}}}}
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+    isolated = %{context | env: Map.put(context.env, "SYMPHONY_ROOT_DIR", root)}
+
+    ProjectContext.with_context(isolated, fn ->
+      for {extra, mode, before_count, after_count} <- [{[], "dry_run", 1, 1}, {["--apply"], "apply", 1, 0}] do
+        output = ExUnit.CaptureIO.capture_io(fn -> Mix.Tasks.Yolo.ReviewCheckouts.run(["--project", root, "--inventory", inventory_path] ++ extra) end)
+        summary = Jason.decode!(String.trim(output))
+        assert summary["mode"] == mode
+        assert summary["before"] == before_count
+        assert summary["after"] == after_count
+      end
+
+      assert_raise Mix.Error, ~r/Review checkout cleanup refused/, fn ->
+        Mix.Tasks.Yolo.ReviewCheckouts.run(["--project", root, "--inventory", Path.join(root, "missing.json")])
+      end
+    end)
+
+    refute File.exists?(workspace.path)
   end
 
   test "AppServer launches the real shell and profile helper in its bound group checkout", %{root: root, context: context} do

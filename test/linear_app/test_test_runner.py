@@ -151,7 +151,7 @@ class TestRunnerProtocol(unittest.TestCase):
     def git(self, root, *args):
         return subprocess.check_output(['git', '-C', str(root), *args], stderr=subprocess.DEVNULL).decode().strip()
 
-    def start(self, scenario='success', checkout=None, mode='development', resume=False, cleanup=False, selected='bootstrap', yolo=False, recovery=False, probe=False):
+    def start(self, scenario='success', checkout=None, mode='development', resume=False, cleanup=False, selected='bootstrap', yolo=False, recovery=False, probe=False, timeout=None):
         checkout = checkout or self.source
         spec = importlib.util.spec_from_file_location('test_instance', REPO / 'scripts/test-instance.py')
         helper = importlib.util.module_from_spec(spec); spec.loader.exec_module(helper)
@@ -163,10 +163,10 @@ class TestRunnerProtocol(unittest.TestCase):
                       main_instance=dict(pid=os.getpid(),started='fixture-main')))
         with socket.socket() as listener:
             listener.bind(('127.0.0.1',0)); port=listener.getsockname()[1]
-        timeout = '20' if scenario == 'probe_failed' else '2' if scenario in ('not_ready', 'missing_session') else '10'
+        effective_timeout = timeout if timeout is not None else (20 if scenario == 'probe_failed' else 2 if scenario in ('not_ready', 'missing_session') else 10)
         args = ['--checkout',str(checkout),'--test-instance','dev','--manifest',str(self.manifest),'--run-id','fixture',
                 '--expected-sha',source['sha'],'--expected-source',source['source_sha256'],'--port',str(port),
-                '--scenario',selected,'--result-dir',str(self.result_dir),'--timeout',timeout,'--source-mode',mode]
+                '--scenario',selected,'--result-dir',str(self.result_dir),'--timeout',str(effective_timeout),'--source-mode',mode]
         if yolo:args+=['--yolo']
         if probe:args += ["--scenario", "failure-probe"]
         if resume:args+=['--resume']
@@ -535,7 +535,7 @@ class TestRunnerProtocol(unittest.TestCase):
         slow_git.chmod(0o755)
         marker = self.root / 'fetch-pid'
         with mock.patch.dict(os.environ, FETCH_PID_FILE=str(marker)):
-            process = self.start('not_ready', mode='merged')
+            process = self.start('not_ready', mode='merged', timeout=5)
         result = self.receipt(process, originals=False)
         self.assertEqual(process.returncode, 1, result)
         self.assertEqual(result['error'], 'fetch_timeout')

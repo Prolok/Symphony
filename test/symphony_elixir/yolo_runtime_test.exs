@@ -2415,6 +2415,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     assert :ok = DurableState.write(Journal.path("review"), put_in(order, ["retirement", "attempt", "id"], "other-run"))
     assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = run_group("review", [review], [review], opts)
+
+    assert :ok = DurableState.write(Journal.path("review"), put_in(order, ["retirement", "deliveries"], nil))
+    assert {:error, :openclaw_journal_corrupt} = Yolo.Delivery.reconcile("review")
   end
 
   test "review retry keeps backoff for unchanged pending subset", %{issues: [first, second | _]} do

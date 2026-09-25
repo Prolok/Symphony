@@ -1376,7 +1376,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch_waiting_plan(state, %Issue{state: "Planung (AI)"} = issue, attempt, preferred_worker_host, run_opts) do
-    case WaitMarker.planning_action(issue) do
+    case WaitMarker.planning_action(issue, budget_background: true) do
       :wait ->
         release_issue_claim(state, issue.id)
 
@@ -1392,7 +1392,8 @@ defmodule SymphonyElixir.Orchestrator do
             identifier: issue.identifier,
             error: "wait marker lookup failed: #{inspect(reason)}",
             worker_host: preferred_worker_host,
-            delegate_id: issue.delegate_id
+            delegate_id: issue.delegate_id,
+            minimum_delay_ms: if(reason == :linear_budget_reserved, do: 120_000, else: 0)
           },
           reason
         )
@@ -1706,7 +1707,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_map(metadata) do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
-    delay_ms = max(retry_delay(next_attempt, metadata), RateLimit.remaining_ms())
+    delay_ms = Enum.max([retry_delay(next_attempt, metadata), RateLimit.remaining_ms(), Map.get(metadata, :minimum_delay_ms, 0)])
     old_timer = Map.get(previous_retry, :timer_ref)
     access_blocked = Map.get(metadata, :access_blocked, false)
     retry_token = if access_blocked, do: nil, else: make_ref()
@@ -4432,18 +4433,40 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_start_comment_scan({id, entry}, {scans, due}, context) do
     previous = scans[id]
-
     now = System.monotonic_time(:millisecond)
+    {deadline, previous_epoch} = comment_scan_schedule(due[id], now)
+    foreign_epoch = comment_foreign_epoch(context, id)
+    previous_epoch = if is_integer(previous_epoch), do: previous_epoch, else: 0
+    urgent = is_integer(foreign_epoch) and foreign_epoch != previous_epoch
 
-    if CommentCheckpoint.active?(entry.issue) and now >= Map.get(due, id, now) and not (is_pid(previous) and Process.alive?(previous)) do
-      {start_comment_scan(id, entry, scans, context), Map.put(due, id, now + CommentCheckpoint.background_interval_ms())}
+    if comment_scan_ready?(entry, previous, now, deadline, urgent) do
+      schedule = %{at: now + CommentCheckpoint.background_interval_ms(), foreign_epoch: foreign_epoch}
+      {start_comment_scan(id, entry, scans, context, urgent), Map.put(due, id, schedule)}
     else
       {scans, due}
     end
   end
 
-  defp start_comment_scan(id, entry, scans, context) do
-    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn -> run_comment_scan(entry, context) end) do
+  defp comment_scan_schedule(%{at: deadline, foreign_epoch: epoch}, _now), do: {deadline, epoch}
+  defp comment_scan_schedule(deadline, _now) when is_integer(deadline), do: {deadline, nil}
+  defp comment_scan_schedule(_schedule, now), do: {now, nil}
+
+  defp comment_foreign_epoch(context, id) do
+    case SymphonyElixir.ProjectPoller.comment_epoch(context, id) do
+      {:ok, {_, _, epoch}} -> epoch
+      _ -> nil
+    end
+  end
+
+  defp comment_scan_ready?(entry, previous, now, deadline, urgent) do
+    CommentCheckpoint.active?(entry.issue) and (now >= deadline or urgent) and
+      not (is_pid(previous) and Process.alive?(previous))
+  end
+
+  defp start_comment_scan(id, entry, scans, context, urgent) do
+    start = fn -> run_comment_scan(entry, context, urgent) end
+
+    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, start) do
       {:ok, pid} ->
         Map.put(scans, id, pid)
 
@@ -4453,10 +4476,10 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp run_comment_scan(entry, context) do
+  defp run_comment_scan(entry, context, urgent) do
     SymphonyElixir.ProjectContext.with_context(context, fn ->
       WriteContext.with_context(%{issue_id: entry.issue.id, issue_identifier: entry.issue.identifier, session_id: entry[:session_id]}, fn ->
-        CommentCheckpoint.background_scan(entry.issue, adoption: entry.pid)
+        CommentCheckpoint.background_scan(entry.issue, adoption: entry.pid, force_full: urgent)
       end)
     end)
   end

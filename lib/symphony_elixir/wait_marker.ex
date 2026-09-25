@@ -2,7 +2,7 @@ defmodule SymphonyElixir.WaitMarker do
   @moduledoc "Cross-workspace issue waits with fresh target state and visible failures."
   require Logger
   alias SymphonyElixir.{Config, ProjectContext, Projects, Tracker, Workpad}
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.{Budget, Client}
 
   @marker ~r/^\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?)?Wartet auf:\s*([A-Z][A-Z0-9]*-[0-9]+)\s*$/mu
   @merged ["Yolo Review", "Review", "Fertig"]
@@ -29,6 +29,7 @@ defmodule SymphonyElixir.WaitMarker do
     Enum.reduce_while(markers, {:ok, []}, fn identifier, {:ok, acc} ->
       case resolve.(identifier, opts) do
         {:ok, target} -> {:cont, {:ok, [target | acc]}}
+        {:error, :linear_budget_reserved} = deferred -> {:halt, deferred}
         {:error, reason} -> {:halt, report(issue, identifier, reason, opts)}
       end
     end)
@@ -131,9 +132,13 @@ defmodule SymphonyElixir.WaitMarker do
 
     graphql = Keyword.get(opts, :query, &Client.graphql/2)
 
-    ProjectContext.with_context(context, fn ->
-      lookup_in_context(context, identifier, team_key, number, query, graphql)
-    end)
+    if opts[:budget_background] == true and not Budget.allow_background_lookup?(context.settings.tracker.app, identifier) do
+      {:error, :linear_budget_reserved}
+    else
+      ProjectContext.with_context(context, fn ->
+        lookup_in_context(context, identifier, team_key, number, query, graphql)
+      end)
+    end
   end
 
   defp lookup_in_context(context, identifier, team_key, number, query, graphql) do

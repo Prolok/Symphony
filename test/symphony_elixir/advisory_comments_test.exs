@@ -326,7 +326,7 @@ defmodule SymphonyElixir.AdvisoryCommentsTest do
     assert_safe(payload)
   end
 
-  test "an unresolved thread invalidates an unchanged background signal after the bounded interval", ctx do
+  test "an unresolved thread stays on the signal path until the safety full scan", ctx do
     [control | _] = fixture(ctx.issue.id)
     root = List.last(fixture(ctx.issue.id))
     Process.put(:background_root, Map.put(root, "agentSession", nil))
@@ -344,6 +344,7 @@ defmodule SymphonyElixir.AdvisoryCommentsTest do
         background_key: "bound-config",
         background_interval: 604_800_000,
         advisory_interval: 30_000,
+        maximum_full_age: 300_000,
         background_now: fn -> Process.get(:background_clock) end,
         signal: fn -> {:ok, [control]} end,
         fetch_after_signal: fn _ -> fetch.() end,
@@ -358,6 +359,10 @@ defmodule SymphonyElixir.AdvisoryCommentsTest do
     assert Process.get(:background_full) == 1
     Process.put(:background_root, root)
     Process.put(:background_clock, 31_000)
+    assert {:ok, state} = CommentInbox.scan(binding, ctx.issue, fetch, opts)
+    assert Process.get(:background_full) == 1
+    assert state["advisory_threads"]["root"]["decision"] == "held"
+    Process.put(:background_clock, 300_000)
     assert {:ok, state} = CommentInbox.scan(binding, ctx.issue, fetch, opts)
     assert Process.get(:background_full) == 2
     assert state["advisory_threads"]["root"]["decision"] == "excluded"

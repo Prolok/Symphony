@@ -91,6 +91,79 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     end
   end
 
+  @spec confirmed_comment_id?(map(), String.t()) :: boolean()
+  def confirmed_comment_id?(binding, id) do
+    case intents(binding) do
+      {:ok, records} -> Enum.any?(records, &(&1["comment_id"] == id and confirmed?(binding, &1)))
+      _ -> false
+    end
+  end
+
+  @spec confirmed_relay_event?(map(), map()) :: boolean()
+  def confirmed_relay_event?(binding, %{"commentId" => id, "action" => action} = event)
+      when is_binary(id) and action in ["create", "update"] do
+    operation = if action == "create", do: "commentCreate", else: "commentUpdate"
+    version = get_in(event, ["payload", "updatedAt"]) || event["sourceTime"]
+
+    case intents(binding) do
+      {:ok, records} ->
+        Enum.any?(records, &confirmed_relay_record?(binding, &1, id, operation, action, version))
+
+      _ ->
+        false
+    end
+  end
+
+  def confirmed_relay_event?(_binding, _event), do: false
+
+  defp confirmed_relay_record?(binding, record, id, operation, action, version) do
+    if record["comment_id"] == id and record["operation"] == operation do
+      case DurableState.read(path(binding, record, "confirmed")) do
+        {:ok, %{"comment" => comment}} ->
+          matches?(record, comment, binding) and
+            (action == "create" or (not is_nil(version) and same_timestamp?(version, comment["updatedAt"])))
+
+        _ ->
+          false
+      end
+    else
+      false
+    end
+  end
+
+  defp same_timestamp?(left, right) when is_binary(left) and is_binary(right) do
+    left == right or
+      case {DateTime.from_iso8601(left), DateTime.from_iso8601(right)} do
+        {{:ok, a, _}, {:ok, b, _}} -> DateTime.compare(a, b) == :eq
+        _ -> false
+      end
+  end
+
+  defp same_timestamp?(_left, _right), do: false
+
+  @spec confirmed_reply_after?(map(), String.t(), integer()) :: boolean()
+  def confirmed_reply_after?(binding, parent_id, after_ms) do
+    case intents(binding) do
+      {:ok, records} ->
+        Enum.any?(records, fn record ->
+          get_in(record, ["input", "parentId"]) == parent_id and written_after?(record["written_at"], after_ms) and
+            confirmed?(binding, record)
+        end)
+
+      _ ->
+        false
+    end
+  end
+
+  defp written_after?(value, after_ms) when is_binary(value) and is_integer(after_ms) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _} -> DateTime.to_unix(datetime, :millisecond) >= after_ms
+      _ -> false
+    end
+  end
+
+  defp written_after?(_value, _after_ms), do: false
+
   @doc "Serialize a full observation with writes; reconcile outstanding receipts before classifying echoes."
   @spec observe(map(), (map() -> term()) | nil, (-> term())) :: term()
   def observe(binding, request, callback) do

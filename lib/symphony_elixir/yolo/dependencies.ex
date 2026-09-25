@@ -28,7 +28,10 @@ defmodule SymphonyElixir.Yolo.Dependencies do
 
   defp refresh_issue(issue, opts) do
     if YoloAgent.delegated?(issue) and issue.state in ["Backlog", "Todo", "Definiert", "BLOCKER", "Planung", "Yolo Review"] do
-      with {:ok, blockers} <- blockers(issue.id, opts), {:ok, markers} <- WaitMarker.targets(issue, opts), do: {:ok, %{issue | blocked_by: blockers ++ markers}}
+      with {:ok, blockers} <- blockers(issue.id, opts),
+           {:ok, markers} <- WaitMarker.targets(issue, Keyword.put_new(opts, :budget_background, true)) do
+        {:ok, %{issue | blocked_by: blockers ++ markers}}
+      end
     else
       {:ok, issue}
     end
@@ -74,7 +77,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   def actionable(issues, opts) do
     backlog = Enum.filter(issues, &YoloAgent.delegated?/1)
 
-    with {:ok, fresh} <- refresh(backlog, opts) do
+    with {:ok, fresh} <- refresh(backlog, Keyword.put(opts, :budget_background, false)) do
       cond do
         Enum.all?(fresh, &dispatchable?/1) -> :ok
         Enum.any?(fresh, &(&1.state == "Backlog" and not dispatchable?(&1))) -> {:error, :yolo_backlog_blocked}

@@ -574,6 +574,9 @@ defmodule SymphonyElixir.CommentJournalTest do
     created = Process.get(:remote_comments)["new"]
     assert created["body"] === body
     assert CommentJournal.classify(binding, created) == :own
+    assert CommentJournal.confirmed_comment_id?(binding, "new")
+    assert CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "create"})
+    refute CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "update", "sourceTime" => created["updatedAt"]})
     # A real Linear thread reply changes parent updatedAt without editing it.
     assert CommentJournal.classify(binding, Map.put(created, "updatedAt", "2026-09-12T13:43:46.536Z")) == :own
     assert length(journal_files(binding, "confirmed")) == 1
@@ -584,6 +587,9 @@ defmodule SymphonyElixir.CommentJournalTest do
     edited = Process.get(:remote_comments)["new"]
     assert edited["body"] === edited_body
     assert CommentJournal.classify(binding, edited) == :own
+    assert CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "update", "sourceTime" => edited["updatedAt"]})
+    refute CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "update", "sourceTime" => "2020-01-01T00:00:00Z"})
+    refute CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "remove", "sourceTime" => edited["updatedAt"]})
     assert CommentJournal.classify(binding, created) == :pending
     assert length(journal_files(binding, "confirmed")) == 2
     [edit_intent] = Enum.filter(journal_records(binding), &(&1["operation"] == "commentUpdate"))
@@ -594,6 +600,62 @@ defmodule SymphonyElixir.CommentJournalTest do
     [latest] = Enum.filter(journal_files(binding, "confirmed"), fn path -> get_in(Jason.decode!(File.read!(path)), ["comment", "id"]) == "later" end)
     File.write!(latest, "broken")
     assert {:error, :comment_journal_corrupt} = CommentJournal.classify(binding, Process.get(:remote_comments)["later"])
+  end
+
+  test "confirmed reply receipt is recognized only after its cache observation", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+    before = System.system_time(:millisecond) - 1_000
+    payload = put_in(variable_create("reply", "Antwort"), ["variables", "input", "parentId"], "parent")
+    assert {:ok, _} = CommentJournal.execute(binding, payload, &graphql_request/1)
+    assert CommentJournal.confirmed_reply_after?(binding, "parent", before)
+    refute CommentJournal.confirmed_reply_after?(binding, "other", before)
+    refute CommentJournal.confirmed_reply_after?(binding, "parent", System.system_time(:millisecond) + 1_000)
+  end
+
+  test "relay echoes and reply timestamps fail closed on missing or malformed evidence", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+    reply = put_in(variable_create("reply", "Antwort"), ["variables", "input", "parentId"], "parent")
+    assert {:ok, _} = CommentJournal.execute(binding, reply, &graphql_request/1)
+    assert CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "reply", "action" => "create"})
+
+    update = %{"query" => "mutation { commentUpdate(id: \"reply\", input: {body: \"Bearbeitet\"}) { success } }"}
+    assert {:ok, _} = CommentJournal.execute(binding, update, &graphql_request/1)
+    event = %{"commentId" => "reply", "action" => "update"}
+    refute CommentJournal.confirmed_relay_event?(binding, event)
+    refute CommentJournal.confirmed_relay_event?(binding, Map.put(event, "sourceTime", "invalid"))
+    refute CommentJournal.confirmed_relay_event?(binding, Map.put(event, "sourceTime", 42))
+
+    [confirmed_path] =
+      Enum.filter(journal_files(binding, "confirmed"), fn path ->
+        get_in(Jason.decode!(File.read!(path)), ["comment", "body"]) == "Bearbeitet"
+      end)
+
+    confirmed = Jason.decode!(File.read!(confirmed_path))
+    :ok = DurableState.write(confirmed_path, put_in(confirmed, ["comment", "updatedAt"], "2026-09-12T13:43:46.536Z"))
+    assert CommentJournal.confirmed_relay_event?(binding, Map.put(event, "sourceTime", "2026-09-12T15:43:46.536+02:00"))
+    File.rm!(confirmed_path)
+    refute CommentJournal.confirmed_relay_event?(binding, Map.put(event, "sourceTime", "2026-09-12T13:43:46.536Z"))
+
+    [reply_path] =
+      Enum.filter(journal_files(binding, "intent"), fn path ->
+        get_in(Jason.decode!(File.read!(path)), ["input", "parentId"]) == "parent"
+      end)
+
+    record = Jason.decode!(File.read!(reply_path))
+    :ok = DurableState.write(reply_path, Map.put(record, "written_at", "invalid"))
+    refute CommentJournal.confirmed_reply_after?(binding, "parent", 0)
+    :ok = DurableState.write(reply_path, Map.put(record, "written_at", nil))
+    refute CommentJournal.confirmed_reply_after?(binding, "parent", 0)
+  end
+
+  test "journal lookup errors never classify a relay echo or confirmed reply", %{binding: binding} do
+    File.mkdir_p!(binding["state_root"])
+    blocked_root = Path.join(binding["state_root"], "not-a-directory")
+    File.write!(blocked_root, "file")
+    unavailable = %{binding | "state_root" => blocked_root}
+    refute CommentJournal.confirmed_comment_id?(unavailable, "reply")
+    refute CommentJournal.confirmed_relay_event?(unavailable, %{"commentId" => "reply", "action" => "update", "sourceTime" => "2026-09-12T13:43:46Z"})
+    refute CommentJournal.confirmed_reply_after?(unavailable, "parent", 0)
   end
 
   test "legacy newline conflicts block writes until exact operator repair and cannot cause duplicate creation", %{binding: binding} do

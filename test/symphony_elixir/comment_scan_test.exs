@@ -106,6 +106,20 @@ defmodule SymphonyElixir.CommentScanTest do
     assert {:error, :comment_scan_signal_unavailable} = Client.scan_issue_comments("issue")
   end
 
+  test "a foreign signal observation survives a partial response and failed pagination" do
+    foreign = source("foreign", "beobachtete Antwort")
+    own = put_in(source("own", "eigene Ausgabe"), ["user", "id"], Config.settings!().tracker.app["user_id"])
+    partial = add_errors(data(%{"issue" => %{"comments" => %{"nodes" => [own]}, "foreignComments" => %{"nodes" => [foreign]}}}))
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+      if payload["query"] =~ "SymphonyCommentScanSignal", do: partial, else: {:error, :page_offline}
+    end)
+
+    assert {:error, {:comment_scan_incomplete, reason, observed}} = Client.comment_scan_signal("issue")
+    assert reason == :comment_scan_signal_unavailable
+    assert Enum.map(observed, & &1.source) == [own, foreign]
+  end
+
   test "a pre-scan version survives pagination failure and a later changed version", _ctx do
     first = source("first", "nur im Vorsignal beobachtet")
     changed = %{first | "body" => "in Paginierung beobachtet"}

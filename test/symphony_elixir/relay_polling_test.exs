@@ -161,6 +161,8 @@ defmodule SymphonyElixir.RelayPollingTest do
       assert {:error, _} = Relay.background_issues(["issue"])
       assert {:error, _} = CommentCheckpoint.background_scan(issue)
       refute_received {:linear, _}
+      # Explicit checkpoints keep working through a relay outage and record no relay epoch.
+      assert {:ok, _} = CommentCheckpoint.scan(issue, fetch: fn -> {:ok, []} end, confirm_absence: fn _ -> :deleted end)
       assert ProjectPoller.polling().relay["synthetic-workspace"].status == :degraded
       snapshot = %{running: [], retrying: [], codex_totals: %{}, rate_limits: nil, polling: ProjectPoller.polling()}
 

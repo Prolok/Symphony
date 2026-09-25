@@ -100,6 +100,14 @@ defmodule SymphonyElixir.CommentBackgroundTest do
     assert_received :full
   end
 
+  test "failed signal forces a full scan and never stores a false signal proof", ctx do
+    fetch = fn -> {:ok, [source()]} end
+    assert {:ok, state} = scan(ctx, 0, fetch, signal: fn -> {:error, :offline} end)
+    assert state["background"]["signal"] == nil
+    assert state["background"]["foreign"] == nil
+    assert {:ok, _} = scan(ctx, 30_000, fetch, fetch_after_signal: fn _ -> fetch.() end)
+  end
+
   test "checkpoint refreshes a persisted cache without an extra background full scan", ctx do
     parent = self()
 

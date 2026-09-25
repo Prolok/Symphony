@@ -34,6 +34,17 @@ defmodule SymphonyElixir.RelayCacheTest do
     assert resumed.record["foreign_comment_epochs"]["issue"] == 1
   end
 
+  test "legacy cache without foreign epochs resumes, malformed epochs fail closed", c do
+    {:ok, session} = open(c)
+    :ok = DurableState.write(session.path, Map.put(session.record, "foreign_comment_epochs", nil))
+    assert {:ok, _} = open(c)
+
+    for invalid <- [Map.put(session.record, "issues", []), Map.put(session.record, "foreign_comment_epochs", []), Map.put(session.record, "foreign_comment_epochs", %{"issue" => -1})] do
+      :ok = DurableState.write(session.path, invalid)
+      assert {:error, :relay_cache_corrupt} = open(c)
+    end
+  end
+
   test "legacy binding migration keeps the durable receipt and cursor until authenticated registration", c do
     {:ok, s} = open(c)
     s = Session.tick(s)

@@ -14,6 +14,9 @@ defmodule SymphonyElixir.LinearBudgetGuardTest do
     :ok = Budget.record(binding, :comments, %{headers | "x-ratelimit-requests-remaining" => "999"}, now: now + 1)
     assert Budget.low?(binding)
 
+    :ok = Budget.record(binding, :read, %{headers | "x-ratelimit-requests-remaining" => "unknown"}, now: now + 2)
+    assert Budget.low?(binding)
+
     log =
       capture_log(fn ->
         :ok = Budget.record(binding, :write, headers, now: now + 300_000)

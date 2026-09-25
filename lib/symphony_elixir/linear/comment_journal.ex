@@ -117,16 +117,17 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   def confirmed_relay_event?(_binding, _event), do: false
 
   defp confirmed_relay_record?(binding, record, id, operation, action, version) do
-    record["comment_id"] == id and record["operation"] == operation and confirmed?(binding, record) and
-      (action == "create" or confirmed_event_version?(binding, record, version))
-  end
+    if record["comment_id"] == id and record["operation"] == operation do
+      case DurableState.read(path(binding, record, "confirmed")) do
+        {:ok, %{"comment" => comment}} ->
+          matches?(record, comment, binding) and
+            (action == "create" or (not is_nil(version) and same_timestamp?(version, comment["updatedAt"])))
 
-  defp confirmed_event_version?(_binding, _record, nil), do: false
-
-  defp confirmed_event_version?(binding, record, version) do
-    case DurableState.read(path(binding, record, "confirmed")) do
-      {:ok, %{"comment" => %{"updatedAt" => confirmed}}} -> same_timestamp?(version, confirmed)
-      _ -> false
+        _ ->
+          false
+      end
+    else
+      false
     end
   end
 

@@ -99,8 +99,6 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     end
   end
 
-  defp refresh_background(observed, _previous, _result, _binding, _opts), do: {:ok, observed}
-
   defp checkpoint_signal(comments, binding) do
     latest = Enum.max_by(comments, &CommentVersion.raw(&1)["updatedAt"], fn -> nil end)
     foreign = comments |> Enum.reject(&(get_in(CommentVersion.raw(&1), ["user", "id"]) == binding["user_id"]))

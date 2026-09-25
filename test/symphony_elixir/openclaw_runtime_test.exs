@@ -279,7 +279,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
       ProjectContext.with_context(loaded, fn ->
         {:ok, record} = Store.read("incoming")
-        Store.write("incoming", record |> Map.put("processed", nil) |> Map.drop(~w(deliveries decisions)))
+        Store.write("incoming", record |> Map.put("processed", nil) |> Map.put("attempt", nil) |> Map.drop(~w(deliveries decisions decision_sources completed_sources delivery_ends)))
 
         session = fn _, _, _, _ ->
           Enum.each(issues, fn issue -> assert :ok = Completion.invoke(%{"issue_id" => issue.id, "result" => "internal"}, opts) end)

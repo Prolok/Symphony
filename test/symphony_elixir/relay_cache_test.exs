@@ -45,6 +45,23 @@ defmodule SymphonyElixir.RelayCacheTest do
     end
   end
 
+  test "invalid persisted event positions fail closed", c do
+    {:ok, session} = open(c)
+
+    for positions <- [%{"issue" => %{"generation" => nil, "position" => 1, "event_id" => "event"}}, %{"issue" => 42}, []] do
+      :ok = DurableState.write(session.path, Map.put(session.record, "event_positions", positions))
+      assert {:error, :relay_cache_corrupt} = open(c)
+    end
+  end
+
+  test "authenticated resync events without an issue id do not create issue positions", c do
+    {:ok, session} = open(c)
+    session = Session.tick(session)
+    Server.publish(c.server, "workspace", %{"type" => "RelayGap", "action" => "expired_input", "signal" => "resync_required", "issueId" => nil, "broadcast" => true})
+
+    assert Session.tick(session).status == :ready
+  end
+
   test "legacy binding migration keeps the durable receipt and cursor until authenticated registration", c do
     {:ok, s} = open(c)
     s = Session.tick(s)
@@ -202,8 +219,10 @@ defmodule SymphonyElixir.RelayCacheTest do
     after_ack = Session.tick(%{s | request: request})
     assert_received :durable_before_ack
     assert after_ack.record["pending"] != nil
+    assert get_in(after_ack.record, ["event_positions", "issue", "position"]) == 1
     assert Server.consumer(c.server, "workspace", "one").cursor == 1
     {:ok, restarted} = open(c)
+    assert restarted.record["event_positions"] == after_ack.record["event_positions"]
     restarted = Session.tick(restarted)
     assert restarted.status == :ready
     assert restarted.record["pending"] == nil
@@ -232,6 +251,26 @@ defmodule SymphonyElixir.RelayCacheTest do
     assert s.record["cursor"] == 5
     refute_received {:ids, _}
     assert length(Server.consumer(c.server, "workspace", "one").acks) == 2
+  end
+
+  test "two issue events in one page retain their last durable event position after ack and restart", c do
+    {:ok, initial} = open(c)
+    initial = Session.tick(initial)
+    Server.publish(c.server, "workspace")
+    Server.publish(c.server, "workspace")
+    current = Session.tick(initial)
+    assert current.status == :ready
+
+    assert get_in(current.record, ["event_positions", "issue"]) == %{
+             "generation" => current.record["generation"],
+             "position" => 2,
+             "event_id" => "event-2"
+           }
+
+    {:ok, restarted} = open(c)
+    assert get_in(restarted.record, ["event_positions", "issue"]) == get_in(current.record, ["event_positions", "issue"])
+    :ok = DurableState.write(current.path, put_in(current.record, ["event_positions", "issue", "position"], "invalid"))
+    assert {:error, :relay_cache_corrupt} = open(c)
   end
 
   test "two consumers and two workspaces have independent receipts and caches", c do
@@ -431,10 +470,17 @@ defmodule SymphonyElixir.RelayCacheTest do
   test "explicit resync signals are accepted durably and reconfigure or watch failures remain blocked", c do
     {:ok, s} = open(c)
     s = Session.tick(s)
+    previous = get_in(s.record, ["event_positions", "issue"])
     Server.publish(c.server, "workspace", %{"type" => "RelayGap", "action" => "expired_input", "signal" => "resync_required"})
     resynced = Session.tick(s)
     assert resynced.status == :ready
     assert resynced.record["generation"] != s.record["generation"]
+    marker = get_in(resynced.record, ["event_positions", "issue"])
+    assert marker != previous
+    assert marker["generation"] == resynced.record["generation"]
+    assert String.starts_with?(marker["event_id"], "snapshot:")
+    assert {:ok, reopened} = open(c)
+    assert get_in(reopened.record, ["event_positions", "issue"]) == marker
     assert Session.reconfigure(resynced, "binding") == resynced
     changed = Session.reconfigure(resynced, "new-binding")
     assert changed.status == :resyncing

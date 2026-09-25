@@ -320,6 +320,10 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   authentifiziert an LinearBridge; dessen optionaler `gateway_port` wählt nur
   das lokale Bridgeziel und bleibt auftragsgebunden (Standard `18789`);
   [Einrichtung und Vertrag](docs/linearbridge-lifecycle.md).
+  Fachlich offene, bereits zugestellte Mitglieder werden nach belegter Neudelegation,
+  menschlicher Prioritätserhöhung oder relevanter Auftrags-/Blockadeänderung erneut
+  geprüft. Ungeklärte Ausführungen bleiben reserviert; eine fehlgeschlagene reine
+  Benachrichtigung wird über ihr Journal ohne neuen Review erneut versucht.
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
   `config.toml` oder der geprüften Repository-Skills blockieren den

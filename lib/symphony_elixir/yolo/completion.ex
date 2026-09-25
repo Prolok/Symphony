@@ -114,6 +114,10 @@ defmodule SymphonyElixir.Yolo.Completion do
       attempt = Map.put(attempt, "escalated_operations", Map.put(attempt["escalated_operations"] || %{}, id, escalated))
       held = Enum.uniq((get_in(record, ["escalated_operations", id]) || []) ++ escalated)
       record = Map.put(record, "escalated_operations", Map.put(record["escalated_operations"] || %{}, id, held))
+      source = get_in(record, ["observations", id, "source"])
+      record = if is_binary(source), do: Map.update(record, "completed_sources", %{id => source}, &Map.put(&1, id, source)), else: record
+      version = get_in(record, ["observations", id, "member_semantic"])
+      record = if is_binary(version), do: Map.update(record, "completed_versions", %{id => version}, &Map.put(&1, id, version)), else: record
       Store.write(group, Map.put(record, "attempt", attempt))
     else
       {:error, _} = error -> error

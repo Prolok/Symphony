@@ -1376,7 +1376,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch_waiting_plan(state, %Issue{state: "Planung (AI)"} = issue, attempt, preferred_worker_host, run_opts) do
-    case WaitMarker.planning_action(issue) do
+    case WaitMarker.planning_action(issue, budget_background: true) do
       :wait ->
         release_issue_claim(state, issue.id)
 

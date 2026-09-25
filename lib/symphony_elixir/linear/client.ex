@@ -660,7 +660,7 @@ defmodule SymphonyElixir.Linear.Client do
          true <- Enum.all?(comments, &(&1.issue_id == issue_id)) do
       {:ok, Enum.uniq_by(comments, &CommentVersion.raw/1)}
     else
-      _ -> incomplete_comments(:comment_scan_signal_unavailable, observed_comments(body, issue_id))
+      _ -> incomplete_comments(:comment_scan_signal_unavailable, observed_signal_comments(body, issue_id))
     end
   end
 
@@ -672,6 +672,14 @@ defmodule SymphonyElixir.Linear.Client do
       foreign ->
         foreign
     end
+  end
+
+  defp observed_signal_comments(body, issue_id) do
+    issue = get_in(body, ["data", "issue"])
+
+    ["comments", "foreignComments"]
+    |> Enum.flat_map(fn field -> observed_comments(%{"data" => %{"issue" => %{"comments" => issue && issue[field]}}}, issue_id) end)
+    |> Enum.uniq_by(&CommentVersion.raw/1)
   end
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}

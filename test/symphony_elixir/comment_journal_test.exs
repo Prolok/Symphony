@@ -575,6 +575,8 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert created["body"] === body
     assert CommentJournal.classify(binding, created) == :own
     assert CommentJournal.confirmed_comment_id?(binding, "new")
+    assert CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "create"})
+    refute CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "update", "sourceTime" => created["updatedAt"]})
     # A real Linear thread reply changes parent updatedAt without editing it.
     assert CommentJournal.classify(binding, Map.put(created, "updatedAt", "2026-09-12T13:43:46.536Z")) == :own
     assert length(journal_files(binding, "confirmed")) == 1
@@ -585,6 +587,9 @@ defmodule SymphonyElixir.CommentJournalTest do
     edited = Process.get(:remote_comments)["new"]
     assert edited["body"] === edited_body
     assert CommentJournal.classify(binding, edited) == :own
+    assert CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "update", "sourceTime" => edited["updatedAt"]})
+    refute CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "update", "sourceTime" => "2020-01-01T00:00:00Z"})
+    refute CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "new", "action" => "remove", "sourceTime" => edited["updatedAt"]})
     assert CommentJournal.classify(binding, created) == :pending
     assert length(journal_files(binding, "confirmed")) == 2
     [edit_intent] = Enum.filter(journal_records(binding), &(&1["operation"] == "commentUpdate"))

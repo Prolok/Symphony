@@ -20,11 +20,20 @@ defmodule SymphonyElixir.CommentPollingTest do
 
     ProjectContext.with_context(source, fn ->
       assert CommentCheckpoint.background_interval_ms() == 180_000
-      issue = %{id: "waiting", description: "Wartet auf: PRI-1"}
-      query = fn _, _ -> flunk("deferred wait lookup reached Linear") end
+      issue = %{id: "waiting", identifier: "PRO-1", description: "Wartet auf: PRI-1"}
+      query = fn _, _ -> {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}}}} end
 
-      assert {:error, :linear_budget_reserved} =
-               WaitMarker.targets(issue, contexts: [target], wait_comments: fn _ -> {:ok, []} end, query: query)
+      opts = [
+        contexts: [target],
+        wait_comments: fn _ -> {:ok, []} end,
+        query: query,
+        report_error: fn _, _, _ -> :ok end,
+        budget_background: true
+      ]
+
+      assert {:error, {:wait_marker_unresolved, "PRI-1", :wait_target_unresolved}} = WaitMarker.targets(issue, opts)
+      assert {:error, :linear_budget_reserved} = WaitMarker.targets(issue, opts)
+      assert {:error, {:wait_marker_unresolved, "PRI-1", :wait_target_unresolved}} = WaitMarker.targets(issue, Keyword.put(opts, :budget_background, false))
     end)
 
     write = fn -> {:ok, %{status: 200, headers: %{}, body: %{}}} end

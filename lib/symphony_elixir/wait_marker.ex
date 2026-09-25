@@ -132,7 +132,7 @@ defmodule SymphonyElixir.WaitMarker do
 
     graphql = Keyword.get(opts, :query, &Client.graphql/2)
 
-    if Budget.low?(context.settings.tracker.app) do
+    if opts[:budget_background] == true and not Budget.allow_background_lookup?(context.settings.tracker.app, identifier) do
       {:error, :linear_budget_reserved}
     else
       ProjectContext.with_context(context, fn ->

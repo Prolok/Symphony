@@ -1390,7 +1390,9 @@ eines anderen Autors. Ein unverändertes Signal benötigt keinen Seitenabruf;
 bestätigte eigene Kommentarversionen aus dem Journal bleiben ohne Vollscan.
 Fremde oder ungeklärte Relay-Kommentarereignisse lösen sofort einen Vollscan aus,
 auch bei unverändertem Signal. Offene `held`-Stränge erzwingen für sich allein
-keinen Vollscan. Ohne Relay erfolgt spätestens nach fünf Minuten ein
+keinen Vollscan. Eigene Relay-Echos verlangen einen Beleg für die konkrete
+Schreibaktion und bei Updates die bestätigte Kommentarversion; unklare Echos
+gelten als fremde Ereignisse. Ohne Relay erfolgt spätestens nach fünf Minuten ein
 Sicherheitsvollscan, mit Relay spätestens nach 30 Minuten. Der reguläre
 Hintergrundtakt beträgt mit Relay mindestens 60 Sekunden, unter 20 %
 App-Restbudget mindestens 180 Sekunden; fremde Ereignisse überholen diese Frist.
@@ -1582,7 +1584,9 @@ Der Dienst zählt Requests je App-Bindung nach Anfrageart und protokolliert bei
 laufendem Verkehr alle fünf Minuten `Linear budget summary` mit Restbudget und
 Zählern. Unter 20 % von `x-ratelimit-requests-limit` werden nur Hintergrundscans
 und wiederholte workspaceübergreifende Wartemarker-Lookups verlängert;
-Kandidatenabfragen, Checkpoints, Handoffs und Schreibvorgänge bleiben vorrangig.
+deren erste Prüfung bleibt möglich und Hintergrund-Wiederholungen erfolgen
+frühestens nach zwei Minuten. Frische Aktionsprüfungen sowie Kandidatenabfragen,
+Checkpoints, Handoffs und Schreibvorgänge bleiben vorrangig.
 
 Die historische Vorher-Referenz aus PRO-715/PRO-716 verglich 3.600 simulierte Sekunden
 mit 5-Sekunden-Arbeitstakt, einer Seite je Abfrage und unveränderten Kommentaren,

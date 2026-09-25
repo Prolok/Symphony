@@ -289,11 +289,9 @@ defmodule SymphonyElixir.Relay.Session do
     continue_saved(session, r, &acknowledge/1)
   end
 
-  defp own_comment_event?(session, %{"commentId" => id}) do
-    Enum.any?(session.contexts, &CommentJournal.confirmed_comment_id?(&1.settings.tracker.app, id))
+  defp own_comment_event?(session, event) do
+    Enum.any?(session.contexts, &CommentJournal.confirmed_relay_event?(&1.settings.tracker.app, event))
   end
-
-  defp own_comment_event?(_session, _event), do: false
 
   defp dependent_issue_ids(issues, ids) do
     changed = MapSet.new(ids)

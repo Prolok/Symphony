@@ -99,6 +99,47 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     end
   end
 
+  @spec confirmed_relay_event?(map(), map()) :: boolean()
+  def confirmed_relay_event?(binding, %{"commentId" => id, "action" => action} = event)
+      when is_binary(id) and action in ["create", "update"] do
+    operation = if action == "create", do: "commentCreate", else: "commentUpdate"
+    version = get_in(event, ["payload", "updatedAt"]) || event["sourceTime"]
+
+    case intents(binding) do
+      {:ok, records} ->
+        Enum.any?(records, &confirmed_relay_record?(binding, &1, id, operation, action, version))
+
+      _ ->
+        false
+    end
+  end
+
+  def confirmed_relay_event?(_binding, _event), do: false
+
+  defp confirmed_relay_record?(binding, record, id, operation, action, version) do
+    record["comment_id"] == id and record["operation"] == operation and confirmed?(binding, record) and
+      (action == "create" or confirmed_event_version?(binding, record, version))
+  end
+
+  defp confirmed_event_version?(_binding, _record, nil), do: false
+
+  defp confirmed_event_version?(binding, record, version) do
+    case DurableState.read(path(binding, record, "confirmed")) do
+      {:ok, %{"comment" => %{"updatedAt" => confirmed}}} -> same_timestamp?(version, confirmed)
+      _ -> false
+    end
+  end
+
+  defp same_timestamp?(left, right) when is_binary(left) and is_binary(right) do
+    left == right or
+      case {DateTime.from_iso8601(left), DateTime.from_iso8601(right)} do
+        {{:ok, a, _}, {:ok, b, _}} -> DateTime.compare(a, b) == :eq
+        _ -> false
+      end
+  end
+
+  defp same_timestamp?(_left, _right), do: false
+
   @spec confirmed_reply_after?(map(), String.t(), integer()) :: boolean()
   def confirmed_reply_after?(binding, parent_id, after_ms) do
     case intents(binding) do

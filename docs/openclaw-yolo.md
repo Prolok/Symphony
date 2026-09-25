@@ -34,10 +34,12 @@ LinearBridge-Lifecycle-RPC kann über
 adressieren; dieser bleibt dauerhaft an seinen Originalauftrag gebunden.
 CLI und Node müssen auf dem PATH des Dienstes liegen; der
 SDK wird über die öffentliche Exportauflösung derselben CLI-Installation geladen.
-Gateway und CLI müssen zum unterstützten Release **2026.9.4** gehören. Die
-CLI-Version wird vor jedem neuen Auftrag geprüft; Gatewayversion und vorhandener
-SDK-Vertrag sind Teil der Betreiberabnahme. Andere Versionen benötigen eine
-erneute Schnittstellenprüfung.
+Die CLI muss mindestens Version **2026.9.4** haben. Vor jedem neuen Auftrag
+vergleicht Symphony die von `openclaw --version` gemeldete Version numerisch;
+ältere, ungültige und Vorabversionen unterhalb dieser Grenze werden vor
+`agents.list` abgewiesen. Die Gatewayversion und der vorhandene SDK-Vertrag
+bleiben Teil der separaten Betreiberabnahme für den tatsächlich installierten
+Stand; der CLI-Vergleich allein belegt deren Kompatibilität nicht.
 
 Der SDK-Client nutzt den vorhandenen normalen lokalen Token-/Passwortzugang,
 `sharedStateMode=read-only` und ausschließlich `operator.write`. Die öffentlichen
@@ -68,7 +70,7 @@ Das ist ein Quellnachweis, kein Beleg für eine lokale Installation.
 
 | Operation | Vertrag und verwendeter Beleg |
 | --- | --- |
-| Vorprüfung | `--version`, anschließend `agents.list`; exakt konfigurierte ID erforderlich |
+| Vorprüfung | `--version` mindestens 2026.9.4, anschließend `agents.list`; exakt konfigurierte ID erforderlich |
 | Start | Externes `agent`: `agentId`, `sessionKey`, `idempotencyKey`, vollständige `message`, `timeout`, `deliver=false`; kein `cwd` oder interner/plugin-eigener Principal |
 | Annahme | Antwort `runId` gleich Auftrags-ID und `status=accepted`; noch kein Arbeitsabschluss |
 | Nichtstart | Typisierte erste Gateway-Fehlerantwort mit belegtem Vorab-Grund; eigener Ablehnungsbeleg, kein erfundenes `endedAt` |

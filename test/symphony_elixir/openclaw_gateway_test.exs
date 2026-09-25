@@ -3,6 +3,35 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
 
+  test "preflight accepts the minimum and newer CLI versions before querying the standard gateway" do
+    parent = self()
+
+    for version <- ["2026.9.4", "OpenClaw 2026.9.4\n", "2026.9.5", "OpenClaw 2026.9.6\n", "2026.10.0", "2027.1.0", "2026.9.5-rc.1"] do
+      transport = fn
+        ["--version"] ->
+          {:ok, version}
+
+        ["gateway", "call", "agents.list", "--params", "{}", "--json", "--timeout", "10000", "--port", "18789"] ->
+          send(parent, {:agents_list, version})
+          {:ok, ~s({"agents":[{"id":"po"}]})}
+      end
+
+      assert :ok = Gateway.preflight("po", transport: transport)
+      assert_received {:agents_list, ^version}
+    end
+  end
+
+  test "preflight rejects older and invalid versions without querying the gateway" do
+    for version <- ["2026.9.3", "2025.99.99", "2026.9.4-rc.1", "2026.9.4invalid", "unknown", "", nil] do
+      transport = fn
+        ["--version"] -> {:ok, version}
+        _ -> flunk("unsupported CLI version must not query the gateway")
+      end
+
+      assert {:error, :openclaw_version_unsupported} = Gateway.preflight("po", transport: transport)
+    end
+  end
+
   test "lifecycle uses the selected local port" do
     parent = self()
 

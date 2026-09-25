@@ -1,9 +1,10 @@
 defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
-  @moduledoc "Gateway RPC contract verified against OpenClaw 2026.9.4; no local fallback."
+  @moduledoc "Gateway RPC contract verified against OpenClaw 2026.9.4; CLI requires at least this version."
   @behaviour SymphonyElixir.Yolo.OpenClaw.Adapter
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.{LinearBridge, Transport}
+  @minimum_openclaw_version "2026.9.4"
   @owner_unavailable [:openclaw_owner_connection_lost, :openclaw_owner_credentials_unavailable]
 
   @impl true
@@ -20,9 +21,26 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
     end
   end
 
-  defp version_supported(version) do
-    if Regex.match?(~r/^(?:OpenClaw )?2026\.9\.4(?:\s|$)/, version), do: :ok, else: {:error, :openclaw_version_unsupported}
+  defp version_supported(output) when is_binary(output) do
+    version =
+      output
+      |> String.trim()
+      |> String.replace_prefix("OpenClaw ", "")
+      |> String.split()
+      |> List.first()
+
+    case Version.parse(version || "") do
+      {:ok, parsed} ->
+        if Version.compare(parsed, @minimum_openclaw_version) in [:eq, :gt],
+          do: :ok,
+          else: {:error, :openclaw_version_unsupported}
+
+      :error ->
+        {:error, :openclaw_version_unsupported}
+    end
   end
+
+  defp version_supported(_), do: {:error, :openclaw_version_unsupported}
 
   @impl true
   def submit(order, prompt, opts) do

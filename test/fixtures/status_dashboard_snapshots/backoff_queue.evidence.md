@@ -3,7 +3,7 @@
 │ Agents: 1/10
 │ Throughput: 15 tps
 │ Runtime: 45m 0s
-│ Tokens: in 18,000 | out 2,200 | total 20,200
+│ Tokens: in 18,000 (0% cached) | out 2,200 | total 20,200
 │ Project: https://linear.app/project/project/issues
 │ Dashboard: http://127.0.0.1:4000/
 │ Next refresh: n/a

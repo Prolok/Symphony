@@ -207,7 +207,7 @@ For Symphony, `model_context_window` should be displayed or logged separately fr
 
 Symphony tracks token totals in the active `Orchestrator` running entry and
 publishes them through the terminal dashboard and observability presenter. The
-state stores the latest reported input, output and total counters as
+state stores the latest reported input, cached input, output and total counters as
 `codex_last_reported_*` values, then applies only the positive difference from
 the next accepted report. That makes cumulative snapshots safe to replay and
 prevents a smaller later report from reducing or double-counting totals.
@@ -215,10 +215,20 @@ prevents a smaller later report from reducing or double-counting totals.
 For each active run, keep:
 
 - `codex_last_reported_input_tokens`
+- `codex_last_reported_cached_input_tokens`
 - `codex_last_reported_output_tokens`
 - `codex_last_reported_total_tokens`
 - `accumulated_total`: the total you expose in UI/API
 - `session_id`: combined Codex thread/turn identifier for display and log correlation
+
+Cached input tokens use the same accepted cumulative and completion snapshots as
+the other counters. Missing cache values add zero; replayed or older reports do
+not subtract or double-count cached tokens. A new thread resets the reported
+cache checkpoint while preserving already accumulated cache usage. The terminal
+dashboard displays `cached_input_tokens / input_tokens` as a rounded whole
+percentage beside `in`. Zero input displays `0% cached`; inconsistent cache
+totals are clamped to 0–100% for display. The meanings of `in`, `out` and
+`total` are unchanged.
 
 ### Preferred source order
 

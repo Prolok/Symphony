@@ -2,7 +2,7 @@
 \e[1m│ Agents: \e[0m\e[32m2\e[0m\e[90m/\e[0m\e[90m10\e[0m
 \e[1m│ Throughput: \e[0m\e[36m1,842 tps\e[0m
 \e[1m│ Runtime: \e[0m\e[35m72m 1s\e[0m
-\e[1m│ Tokens: \e[0m\e[33min 250,000\e[0m\e[90m | \e[0m\e[33mout 18,500\e[0m\e[90m | \e[0m\e[33mtotal 268,500\e[0m
+\e[1m│ Tokens: \e[0m\e[33min 250,000 (92% cached)\e[0m\e[90m | \e[0m\e[33mout 18,500\e[0m\e[90m | \e[0m\e[33mtotal 268,500\e[0m
 \e[1m│ Project: \e[0m\e[36mhttps://linear.app/project/project/issues\e[0m
 \e[1m│ Dashboard: \e[0m\e[36mhttp://127.0.0.1:4000/\e[0m
 \e[1m│ Next refresh: \e[0m\e[90mn/a\e[0m

@@ -4,7 +4,8 @@ defmodule SymphonyElixir.CommentCheckpointTest do
   alias Absinthe.Phase.Parse
   alias SymphonyElixir.Codex.{CommentTool, DynamicTool, MCPServer, MergeTool}
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, Workpad}
-  alias SymphonyElixir.Linear.{Adapter, CommentActionGuard, CommentMutations, CommentVersion, WriteContext}
+  alias SymphonyElixir.Linear.{Adapter, CommentActionGuard, CommentInbox, CommentMutations}
+  alias SymphonyElixir.Linear.{CommentVersion, WriteContext}
   alias SymphonyElixir.Linear.DurableState
 
   setup do
@@ -50,6 +51,44 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert :ok = CommentCheckpoint.before_action(issue)
     assert DynamicTool.execute("linear_graphql", %{"query" => mutation})["success"]
     assert_received :status_mutation
+  end
+
+  test "checkpoint cache survives a new adoption and a persisted-state read", %{issue: issue} do
+    establish(issue)
+    binding = Config.settings!().tracker.app
+    assert {:ok, state} = CommentInbox.read(binding, issue)
+    full_at = state["background"]["full_at"]
+    parent = self()
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, headers ->
+      send(parent, {:query, payload["query"]})
+      request(payload, headers)
+    end)
+
+    assert {:ok, _} =
+             CommentCheckpoint.background_scan(issue, adoption: self(), background_now: fn -> full_at + 35_000 end)
+
+    assert_receive {:query, signal}
+    assert signal =~ "SymphonyCommentScanSignal"
+    refute_received {:query, _}
+
+    adopted =
+      spawn(fn ->
+        receive do
+          :stop -> :ok
+        end
+      end)
+
+    assert {:ok, _} =
+             CommentCheckpoint.background_scan(issue, adoption: adopted, background_now: fn -> full_at + 70_000 end)
+
+    assert_receive {:query, signal}
+    assert signal =~ "SymphonyCommentScanSignal"
+    refute_received {:query, _}
+    send(adopted, :stop)
+
+    assert {:ok, persisted} = CommentInbox.read(binding, issue)
+    assert persisted["background"]["full_at"] == full_at
   end
 
   test "oversized acknowledgement remains pending until the same workpad is condensed", %{issue: issue} do
@@ -647,8 +686,10 @@ defmodule SymphonyElixir.CommentCheckpointTest do
   end
 
   defp signal_response do
-    nodes = Process.get(:comments) |> Map.values() |> Enum.sort_by(& &1["updatedAt"], :desc) |> Enum.take(1)
-    if Process.get(:signal_failure), do: {:error, :scan_signal_offline}, else: data(%{"issue" => %{"comments" => %{"nodes" => nodes}}})
+    comments = Process.get(:comments) |> Map.values() |> Enum.sort_by(& &1["updatedAt"], :desc)
+    nodes = Enum.take(comments, 1)
+    foreign = comments |> Enum.reject(&(get_in(&1, ["user", "id"]) == Config.settings!().tracker.app["user_id"])) |> Enum.take(1)
+    if Process.get(:signal_failure), do: {:error, :scan_signal_offline}, else: data(%{"issue" => %{"comments" => %{"nodes" => nodes}, "foreignComments" => %{"nodes" => foreign}}})
   end
 
   defp issue_response(vars) do

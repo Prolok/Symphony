@@ -128,7 +128,11 @@ defmodule SymphonyElixir.ProjectPoller do
     result =
       case state.relays[workspace] do
         %Session{status: :ready, record: record} ->
-          if id in record["known"], do: {:ok, {record["generation"], record["epochs"][id]}}, else: {:error, :relay_issue_unknown}
+          if id in record["known"] do
+            {:ok, {record["generation"], record["epochs"][id], get_in(record, ["foreign_comment_epochs", id]) || 0}}
+          else
+            {:error, :relay_issue_unknown}
+          end
 
         _ ->
           {:error, :relay_unavailable}

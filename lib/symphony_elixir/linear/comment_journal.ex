@@ -91,6 +91,37 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     end
   end
 
+  @spec confirmed_comment_id?(map(), String.t()) :: boolean()
+  def confirmed_comment_id?(binding, id) do
+    case intents(binding) do
+      {:ok, records} -> Enum.any?(records, &(&1["comment_id"] == id and confirmed?(binding, &1)))
+      _ -> false
+    end
+  end
+
+  @spec confirmed_reply_after?(map(), String.t(), integer()) :: boolean()
+  def confirmed_reply_after?(binding, parent_id, after_ms) do
+    case intents(binding) do
+      {:ok, records} ->
+        Enum.any?(records, fn record ->
+          get_in(record, ["input", "parentId"]) == parent_id and written_after?(record["written_at"], after_ms) and
+            confirmed?(binding, record)
+        end)
+
+      _ ->
+        false
+    end
+  end
+
+  defp written_after?(value, after_ms) when is_binary(value) and is_integer(after_ms) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _} -> DateTime.to_unix(datetime, :millisecond) >= after_ms
+      _ -> false
+    end
+  end
+
+  defp written_after?(_value, _after_ms), do: false
+
   @doc "Serialize a full observation with writes; reconcile outstanding receipts before classifying echoes."
   @spec observe(map(), (map() -> term()) | nil, (-> term())) :: term()
   def observe(binding, request, callback) do

@@ -1376,15 +1376,24 @@ Die Grenzen für Projektroot, Vorabmeldungen und gestartete Läufe stehen in
 
 Reguläre übernommene aktive Issues verwenden im Hintergrund den lokalen Relay-
 Stand. Gleichzeitige Prüfungen derselben Bindung teilen das Ergebnis; die
-Fälligkeit wird nach der Journal-Sperre erneut geprüft. Relay-Invalidierungen und
-der gestaffelte Workspace-Sicherheitsabgleich verlangen einen vollständigen Scan,
-unveränderte Leerticks lesen nur den lokalen Inbox-Zustand. Fehlende Baseline,
-Neustart, geänderte Bindung oder Scanfehler erlauben keine Wiederverwendung eines
-alten Frischebelegs. Erst ein vollständiger Scan aktualisiert
-`last_successful_scan`; ein Signalcheck beweist weder Vollständigkeit noch Löschung.
-Die Cache-Bindung umfasst Projekt-/App-/Issue-Kontext, Laufzeit/Übernahme und den
-vor dem Scan erfassten Relay-Stand. Ein ausgefallener Poller ist ein sichtbarer
-Fehler, kein Anlass für direkte Ersatzabfragen gegen Linear.
+Fälligkeit wird nach der Journal-Sperre erneut geprüft. Ein vollständiger
+Checkpoint aktualisiert den persistierten Hintergrundcache. Dessen Schlüssel
+bindet Projekt, App-Workspace, Client, App-User, Beratungsauswahl, Issue und Signalformat; Neustart und neue
+Übernahme entwerten ihn nicht. Scanfehler erhalten die letzte verlässliche
+Beobachtung, sperren aber die Abkürzung bis zum nächsten erfolgreichen Vollscan.
+Erst ein vollständiger Scan aktualisiert `last_successful_scan`; ein Signalcheck
+beweist weder Vollständigkeit noch Löschung. Ein ausgefallener Poller ist ein
+sichtbarer Fehler, kein Anlass für direkte Ersatzabfragen gegen Linear.
+
+Ein GraphQL-Request liest den neuesten Kommentar und den neuesten Kommentar
+eines anderen Autors. Ein unverändertes Signal benötigt keinen Seitenabruf;
+bestätigte eigene Kommentarversionen aus dem Journal bleiben ohne Vollscan.
+Fremde oder ungeklärte Relay-Kommentarereignisse lösen sofort einen Vollscan aus,
+auch bei unverändertem Signal. Offene `held`-Stränge erzwingen für sich allein
+keinen Vollscan. Ohne Relay erfolgt spätestens nach fünf Minuten ein
+Sicherheitsvollscan, mit Relay spätestens nach 30 Minuten. Der reguläre
+Hintergrundtakt beträgt mit Relay mindestens 60 Sekunden, unter 20 %
+App-Restbudget mindestens 180 Sekunden; fremde Ereignisse überholen diese Frist.
 Explizite Checkpoints, Acks und Status-/Merge-Aktionen führen immer einen frischen
 Vollscan aus, auch nach einem Cache-Hit oder einem bereits laufenden Hintergrundscan. Die erste vollständige Beobachtung ist historische
 Baseline. Der Worker erhält sie einmal zur Übernahme noch offener Hinweise;
@@ -1426,7 +1435,7 @@ Die vorhandenen Transport-, Rate-Limit- und Journalwege bleiben maßgeblich.
 Zyklen, widersprüchliche oder unvollständige Bindungen bleiben zurückgehalten;
 Zeitablauf und eine Null-Session allein geben Kandidaten nicht frei. Unabhängige
 Coding-Kommentare bleiben verfügbar. Der bestehende Hintergrundabgleich prüft
-ungeklärte Stränge erneut, auch wenn das letzte Kommentarsignal unverändert ist.
+ungeklärte Stränge bei fremder Änderung oder spätestens beim Sicherheitsvollscan erneut.
 
 Die projektlokale Inbox speichert Zuordnung und Quarantäne ohne zusätzlichen
 Quelltext unter derselben Journal-Sperre. Sie bewertet neue Metadaten auch bei
@@ -1569,6 +1578,11 @@ nicht verlängert und durch parallele Antworten nicht verkürzt. Dies koordinier
 Prozesse auf demselben Rechner, keine Budgets zwischen mehreren Rechnern.
 Budgetdiagnosen enthalten nur erlaubte Zahlenheader und gültiges `Retry-After`,
 einschließlich `X-Complexity`; erfolgreiche Antworten sind im Debug-Log sichtbar.
+Der Dienst zählt Requests je App-Bindung nach Anfrageart und protokolliert bei
+laufendem Verkehr alle fünf Minuten `Linear budget summary` mit Restbudget und
+Zählern. Unter 20 % von `x-ratelimit-requests-limit` werden nur Hintergrundscans
+und wiederholte workspaceübergreifende Wartemarker-Lookups verlängert;
+Kandidatenabfragen, Checkpoints, Handoffs und Schreibvorgänge bleiben vorrangig.
 
 Die historische Vorher-Referenz aus PRO-715/PRO-716 verglich 3.600 simulierte Sekunden
 mit 5-Sekunden-Arbeitstakt, einer Seite je Abfrage und unveränderten Kommentaren,

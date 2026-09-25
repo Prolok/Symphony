@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Linear.RateLimit do
 
   require Logger
   alias SymphonyElixir.Config
-  alias SymphonyElixir.Linear.{DurableState, IssueLease}
+  alias SymphonyElixir.Linear.{Budget, DurableState, IssueLease}
 
   @spec check(map(), keyword()) :: :ok | {:error, term()}
   def check(binding, opts \\ []) do
@@ -54,6 +54,7 @@ defmodule SymphonyElixir.Linear.RateLimit do
     }
 
     :telemetry.execute([:symphony, :linear, :request], measurement, metadata)
+    Budget.record(binding, metadata.kind, diagnostics)
 
     if Application.get_env(:symphony_elixir, :linear_budget_measurements, false),
       do: Logger.debug("Linear request measurement=" <> Jason.encode!(Map.merge(measurement, metadata)))

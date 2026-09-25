@@ -642,9 +642,10 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec comment_scan_signal(String.t()) :: {:ok, [map()]} | {:error, term()}
   def comment_scan_signal(issue_id) do
-    query = "query SymphonyCommentScanSignal($id: String!) { issue(id: $id) { comments(first: 1, orderBy: updatedAt, includeArchived: true) { nodes { #{@comment_selection} } } } }"
+    query =
+      "query SymphonyCommentScanSignal($id: String!, $appUser: ID!) { issue(id: $id) { comments(first: 1, orderBy: updatedAt, includeArchived: true) { nodes { #{@comment_selection} } } foreignComments: comments(first: 1, orderBy: updatedAt, includeArchived: true, filter: {user: {id: {neq: $appUser}}}) { nodes { #{@comment_selection} } } } }"
 
-    with {:ok, body} <- graphql(query, %{id: issue_id}) do
+    with {:ok, body} <- graphql(query, %{id: issue_id, appUser: Config.settings!().tracker.app["user_id"]}) do
       decode_comment_scan_signal(body, issue_id)
     end
   end
@@ -653,11 +654,23 @@ defmodule SymphonyElixir.Linear.Client do
     with true <- Map.get(body, "errors", []) in [nil, []],
          nodes when is_list(nodes) <- get_in(body, ["data", "issue", "comments", "nodes"]),
          true <- length(nodes) <= 1 and Enum.all?(nodes, &(is_binary(&1["id"]) and is_binary(&1["body"]))),
-         {:ok, comments} <- normalize_comments(nodes),
+         foreign when is_list(foreign) <- signal_foreign_nodes(body, nodes),
+         true <- length(foreign) <= 1 and Enum.all?(foreign, &(is_binary(&1["id"]) and is_binary(&1["body"]))),
+         {:ok, comments} <- normalize_comments(nodes ++ foreign),
          true <- Enum.all?(comments, &(&1.issue_id == issue_id)) do
-      {:ok, comments}
+      {:ok, Enum.uniq_by(comments, &CommentVersion.raw/1)}
     else
       _ -> incomplete_comments(:comment_scan_signal_unavailable, observed_comments(body, issue_id))
+    end
+  end
+
+  defp signal_foreign_nodes(body, nodes) do
+    case get_in(body, ["data", "issue", "foreignComments", "nodes"]) do
+      nil ->
+        if Enum.all?(nodes, &(get_in(&1, ["user", "id"]) != Config.settings!().tracker.app["user_id"])), do: nodes
+
+      foreign ->
+        foreign
     end
   end
 

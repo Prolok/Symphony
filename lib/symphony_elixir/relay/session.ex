@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Relay.Session do
   @moduledoc "Serialized receive → persist → ack → refresh state machine for one workspace consumer."
-  alias SymphonyElixir.Linear.DurableState
+  alias SymphonyElixir.Linear.{CommentJournal, DurableState}
   alias SymphonyElixir.Relay.{Contract, Store}
 
   defstruct path: nil,
@@ -39,6 +39,7 @@ defmodule SymphonyElixir.Relay.Session do
       "known" => [],
       "dirty" => [],
       "epochs" => %{},
+      "foreign_comment_epochs" => %{},
       "pending" => nil,
       "reconcile_at" => 0
     }
@@ -103,10 +104,21 @@ defmodule SymphonyElixir.Relay.Session do
   end
 
   defp valid_record?(record) do
-    is_map(record["issues"]) and is_map(record["epochs"]) and is_list(record["known"]) and is_list(record["dirty"]) and
+    valid_collections?(record) and
+      valid_foreign_epochs?(record["foreign_comment_epochs"]) and
       is_integer(record["cursor"]) and record["cursor"] >= 0 and is_integer(record["reconcile_at"]) and
-      record["phase"] in ~w(register snapshot complete replay ready resync) and valid_pending?(record)
+      valid_phase?(record) and valid_pending?(record)
   end
+
+  defp valid_collections?(record) do
+    is_map(record["issues"]) and is_map(record["epochs"]) and is_list(record["known"]) and is_list(record["dirty"])
+  end
+
+  defp valid_phase?(record), do: record["phase"] in ~w(register snapshot complete replay ready resync)
+
+  defp valid_foreign_epochs?(nil), do: true
+  defp valid_foreign_epochs?(epochs) when is_map(epochs), do: Enum.all?(epochs, fn {id, epoch} -> is_binary(id) and is_integer(epoch) and epoch >= 0 end)
+  defp valid_foreign_epochs?(_), do: false
 
   defp valid_pending?(%{"pending" => nil}), do: true
 
@@ -263,9 +275,25 @@ defmodule SymphonyElixir.Relay.Session do
     # set remains durable even when hydration fails or the process is killed.
     ids = page["events"] |> Enum.map(& &1["issueId"]) |> Enum.filter(&is_binary/1)
     ids = ids ++ dependent_issue_ids(session.record["issues"], ids)
-    r = session.record |> Map.put("pending", page) |> Map.update!("dirty", &Enum.uniq(&1 ++ ids))
+
+    foreign_epochs =
+      Enum.reduce(page["events"], Map.get(session.record, "foreign_comment_epochs", %{}), fn event, epochs ->
+        if event["type"] == "Comment" and is_binary(event["issueId"]) and not own_comment_event?(session, event) do
+          Map.update(epochs, event["issueId"], 1, &(&1 + 1))
+        else
+          epochs
+        end
+      end)
+
+    r = session.record |> Map.put("pending", page) |> Map.put("foreign_comment_epochs", foreign_epochs) |> Map.update!("dirty", &Enum.uniq(&1 ++ ids))
     continue_saved(session, r, &acknowledge/1)
   end
+
+  defp own_comment_event?(session, %{"commentId" => id}) do
+    Enum.any?(session.contexts, &CommentJournal.confirmed_comment_id?(&1.settings.tracker.app, id))
+  end
+
+  defp own_comment_event?(_session, _event), do: false
 
   defp dependent_issue_ids(issues, ids) do
     changed = MapSet.new(ids)

@@ -23,6 +23,17 @@ defmodule SymphonyElixir.RelayCacheTest do
   defp issue(time \\ "2026-09-14T20:00:00Z"), do: %{"id" => "issue", "updatedAt" => time, "title" => time}
   defp retry(s), do: %{s | retry_at: 0}
 
+  test "foreign comment events persist independently of hydration epochs", c do
+    {:ok, session} = open(c)
+    session = Session.tick(session)
+    Server.publish(c.server, "workspace", %{"type" => "Comment", "commentId" => "foreign-comment"})
+    observed = Session.tick(session)
+    assert observed.record["foreign_comment_epochs"]["issue"] == 1
+
+    {:ok, resumed} = open(c)
+    assert resumed.record["foreign_comment_epochs"]["issue"] == 1
+  end
+
   test "legacy binding migration keeps the durable receipt and cursor until authenticated registration", c do
     {:ok, s} = open(c)
     s = Session.tick(s)

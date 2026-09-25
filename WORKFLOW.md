@@ -968,7 +968,10 @@ Nutze dies nur, wenn der Abschluss durch fehlende erforderliche Tools oder fehle
 
 Für tatsächlich übernommene aktive Issues ist der Kommentareingang Standard.
 Der Hintergrundabgleich beobachtet Kommentare frühestens alle
-`max(30 Sekunden, polling.interval_ms)`, ohne laufende Turns zu unterbrechen.
+`max(30 Sekunden, polling.interval_ms)`; mit Relay im Regelbudget frühestens alle
+60 Sekunden, unter 20 % App-Restbudget frühestens alle 180 Sekunden. Fremde
+Relay-Kommentarereignisse lösen unabhängig vom Takt sofort einen Scan aus.
+Laufende Turns werden nicht unterbrochen.
 Phasenstart und Fortsetzung liefern offene Quellversionen an den Hauptworker. Nach Meilensteinen und vor Handoffs ruft dieser
 `symphony_comments` mit `operation: "checkpoint"` auf; `issue_id` ist die interne
 ID des aktuellen Issues. Manuelle Gates werden dadurch nicht aktiviert.

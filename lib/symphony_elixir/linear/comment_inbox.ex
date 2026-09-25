@@ -9,13 +9,15 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   @spec scan(map(), map(), (-> {:ok, [map()]} | {:error, term()}), keyword()) :: {:ok, map()} | {:error, term()}
   def scan(binding, issue, fetch, opts \\ []) do
     with {:ok, state} <- read(binding, issue) do
-      if background_fresh?(state, opts), do: {:ok, state}, else: scan_locked(binding, issue, fetch, opts)
+      if opts[:force_full] != true and background_fresh?(state, opts),
+        do: {:ok, state},
+        else: scan_locked(binding, issue, fetch, opts)
     end
   end
 
   defp scan_locked(binding, issue, fetch, opts) do
     transaction(binding, issue, opts, fn state ->
-      if background_fresh?(state, opts) do
+      if opts[:force_full] != true and background_fresh?(state, opts) do
         {:cached, state}
       else
         observe_due(state, binding, fetch, opts)
@@ -33,16 +35,16 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   end
 
   defp scan_result({:ok, _state} = result, _previous), do: result
-  defp scan_result({:save_error, failed, reason}, _previous), do: {:save_error, Map.delete(failed, "background"), reason}
+  defp scan_result({:save_error, failed, reason}, _previous), do: {:save_error, failed, reason}
 
   defp scan_result({:error, reason}, state),
-    do: {:save_error, state |> Map.delete("background") |> Map.put("scan_error", inspect(reason)), reason}
+    do: {:save_error, Map.put(state, "scan_error", inspect(reason)), reason}
 
   defp background_fresh?(state, opts) do
     case background_cache(state, opts) do
       %{"checked_at" => checked} when is_integer(checked) ->
         interval = background_interval(state, opts)
-        clock(opts) < checked + interval
+        not foreign_relay_changed?(state["background"], opts) and clock(opts) >= checked and clock(opts) < checked + interval
 
       _ ->
         false
@@ -66,8 +68,44 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     if opts[:background_key] do
       background_scan(state, binding, fetch, opts)
     else
-      observe_fetch(fetch.(), Map.delete(state, "background"), binding, opts)
+      result = fetch.()
+
+      case observe_fetch(result, state, binding, opts) do
+        {:ok, observed} -> refresh_background(observed, state, result, binding, opts)
+        error -> error
+      end
     end
+  end
+
+  defp refresh_background(observed, previous, {:ok, comments}, binding, opts) do
+    key = opts[:cache_key] || get_in(previous, ["background", "key"])
+
+    if key do
+      now = clock(opts)
+      signal = checkpoint_signal(comments, binding)
+
+      cache = %{
+        "key" => key,
+        "signal" => signal_key({:ok, signal}),
+        "foreign" => foreign_source(signal, binding),
+        "full_at" => now,
+        "checked_at" => now,
+        "foreign_relay_epoch" => opts[:foreign_relay_epoch]
+      }
+
+      {:ok, Map.put(observed, "background", cache)}
+    else
+      {:ok, observed}
+    end
+  end
+
+  defp refresh_background(observed, _previous, _result, _binding, _opts), do: {:ok, observed}
+
+  defp checkpoint_signal(comments, binding) do
+    latest = Enum.max_by(comments, &CommentVersion.raw(&1)["updatedAt"], fn -> nil end)
+    foreign = comments |> Enum.reject(&(get_in(CommentVersion.raw(&1), ["user", "id"]) == binding["user_id"]))
+    foreign = Enum.max_by(foreign, &CommentVersion.raw(&1)["updatedAt"], fn -> nil end)
+    Enum.uniq_by(Enum.reject([latest, foreign], &is_nil/1), &CommentVersion.raw/1)
   end
 
   defp background_scan(state, binding, fetch, opts) do
@@ -75,8 +113,12 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     cache = background_cache(state, opts)
     now = clock(opts)
 
-    if not AdvisoryThreads.unresolved?(state) and unchanged_signal?(signal, cache, now, opts) do
-      {:ok, put_in(state, ["background", "checked_at"], now)}
+    unchanged = unchanged_signal?(signal, cache, binding, now, opts)
+
+    if opts[:force_full] != true and not foreign_relay_changed?(cache, opts) and unchanged do
+      cache = state["background"]
+      cache = %{cache | "checked_at" => now, "signal" => signal_key(signal), "foreign" => signal_foreign(signal, binding)}
+      {:ok, Map.put(state, "background", cache)}
     else
       result =
         case signal do
@@ -88,7 +130,15 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
       case observe_fetch(result, state, binding, opts) do
         {:ok, observed} ->
-          cache = %{"key" => opts[:background_key], "checked_at" => now, "full_at" => now, "signal" => signal_key(signal)}
+          cache = %{
+            "key" => opts[:background_key],
+            "checked_at" => now,
+            "full_at" => now,
+            "signal" => signal_key(signal),
+            "foreign" => signal_foreign(signal, binding),
+            "foreign_relay_epoch" => opts[:foreign_relay_epoch]
+          }
+
           {:ok, Map.put(observed, "background", cache)}
 
         error ->
@@ -96,6 +146,14 @@ defmodule SymphonyElixir.Linear.CommentInbox do
       end
     end
   end
+
+  defp foreign_relay_changed?(%{"foreign_relay_epoch" => previous}, opts) do
+    current = opts[:foreign_relay_epoch]
+    previous = if is_integer(previous), do: previous, else: 0
+    is_integer(current) and current != previous
+  end
+
+  defp foreign_relay_changed?(_cache, _opts), do: false
 
   defp preserve_signal_observations({:error, {:comment_scan_incomplete, reason, observed}}, result) do
     comments =
@@ -110,15 +168,41 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
   defp preserve_signal_observations(_signal, result), do: result
 
-  defp unchanged_signal?({:ok, [_]} = signal, %{"full_at" => full, "signal" => previous}, now, opts)
+  defp unchanged_signal?({:ok, sources} = signal, %{"full_at" => full, "signal" => previous} = cache, binding, now, opts)
        when is_integer(full) do
-    now < full + max(300_000, opts[:background_interval]) and signal_key(signal) == previous
+    now >= full and now < full + Keyword.get(opts, :maximum_full_age, max(300_000, opts[:background_interval])) and
+      (signal_key(signal) == previous or own_echo?(sources, cache, binding, opts))
   end
 
-  defp unchanged_signal?(_signal, _cache, _now, _opts), do: false
-  defp signal_key({:ok, [_] = signal}), do: CommentVersion.digest(Enum.map(signal, &CommentVersion.raw/1))
+  defp unchanged_signal?(_signal, _cache, _binding, _now, _opts), do: false
+
+  defp own_echo?([latest | _] = sources, cache, binding, opts) do
+    foreign = foreign_source(sources, binding)
+    previous = cache["foreign"]
+    classify = Keyword.get(opts, :classify, &CommentJournal.classify(binding, &1))
+    own_reply = Keyword.get(opts, :own_reply_to?, &CommentJournal.confirmed_reply_after?(binding, &1, cache["checked_at"]))
+    latest = CommentVersion.raw(latest)
+
+    ((is_nil(foreign) and is_nil(previous)) or
+       (is_map(foreign) and is_map(previous) and Map.delete(foreign, "updatedAt") == Map.delete(previous, "updatedAt"))) and
+      (classify.(latest) == :own or (is_map(foreign) and latest["id"] == foreign["id"] and own_reply.(foreign["id"])))
+  end
+
+  defp own_echo?([], _cache, _binding, _opts), do: false
+
+  defp signal_foreign({:ok, sources}, binding), do: foreign_source(sources, binding)
+  defp signal_foreign(_signal, _binding), do: nil
+
+  defp foreign_source(sources, binding) do
+    Enum.find_value(sources, fn source ->
+      raw = CommentVersion.raw(source)
+      if get_in(raw, ["user", "id"]) != binding["user_id"], do: raw
+    end)
+  end
+
+  defp signal_key({:ok, signal}) when is_list(signal), do: CommentVersion.digest(Enum.map(signal, &CommentVersion.raw/1))
   defp signal_key(_signal), do: nil
-  defp clock(opts), do: Keyword.get(opts, :background_now, fn -> System.monotonic_time(:millisecond) end).()
+  defp clock(opts), do: Keyword.get(opts, :background_now, fn -> System.system_time(:millisecond) end).()
 
   defp observe_fetch({:ok, comments}, state, binding, opts), do: observe(state, comments, binding, opts)
 

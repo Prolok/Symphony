@@ -7,7 +7,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   alias SymphonyElixir.{Config, Dialog, ProjectContext, Tracker, Workpad}
   alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryThreads}
-  alias SymphonyElixir.Linear.{Client, CommentInbox, CommentVersion, Issue, WriteContext}
+  alias SymphonyElixir.Linear.{Budget, Client, CommentInbox, CommentVersion, Issue, WriteContext}
 
   @spec active?(map()) :: boolean()
   def active?(issue) do
@@ -20,6 +20,10 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   @spec scan(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def scan(issue, opts \\ []) do
+    opts = Keyword.put_new(opts, :cache_key, background_key(issue))
+
+    opts = Keyword.put_new_lazy(opts, :foreign_relay_epoch, fn -> foreign_relay_epoch(issue) end)
+
     opts = Keyword.put_new(opts, :journal_request, &journal_request/1)
     opts = Keyword.put_new(opts, :confirm_absence, &Client.confirm_comment_absence(issue.id, &1))
     opts = Keyword.put_new(opts, :advisory_agent_ids, Config.settings!().tracker.advisory_agent_ids)
@@ -42,13 +46,21 @@ defmodule SymphonyElixir.CommentCheckpoint do
   end
 
   @spec background_interval_ms() :: pos_integer()
-  def background_interval_ms, do: max(30_000, Config.settings!().polling.interval_ms)
+  def background_interval_ms do
+    base = max(30_000, Config.settings!().polling.interval_ms)
+
+    if SymphonyElixir.Relay.enabled?() do
+      if Budget.low?(Config.settings!().tracker.app), do: max(base, 180_000), else: max(base, 60_000)
+    else
+      base
+    end
+  end
 
   @spec background_scan(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def background_scan(issue, opts \\ []) do
     if SymphonyElixir.Relay.enabled?() do
       with {:ok, epoch} <- SymphonyElixir.ProjectPoller.comment_epoch(ProjectContext.current(), issue.id) do
-        background_scan_with_epoch(issue, Keyword.put(opts, :relay_epoch, epoch))
+        background_scan_with_epoch(issue, opts |> Keyword.put(:relay_epoch, epoch) |> Keyword.put(:foreign_relay_epoch, elem(epoch, 2)))
       end
     else
       background_scan_with_epoch(issue, opts)
@@ -56,34 +68,29 @@ defmodule SymphonyElixir.CommentCheckpoint do
   end
 
   defp background_scan_with_epoch(issue, opts) do
-    # Persisted observations survive restarts; scheduling evidence does not.
-    runtime = background_runtime()
-    key = :crypto.hash(:sha256, :erlang.term_to_binary({runtime, Config.settings!().tracker, opts[:adoption], opts[:relay_epoch]})) |> Base.encode16()
-
     opts =
       opts
-      |> Keyword.put(:background_key, key)
-      |> Keyword.put(:background_interval, if(opts[:relay_epoch], do: 604_800_000, else: background_interval_ms()))
-      |> Keyword.put(:advisory_interval, background_interval_ms())
+      |> Keyword.put(:background_key, background_key(issue))
+      |> Keyword.put(:background_interval, background_interval_ms())
+      |> Keyword.put(:maximum_full_age, if(SymphonyElixir.Relay.enabled?(), do: 1_800_000, else: 300_000))
       |> Keyword.put_new(:signal, fn -> Client.comment_scan_signal(issue.id) end)
       |> Keyword.put_new(:fetch_after_signal, &Client.scan_issue_comments(issue.id, &1))
 
     scan(issue, opts)
   end
 
-  defp background_runtime do
-    key = {__MODULE__, :background_runtime}
+  defp background_key(issue) do
+    tracker = Config.settings!().tracker
+    binding = {tracker.app["workspace_id"], tracker.app["client_id"], tracker.app["user_id"], tracker.project_slug, tracker.team_key}
+    :crypto.hash(:sha256, :erlang.term_to_binary({binding, tracker.advisory_agent_ids, issue.id, :signal_v2})) |> Base.encode16()
+  end
 
-    case :persistent_term.get(key, nil) do
-      nil ->
-        :global.trans({key, self()}, fn ->
-          runtime = :persistent_term.get(key, nil) || Ecto.UUID.generate()
-          :persistent_term.put(key, runtime)
-          runtime
-        end)
-
-      runtime ->
-        runtime
+  defp foreign_relay_epoch(issue) do
+    if SymphonyElixir.Relay.enabled?() do
+      case SymphonyElixir.ProjectPoller.comment_epoch(ProjectContext.current(), issue.id) do
+        {:ok, {_, _, epoch}} -> epoch
+        _ -> nil
+      end
     end
   end
 

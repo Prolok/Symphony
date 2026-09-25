@@ -1920,12 +1920,20 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       Map.merge(record, %{
         "observations" => observations,
         "deliveries" => %{first.id => %{"run_id" => "earlier", "semantic" => observations[first.id]["semantic"]}},
+        "delivery_ends" => %{"earlier" => true},
         "nonstart" => %{"fingerprint" => Observation.fingerprint(Map.take(observations, [second.id])), "members" => [second.id], "count" => 2},
         "retry_at" => retry_at
       })
 
-    assert :ok = Store.write("review", record)
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    assert :ok = Store.write("review", Map.delete(record, "delivery_ends"))
+    tick(state, [first, second], scan: &scan/1, start: fn _, _ -> flunk("unconfirmed delivery must wait") end)
+    assert {:ok, waiting} = Store.read("review")
+    assert waiting["waiting_reason"] == "delivery_end_unconfirmed"
+    assert waiting["nonstart"] == record["nonstart"]
+    assert waiting["retry_at"] == retry_at
+
+    assert :ok = Store.write("review", record)
     tick(state, [first, second], scan: &scan/1, start: fn _, _ -> flunk("unchanged pending subset must wait") end)
     assert {:ok, unchanged} = Store.read("review")
     assert unchanged["nonstart"] == record["nonstart"]

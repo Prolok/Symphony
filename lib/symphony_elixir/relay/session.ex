@@ -321,6 +321,7 @@ defmodule SymphonyElixir.Relay.Session do
       |> Map.put("foreign_comment_epochs", foreign_epochs)
       |> Map.put("event_positions", positions)
       |> Map.update!("dirty", &Enum.uniq(&1 ++ ids))
+
     continue_saved(session, r, &acknowledge/1)
   end
 

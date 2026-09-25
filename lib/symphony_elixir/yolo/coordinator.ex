@@ -273,11 +273,12 @@ defmodule SymphonyElixir.Yolo.Coordinator do
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          effective = if(operations == [], do: record, else: Map.put(record, "processed", nil)),
          pending = Delivery.pending(members, observations, effective),
-         record = reset_changed_nonstart(record, pending, observations),
          waiting = if(pending == [], do: Delivery.waiting_reason(members, observations, effective), else: nil),
+         record = if(waiting == "delivery_end_unconfirmed", do: record, else: reset_changed_nonstart(record, pending, observations)),
+         updated = record |> Map.put("observations", observations) |> Map.put("waiting_reason", waiting),
+         :ok <- if(updated == record, do: :ok, else: Store.write(group, updated)),
          true <- record["checkout_cleanup_blocked"] != true,
-         true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond),
-         :ok <- Store.write(group, record |> Map.put("observations", observations) |> Map.put("waiting_reason", waiting)) do
+         true <- is_nil(record["retry_at"]) or record["retry_at"] <= System.system_time(:millisecond) do
       prepare_pending(group, pending, opts)
     else
       {:error, reason} ->

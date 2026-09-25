@@ -125,6 +125,7 @@ defmodule SymphonyElixir.Yolo.Runner do
     create = Keyword.get(opts, :workspace, &Workspace.create/2)
     members = Enum.map(issues, & &1.id)
     attempt = %{"id" => run_id, "members" => members, "fingerprint" => fingerprint}
+
     reasons =
       Map.new(issues, fn issue ->
         reason = get_in(record, ["impulses", issue.id, "reason"])

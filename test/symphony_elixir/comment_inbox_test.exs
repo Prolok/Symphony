@@ -393,6 +393,19 @@ defmodule SymphonyElixir.CommentInboxTest do
     assert state["versions"][CommentVersion.key(own)]["origin"] == "own"
   end
 
+  test "three concurrent inbox changes exhaust the short scan retry", ctx do
+    path = Path.join([ctx.binding["state_root"], "inputs", CommentVersion.digest(ctx.issue.id) <> ".json"])
+
+    fetch = fn ->
+      assert {:ok, state} = CommentInbox.read(ctx.binding, ctx.issue)
+      File.mkdir_p!(Path.dirname(path))
+      assert :ok = DurableState.write(path, Map.put(state, "scan_error", Integer.to_string(System.unique_integer([:positive]))))
+      {:ok, []}
+    end
+
+    assert {:error, :comment_scan_raced} = CommentInbox.scan(ctx.binding, ctx.issue, fetch)
+  end
+
   test "a short journal contention is retried inside the scan", ctx do
     owner = self()
 

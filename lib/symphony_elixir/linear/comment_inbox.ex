@@ -362,8 +362,6 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     )
   end
 
-  defp save_result({:cached, state}, _binding, _issue, _opts), do: {:ok, state}
-
   defp save_result({:ok, state}, binding, issue, opts) do
     with :ok <- persist(binding, issue, state, opts), do: {:ok, state}
   end

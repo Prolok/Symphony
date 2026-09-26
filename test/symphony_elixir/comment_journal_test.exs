@@ -22,7 +22,8 @@ defmodule SymphonyElixir.CommentJournalTest do
 
   test "closed old receipts move to the archive while own classification and recovery survive", %{binding: binding} do
     Process.put(:remote_comments, %{})
-    assert {:ok, _} = CommentJournal.execute(binding, variable_create("old-own", ~s({"text":"Archivtext"})), &graphql_request/1)
+    payload = put_in(variable_create("old-own", ~s({"text":"Archivtext"})), ["variables", "input", "parentId"], "parent")
+    assert {:ok, _} = CommentJournal.execute(binding, payload, &graphql_request/1)
     [remote] = remote_comments()
     assert {:error, :offline} = CommentJournal.execute(binding, variable_create("pending", "Offen"), fn _ -> {:error, :offline} end)
     intent = Enum.find(journal_files(binding, "intent"), &(File.read!(&1) |> Jason.decode!() |> Map.get("comment_id") == "old-own"))
@@ -49,8 +50,11 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert journal_files(binding, "intent") == [pending]
     assert CommentJournal.classify(binding, remote) == :own
     assert CommentJournal.classify(binding, %{remote | "body" => "fremde Änderung"}) == :pending
+    assert {:ok, %{"old-own" => [%{record: %{"_archived" => true, "parent_id" => "parent"}}]}} = CommentJournal.snapshot(binding)
     assert CommentJournal.confirmed_comment_id?(binding, "old-own")
     assert CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "old-own", "action" => "create"})
+    assert CommentJournal.confirmed_reply_after?(binding, "parent", 0)
+    assert CommentJournal.classify(binding, put_in(remote, ["user", "id"], "other")) == :pending
 
     assert {:ok, results} =
              CommentJournal.reconcile(binding, fn payload ->
@@ -119,6 +123,161 @@ defmodule SymphonyElixir.CommentJournalTest do
     refute File.exists?(intent)
     send(reconciling.pid, :continue_lookup)
     assert {:ok, [%{"state" => "rejected"}]} = Task.await(reconciling)
+  end
+
+  test "scan reconciliation reports pending, confirmation, and journal contention", %{binding: binding} do
+    assert :empty = CommentJournal.observe(binding, nil, fn -> :empty end)
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("pending", "Text"), fn _ -> {:error, :offline} end)
+    [record] = journal_records(binding)
+
+    assert {:ok, %{"pending" => [%{confirmed: nil}]}} =
+             CommentJournal.observation_snapshot(binding, fn _ -> response(%{"comment" => nil}) end)
+
+    assert :observed = CommentJournal.observe(binding, fn _ -> response(%{"comment" => comment(record)}) end, fn -> :observed end)
+    assert {:ok, %{"pending" => [%{confirmed: confirmed}]}} = CommentJournal.observation_snapshot(binding, nil)
+    assert confirmed["id"] == "pending"
+
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("another", "Offen"), fn _ -> {:error, :offline} end)
+    owner = self()
+
+    assert {:error, :comment_journal_busy} =
+             CommentJournal.observation_snapshot(binding, fn _ ->
+               holder =
+                 Task.async(fn ->
+                   IssueLease.with_journal_lock(binding["state_root"], fn ->
+                     send(owner, :journal_held)
+
+                     receive do
+                       :release -> :ok
+                     end
+                   end)
+                 end)
+
+               assert_receive :journal_held, 1_000
+               Process.put(:journal_holder, holder)
+               response(%{"comment" => nil})
+             end)
+
+    send(Process.get(:journal_holder).pid, :release)
+    assert :ok = Task.await(Process.get(:journal_holder))
+  end
+
+  test "a confirmation archived during lookup cannot turn a failed response into human input", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("late", "Text"), fn _ -> {:error, :offline} end)
+    [path] = journal_files(binding, "intent")
+    record = path |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    :ok = DurableState.write(path, record)
+
+    assert {:ok, %{"late" => [%{confirmed: nil, recovered: true}]}} =
+             CommentJournal.observation_snapshot(binding, fn _ ->
+               confirmed = String.replace_suffix(path, ".intent.json", ".confirmed.json")
+               :ok = DurableState.write(confirmed, %{"comment" => comment(record)})
+               assert {:ok, _} = CommentJournal.snapshot(binding)
+               {:error, :offline}
+             end)
+
+    assert CommentJournal.classify(binding, comment(record)) == :own
+  end
+
+  test "archive catalog rejects foreign ownership, corruption, and an invalid directory", %{binding: binding} do
+    assert {:ok, _} =
+             CommentJournal.execute(binding, variable_create("old", "Text"), fn payload ->
+               response(%{"commentCreate" => %{"symphonyReceipt" => %{"id" => payload["variables"]["input"]["id"], "body" => "Text", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}}})
+             end)
+
+    [path] = journal_files(binding, "intent")
+    record = path |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    :ok = DurableState.write(path, record)
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    foreign = %{binding | "installation_id" => "other"}
+    assert {:error, {:local_state_requires_handoff, _, _}} = CommentJournal.snapshot(foreign)
+
+    index = Path.join([binding["state_root"], "comments", "archive", "index.json"])
+    File.write!(index, "{")
+    assert {:error, :comment_journal_corrupt} = CommentJournal.snapshot(binding)
+
+    File.rm_rf!(Path.dirname(index))
+    File.write!(Path.dirname(index), "not a directory")
+    assert {:error, :comment_journal_corrupt} = CommentJournal.snapshot(binding)
+  end
+
+  test "archive moves fail closed on conflicting and missing evidence", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("old", "Text"), fn _ -> {:error, :offline} end)
+    [path] = journal_files(binding, "intent")
+    record = path |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    :ok = DurableState.write(path, record)
+    rejected = String.replace_suffix(path, ".intent.json", ".rejected.json")
+    :ok = DurableState.write(rejected, %{"state" => "rejected"})
+    archive = Path.join([binding["state_root"], "comments", "archive"])
+    File.mkdir_p!(archive)
+    File.write!(Path.join(archive, Path.basename(rejected)), "different")
+    assert {:error, :comment_journal_archive_failed} = CommentJournal.snapshot(binding)
+
+    File.rm!(Path.join(archive, Path.basename(rejected)))
+    File.rm!(rejected)
+    assert {:error, :comment_journal_archive_failed} = CommentJournal.snapshot(binding)
+  end
+
+  test "a failed archive rename remains visible", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("old", "Text"), fn _ -> {:error, :offline} end)
+    [path] = journal_files(binding, "intent")
+    record = path |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    :ok = DurableState.write(path, record)
+    rejected = String.replace_suffix(path, ".intent.json", ".rejected.json")
+    :ok = DurableState.write(rejected, %{"state" => "rejected"})
+    archive = Path.join([binding["state_root"], "comments", "archive"])
+    File.mkdir_p!(Path.join(archive, Path.basename(rejected)))
+    assert {:error, :comment_journal_archive_failed} = CommentJournal.snapshot(binding)
+    assert File.exists?(rejected)
+  end
+
+  test "archived recovery evidence still blocks a repeated create", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("old", "Text"), fn _ -> {:error, :offline} end)
+    [path] = journal_files(binding, "intent")
+    record = path |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    :ok = DurableState.write(path, record)
+    :ok = DurableState.write(String.replace_suffix(path, ".intent.json", ".confirmed.json"), %{"comment" => comment(record), "recovered" => true})
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+
+    assert {:error, {:comment_write_recovered, ["old"]}} =
+             CommentJournal.execute(binding, variable_create("old", "Text"), fn _ -> flunk("no blind create") end)
+  end
+
+  test "a new intent between recovery and persist blocks the write", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("old", "Alt"), fn _ -> {:error, :offline} end)
+    [record] = journal_records(binding)
+
+    assert {:error, :comment_write_concurrent} =
+             CommentJournal.execute(binding, variable_create("new", "Neu"), fn _ ->
+               extra = %{record | "operation_id" => "external", "comment_id" => "external", "input" => %{"body" => "Fremd"}}
+               path = Path.join([binding["state_root"], "comments", "external.intent.json"])
+               :ok = DurableState.write(path, extra)
+               response(%{"comment" => comment(record)})
+             end)
+  end
+
+  test "archived resolving fields classify their own comment", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("structured", "Text"), fn _ -> {:error, :offline} end)
+    [path] = journal_files(binding, "intent")
+    record = path |> File.read!() |> Jason.decode!()
+    input = Map.merge(record["input"], %{"resolvingUserId" => "user", "resolvingCommentId" => "parent"})
+    record = record |> Map.put("input", input) |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    :ok = DurableState.write(path, record)
+    remote = comment(record) |> Map.put("resolvingUser", %{"id" => "user"}) |> Map.put("resolvingComment", %{"id" => "parent"})
+    :ok = DurableState.write(String.replace_suffix(path, ".intent.json", ".confirmed.json"), %{"comment" => remote})
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    assert CommentJournal.classify(binding, remote) == :own
+  end
+
+  test "a reader crash and an unreadable journal fail closed", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("pending", "Text"), fn _ -> {:error, :offline} end)
+    Process.flag(:trap_exit, true)
+    assert {:error, :comment_journal_unavailable} = CommentJournal.snapshot(binding, journal_reader: fn _ -> raise "reader crashed" end)
+    directory = Path.join(binding["state_root"], "comments")
+    File.chmod!(directory, 0o000)
+    assert {:error, :comment_journal_unavailable} = CommentJournal.snapshot(binding)
+    File.chmod!(directory, 0o700)
+    refute CommentJournal.confirmed_comment_id?(binding, "pending")
   end
 
   test "an old receipt with an unverified outcome stays active", %{binding: binding} do

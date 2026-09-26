@@ -386,9 +386,8 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp finish_archive_moves(binding) do
-    with :ok <- journal_directory_available(binding),
-         {:ok, catalog} <- archive_catalog(binding),
-         {:ok, files} <- active_files(binding) do
+    with {:ok, files} <- active_files(binding),
+         {:ok, catalog} <- archive_catalog(binding) do
       files
       |> Enum.filter(&String.match?(&1, ~r/\.(intent|confirmed|rejected)\.json\z/))
       |> Enum.map(&String.replace(&1, ~r/\.(intent|confirmed|rejected)\.json\z/, ""))
@@ -400,9 +399,10 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp archive_matches?(record, comment) do
-    comment["id"] == record["comment_id"] and
-      get_in(comment, ["user", "id"]) == record["author_id"] and
-      (is_nil(record["issue_id"]) or record["issue_id"] in [get_in(comment, ["issue", "id"]), get_in(comment, ["issue", "identifier"])]) and
+    same_author? = get_in(comment, ["user", "id"]) == record["author_id"]
+    same_issue? = is_nil(record["issue_id"]) or record["issue_id"] in [get_in(comment, ["issue", "id"]), get_in(comment, ["issue", "identifier"])]
+
+    same_author? and same_issue? and
       fingerprint(actual_match(comment, record["match_keys"])) == record["match_hash"] and
       record["_confirmed"] == true
   end
@@ -451,9 +451,6 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
       {:error, :enoent} ->
         {:ok, %{}}
-
-      {:error, :enotdir} ->
-        {:error, :comment_journal_unavailable}
 
       _ ->
         {:error, :comment_journal_corrupt}
@@ -665,13 +662,14 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp input_fingerprint(%{"_archived" => true} = record), do: record["input_hash"]
   defp input_fingerprint(record), do: fingerprint(comparable_input(record))
 
-  defp parent_id(%{"_archived" => true} = record), do: record["parent_id"]
-  defp parent_id(record), do: get_in(record, ["input", "parentId"])
+  defp parent_id(record) do
+    if record["_archived"] == true,
+      do: record["parent_id"],
+      else: get_in(record, ["input", "parentId"])
+  end
 
   defp rejected?(binding, record) do
-    if record["_archived"],
-      do: record["_rejected"] == true,
-      else: match?({:ok, %{"state" => "rejected"}}, DurableState.read(path(binding, record, "rejected")))
+    match?({:ok, %{"state" => "rejected"}}, DurableState.read(path(binding, record, "rejected")))
   end
 
   defp confirmed?(binding, record) do
@@ -683,10 +681,6 @@ defmodule SymphonyElixir.Linear.CommentJournal do
         _ -> false
       end
     end
-  end
-
-  defp confirmed_receipt(_binding, %{"_archived" => true} = record) do
-    if record["_confirmed"], do: {:ok, %{"comment" => record}}, else: {:error, :enoent}
   end
 
   defp confirmed_receipt(binding, record), do: DurableState.read(path(binding, record, "confirmed"))
@@ -897,22 +891,13 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp intents(binding), do: intents(binding, &read_intent(binding, &1))
 
   defp intents(binding, reader) do
-    with :ok <- journal_directory_available(binding),
+    with {:ok, files} <- active_files(binding),
          {:ok, catalog} <- archive_catalog(binding),
-         {:ok, files} <- active_files(binding),
          {:ok, active} <- files |> Enum.filter(&String.ends_with?(&1, ".intent.json")) |> read_many(reader) do
       # The catalog is made durable before any move. It wins during interrupted
       # moves, so a confirmation cannot temporarily become pending.
       records = active |> Map.new(&{&1["operation_id"], &1}) |> Map.merge(catalog)
       {:ok, Map.values(records)}
-    end
-  end
-
-  defp journal_directory_available(binding) do
-    case File.stat(directory(binding)) do
-      {:ok, %File.Stat{type: :directory}} -> :ok
-      {:error, :enoent} -> :ok
-      _ -> {:error, :comment_journal_unavailable}
     end
   end
 

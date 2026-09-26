@@ -24,7 +24,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       relay_signals = relay_signals(issues)
       retrying_groups = retrying_groups(relay_signals)
       opts = opts |> Keyword.put(:relay_signals, relay_signals) |> Keyword.put(:retrying_groups, retrying_groups)
-      {retrying, regular} = Enum.split_with(issues, &Map.get(retrying_groups, Group.name(&1), false))
+      {retrying, regular} = Enum.split_with(issues, &Map.has_key?(retrying_groups, Group.name(&1)))
+      retrying = Enum.map(retrying, &%{&1 | blocked_by: retrying_groups[Group.name(&1)][&1.id]})
 
       case Dependencies.refresh(regular, opts) do
         {:ok, refreshed} ->
@@ -119,13 +120,32 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp retrying_groups(signals) do
     Map.new(signals, fn {group, current} ->
-      unchanged? =
+      snapshot =
         case Store.read(group) do
-          {:ok, %{"retry_at" => retry_at, "relay_signals" => ^current}} when is_integer(retry_at) -> true
-          _ -> false
+          {:ok, %{"retry_at" => retry_at, "relay_signals" => ^current, "dependency_snapshot" => dependencies}}
+          when is_integer(retry_at) and is_map(dependencies) ->
+            restore_dependency_snapshot(dependencies, current)
+
+          _ ->
+            nil
         end
 
-      {group, unchanged?}
+      {group, snapshot}
+    end)
+    |> Map.reject(fn {_, snapshot} -> is_nil(snapshot) end)
+  end
+
+  defp restore_dependency_snapshot(snapshot, signals) do
+    if Enum.sort(Map.keys(snapshot)) == Enum.sort(Map.keys(signals)) and
+         Enum.all?(Map.values(snapshot), fn blockers -> is_list(blockers) and Enum.all?(blockers, &is_map/1) end) do
+      Map.new(snapshot, fn {id, blockers} -> {id, Enum.map(blockers, &restore_blocker/1)} end)
+    end
+  end
+
+  defp restore_blocker(blocker) do
+    Enum.reduce([:id, :identifier, :state, :state_type, :marker], %{}, fn field, acc ->
+      value = Map.get(blocker, Atom.to_string(field), Map.get(blocker, field))
+      if is_nil(value), do: acc, else: Map.put(acc, field, value)
     end)
   end
 
@@ -262,7 +282,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
     issues =
       Enum.flat_map(issues, fn issue ->
-        if not Map.get(opts[:retrying_groups] || %{}, Group.name(issue), false) and
+        if not Map.has_key?(opts[:retrying_groups] || %{}, Group.name(issue)) and
              Admission.eligible?(issue) and Admission.needed?(issue) and
              Dependencies.dispatchable?(issue) and
              not Group.terminal?(issue) and issue.id not in reserved and not Map.has_key?(state.running, issue.id) do
@@ -316,8 +336,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
          record = Delivery.migrate(record, observations),
          signals = get_in(opts[:relay_signals] || %{}, [group]),
          record = reset_changed_retry(record, signals),
-         :ok <- persist_observations(group, record, observations, signals),
-         record = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}}),
+         :ok <- persist_observations(group, record, observations, signals, members),
+         record = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}, "dependency_snapshot" => dependency_snapshot(members)}),
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          effective = if(operations == [], do: record, else: Map.put(record, "processed", nil)),
          pending = Delivery.pending(members, observations, effective),
@@ -340,7 +360,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   end
 
   defp capture_group(group, members, record, opts) do
-    if Map.get(opts[:retrying_groups] || %{}, group, false) and
+    if Map.has_key?(opts[:retrying_groups] || %{}, group) and
          Enum.all?(members, &is_map(get_in(record, ["observations", &1.id]))) do
       observations = Map.take(record["observations"], Enum.map(members, & &1.id))
       {:ok, observations, Observation.fingerprint(observations)}
@@ -356,8 +376,10 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp reset_changed_retry(record, _), do: record
 
-  defp persist_observations(group, record, observations, signals) do
-    updated = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}})
+  defp dependency_snapshot(members), do: Map.new(members, &{&1.id, &1.blocked_by})
+
+  defp persist_observations(group, record, observations, signals, members) do
+    updated = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}, "dependency_snapshot" => dependency_snapshot(members)})
     if updated == record, do: :ok, else: Store.write(group, updated)
   end
 

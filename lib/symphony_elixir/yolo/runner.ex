@@ -130,6 +130,7 @@ defmodule SymphonyElixir.Yolo.Runner do
     with {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
          true <- Enum.sort(Enum.map(fresh, & &1.id)) == Enum.sort(Enum.map(issues, & &1.id)),
          fresh = with_relay_epochs(fresh, issues),
+         fresh = with_retry_dependencies(fresh, issues, retry?),
          {:ok, fresh} <- tentative_dependencies(fresh, opts, retry?),
          true <- Enum.all?(fresh, &Dependencies.dispatchable?/1),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))),
@@ -170,6 +171,19 @@ defmodule SymphonyElixir.Yolo.Runner do
       end
     end)
   end
+
+  defp with_retry_dependencies(fresh, scheduled, true) do
+    scheduled = Map.new(scheduled, &{&1.id, &1})
+
+    Enum.map(fresh, fn issue ->
+      case scheduled[issue.id] do
+        %{blocked_by: blockers} when is_list(blockers) -> %{issue | blocked_by: blockers}
+        _ -> issue
+      end
+    end)
+  end
+
+  defp with_retry_dependencies(fresh, _, _), do: fresh
 
   defp tentative_dependencies(fresh, _opts, true), do: {:ok, fresh}
   defp tentative_dependencies(fresh, opts, false), do: Dependencies.refresh(fresh, opts)
@@ -431,6 +445,7 @@ defmodule SymphonyElixir.Yolo.Runner do
     with {:ok, _} <- current_project(group, issues, project_issues, opts),
          true <- Keyword.get(opts, :unchanged, &Workspace.unchanged?/1).(workspace),
          {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
+         fresh = with_relay_epochs(fresh, issues),
          {:ok, fresh} <- Dependencies.refresh(fresh, opts),
          true <- Enum.sort_by(fresh, & &1.id) == Enum.sort_by(issues, & &1.id),
          true <- Enum.all?(fresh, &Dependencies.dispatchable?/1),

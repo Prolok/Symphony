@@ -1332,7 +1332,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       recipient: self()
     ]
 
-    assert :ok = run_group("incoming", issues, issues, opts)
+    scheduled = Enum.map(issues, &%{&1 | last_comment_signal: %{relay_epoch: "relay-current"}})
+    assert :ok = run_group("incoming", scheduled, scheduled, opts)
     assert_receive {:yolo_event, "incoming", %{session_id: "shared-session"}}
     assert {:ok, completed} = Store.read("incoming")
     assert completed["processed"] == fingerprint
@@ -1941,6 +1942,49 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Process.get(:po_scans) == 1
     assert Process.get(:po_starts) == 1 + retries
     assert Process.get(:po_linear_reads) == 2
+  end
+
+  test "a failed review retry keeps its fresh dependency snapshot when Relay is stale", %{issues: [issue | _]} do
+    relay = %{issue | state: "Yolo Review", blocked_by: [%{id: "external", state: "Test (AI)"}]}
+    refreshed = %{relay | blocked_by: [%{id: "external", state: "Review"}]}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    Process.put(:dependency_reads, 0)
+    Process.put(:review_starts, 0)
+    Process.put(:review_scans, 0)
+
+    opts = [
+      dependencies: fn issues ->
+        if issues != [], do: Process.put(:dependency_reads, Process.get(:dependency_reads) + 1)
+        {:ok, Enum.map(issues, &%{&1 | blocked_by: refreshed.blocked_by})}
+      end,
+      scan: fn _ ->
+        Process.put(:review_scans, Process.get(:review_scans) + 1)
+        {:ok, inbox()}
+      end,
+      start: fn "review", _ ->
+        Process.put(:review_starts, Process.get(:review_starts) + 1)
+        {:error, :synthetic_po_failure}
+      end
+    ]
+
+    tick(state, [relay], opts)
+    assert Process.get(:dependency_reads) == 1
+    assert Process.get(:review_starts) == 1
+    assert Process.get(:review_scans) == 1
+    assert {:ok, %{"retry_at" => retry_at, "dependency_snapshot" => snapshot} = record} = Store.read("review")
+    assert retry_at > System.system_time(:millisecond)
+    assert get_in(snapshot, [issue.id, Access.at(0), "state"]) == "Review"
+
+    tick(state, [relay], opts)
+    assert Process.get(:dependency_reads) == 1
+    assert Process.get(:review_starts) == 1
+    assert Process.get(:review_scans) == 1
+
+    :ok = Store.write("review", %{record | "retry_at" => System.system_time(:millisecond) - 1})
+    tick(state, [relay], opts)
+    assert Process.get(:dependency_reads) == 1
+    assert Process.get(:review_starts) == 2
+    assert Process.get(:review_scans) == 1
   end
 
   test "runner reuses the coordinator observation after a local startup failure", %{issues: [issue | _]} do

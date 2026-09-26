@@ -80,7 +80,10 @@ if stage=='run':
             if scenario=='missing_session': data['running']=[]
             if scenario=='duplicate_session': data['running'] *= 2
             self.send_response(200);self.end_headers();self.wfile.write(json.dumps(data).encode())
-    http.server.HTTPServer(('127.0.0.1',int(sys.argv[sys.argv.index('--port')+1])),Handler).serve_forever()
+    # Avoid HTTPServer's reverse DNS lookup; preserve port reuse for restart probes.
+    class FixtureServer(http.server.socketserver.TCPServer):
+        allow_reuse_address=True
+    FixtureServer(('127.0.0.1',int(sys.argv[sys.argv.index('--port')+1])),Handler).serve_forever()
 elif stage=='prepare':
     (root/'fixtures.json').write_text(json.dumps(dict(fixtures=fixtures)))
     (root/'remote-fixtures.json').write_text(json.dumps(fixtures))

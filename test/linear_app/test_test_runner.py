@@ -35,7 +35,7 @@ for number in (signal.SIGINT,signal.SIGTERM): signal.signal(number,interrupt)
 sys.exit(run.execute())
 '''
 SERVICE = r'''
-import http.server,json,os,pathlib,subprocess,sys,time
+import http.server,json,os,pathlib,socketserver,subprocess,sys,time
 capsule=json.loads(os.environ['FIXTURE_CAPSULE'])
 scenario=os.environ.get('FIXTURE_SCENARIO','success')
 stage=os.environ['SYMPHONY_TEST_RUN_STAGE']
@@ -81,8 +81,8 @@ if stage=='run':
             if scenario=='duplicate_session': data['running'] *= 2
             self.send_response(200);self.end_headers();self.wfile.write(json.dumps(data).encode())
     # Avoid HTTPServer's reverse DNS lookup; preserve port reuse for restart probes.
-    class FixtureServer(http.server.socketserver.TCPServer):
-        allow_reuse_address=True
+    class FixtureServer(socketserver.TCPServer):
+        allow_reuse_address = True
     FixtureServer(('127.0.0.1',int(sys.argv[sys.argv.index('--port')+1])),Handler).serve_forever()
 elif stage=='prepare':
     (root/'fixtures.json').write_text(json.dumps(dict(fixtures=fixtures)))

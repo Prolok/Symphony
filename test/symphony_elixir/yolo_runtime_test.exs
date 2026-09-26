@@ -1036,12 +1036,150 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     ]
 
     assert :ok = BlockerBrake.reserve([issue], "previous", opts)
+    assert :ok = Journal.write(%{"id" => "previous", "group" => "blocker", "members" => [%{"id" => issue.id}], "state" => "completed"})
     assert Group.groups([issue]) == %{"blocker" => [issue]}
     assert SymphonyElixir.TestRun.start_allowed?(issue)
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
     assert tick(state, [issue], opts).yolo_runs == %{}
     assert_receive {:brake_note, updated}
     assert updated =~ "PO-Lauf previous"
+  end
+
+  for recovery <- ~w(rejected fenced_interruption) do
+    test "coordinator redelivers an unprocessed BLOCKER after #{recovery} recovery", %{issues: [issue | _]} do
+      alias SymphonyElixir.Yolo.Delivery
+
+      issue = %{issue | state: "BLOCKER", url: "https://linear.example/PRO-0"}
+      body = "## Symphony Workpad\n\n### Validierung\n\n- [ ] Betreiber prüft Hostzugang; fällig: Yolo Review\n"
+
+      opts = [
+        now: fn -> 2_000 end,
+        workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: body}]} end,
+        workpad_write: fn _, _ -> flunk("an unprocessed delivery must not escalate") end,
+        scan: fn _ -> {:ok, Map.put(inbox(), "current", %{})} end,
+        start: fn "blocker", _ ->
+          send(self(), :redelivered)
+          {:error, :observed_start}
+        end
+      ]
+
+      {:ok, observations, _} = Observation.capture([issue], %{}, opts)
+      assert :ok = Delivery.reserve("blocker", "first-run", observations)
+      assert :ok = BlockerBrake.reserve([issue], "first-run", opts)
+      {:ok, record} = Store.read("blocker")
+      receipt = record["deliveries"][issue.id]
+
+      order = %{
+        "id" => "first-run",
+        "group" => "blocker",
+        "members" => [%{"id" => issue.id}],
+        "state" => if(unquote(recovery) == "rejected", do: "rejected", else: "retired")
+      }
+
+      order =
+        if unquote(recovery) == "fenced_interruption" do
+          Map.put(order, "retirement", %{
+            "kind" => "fenced_interruption",
+            "attempt" => %{"id" => "first-run", "completed" => %{}},
+            "deliveries" => %{issue.id => receipt}
+          })
+        else
+          order
+        end
+
+      assert :ok = Journal.write(order)
+      assert :ok = Delivery.reconcile("blocker")
+      assert :ok = Delivery.reconcile("blocker")
+      assert {:ok, [^issue]} = BlockerBrake.check([issue], opts)
+
+      state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+      tick(state, [issue], opts)
+      assert_receive :redelivered
+    end
+  end
+
+  test "interruption releases only unfinished BLOCKER members of the retired generation", %{issues: [first, second, third]} do
+    alias SymphonyElixir.Yolo.Delivery
+
+    members = Enum.map([first, second, third], &%{&1 | state: "BLOCKER"})
+    [first, second, third] = members
+    body = "## Symphony Workpad\n\n### Betreiberauftrag\n\nHostzugang prüfen.\n"
+    opts = [now: fn -> 2_000 end, workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: body}]} end]
+    {:ok, observations, _} = Observation.capture(members, %{}, scan: fn _ -> {:ok, Map.put(inbox(), "current", %{})} end)
+    assert :ok = Delivery.reserve("blocker", "retired-run", observations)
+    assert :ok = BlockerBrake.reserve(members, "retired-run", opts)
+    {:ok, before} = Store.read("blocker")
+    original = before["deliveries"]
+
+    assert :ok = Delivery.reserve("blocker", "newer-run", Map.take(observations, [third.id]))
+    assert :ok = BlockerBrake.reserve([third], "newer-run", opts)
+
+    order = %{
+      "id" => "retired-run",
+      "group" => "blocker",
+      "members" => Enum.map(members, &%{"id" => &1.id}),
+      "state" => "retired",
+      "retirement" => %{
+        "kind" => "fenced_interruption",
+        "attempt" => %{"id" => "retired-run", "completed" => %{second.id => "Entscheidung abgeschlossen"}},
+        "deliveries" => original
+      }
+    }
+
+    assert :ok = Journal.write(order)
+    assert :ok = Delivery.reconcile("blocker")
+    assert :ok = Delivery.reconcile("blocker")
+    {:ok, after_reconcile} = Store.read("blocker")
+    expected = Map.take(before["deliveries"], [second.id]) |> Map.put(third.id, %{"semantic" => observations[third.id]["semantic"], "run_id" => "newer-run"})
+    assert after_reconcile["deliveries"] == expected
+    assert {:ok, [^first]} = BlockerBrake.check([first], opts)
+
+    blocked = Keyword.merge(opts, workpad_write: fn _, _ -> :ok end, query: fn _, _ -> {:error, :expected_handoff} end)
+    assert {:error, :expected_handoff} = BlockerBrake.check([second], blocked)
+    assert {:error, :expected_handoff} = BlockerBrake.check([third], blocked)
+  end
+
+  test "rejected BLOCKER reconciliation releases a reservation even when its receipt was already removed", %{issues: [issue | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+
+    issue = %{issue | state: "BLOCKER"}
+    body = "## Symphony Workpad\n\n### Betreiberauftrag\n\nHostzugang prüfen.\n"
+    opts = [now: fn -> 2_000 end, workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: body}]} end]
+    assert :ok = BlockerBrake.reserve([issue], "rejected-run", opts)
+    assert :ok = Journal.write(%{"id" => "rejected-run", "group" => "blocker", "members" => [%{"id" => issue.id}], "state" => "rejected"})
+    assert :ok = Delivery.reconcile("blocker")
+    assert {:ok, [^issue]} = BlockerBrake.check([issue], opts)
+  end
+
+  test "malformed interruption proof keeps the BLOCKER reservation and delivery", %{issues: [issue | _]} do
+    alias SymphonyElixir.Yolo.Delivery
+
+    issue = %{issue | state: "BLOCKER"}
+    body = "## Symphony Workpad\n\n### Betreiberauftrag\n\nHostzugang prüfen.\n"
+    opts = [now: fn -> 2_000 end, workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: body}]} end]
+    {:ok, observations, _} = Observation.capture([issue], %{}, scan: fn _ -> {:ok, Map.put(inbox(), "current", %{})} end)
+    assert :ok = Delivery.reserve("blocker", "retired-run", observations)
+    assert :ok = BlockerBrake.reserve([issue], "retired-run", opts)
+    {:ok, before} = Store.read("blocker")
+
+    assert :ok =
+             Journal.write(%{
+               "id" => "retired-run",
+               "group" => "blocker",
+               "members" => [%{"id" => issue.id}],
+               "state" => "retired",
+               "retirement" => %{
+                 "kind" => "fenced_interruption",
+                 "attempt" => %{"id" => "different-run"},
+                 "deliveries" => before["deliveries"]
+               }
+             })
+
+    assert {:error, :openclaw_journal_corrupt} = Delivery.reconcile("blocker")
+    assert {:ok, ^before} = Store.read("blocker")
+
+    blocked = Keyword.merge(opts, workpad_write: fn _, _ -> :ok end, query: fn _, _ -> {:error, :expected_handoff} end)
+    assert {:error, :expected_handoff} = BlockerBrake.check([issue], blocked)
   end
 
   test "an unresolved marker blocks a non-Backlog PO action", %{issues: [issue | _]} do
@@ -2277,6 +2415,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     assert :ok = DurableState.write(Journal.path("review"), put_in(order, ["retirement", "attempt", "id"], "other-run"))
     assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = run_group("review", [review], [review], opts)
+
+    assert :ok = DurableState.write(Journal.path("review"), put_in(order, ["retirement", "deliveries"], nil))
+    assert {:error, :openclaw_journal_corrupt} = Yolo.Delivery.reconcile("review")
   end
 
   test "review retry keeps backoff for unchanged pending subset", %{issues: [first, second | _]} do

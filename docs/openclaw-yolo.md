@@ -264,8 +264,10 @@ Produktfreigabe. Späte Antworten können diesen Zustand nicht wieder öffnen.
 Der normale Beobachter beendet sich und gibt Mitgliederleases und Kapazität frei.
 Die bestehende Zustellungs-Reconciliation löst ausschließlich unerledigte
 Zustellquittungen dieser Generation. Bestätigte Mitgliedsentscheidungen und neuere
-Quittungen bleiben erhalten; vollständige Originalaufträge werden vor dem nächsten
-Auftrag wie bisher archiviert. Der Coordinator und Runner prüfen Status, Delegation,
+Quittungen bleiben erhalten. Für erneut planbare BLOCKER-Mitglieder gibt sie auch
+die Schleifenbremsen-Einträge der retirierten Lauf-ID frei; abgeschlossene Läufe
+bleiben gebremst. Vollständige Originalaufträge werden vor dem nächsten Auftrag
+wie bisher archiviert. Der Coordinator und Runner prüfen Status, Delegation,
 Kommentare und offene Aktionen erneut. Ein neuer Auftrag erhält eine neue Sitzung
 und bearbeitet nur noch offene Arbeit. Es gibt keine Wiederholung des alten
 `agent`-Aufrufs und keine zusätzliche Recovery-Infrastruktur.
@@ -294,6 +296,9 @@ und Timeouts bleiben `unknown`; daraus folgt keine Freigabe.
 
 Eine belegte Ablehnung wird `rejected`, entzieht Werkzeuge und beendet den lokalen
 Beobachter ohne `agent.wait`. Annahme-/Werkzeugbelege sperren spätere Nichtstartbefunde.
+Die Reconciliation gibt bei `rejected` auch die BLOCKER-Schleifenbremse für die
+Mitglieder der abgelehnten Lauf-ID frei, selbst wenn ihre Zustellquittung bereits
+entfernt wurde.
 Nichtterminale Ausführungsbelege bewahren die bestehende Werkzeugfreigabe;
 bereits entzogene Freigaben oder angeforderte Abbrüche werden dadurch nicht aufgehoben.
 Verspätete Poll-/Cancel-Antworten öffnen terminale Generationen nicht wieder.

@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.CommentJournalTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Absinthe.Language, as: L
   alias Absinthe.Phase.Parse
-  alias SymphonyElixir.Linear.{CommentJournal, CommentMutations, DurableState, WorkpadTransfer}
+  alias SymphonyElixir.Linear.{CommentJournal, CommentMutations, DurableState, IssueLease, WorkpadTransfer}
 
   setup do
     root = Path.join([File.cwd!(), "_build", "journal-test-#{System.unique_integer([:positive])}"])
@@ -18,6 +18,149 @@ defmodule SymphonyElixir.CommentJournalTest do
     {output, status} = System.cmd(System.find_executable("python3"), [helper, System.find_executable("elixir")] ++ code_paths, stderr_to_stdout: true)
     assert status == 0, output
     assert output =~ "pending recovery and true issue exclusion passed"
+  end
+
+  test "closed old receipts move to the archive while own classification and recovery survive", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+    assert {:ok, _} = CommentJournal.execute(binding, variable_create("old-own", ~s({"text":"Archivtext"})), &graphql_request/1)
+    [remote] = remote_comments()
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("pending", "Offen"), fn _ -> {:error, :offline} end)
+    intent = Enum.find(journal_files(binding, "intent"), &(File.read!(&1) |> Jason.decode!() |> Map.get("comment_id") == "old-own"))
+    pending = Enum.find(journal_files(binding, "intent"), &(File.read!(&1) |> Jason.decode!() |> Map.get("comment_id") == "pending"))
+    record = intent |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    File.write!(intent, Jason.encode!(record))
+    pending_record = pending |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    File.write!(pending, Jason.encode!(pending_record))
+
+    assert {:ok, view} = CommentJournal.snapshot(binding)
+    assert CommentJournal.classify_snapshot(view, binding, remote) == :own
+    assert journal_files(binding, "intent") == [pending]
+    assert [_] = Path.wildcard(Path.join([binding["state_root"], "comments", "archive", "*.intent.json"]))
+    archive = Path.join([binding["state_root"], "comments", "archive"])
+    confirmation = String.replace(intent, ".intent.json", ".confirmed.json")
+    archived_confirmation = Path.join(archive, Path.basename(confirmation))
+    File.rename!(archived_confirmation, confirmation)
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    assert File.exists?(archived_confirmation)
+    refute File.exists?(confirmation)
+    File.cp!(Path.join(archive, Path.basename(intent)), intent)
+    File.cp!(Path.join(archive, Path.basename(confirmation)), confirmation)
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    assert journal_files(binding, "intent") == [pending]
+    assert CommentJournal.classify(binding, remote) == :own
+    assert CommentJournal.classify(binding, %{remote | "body" => "fremde Änderung"}) == :pending
+    assert CommentJournal.confirmed_comment_id?(binding, "old-own")
+    assert CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "old-own", "action" => "create"})
+
+    assert {:ok, results} =
+             CommentJournal.reconcile(binding, fn payload ->
+               assert payload["variables"]["id"] == "pending"
+               response(%{"comment" => nil})
+             end)
+
+    assert Enum.sort(Enum.map(results, & &1["state"])) == ["confirmed", "pending"]
+    assert File.exists?(pending)
+  end
+
+  test "an old receipt with an unverified outcome stays active", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("unclear", "Erwartet"), fn _ -> {:error, :offline} end)
+    [intent] = journal_files(binding, "intent")
+    record = intent |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    File.write!(intent, Jason.encode!(record))
+    confirmed = String.replace(intent, ".intent.json", ".confirmed.json")
+    File.write!(confirmed, Jason.encode!(%{"comment" => %{comment(record) | "body" => "Andere Fassung"}}))
+
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    assert File.exists?(intent)
+    assert CommentJournal.classify(binding, comment(record)) == :pending
+  end
+
+  test "recovery confirmation waits for the shared journal lock", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("old", "Alt"), fn _ -> {:error, :offline} end)
+    [record] = journal_records(binding)
+    owner = self()
+
+    recovering =
+      Task.async(fn ->
+        CommentJournal.execute(binding, variable_create("new", "Neu"), fn payload ->
+          if payload["query"] =~ "SymphonyReceipt" do
+            send(owner, :recovery_lookup)
+
+            receive do
+              :continue_lookup -> response(%{"comment" => comment(record)})
+            end
+          else
+            {:error, :offline}
+          end
+        end)
+      end)
+
+    assert_receive :recovery_lookup, 1_000
+
+    holder =
+      Task.async(fn ->
+        IssueLease.with_journal_lock(binding["state_root"], fn ->
+          send(owner, :journal_held)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :journal_held, 1_000
+    send(recovering.pid, :continue_lookup)
+    Process.sleep(100)
+    assert journal_files(binding, "confirmed") == []
+    send(holder.pid, :release)
+    assert :ok = Task.await(holder)
+    assert {:error, :offline} = Task.await(recovering)
+    assert length(journal_files(binding, "confirmed")) == 1
+  end
+
+  @tag timeout: 120_000
+  test "two thousand closed receipts keep a scan snapshot and local write below one second", %{binding: binding} do
+    directory = Path.join(binding["state_root"], "comments")
+    File.mkdir_p!(directory)
+    written_at = DateTime.utc_now() |> DateTime.add(-15, :day) |> DateTime.to_iso8601()
+
+    for number <- 1..2_000 do
+      id = "load-#{number}"
+
+      record = %{
+        "operation_id" => id,
+        "comment_id" => id,
+        "workspace_id" => binding["workspace_id"],
+        "installation_id" => binding["installation_id"],
+        "operation" => "commentCreate",
+        "issue_id" => "issue",
+        "author_id" => "app",
+        "written_at" => written_at,
+        "input" => %{"body" => "Beleg"}
+      }
+
+      remote = %{"id" => id, "body" => "Beleg", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
+      File.write!(Path.join(directory, id <> ".intent.json"), Jason.encode!(record))
+      File.write!(Path.join(directory, id <> ".confirmed.json"), Jason.encode!(%{"comment" => remote}))
+    end
+
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, view} = CommentJournal.snapshot(binding)
+    scan_ms = System.monotonic_time(:millisecond) - started
+    assert map_size(view) == 2_000
+    assert length(Path.wildcard(Path.join([directory, "archive", "*.intent.json"]))) == 16
+    assert scan_ms < 1_000, "scan snapshot held lock for #{scan_ms} ms"
+
+    started = System.monotonic_time(:millisecond)
+
+    assert {:ok, _} =
+             CommentJournal.execute(binding, variable_create("fresh", "Neu"), fn payload ->
+               input = hd(parsed_fields(payload)).arguments["input"]
+               response(%{"commentCreate" => %{"symphonyReceipt" => %{"id" => input["id"], "body" => input["body"], "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}}})
+             end)
+
+    write_ms = System.monotonic_time(:millisecond) - started
+    assert write_ms < 1_000, "local write with 2,000 receipts took #{write_ms} ms"
   end
 
   test "parallel clients cannot enter the same journal transaction during HTTP", %{binding: binding} do
@@ -51,6 +194,35 @@ defmodule SymphonyElixir.CommentJournalTest do
 
     assert {:error, {:comment_write_unresolved, [_]}} =
              CommentJournal.execute(binding, create_payload(), fn _ -> {:error, :connection_lost} end)
+  end
+
+  test "a concurrent update cannot hydrate identity before writer serialization", %{binding: binding} do
+    owner = self()
+    payload = %{"query" => "mutation { commentUpdate(id: \"old\", input: {body: \"Neu\"}) { success } }"}
+    old = %{"id" => "old", "body" => "Alt", "updatedAt" => "2026-09-26T08:00:00Z", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
+
+    first =
+      Task.async(fn ->
+        CommentJournal.execute(binding, payload, fn request ->
+          if request["query"] =~ "SymphonyReceipt" do
+            response(%{"comment" => old})
+          else
+            send(owner, :first_update_http)
+
+            receive do
+              :finish_update -> {:error, :offline}
+            end
+          end
+        end)
+      end)
+
+    assert_receive :first_update_http, 1_000
+
+    assert {:error, :comment_journal_busy} =
+             CommentJournal.execute(binding, payload, fn _ -> flunk("identity hydration must wait") end, %{}, lock_timeout: 100)
+
+    send(first.pid, :finish_update)
+    assert {:error, :offline} = Task.await(first)
   end
 
   test "aliases, variables, defaults, root fragments and inline inputs are instrumented" do

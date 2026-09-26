@@ -3,8 +3,10 @@ defmodule SymphonyElixir.Linear.IssueLease do
   Host-local issue ownership for app workers.
   """
 
+  require Logger
+
   alias SymphonyElixir.{Config, RuntimePaths, Tracker, Workpad}
-  alias SymphonyElixir.Linear.{WorkpadTransfer, YoloAgent}
+  alias SymphonyElixir.Linear.{WorkpadTransfer, WriteContext, YoloAgent}
   alias SymphonyElixir.Yolo.OpenClaw.Journal, as: OpenClawJournal
   alias SymphonyElixir.Yolo.Operations, as: Operations
 
@@ -63,10 +65,30 @@ defmodule SymphonyElixir.Linear.IssueLease do
     lock(workspace_id, issue_id, callback, 0, {:issue_already_owned, :issue_lease_unavailable})
   end
 
-  @spec with_journal_lock(String.t(), (-> term()), non_neg_integer()) :: term()
-  def with_journal_lock(state_root, callback, timeout \\ 10_000) do
+  @spec with_journal_lock(String.t(), (-> term()), non_neg_integer(), String.t()) :: term()
+  def with_journal_lock(state_root, callback, timeout \\ 10_000, purpose \\ "journal") do
     # Keep the existing lock identity/inode, including across release upgrades.
-    lock("symphony-comment-journal", Path.expand(state_root), callback, timeout, {:comment_journal_busy, :comment_journal_unavailable})
+    timed = fn ->
+      started = System.monotonic_time(:millisecond)
+
+      try do
+        callback.()
+      after
+        elapsed = System.monotonic_time(:millisecond) - started
+
+        if elapsed > 2_000 and purpose not in ["scan-serialization", "write-serialization"] do
+          context = WriteContext.current()
+
+          Logger.debug(
+            "Comment journal lock hold exceeded purpose=#{purpose} elapsed_ms=#{elapsed} " <>
+              "issue_id=#{context["issue_id"] || "unknown"} issue_identifier=#{context["issue_identifier"] || "unknown"} " <>
+              "session_id=#{context["session_id"] || "unknown"}"
+          )
+        end
+      end
+    end
+
+    lock("symphony-comment-journal", Path.expand(state_root), timed, timeout, {:comment_journal_busy, :comment_journal_unavailable})
   end
 
   defp lock(workspace_id, issue_id, callback, timeout, {_busy, unavailable} = errors) do
@@ -112,8 +134,20 @@ defmodule SymphonyElixir.Linear.IssueLease do
     with :ok <- ready_target(issue.id),
          :ok <- verify_delegation(issue),
          {:ok, comments} <- Tracker.fetch_issue_comments(issue.id),
-         :ok <- workpad_ready(binding, issue, comments) do
+         :ok <- retry_journal_busy(fn -> workpad_ready(binding, issue, comments) end, 3) do
       callback.()
+    end
+  end
+
+  @spec retry_journal_busy((-> term()), pos_integer()) :: term()
+  def retry_journal_busy(callback, remaining) do
+    case callback.() do
+      {:error, :comment_journal_busy} when remaining > 1 ->
+        Process.sleep(250)
+        retry_journal_busy(callback, remaining - 1)
+
+      result ->
+        result
     end
   end
 

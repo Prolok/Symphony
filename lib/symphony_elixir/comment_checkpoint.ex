@@ -30,9 +30,11 @@ defmodule SymphonyElixir.CommentCheckpoint do
     opts = Keyword.put_new(opts, :resolve_advisory, &Client.fetch_comment_thread(issue.id, &1))
 
     result =
-      with :ok <- AdvisoryAgents.verify() do
-        CommentInbox.scan(app_binding(), issue, Keyword.get(opts, :fetch, fn -> Client.scan_issue_comments(issue.id) end), opts)
-      end
+      WriteContext.with_context(%{issue_id: issue.id, issue_identifier: issue.identifier}, fn ->
+        with :ok <- AdvisoryAgents.verify() do
+          CommentInbox.scan(app_binding(), issue, Keyword.get(opts, :fetch, fn -> Client.scan_issue_comments(issue.id) end), opts)
+        end
+      end)
 
     case result do
       {:ok, state} ->

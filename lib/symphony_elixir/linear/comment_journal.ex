@@ -11,6 +11,12 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   @lookup "query SymphonyReceipt($id: String!) { comment(id: $id) { id body bodyData quotedText resolvingUser { id } resolvingComment { id } updatedAt user { id } issue { id identifier } } }"
   @issue_lookup "query SymphonyReceiptIssue($id: String!) { issue(id: $id) { id } }"
   @recovery_update "mutation SymphonyRecoverCommentUpdate($id: String!, $input: CommentUpdateInput!) { recovered: commentUpdate(id: $id, input: $input) { success symphonyReceipt: comment { id body bodyData quotedText resolvingUser { id } resolvingComment { id } updatedAt user { id } issue { id identifier } } } }"
+  # Closed receipts older than 14 days leave the active scan path. A small batch
+  # bounds each transaction; pending and unknown outcomes stay active forever.
+  @retention_days 14
+  @archive_batch 16
+  @match_fields ~w(body bodyData quotedText resolvingUserId resolvingCommentId)
+  @version_fields ~w(body bodyData quotedText resolvingUser resolvingComment)
 
   @spec execute(map(), map(), (map() -> term()), map(), keyword()) :: term()
   def execute(binding, payload, request, context \\ %{}, opts \\ []) do
@@ -22,22 +28,48 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp execute_prepared(_binding, prepared, [], request, _context, _opts), do: request.(prepared)
 
   defp execute_prepared(binding, prepared, receipts, request, context, opts) do
+    binding = Map.put(binding, :state_writer, Keyword.get(opts, :state_writer, &DurableState.write/2))
+
+    # Serialize new writers, including identity hydration, while HTTP runs.
+    # The shared journal lock only covers local intent/confirmation transactions.
     IssueLease.with_journal_lock(
-      binding["state_root"],
-      fn -> execute_locked(binding, prepared, receipts, request, context, opts) end,
-      Keyword.get(opts, :lock_timeout, 10_000)
+      binding["state_root"] <> ".writes",
+      fn -> execute_serialized(binding, prepared, receipts, request, context, opts) end,
+      Keyword.get(opts, :lock_timeout, 10_000),
+      "write-serialization"
     )
   end
 
-  defp execute_locked(binding, prepared, receipts, request, context, opts) do
-    binding = Map.put(binding, :state_writer, Keyword.get(opts, :state_writer, &DurableState.write/2))
-
+  defp execute_serialized(binding, prepared, receipts, request, context, opts) do
     with {:ok, receipts} <- collect(receipts, &hydrate_receipt(binding, &1, request)),
-         :ok <- recover_before_write(binding, receipts, request),
-         :ok <- persist_intents(binding, receipts, context),
+         {:ok, known_ids} <- recover_before_write(binding, receipts, request),
+         :ok <-
+           IssueLease.with_journal_lock(
+             binding["state_root"],
+             fn ->
+               persist_new_intents(binding, receipts, context, known_ids)
+             end,
+             Keyword.get(opts, :lock_timeout, 10_000),
+             "write-intent"
+           ),
          {:ok, response} <- request.(prepared),
-         :ok <- confirm_response(binding, receipts, response) do
+         :ok <-
+           IssueLease.with_journal_lock(binding["state_root"], fn -> confirm_response(binding, receipts, response) end, Keyword.get(opts, :lock_timeout, 10_000), "write-confirm") do
       {:ok, response}
+    end
+  end
+
+  defp persist_new_intents(binding, receipts, context, known_ids) do
+    with {:ok, files} <- active_files(binding),
+         true <-
+           files
+           |> Enum.filter(&String.ends_with?(&1, ".intent.json"))
+           |> Enum.all?(fn file -> MapSet.member?(known_ids, String.replace_suffix(file, ".intent.json", "")) end),
+         :ok <- persist_intents(binding, receipts, context) do
+      :ok
+    else
+      false -> {:error, :comment_write_concurrent}
+      error -> error
     end
   end
 
@@ -77,17 +109,337 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   @spec reconcile(map(), (map() -> term())) :: {:ok, [map()]} | {:error, term()}
   def reconcile(binding, request) do
-    IssueLease.with_journal_lock(binding["state_root"], fn ->
-      with {:ok, records} <- intents(binding) do
-        collect(records, &confirm_remote(binding, &1, request))
-      end
-    end)
+    with {:ok, records} <- IssueLease.with_journal_lock(binding["state_root"], fn -> intents(binding) end) do
+      collect(records, &reconcile_record(binding, &1, request))
+    end
+  end
+
+  defp reconcile_record(binding, record, request) do
+    cond do
+      rejected?(binding, record) ->
+        {:ok, result(record, "rejected")}
+
+      record["_archived"] == true ->
+        {:ok, result(record, "confirmed")}
+
+      true ->
+        response = request.(%{"query" => @lookup, "variables" => %{"id" => record["comment_id"]}})
+        confirm_prefetched(binding, record, response, 10_000, "reconcile-confirm")
+    end
+  end
+
+  defp confirm_prefetched(binding, record, response, timeout, purpose) do
+    IssueLease.with_journal_lock(
+      binding["state_root"],
+      fn ->
+        confirm_remote(binding, record, fn _ -> response end)
+      end,
+      timeout,
+      purpose
+    )
   end
 
   @spec classify(map(), map()) :: :own | :pending | :foreign | {:error, term()}
   def classify(binding, comment) do
-    with {:ok, records} <- intents(binding) do
-      classify_records(records, binding, comment)
+    with {:ok, view} <- snapshot(binding) do
+      classify_snapshot(view, binding, comment)
+    end
+  end
+
+  @doc "Read each active intent once while holding the journal lock. The returned view is immutable."
+  @spec snapshot(map(), keyword()) :: {:ok, map()} | {:error, term()}
+  def snapshot(binding, opts \\ []) do
+    IssueLease.with_journal_lock(
+      binding["state_root"],
+      fn ->
+        with :ok <- finish_archive_moves(binding),
+             {:ok, records} <- intents(binding, Keyword.get(opts, :journal_reader, &read_intent(binding, &1))),
+             {:ok, entries} <- read_many(records, &snapshot_entry(binding, &1)),
+             :ok <- archive_due(binding, entries) do
+          {:ok, entries |> Enum.group_by(& &1.record["comment_id"]) |> Map.new()}
+        end
+      end,
+      Keyword.get(opts, :scan_lock_timeout, 750),
+      "scan-snapshot"
+    )
+  end
+
+  @doc "Reconcile pending receipts from the same intent view used to classify a scan."
+  @spec observation_snapshot(map(), (map() -> term()) | nil, keyword()) :: {:ok, map()} | {:error, term()}
+  def observation_snapshot(binding, request, opts \\ []) do
+    with {:ok, view} <- snapshot(binding, opts) do
+      reconcile_view(binding, view, request)
+    end
+  end
+
+  defp reconcile_view(_binding, view, nil), do: {:ok, view}
+
+  defp reconcile_view(binding, view, request) do
+    Enum.reduce_while(view, {:ok, %{}}, fn {comment_id, entries}, {:ok, acc} ->
+      case collect(entries, &reconcile_view_entry(binding, &1, request)) do
+        {:ok, reconciled} -> {:cont, {:ok, Map.put(acc, comment_id, reconciled)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp reconcile_view_entry(binding, entry, request) do
+    if pending_entry?(entry, binding) do
+      record = entry.record
+      response = request.(%{"query" => @lookup, "variables" => %{"id" => record["comment_id"]}})
+
+      case confirm_prefetched(binding, record, response, 750, "scan-reconcile-confirm") do
+        {:ok, %{"state" => "confirmed"}} ->
+          comment = observed_comment(response)
+          {:ok, %{entry | confirmed: comment, recovered: true}}
+
+        {:ok, _result} ->
+          {:ok, entry}
+
+        error ->
+          error
+      end
+    else
+      {:ok, entry}
+    end
+  end
+
+  defp observed_comment({:ok, %{body: %{"data" => %{"comment" => comment}}}}), do: comment
+  defp observed_comment(_response), do: nil
+
+  @spec classify_snapshot(map(), map(), map()) :: :own | :pending | :foreign | {:error, term()}
+  def classify_snapshot(view, binding, comment) do
+    entries = Map.get(view, comment["id"], [])
+    latest = entries |> Enum.reject(& &1.rejected) |> Enum.max_by(&{&1.record["written_at"], &1.record["operation_id"]}, fn -> nil end)
+    classify_latest(latest, binding, comment)
+  end
+
+  defp classify_latest(nil, binding, comment) do
+    if get_in(comment, ["user", "id"]) == binding["user_id"], do: :pending, else: :foreign
+  end
+
+  defp classify_latest(%{confirmed: nil}, _binding, _comment), do: :pending
+
+  defp classify_latest(%{record: %{"_archived" => true} = record}, _binding, comment) do
+    if archive_matches?(record, comment) and archive_version?(record, comment), do: :own, else: :pending
+  end
+
+  defp classify_latest(%{record: record, confirmed: confirmed}, binding, comment) do
+    if matches?(record, comment, binding) and confirmed_version?(confirmed, comment), do: :own, else: :pending
+  end
+
+  defp snapshot_entry(_binding, %{"_archived" => true} = record) do
+    {:ok,
+     %{
+       record: record,
+       confirmed: if(record["_confirmed"], do: true),
+       recovered: record["_recovered"] == true,
+       rejected: record["_rejected"] == true
+     }}
+  end
+
+  defp snapshot_entry(binding, record) do
+    with {:ok, confirmation} <- optional_receipt(path(binding, record, "confirmed"), "comment"),
+         {:ok, rejected} <- optional_receipt(path(binding, record, "rejected"), "state") do
+      {:ok,
+       %{
+         record: record,
+         confirmed: if(is_map(confirmation), do: confirmation["comment"]),
+         recovered: is_map(confirmation) and confirmation["recovered"] == true,
+         rejected: rejected == "rejected"
+       }}
+    end
+  end
+
+  defp optional_receipt(path, key) do
+    case DurableState.read(path) do
+      {:ok, receipt} when is_map(receipt) -> {:ok, if(key == "comment", do: receipt, else: receipt[key])}
+      {:error, :enoent} -> {:ok, nil}
+      _ -> {:error, :comment_journal_corrupt}
+    end
+  end
+
+  defp archive_due(binding, entries) do
+    cutoff = DateTime.utc_now() |> DateTime.add(-@retention_days, :day) |> DateTime.to_iso8601()
+    entries |> Enum.filter(&archive_due?(&1, cutoff, binding)) |> Enum.take(@archive_batch) |> write_archive_batch(binding)
+  end
+
+  defp archive_due?(%{record: record, confirmed: confirmed, rejected: rejected}, cutoff, binding) do
+    closed? =
+      (rejected and is_nil(confirmed)) or
+        (not rejected and is_map(confirmed) and matches?(record, confirmed, binding))
+
+    record["_archived"] != true and is_binary(record["written_at"]) and record["written_at"] < cutoff and
+      closed?
+  end
+
+  defp write_archive_batch([], _binding), do: :ok
+
+  defp write_archive_batch(due, binding) do
+    with {:ok, catalog} <- archive_catalog(binding),
+         updated = Enum.reduce(due, catalog, fn entry, acc -> Map.put(acc, entry.record["operation_id"], archive_summary(entry)) end),
+         :ok <- DurableState.write(archive_index(binding), archive_index_data(binding, updated)),
+         :ok <- move_archive_batch(binding, Enum.map(due, &archive_summary/1)) do
+      :ok
+    else
+      _ -> {:error, :comment_journal_archive_failed}
+    end
+  end
+
+  defp archive_index_data(binding, entries) do
+    %{"workspace_id" => binding["workspace_id"], "installation_id" => binding["installation_id"], "entries" => entries, "digest" => fingerprint(entries)}
+  end
+
+  defp archive_summary(%{record: record, confirmed: confirmed, recovered: recovered, rejected: rejected}) do
+    keys = record["input"] |> Map.take(@match_fields) |> Map.keys() |> Enum.sort()
+    version_keys = if is_map(confirmed), do: confirmed |> Map.take(@version_fields) |> Map.keys() |> Enum.sort(), else: []
+
+    %{
+      "_archived" => true,
+      "_confirmed" => is_map(confirmed),
+      "_rejected" => rejected,
+      "_recovered" => recovered,
+      "operation_id" => record["operation_id"],
+      "operation" => record["operation"],
+      "comment_id" => record["comment_id"],
+      "issue_id" => record["issue_id"],
+      "author_id" => record["author_id"],
+      "written_at" => record["written_at"],
+      "parent_id" => get_in(record, ["input", "parentId"]),
+      "input_hash" => fingerprint(comparable_input(record)),
+      "match_keys" => keys,
+      "match_hash" => fingerprint(expected_match(record["input"], keys)),
+      "version_keys" => version_keys,
+      "version_hash" => fingerprint(Map.take(confirmed || %{}, version_keys)),
+      "updated_at" => if(is_map(confirmed), do: confirmed["updatedAt"])
+    }
+  end
+
+  defp move_archived(binding, record) do
+    receipt = if record["_confirmed"], do: "confirmed", else: "rejected"
+
+    Enum.reduce_while([receipt, "intent"], :ok, fn suffix, :ok ->
+      from = path(binding, record, suffix)
+      to = Path.join(archive_directory(binding), Path.basename(from))
+
+      case move_archived_file(from, to) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp move_archived_file(from, to) do
+    case {File.read(from), File.read(to)} do
+      {{:ok, source}, {:ok, destination}} when source != destination ->
+        {:error, :comment_journal_archive_failed}
+
+      {{:error, :enoent}, {:ok, _}} ->
+        :ok
+
+      {{:ok, _}, _} ->
+        case File.rename(from, to) do
+          :ok -> :ok
+          _ -> {:error, :comment_journal_archive_failed}
+        end
+
+      _ ->
+        {:error, :comment_journal_archive_failed}
+    end
+  end
+
+  defp move_archive_batch(_binding, []), do: :ok
+
+  defp move_archive_batch(binding, records) do
+    with :ok <- reduce_ok(records, &move_archived(binding, &1)),
+         :ok <- sync_archive_directory(directory(binding)),
+         :ok <- sync_archive_directory(archive_directory(binding)) do
+      :ok
+    else
+      _ -> {:error, :comment_journal_archive_failed}
+    end
+  end
+
+  defp sync_archive_directory(path) do
+    with {:ok, descriptor} <- :file.open(String.to_charlist(path), [:read, :raw, :directory]) do
+      result = :file.sync(descriptor)
+      closed = :file.close(descriptor)
+      if result == :ok, do: closed, else: result
+    end
+  end
+
+  defp finish_archive_moves(binding) do
+    with :ok <- journal_directory_available(binding),
+         {:ok, catalog} <- archive_catalog(binding),
+         {:ok, files} <- active_files(binding) do
+      files
+      |> Enum.filter(&String.match?(&1, ~r/\.(intent|confirmed|rejected)\.json\z/))
+      |> Enum.map(&String.replace(&1, ~r/\.(intent|confirmed|rejected)\.json\z/, ""))
+      |> Enum.uniq()
+      |> Enum.flat_map(&List.wrap(catalog[&1]))
+      |> Enum.take(@archive_batch)
+      |> then(&move_archive_batch(binding, &1))
+    end
+  end
+
+  defp archive_matches?(record, comment) do
+    comment["id"] == record["comment_id"] and
+      get_in(comment, ["user", "id"]) == record["author_id"] and
+      (is_nil(record["issue_id"]) or record["issue_id"] in [get_in(comment, ["issue", "id"]), get_in(comment, ["issue", "identifier"])]) and
+      fingerprint(actual_match(comment, record["match_keys"])) == record["match_hash"] and
+      record["_confirmed"] == true
+  end
+
+  defp archive_version?(record, comment),
+    do: fingerprint(Map.take(comment, record["version_keys"])) == record["version_hash"]
+
+  defp expected_match(input, keys) do
+    Map.new(keys, fn key -> {key, if(key == "bodyData", do: normalize_json(input[key]), else: input[key])} end)
+  end
+
+  defp actual_match(comment, keys) do
+    Map.new(keys, fn key ->
+      value =
+        case key do
+          "resolvingUserId" -> get_in(comment, ["resolvingUser", "id"])
+          "resolvingCommentId" -> get_in(comment, ["resolvingComment", "id"])
+          _ -> Map.get(comment, key, :missing)
+        end
+
+      {key, if(key == "bodyData", do: normalize_json(value), else: value)}
+    end)
+  end
+
+  defp fingerprint(value), do: :crypto.hash(:sha256, :erlang.term_to_binary(value)) |> Base.encode16(case: :lower)
+
+  defp archive_index(binding), do: Path.join(archive_directory(binding), "index.json")
+  defp archive_directory(binding), do: Path.join(directory(binding), "archive")
+
+  defp archive_catalog(binding) do
+    case DurableState.read(archive_index(binding)) do
+      {:ok, %{"workspace_id" => workspace, "installation_id" => installation, "entries" => entries, "digest" => digest}} when is_map(entries) ->
+        cond do
+          installation != binding["installation_id"] ->
+            {:error, {:local_state_requires_handoff, archive_directory(binding), LocalState.handoff_message()}}
+
+          workspace != binding["workspace_id"] ->
+            {:error, :comment_journal_corrupt}
+
+          digest != fingerprint(entries) ->
+            {:error, :comment_journal_corrupt}
+
+          true ->
+            {:ok, entries}
+        end
+
+      {:error, :enoent} ->
+        {:ok, %{}}
+
+      {:error, :enotdir} ->
+        {:error, :comment_journal_unavailable}
+
+      _ ->
+        {:error, :comment_journal_corrupt}
     end
   end
 
@@ -117,19 +469,26 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   def confirmed_relay_event?(_binding, _event), do: false
 
   defp confirmed_relay_record?(binding, record, id, operation, action, version) do
-    if record["comment_id"] == id and record["operation"] == operation do
-      case DurableState.read(path(binding, record, "confirmed")) do
-        {:ok, %{"comment" => comment}} ->
-          matches?(record, comment, binding) and
-            (action == "create" or (not is_nil(version) and same_timestamp?(version, comment["updatedAt"])))
+    record["comment_id"] == id and record["operation"] == operation and
+      relay_receipt_matches?(binding, record, action, version)
+  end
 
-        _ ->
-          false
-      end
-    else
-      false
+  defp relay_receipt_matches?(_binding, %{"_archived" => true} = record, action, version) do
+    record["_confirmed"] == true and relay_version_matches?(action, version, record["updated_at"])
+  end
+
+  defp relay_receipt_matches?(binding, record, action, version) do
+    case confirmed_receipt(binding, record) do
+      {:ok, %{"comment" => comment}} ->
+        matches?(record, comment, binding) and relay_version_matches?(action, version, comment["updatedAt"])
+
+      _ ->
+        false
     end
   end
+
+  defp relay_version_matches?("create", _version, _confirmed), do: true
+  defp relay_version_matches?(_action, version, confirmed), do: not is_nil(version) and same_timestamp?(version, confirmed)
 
   defp same_timestamp?(left, right) when is_binary(left) and is_binary(right) do
     left == right or
@@ -146,7 +505,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     case intents(binding) do
       {:ok, records} ->
         Enum.any?(records, fn record ->
-          get_in(record, ["input", "parentId"]) == parent_id and written_after?(record["written_at"], after_ms) and
+          parent_id(record) == parent_id and written_after?(record["written_at"], after_ms) and
             confirmed?(binding, record)
         end)
 
@@ -164,49 +523,27 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp written_after?(_value, _after_ms), do: false
 
-  @doc "Serialize a full observation with writes; reconcile outstanding receipts before classifying echoes."
+  @doc "Reconcile outstanding receipts, then run the callback without holding the journal lock."
   @spec observe(map(), (map() -> term()) | nil, (-> term())) :: term()
   def observe(binding, request, callback) do
-    IssueLease.with_journal_lock(binding["state_root"], fn ->
-      with :ok <- reconcile_observation(binding, request) do
-        callback.()
-      end
-    end)
+    with :ok <- reconcile_observation(binding, request), do: callback.()
   end
 
   defp reconcile_observation(_binding, nil), do: :ok
 
   defp reconcile_observation(binding, request) do
-    with {:ok, records} <- intents(binding),
-         {:ok, _results} <- collect(Enum.reject(records, &(confirmed?(binding, &1) or rejected?(binding, &1))), &confirm_remote(binding, &1, request)) do
+    with {:ok, records} <- IssueLease.with_journal_lock(binding["state_root"], fn -> intents(binding) end, 750, "scan-reconcile-read"),
+         pending = pending_records(binding, records),
+         {:ok, _results} <- collect(pending, &reconcile_observation_record(binding, &1, request)) do
       :ok
     end
   end
 
-  defp classify_records(records, binding, comment) do
-    matches = Enum.filter(records, &(&1["comment_id"] == comment["id"] and not rejected?(binding, &1)))
-    latest = Enum.max_by(matches, &{&1["written_at"], &1["operation_id"]}, fn -> nil end)
+  defp pending_records(binding, records), do: Enum.reject(records, &(confirmed?(binding, &1) or rejected?(binding, &1)))
 
-    case latest do
-      nil ->
-        if get_in(comment, ["user", "id"]) == binding["user_id"], do: :pending, else: :foreign
-
-      record ->
-        classify_confirmed(binding, record, comment)
-    end
-  end
-
-  defp classify_confirmed(binding, record, comment) do
-    case DurableState.read(path(binding, record, "confirmed")) do
-      {:ok, %{"comment" => confirmed}} ->
-        if matches?(record, comment, binding) and confirmed_version?(confirmed, comment), do: :own, else: :pending
-
-      {:error, :enoent} ->
-        :pending
-
-      _ ->
-        {:error, :comment_journal_corrupt}
-    end
+  defp reconcile_observation_record(binding, record, request) do
+    response = request.(%{"query" => @lookup, "variables" => %{"id" => record["comment_id"]}})
+    confirm_prefetched(binding, record, response, 750, "scan-reconcile-confirm")
   end
 
   defp confirmed_version?(confirmed, comment) do
@@ -218,18 +555,44 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp recover_before_write(binding, receipts, request) do
-    with {:ok, records} <- intents(binding),
+    with {:ok, {records, entries}} <- recovery_snapshot(binding),
          {:ok, recovered} <-
            collect(
-             Enum.reject(records, &(confirmed?(binding, &1) or rejected?(binding, &1))),
+             entries |> Enum.filter(&pending_entry?(&1, binding)) |> Enum.map(& &1.record),
              &recover_remote_before_write(binding, &1, request)
            ) do
       # Another issue or a restarted runtime may have completed reconciliation.
       # The original run/tool context is evidence, not a retry identity.
-      prior = Enum.filter(records, &recovered?(binding, &1))
-      check_recovery(records, recovered, receipts, prior)
+      prior = entries |> Enum.filter(& &1.recovered) |> Enum.map(& &1.record)
+
+      case check_recovery(records, recovered, receipts, prior) do
+        :ok -> {:ok, MapSet.new(records, & &1["operation_id"])}
+        error -> error
+      end
     end
   end
+
+  defp recovery_snapshot(binding) do
+    IssueLease.with_journal_lock(
+      binding["state_root"],
+      fn ->
+        with {:ok, records} <- intents(binding),
+             {:ok, entries} <- read_many(records, &snapshot_entry(binding, &1)) do
+          {:ok, {records, entries}}
+        end
+      end,
+      10_000,
+      "write-recovery-snapshot"
+    )
+  end
+
+  defp pending_entry?(%{rejected: true}, _binding), do: false
+  defp pending_entry?(%{record: %{"_archived" => true}, confirmed: true}, _binding), do: false
+
+  defp pending_entry?(%{record: record, confirmed: confirmed}, binding) when is_map(confirmed),
+    do: not matches?(record, confirmed, binding)
+
+  defp pending_entry?(_entry, _binding), do: true
 
   defp check_recovery(records, recovered, receipts, prior) do
     unresolved = Enum.filter(recovered, &(&1["state"] != "confirmed"))
@@ -258,26 +621,40 @@ defmodule SymphonyElixir.Linear.CommentJournal do
         receipt["operation"] == record["operation"] and
           (record["operation"] == "commentCreate" or
              receipt["comment_id"] == record["comment_id"]) and
-          comparable_input(receipt) == comparable_input(record)
+          input_fingerprint(receipt) == input_fingerprint(record)
       end)
   end
 
   defp comparable_input(record), do: Map.delete(record["input"], "id")
 
-  defp recovered?(binding, record) do
-    match?({:ok, %{"recovered" => true}}, DurableState.read(path(binding, record, "confirmed")))
-  end
+  defp input_fingerprint(%{"_archived" => true} = record), do: record["input_hash"]
+  defp input_fingerprint(record), do: fingerprint(comparable_input(record))
+
+  defp parent_id(%{"_archived" => true} = record), do: record["parent_id"]
+  defp parent_id(record), do: get_in(record, ["input", "parentId"])
 
   defp rejected?(binding, record) do
-    match?({:ok, %{"state" => "rejected"}}, DurableState.read(path(binding, record, "rejected")))
+    if record["_archived"],
+      do: record["_rejected"] == true,
+      else: match?({:ok, %{"state" => "rejected"}}, DurableState.read(path(binding, record, "rejected")))
   end
 
   defp confirmed?(binding, record) do
-    case DurableState.read(path(binding, record, "confirmed")) do
-      {:ok, %{"comment" => comment}} -> matches?(record, comment, binding)
-      _ -> false
+    if record["_archived"] == true do
+      record["_confirmed"] == true
+    else
+      case confirmed_receipt(binding, record) do
+        {:ok, %{"comment" => comment}} -> matches?(record, comment, binding)
+        _ -> false
+      end
     end
   end
+
+  defp confirmed_receipt(_binding, %{"_archived" => true} = record) do
+    if record["_confirmed"], do: {:ok, %{"comment" => record}}, else: {:error, :enoent}
+  end
+
+  defp confirmed_receipt(binding, record), do: DurableState.read(path(binding, record, "confirmed"))
 
   defp persist_intents(binding, receipts, context) do
     reduce_ok(receipts, &persist_intent(binding, &1, context))
@@ -380,13 +757,21 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp confirm_recovered_comment(binding, record, comment, recover_update?) do
     with :ok <-
-           persist(binding, path(binding, record, "confirmed"), %{
-             "comment" => comment,
-             "recovered" => true
-           }) do
+           persist_recovery(binding, record, "confirmed", %{"comment" => comment, "recovered" => true}, recover_update?) do
       {:ok, recovered_result(record, recover_update?)}
     end
   end
+
+  defp persist_recovery(binding, record, suffix, value, true) do
+    IssueLease.with_journal_lock(
+      binding["state_root"],
+      fn -> persist(binding, path(binding, record, suffix), value) end,
+      10_000,
+      "write-recovery-#{suffix}"
+    )
+  end
+
+  defp persist_recovery(binding, record, suffix, value, false), do: persist(binding, path(binding, record, suffix), value)
 
   defp recovered_result(%{"operation" => "commentUpdate"} = record, true) do
     Map.put(result(record, "confirmed"), "recovered_update", true)
@@ -422,12 +807,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
       "variables" => %{"id" => record["comment_id"], "input" => record["input"]}
     }
 
-    with :ok <-
-           persist(
-             binding,
-             path(binding, record, "intent"),
-             Map.put(record, "replay_attempted", true)
-           ) do
+    with :ok <- persist_recovery(binding, record, "intent", Map.put(record, "replay_attempted", true), true) do
       case request.(payload) do
         {:ok, response} ->
           confirm_replayed_update(binding, record, response)
@@ -479,16 +859,33 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp nonempty?(value), do: is_binary(value) and String.trim(value) != ""
 
-  defp intents(binding) do
+  defp intents(binding), do: intents(binding, &read_intent(binding, &1))
+
+  defp intents(binding, reader) do
+    with :ok <- journal_directory_available(binding),
+         {:ok, catalog} <- archive_catalog(binding),
+         {:ok, files} <- active_files(binding),
+         {:ok, active} <- files |> Enum.filter(&String.ends_with?(&1, ".intent.json")) |> read_many(reader) do
+      # The catalog is made durable before any move. It wins during interrupted
+      # moves, so a confirmation cannot temporarily become pending.
+      records = active |> Map.new(&{&1["operation_id"], &1}) |> Map.merge(catalog)
+      {:ok, Map.values(records)}
+    end
+  end
+
+  defp journal_directory_available(binding) do
+    case File.stat(directory(binding)) do
+      {:ok, %File.Stat{type: :directory}} -> :ok
+      {:error, :enoent} -> :ok
+      _ -> {:error, :comment_journal_unavailable}
+    end
+  end
+
+  defp active_files(binding) do
     case File.ls(directory(binding)) do
-      {:ok, files} ->
-        files |> Enum.filter(&String.ends_with?(&1, ".intent.json")) |> collect(&read_intent(binding, &1))
-
-      {:error, :enoent} ->
-        {:ok, []}
-
-      _ ->
-        {:error, :comment_journal_unavailable}
+      {:ok, files} -> {:ok, files}
+      {:error, :enoent} -> {:ok, []}
+      _ -> {:error, :comment_journal_unavailable}
     end
   end
 
@@ -515,6 +912,16 @@ defmodule SymphonyElixir.Linear.CommentJournal do
         {:ok, value} -> {:cont, {:ok, [value | acc]}}
         error -> {:halt, error}
       end
+    end)
+  end
+
+  defp read_many(items, fun) do
+    items
+    |> Task.async_stream(fun, max_concurrency: 32, timeout: 30_000, ordered: false)
+    |> Enum.reduce_while({:ok, []}, fn
+      {:ok, {:ok, value}}, {:ok, acc} -> {:cont, {:ok, [value | acc]}}
+      {:ok, error}, _acc -> {:halt, error}
+      _, _acc -> {:halt, {:error, :comment_journal_unavailable}}
     end)
   end
 

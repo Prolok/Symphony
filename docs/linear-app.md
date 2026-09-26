@@ -1328,8 +1328,13 @@ Das ist ein Zustandsabgleich, kein zusätzliches Journal oder atomarer Schutz
 gegen gleichzeitige fremde Statusänderungen. Für direkt aufgerufene
 `linear_graphql`-Mutationen gilt weiterhin der agentenseitige Abgleichvertrag.
 
-App-Kommentarschreibvorgänge und ihre Wiederaufnahme werden pro Projektjournal
-prozessübergreifend serialisiert. Jede App-Anfrage darf eine Kommentar-ID nur
+App-Kommentarschreibvorgänge und ihre Wiederaufnahme werden pro Projekt
+prozessübergreifend serialisiert. Der bisherige Journal-Lock schützt die lokale
+Intent-Anlage, Bestätigung, Klassifikation und Archivierung; Linear-Requests
+laufen außerhalb dieses Locks. Scans holen Kommentare vor dem lokalen Abgleich
+und verwenden danach eine frisch geladene Intent-Sicht. Eine zusätzliche
+Issue-spezifische Scan-Sperre verhindert doppelte Abrufe bei parallelen Scans.
+Jede App-Anfrage darf eine Kommentar-ID nur
 einmal verändern; mehrfache Writes derselben ID werden vor HTTP mit
 `invalid_comment_mutation` abgewiesen und müssen einzeln gesendet werden.
 Optionale GraphQL-Felder bleiben bei fehlenden Variablen ausgelassen;
@@ -1359,9 +1364,21 @@ bleiben an die aktuell geprüfte App-Identität gebunden; ein vor dem App-Wechse
 angelegtes Update-Intent darf daher unter der neuen Identität nicht abgespielt
 werden.
 
-Konkurrierende Journalzugriffe warten bis zu 10 Sekunden auf den Lock
+Abgeschlossene bestätigte oder verworfene Beleggruppen verlassen nach 14 Tagen
+in kleinen Chargen den aktiven Suchpfad. Ihre Dateien liegen unverändert unter
+`comments/archive/`; ein vor dem Verschieben dauerhaft gespeicherter, geprüfter
+Suchindex erhält die Klassifikation alter eigener Kommentare sowie Relay-,
+Antwort- und Recovery-Abfragen. Offene oder unklare Intents bleiben aktiv.
+Bei einem unterbrochenen Verschieben gilt der Index bereits als maßgeblich.
+
+Konkurrierende Journalzugriffe warten regulär bis zu 10 Sekunden auf den Lock
 (`comment_journal_busy` bei Zeitüberschreitung, `comment_journal_unavailable`
-bei Helfer-/Backendfehlern). GraphQL-Aufrufe ohne Kommentarschreibvorgang
+bei Helfer-/Backendfehlern). Scans verwenden für den lokalen Journalabgleich
+eine kürzere Wartezeit und wiederholen `comment_journal_busy` begrenzt; die
+Startprüfung wiederholt diesen Fehler ebenfalls, bevor ein Workerfehler zählt.
+Schreibvorgänge behalten eine begrenzte Wartezeit. Eine Journal-Haltezeit über
+zwei Sekunden wird mit Dauer, Zweck und verfügbarem Issue-/Session-Kontext auf
+Debug-Level protokolliert. GraphQL-Aufrufe ohne Kommentarschreibvorgang
 benötigen keinen Journal-Lock. Echte konkurrierende Issue-Owner werden sofort
 mit `issue_already_owned` abgewiesen.
 Der gebundene Linear-MCP überträgt UTF-8-JSON als unveränderte Bytes mit genau

@@ -60,7 +60,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     result =
       WriteContext.with_context(
-        %{issue_id: issue.id, phase: issue.state, run_id: Ecto.UUID.generate()},
+        %{issue_id: issue.id, issue_identifier: issue.identifier, phase: issue.state, run_id: Ecto.UUID.generate()},
         fn -> IssueLease.run(issue, fn -> run_on_worker_host(issue, codex_update_recipient, opts, worker_host) end) end
       )
 

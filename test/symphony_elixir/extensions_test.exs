@@ -987,6 +987,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "workspace_path" => nil
                }
              ],
+             "waiting" => [],
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -1308,6 +1309,33 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Snapshot unavailable"
     assert html =~ "snapshot_unavailable"
+  end
+
+  test "dashboard and API show capacity waiting separately from retry errors" do
+    waiting = [
+      %{issue_id: "queued-1", identifier: "PRO-967", project: "Alpha", project_qualifier: "Alpha"},
+      %{issue_id: "queued-2", identifier: "PRI-177", project: "Alpha", project_qualifier: "Alpha"}
+    ]
+
+    snapshot = Map.put(static_snapshot(), :waiting, waiting)
+    orchestrator_name = Module.concat(__MODULE__, :CapacityQueueOrchestrator)
+    start_supervised!({StaticOrchestrator, name: orchestrator_name, snapshot: snapshot})
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state = get(build_conn(), "/api/v1/state") |> json_response(200)
+    assert Enum.map(state["waiting"], & &1["issue_reference"]) == ["Alpha:PRO-967", "Alpha:PRI-177"]
+    assert state["counts"]["retrying"] == 1
+    assert [%{"error" => "boom"}] = state["retrying"]
+
+    queued_issue = get(build_conn(), "/api/v1/Alpha%3APRO-967") |> json_response(200)
+    assert queued_issue["status"] == "waiting"
+    assert queued_issue["last_error"] == nil
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Tickets in Warteschlange"
+    assert html =~ "Alpha:PRO-967, Alpha:PRI-177"
+    assert html =~ "boom"
+    refute html =~ "Rate limits"
   end
 
   test "http server serves embedded assets, accepts form posts, and rejects invalid hosts" do

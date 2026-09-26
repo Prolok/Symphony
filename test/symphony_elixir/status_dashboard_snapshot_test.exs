@@ -5,6 +5,48 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
 
   @terminal_columns 115
 
+  test "capacity queue shows waiting tickets separately from genuine retry errors" do
+    snapshot = %{
+      running: [],
+      waiting: [
+        %{issue_id: "one", identifier: "PRO-967", project: "Alpha", project_qualifier: "Alpha"},
+        %{issue_id: "two", identifier: "PRI-177", project: "Alpha", project_qualifier: "Alpha"},
+        %{issue_id: "three", identifier: "PRO-967", project: "Beta", project_qualifier: "Beta"}
+      ],
+      retrying: [retry_entry(%{error: "API unavailable"})],
+      codex_totals: %{}
+    }
+
+    rendered = render_snapshot({:ok, snapshot}, 0.0) |> Snapshot.strip_ansi()
+
+    assert rendered =~ "Tickets in Warteschlange: Alpha:PRO-967, PRI-177, Beta:PRO-967"
+    assert rendered =~ "error=API unavailable"
+    refute rendered =~ "failed to spawn agent: :worker_capacity"
+    refute rendered =~ "Rate Limits:"
+    refute rendered =~ "Assignee:"
+  end
+
+  test "capacity queue wraps ticket identifiers within the terminal width" do
+    waiting =
+      for number <- 1..14 do
+        %{issue_id: "queued-#{number}", identifier: "PRO-#{String.pad_leading(to_string(number), 3, "0")}"}
+      end
+
+    snapshot = %{running: [], waiting: waiting, retrying: [], codex_totals: %{}}
+    rendered = StatusDashboard.format_snapshot_content_for_test({:ok, snapshot}, 0.0, 50) |> Snapshot.strip_ansi()
+
+    queue_lines =
+      rendered
+      |> String.split("\n")
+      |> Enum.drop_while(&(not String.contains?(&1, "Tickets in Warteschlange")))
+      |> Enum.take_while(&(not String.contains?(&1, "Backoff queue")))
+
+    assert length(queue_lines) > 2
+    assert Enum.all?(queue_lines, &(String.length(&1) <= 50))
+    assert Enum.count(queue_lines, &String.contains?(&1, "PRO-001")) == 1
+    assert Enum.count(queue_lines, &String.contains?(&1, "PRO-014")) == 1
+  end
+
   test "two workspace relay details disappear while countdown and errors remain" do
     snapshot = %{
       running: [],

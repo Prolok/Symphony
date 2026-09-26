@@ -21,6 +21,45 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "capacity queue projects candidates beyond ten slots and clears stale entries" do
+    issues =
+      for number <- 1..14 do
+        %Issue{
+          id: "issue-#{number}",
+          identifier: "PRO-#{String.pad_leading(to_string(number), 3, "0")}",
+          title: "Capacity candidate #{number}",
+          state: "In Arbeit (AI)"
+        }
+      end
+
+    running =
+      issues
+      |> Enum.take(10)
+      |> Map.new(fn issue -> {issue.id, %{issue: issue}} end)
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 10,
+      running: running,
+      retry_attempts: %{
+        "issue-13" => %{capacity_wait: true},
+        "issue-14" => %{capacity_wait: false, error: "API unavailable"}
+      }
+    }
+
+    queued = Orchestrator.refresh_waiting_issues_for_test(state, issues)
+    assert Enum.map(queued.waiting, & &1.identifier) == ["PRO-011", "PRO-012", "PRO-013"]
+
+    after_reconciliation = Orchestrator.refresh_waiting_issues_for_test(queued, [Enum.at(issues, 10)])
+    assert Enum.map(after_reconciliation.waiting, & &1.identifier) == ["PRO-011"]
+
+    after_release =
+      after_reconciliation
+      |> Map.update!(:running, &Map.delete(&1, "issue-1"))
+      |> Orchestrator.refresh_waiting_issues_for_test([Enum.at(issues, 10)])
+
+    assert after_release.waiting == []
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -1437,7 +1476,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert rendered =~ "http://127.0.0.1:4000/"
   end
 
-  test "status dashboard renders the current assignee in the header" do
+  test "status dashboard omits assignee and rate limits from the header" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "dev@example.com")
 
     snapshot_data =
@@ -1451,8 +1490,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
 
-    assert rendered =~ "│ Assignee:"
-    assert rendered =~ "dev@example.com"
+    refute rendered =~ "│ Assignee:"
+    refute rendered =~ "dev@example.com"
+    refute rendered =~ "│ Rate Limits:"
   end
 
   test "status dashboard prefers the bound server port and normalizes wildcard hosts" do

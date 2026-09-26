@@ -84,6 +84,7 @@ defmodule SymphonyElixir.Orchestrator do
       completed_states: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
+      waiting: [],
       review_cleanup_blocked: MapSet.new(),
       dialog_observations: %{},
       comment_scans: %{},
@@ -434,11 +435,8 @@ defmodule SymphonyElixir.Orchestrator do
       state = retain_visible_completed_states(state, issues)
       state = retain_visible_dialog_observations(state, issues)
 
-      if available_slots(state) > 0 do
-        choose_issues(state, issues)
-      else
-        state
-      end
+      state = if available_slots(state) > 0, do: choose_issues(state, issues), else: state
+      refresh_waiting_issues(state, issues)
     else
       {:error, :missing_linear_scope} ->
         Logger.error("Configure exactly one Linear scope using tracker.project_slug/tracker.team_key or LINEAR_PROJECT_SLUG/LINEAR_TEAM_KEY")
@@ -536,6 +534,18 @@ defmodule SymphonyElixir.Orchestrator do
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
+  end
+
+  @doc false
+  @spec refresh_waiting_issues_for_test(term(), [Issue.t()]) :: term()
+  def refresh_waiting_issues_for_test(%State{} = state, issues) when is_list(issues) do
+    refresh_waiting_issues(state, issues)
+  end
+
+  @doc false
+  @spec spawn_issue_on_worker_host_for_test(term(), Issue.t()) :: term()
+  def spawn_issue_on_worker_host_for_test(%State{} = state, %Issue{} = issue) do
+    spawn_issue_on_worker_host(state, issue, nil, self(), nil, [])
   end
 
   @doc false
@@ -1100,6 +1110,39 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
+  defp refresh_waiting_issues(%State{} = state, issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    waiting =
+      issues
+      |> sort_issues_for_dispatch()
+      |> Enum.filter(&capacity_waiting_issue?(&1, state, active_states, terminal_states))
+      |> Enum.map(&%{issue_id: &1.id, identifier: &1.identifier})
+
+    %{state | waiting: waiting}
+  end
+
+  defp capacity_waiting_issue?(%Issue{} = issue, state, active_states, terminal_states) do
+    waiting_candidate?(issue, state, active_states, terminal_states) and
+      (get_in(state.retry_attempts, [issue.id, :capacity_wait]) == true or
+         (dispatch_recovery_ready?(state.retry_attempts, state.review_cleanup_blocked, issue.id) and
+            !MapSet.member?(state.claimed, issue.id) and
+            (!dispatch_slots_available?(issue, state) or !worker_slots_available?(issue, state, nil))))
+  end
+
+  defp capacity_waiting_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp waiting_candidate?(issue, state, active_states, terminal_states) do
+    !Dialog.state?(issue.state) and
+      regular_candidate?(issue, active_states, terminal_states) and
+      !blocked_issue_in_dispatch_state?(issue, terminal_states) and
+      dispatchable_after_completion?(issue, state.completed_states) and
+      SymphonyElixir.Relay.execution_allowed(issue) == :ok and
+      !Map.has_key?(state.running, issue.id) and
+      !MapSet.member?(state.review_cleanup_blocked, issue.id)
+  end
+
   defp maybe_dispatch_candidate_issue(%State{} = state, %Issue{} = issue, dialog_issue_count) do
     if Dialog.state?(issue.state) do
       maybe_dispatch_dialog_issue(state, issue, dialog_issue_count)
@@ -1412,11 +1455,13 @@ defmodule SymphonyElixir.Orchestrator do
 
         schedule_issue_retry(state, issue.id, attempt, %{
           identifier: issue.identifier,
-          error: "no worker capacity",
+          error: nil,
+          capacity_wait: true,
           worker_host: preferred_worker_host,
           delegate_id: issue.delegate_id,
           review_stay: review_issue_state?(issue.state)
         })
+        |> put_waiting_issue(issue)
 
       worker_host ->
         spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, run_opts)
@@ -1487,8 +1532,22 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
+            retry_attempts: Map.delete(state.retry_attempts, issue.id),
+            waiting: Enum.reject(state.waiting, &(&1.issue_id == issue.id))
         }
+
+      {:error, :worker_capacity} ->
+        Logger.info("Worker capacity reached for #{issue_context(issue)}; waiting for a free slot")
+
+        schedule_issue_retry(state, issue.id, attempt, %{
+          identifier: issue.identifier,
+          error: nil,
+          capacity_wait: true,
+          worker_host: worker_host,
+          delegate_id: issue.delegate_id,
+          review_stay: review_issue_state?(issue.state)
+        })
+        |> put_waiting_issue(issue)
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
@@ -1699,7 +1758,8 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | completed: MapSet.put(state.completed, issue_id),
         completed_states: put_completed_state(state.completed_states, issue_id, issue_state),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        waiting: Enum.reject(state.waiting, &(&1.issue_id == issue_id))
     }
   end
 
@@ -1729,13 +1789,7 @@ defmodule SymphonyElixir.Orchestrator do
     timer_ref =
       if access_blocked, do: nil, else: Process.send_after(self(), {:retry_issue, issue_id, retry_token}, delay_ms)
 
-    error_suffix = if is_binary(error), do: " error=#{error}", else: ""
-
-    if access_blocked do
-      Logger.error("Issue access blocked issue_id=#{issue_id} issue_identifier=#{identifier} attempt=#{next_attempt}; restore access and request refresh#{error_suffix}")
-    else
-      Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
-    end
+    log_scheduled_retry(issue_id, identifier, next_attempt, delay_ms, error, access_blocked, metadata)
 
     %{
       state
@@ -1748,6 +1802,7 @@ defmodule SymphonyElixir.Orchestrator do
             access_blocked: access_blocked,
             identifier: identifier,
             error: error,
+            capacity_wait: Map.get(metadata, :capacity_wait, false),
             worker_host: worker_host,
             workspace_path: workspace_path,
             recovered_turn_context: recovered_turn_context,
@@ -1757,8 +1812,32 @@ defmodule SymphonyElixir.Orchestrator do
             review_stay: review_stay,
             delegate_id: Map.get(metadata, :delegate_id, Map.get(previous_retry, :delegate_id)),
             completion_pending: Map.get(metadata, :completion_pending, Map.get(previous_retry, :completion_pending, false))
-          })
+          }),
+        waiting: waiting_after_retry(state.waiting, issue_id, metadata)
     }
+  end
+
+  defp log_scheduled_retry(issue_id, identifier, attempt, delay_ms, error, access_blocked, metadata) do
+    error_suffix = if is_binary(error), do: " error=#{error}", else: ""
+
+    cond do
+      access_blocked ->
+        Logger.error("Issue access blocked issue_id=#{issue_id} issue_identifier=#{identifier} attempt=#{attempt}; restore access and request refresh#{error_suffix}")
+
+      metadata[:capacity_wait] == true ->
+        Logger.info("Issue waiting for worker capacity issue_id=#{issue_id} issue_identifier=#{identifier} retry_in_ms=#{delay_ms}")
+
+      true ->
+        Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{attempt})#{error_suffix}")
+    end
+  end
+
+  defp waiting_after_retry(waiting, _issue_id, %{capacity_wait: true}), do: waiting
+  defp waiting_after_retry(waiting, issue_id, _metadata), do: Enum.reject(waiting, &(&1.issue_id == issue_id))
+
+  defp put_waiting_issue(%State{} = state, %Issue{} = issue) do
+    waiting = Enum.reject(state.waiting, &(&1.issue_id == issue.id)) ++ [%{issue_id: issue.id, identifier: issue.identifier}]
+    %{state | waiting: waiting}
   end
 
   defp schedule_refresh_retry(state, issue_id, attempt, metadata, reason) do
@@ -1960,7 +2039,8 @@ defmodule SymphonyElixir.Orchestrator do
         completed: MapSet.delete(state.completed, issue_id),
         completed_states: Map.delete(state.completed_states, issue_id),
         dialog_observations: Map.delete(state.dialog_observations, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        waiting: Enum.reject(state.waiting, &(&1.issue_id == issue_id))
     }
   end
 
@@ -2006,9 +2086,11 @@ defmodule SymphonyElixir.Orchestrator do
          attempt + 1,
          Map.merge(metadata, %{
            identifier: issue.identifier,
-           error: "no available orchestrator slots"
+           error: nil,
+           capacity_wait: true
          })
-       )}
+       )
+       |> put_waiting_issue(issue)}
     end
   end
 
@@ -2027,7 +2109,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
-    %{state | claimed: MapSet.delete(state.claimed, issue_id), retry_attempts: Map.delete(state.retry_attempts, issue_id)}
+    %{
+      state
+      | claimed: MapSet.delete(state.claimed, issue_id),
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        waiting: Enum.reject(state.waiting, &(&1.issue_id == issue_id))
+    }
   end
 
   defp maybe_integrate_retry_codex_update(%State{} = state, issue_id, update)
@@ -2323,7 +2410,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp pick_retry_error(previous_retry, metadata) do
-    metadata[:error] || Map.get(previous_retry, :error)
+    if Map.has_key?(metadata, :error), do: metadata[:error], else: Map.get(previous_retry, :error)
   end
 
   defp pick_retry_worker_host(previous_retry, metadata) do
@@ -2585,6 +2672,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     retrying =
       state.retry_attempts
+      |> Enum.reject(fn {_issue_id, retry} -> Map.get(retry, :capacity_wait, false) end)
       |> Enum.map(fn {issue_id, %{attempt: attempt, due_at_ms: due_at_ms} = retry} ->
         %{
           issue_id: issue_id,
@@ -2603,6 +2691,7 @@ defmodule SymphonyElixir.Orchestrator do
      %{
        running: running ++ YoloCoordinator.entries(state.yolo_runs),
        retrying: retrying,
+       waiting: state.waiting,
        yolo_running: map_size(state.yolo_runs),
        last_activity_at_ms: activity_at,
        idle_shutdown_ms: state.idle_shutdown_ms,
@@ -4584,6 +4673,7 @@ defmodule SymphonyElixir.Orchestrator do
     previous_state.yolo_runs != next_state.yolo_runs or
       previous_state.running != next_state.running or
       previous_state.retry_attempts != next_state.retry_attempts or
+      previous_state.waiting != next_state.waiting or
       previous_state.claimed != next_state.claimed or
       previous_state.completed != next_state.completed or
       previous_state.completed_states != next_state.completed_states
@@ -4602,6 +4692,9 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       map_size(state.retry_attempts) > 0 ->
+        state
+
+      state.waiting != [] ->
         state
 
       true ->

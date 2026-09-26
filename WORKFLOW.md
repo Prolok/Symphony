@@ -464,7 +464,7 @@ No-Findings-Signale müssen weiterhin vom Hauptagenten behandelt und dokumentier
 werden; danach überspringt `--yolo` aber auch `Freigabe Review`. Außerdem
 empfängt Symphony Relay-Ereignisse workspaceweit; die Ausführung bleibt auf
 lokal konfigurierte, verifizierte menschliche Assignees begrenzt;
-die Hauptmaske zeigt in diesem Modus `--yolo` statt des Assignees.
+die Hauptmaske zeigt in diesem Modus `--yolo` als Modus.
 
 Jeder automatische Statuswechsel beendet den aktuellen Codex-Turn. Der
 Zielstatus wird erst in einer neuen Codex-Session bearbeitet; Skip-Ketten

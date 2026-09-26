@@ -21,6 +21,29 @@ defmodule SymphonyElixir.WorkerCapacityTest do
     assert {:ok, _} = WorkerCapacity.start_child(nil, "Test (AI)", &wait/0)
   end
 
+  test "worker capacity race becomes a visible wait without a retry error" do
+    settings = Config.settings!()
+    context = %ProjectContext{settings: %{settings | agent: %{settings.agent | max_concurrent_agents: 1}}}
+    start_supervised!({WorkerCapacity, contexts: [context]})
+    assert {:ok, occupied} = WorkerCapacity.start_child(nil, "In Arbeit (AI)", &wait/0)
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: "capacity-race",
+      identifier: "PRO-967",
+      title: "Waiting for capacity",
+      state: "In Arbeit (AI)"
+    }
+
+    state = %Orchestrator.State{external_poll: true, max_concurrent_agents: 10}
+    result = Orchestrator.spawn_issue_on_worker_host_for_test(state, issue)
+
+    assert [%{issue_id: "capacity-race", identifier: "PRO-967"}] = result.waiting
+    assert %{capacity_wait: true, error: nil} = result.retry_attempts[issue.id]
+    refute Map.has_key?(result.running, issue.id)
+
+    send(occupied, :stop)
+  end
+
   test "concurrent project owners share host limits and release workers on owner exit" do
     settings = Config.settings!()
     worker = %{settings.worker | ssh_hosts: ["shared", "other"], max_concurrent_agents_per_host: 1}

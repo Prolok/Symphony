@@ -64,6 +64,9 @@ Die gemeinsame Dashboard-Konfiguration übernimmt akzeptierte Reloads aus einem
 an die Poller-Laufzeit gebundenen Snapshot, einschließlich des geltenden Gesamtlimits.
 Gesamt-, Status- und SSH-Hostkapazität werden über alle Projekte atomar geprüft; auch ein
 abgebrochener Projektprozess gibt die von ihm gestarteten Worker und Plätze frei.
+Nach erfolgreichem Kandidatenabruf zeigen Terminal und Web-Dashboard ausführbare,
+kapazitätsbedingt wartende Tickets getrennt von echten Fehlerrückläufen. `:worker_capacity`
+erscheint dabei nicht als Fehler.
 Die Vorbereitung lehnt überschneidende Worktree-Roots verschiedener Projekte
 einschließlich Symlink-Aliasen ab. Ein gemeinsamer literaler Root oder der allgemeine
 Fallbackroot muss dafür durch projektspezifische Roots ersetzt werden, etwa

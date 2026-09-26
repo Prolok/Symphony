@@ -129,13 +129,17 @@ defmodule SymphonyElixir.RetryRefreshTest do
       assert {:noreply, waiting} = Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
       assert File.dir?(workspace)
       assert MapSet.member?(waiting.claimed, issue.id)
-      assert waiting.retry_attempts[issue.id].error == "no available orchestrator slots"
+      assert waiting.retry_attempts[issue.id].error == nil
+      assert waiting.retry_attempts[issue.id].capacity_wait == true
+      assert [%{issue_id: waiting_id}] = waiting.waiting
+      assert waiting_id == issue.id
       retry = waiting.retry_attempts[issue.id]
       assert retry.recovered_turn_context == completed.retry_attempts[issue.id].recovered_turn_context
       assert waiting.running == %{}
       Process.cancel_timer(retry.timer_ref)
       assert {:noreply, resumed} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, %{waiting | max_concurrent_agents: 1})
       assert map_size(resumed.running) == 1
+      assert resumed.waiting == []
       assert resumed.running[issue.id].issue.state == "Test (AI)"
       assert {:noreply, ^resumed} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, resumed)
       Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, resumed.running[issue.id].pid)

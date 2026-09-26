@@ -47,6 +47,26 @@ defmodule SymphonyElixir.IssueLeaseTest do
     assert :ok = IssueLease.ready_for_delivery(%Issue{id: "issue"})
   end
 
+  test "worker start retries a short journal contention before returning to the orchestrator" do
+    {:ok, attempts} = Agent.start_link(fn -> 0 end)
+    started = System.monotonic_time(:millisecond)
+
+    result =
+      IssueLease.retry_journal_busy(
+        fn ->
+          count = Agent.get_and_update(attempts, fn value -> {value + 1, value + 1} end)
+          if count < 3, do: {:error, :comment_journal_busy}, else: :ok
+        end,
+        3
+      )
+
+    assert result == :ok
+    assert Agent.get(attempts, & &1) == 3
+    assert System.monotonic_time(:millisecond) - started < 30_000
+    exhausted = IssueLease.retry_journal_busy(fn -> {:error, :comment_journal_busy} end, 1)
+    assert exhausted == {:error, :comment_journal_busy}
+  end
+
   test "helper backend failure is unavailable, never a competing issue owner", %{helper_dir: helper_dir} do
     File.write!(Path.join(helper_dir, "state_lock.py"), "def state_lock(*args, **kwargs):\n    raise OSError('synthetic backend failure')\nclass StateLockError(Exception):\n    pass\n")
     assert {:error, :issue_lease_unavailable} = IssueLease.with_lock("workspace", "issue", fn -> flunk("no lease") end)

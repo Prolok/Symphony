@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.CommentInboxTest do
   use ExUnit.Case, async: true
-  alias SymphonyElixir.Linear.{CommentInbox, CommentVersion, DurableState}
+  alias SymphonyElixir.Linear.{CommentInbox, CommentJournal, CommentVersion, DurableState, IssueLease}
 
   setup do
     root = Path.join([File.cwd!(), "_build", "inputs-#{System.unique_integer([:positive])}"])
@@ -287,6 +287,162 @@ defmodule SymphonyElixir.CommentInboxTest do
     assert {:error, :comment_scan_inconsistent} = scan(ctx, [], confirm_absence: fn _ -> {:present, source} end)
     assert {:ok, state} = read(ctx)
     refute state["versions"][CommentVersion.key(source)]["deleted"]
+  end
+
+  test "a write completes during a delayed fetch and its echo remains own", ctx do
+    owner = self()
+    own = %{"id" => "own", "body" => "App-Ausgabe", "user" => %{"id" => "app"}, "issue" => %{"id" => ctx.issue.id}, "updatedAt" => "2026-09-26T08:00:00Z"}
+
+    scan =
+      Task.async(fn ->
+        CommentInbox.scan(ctx.binding, ctx.issue, fn ->
+          send(owner, :fetch_started)
+
+          receive do
+            :finish_fetch -> {:ok, [own]}
+          end
+        end)
+      end)
+
+    assert_receive :fetch_started, 1_000
+    payload = %{"query" => "mutation { commentCreate(input: {id: \"own\", issueId: \"one\", body: \"App-Ausgabe\"}) { success } }"}
+
+    assert {:ok, _} =
+             CommentJournal.execute(ctx.binding, payload, fn _ ->
+               {:ok, %{status: 200, body: %{"data" => %{"commentCreate" => %{"symphonyReceipt" => own}}}}}
+             end)
+
+    send(scan.pid, :finish_fetch)
+    assert {:ok, state} = Task.await(scan)
+    assert state["versions"][CommentVersion.key(own)]["origin"] == "own"
+    assert Enum.all?(CommentInbox.pending(state), &(&1["origin"] != "human"))
+  end
+
+  test "one scan reads each active intent once for many comments", ctx do
+    directory = Path.join(ctx.binding["state_root"], "comments")
+    File.mkdir_p!(directory)
+
+    for number <- 1..12 do
+      id = "operation-#{number}"
+
+      record = %{
+        "operation_id" => id,
+        "comment_id" => id,
+        "workspace_id" => "workspace",
+        "installation_id" => "symphony",
+        "operation" => "commentCreate",
+        "issue_id" => "one",
+        "author_id" => "app",
+        "written_at" => "2026-09-26T08:00:00Z",
+        "input" => %{"body" => "App-Ausgabe"}
+      }
+
+      File.write!(Path.join(directory, id <> ".intent.json"), Jason.encode!(record))
+      confirmed = %{"id" => id, "body" => "App-Ausgabe", "user" => %{"id" => "app"}, "issue" => %{"id" => "one"}}
+      File.write!(Path.join(directory, id <> ".confirmed.json"), Jason.encode!(%{"comment" => confirmed}))
+    end
+
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    reader = fn file ->
+      Agent.update(counter, &(&1 + 1))
+      DurableState.read(Path.join(directory, file))
+    end
+
+    assert {:ok, _} =
+             scan(ctx, Enum.map(1..30, &comment("human-#{&1}", "Eingabe")),
+               journal_reader: reader,
+               journal_request: fn _ -> flunk("confirmed receipts need no remote reconciliation") end
+             )
+
+    assert Agent.get(counter, & &1) == 12
+  end
+
+  test "a pending own receipt is reconciled from the scan view", ctx do
+    directory = Path.join(ctx.binding["state_root"], "comments")
+    File.mkdir_p!(directory)
+    own = %{"id" => "late-own", "body" => "App-Ausgabe", "user" => %{"id" => "app"}, "issue" => %{"id" => "one"}, "updatedAt" => "2026-09-26T08:00:00Z"}
+
+    record = %{
+      "operation_id" => "late-own",
+      "comment_id" => "late-own",
+      "workspace_id" => "workspace",
+      "installation_id" => "symphony",
+      "operation" => "commentCreate",
+      "issue_id" => "one",
+      "author_id" => "app",
+      "written_at" => "2026-09-26T08:00:00Z",
+      "input" => %{"body" => "App-Ausgabe"}
+    }
+
+    File.write!(Path.join(directory, "late-own.intent.json"), Jason.encode!(record))
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    reader = fn file ->
+      Agent.update(counter, &(&1 + 1))
+      DurableState.read(Path.join(directory, file))
+    end
+
+    assert {:ok, state} =
+             scan(ctx, [own],
+               journal_reader: reader,
+               journal_request: fn _ -> {:ok, %{status: 200, body: %{"data" => %{"comment" => own}}}} end
+             )
+
+    assert Agent.get(counter, & &1) == 1
+    assert state["versions"][CommentVersion.key(own)]["origin"] == "own"
+  end
+
+  test "three concurrent inbox changes exhaust the short scan retry", ctx do
+    path = Path.join([ctx.binding["state_root"], "inputs", CommentVersion.digest(ctx.issue.id) <> ".json"])
+
+    fetch = fn ->
+      assert {:ok, state} = CommentInbox.read(ctx.binding, ctx.issue)
+      File.mkdir_p!(Path.dirname(path))
+      assert :ok = DurableState.write(path, Map.put(state, "scan_error", Integer.to_string(System.unique_integer([:positive]))))
+      {:ok, []}
+    end
+
+    assert {:error, :comment_scan_raced} = CommentInbox.scan(ctx.binding, ctx.issue, fetch)
+  end
+
+  test "a short journal contention is retried inside the scan", ctx do
+    owner = self()
+
+    holder =
+      Task.async(fn ->
+        IssueLease.with_journal_lock(ctx.binding["state_root"], fn ->
+          send(owner, :journal_held)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :journal_held, 1_000
+    {:ok, fetches} = Agent.start_link(fn -> 0 end)
+
+    scan =
+      Task.async(fn ->
+        CommentInbox.scan(
+          ctx.binding,
+          ctx.issue,
+          fn ->
+            Agent.update(fetches, &(&1 + 1))
+            send(owner, :scan_fetched)
+            {:ok, []}
+          end,
+          scan_lock_timeout: 1
+        )
+      end)
+
+    assert_receive :scan_fetched, 1_000
+    Process.sleep(100)
+    send(holder.pid, :release)
+    assert :ok = Task.await(holder)
+    assert {:ok, _} = Task.await(scan)
+    assert Agent.get(fetches, & &1) >= 2
   end
 
   defp comment(id, body), do: %{"id" => id, "body" => body, "user" => %{"id" => "human", "app" => false}, "createdAt" => "2026-09-12T12:00:00Z", "updatedAt" => "2026-09-12T12:00:00Z"}

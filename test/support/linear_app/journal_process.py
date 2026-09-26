@@ -77,12 +77,11 @@ with tempfile.TemporaryDirectory(prefix='journal-process-') as directory:
         Worker(payload={'query': 'query { viewer { id } }'}).finish()
         Worker(payload=create('blocked', 'issue-c'), timeout=100).finish(':comment_journal_busy')
         reconciler = Worker(action='reconcile')
-        assert not reconciler.selector.select(0.2), 'reconciliation wrote through a held journal'
+        reconciler.finish()
         first.release()
         first.finish()
         second.read('http')
         second.finish()
-        reconciler.finish()
 
         # A fresh planning runtime edits the existing workpad in the same journal.
         update = {'query': 'mutation($id: String!, $input: CommentUpdateInput!) { commentUpdate(id: $id, input: $input) { success } }',

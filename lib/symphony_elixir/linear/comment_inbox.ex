@@ -9,30 +9,68 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   @spec scan(map(), map(), (-> {:ok, [map()]} | {:error, term()}), keyword()) :: {:ok, map()} | {:error, term()}
   def scan(binding, issue, fetch, opts \\ []) do
     with {:ok, state} <- read(binding, issue) do
-      if opts[:force_full] != true and background_fresh?(state, opts),
-        do: {:ok, state},
-        else: scan_locked(binding, issue, fetch, opts)
+      scan_or_cached(state, binding, issue, fetch, opts)
     end
   end
 
-  defp scan_locked(binding, issue, fetch, opts) do
-    transaction(binding, issue, opts, fn state ->
-      if opts[:force_full] != true and background_fresh?(state, opts) do
-        {:cached, state}
-      else
-        observe_due(state, binding, fetch, opts)
-      end
-    end)
+  defp scan_or_cached(state, binding, issue, fetch, opts) do
+    if opts[:force_full] != true and background_fresh?(state, opts),
+      do: {:ok, state},
+      else: scan_serialized(binding, issue, fetch, opts)
   end
 
-  defp observe_due(state, binding, fetch, opts) do
-    result =
-      CommentJournal.observe(binding, Keyword.get(opts, :journal_request), fn ->
-        scan_due(state, binding, fetch, opts)
-      end)
-
-    scan_result(result, state)
+  defp scan_serialized(binding, issue, fetch, opts) do
+    # This issue-specific scan gate prevents duplicate budget-consuming
+    # fetches. The shared journal and inbox state locks remain free for HTTP.
+    IssueLease.with_journal_lock(
+      path(binding, issue) <> ".scan",
+      fn ->
+        scan_with_busy_retry(binding, issue, fetch, opts, 3)
+      end,
+      10_000,
+      "scan-serialization"
+    )
   end
+
+  defp scan_with_busy_retry(binding, issue, fetch, opts, remaining) do
+    case scan_attempt(binding, issue, fetch, opts, 3) do
+      {:error, :comment_journal_busy} when remaining > 1 ->
+        Process.sleep(150)
+        scan_with_busy_retry(binding, issue, fetch, opts, remaining - 1)
+
+      result ->
+        result
+    end
+  end
+
+  defp scan_attempt(binding, issue, fetch, opts, remaining) do
+    with {:ok, state} <- read(binding, issue) do
+      scan_attempt_state(state, binding, issue, fetch, opts, remaining)
+    end
+  end
+
+  defp scan_attempt_state(state, binding, issue, fetch, opts, remaining) do
+    if opts[:force_full] != true and background_fresh?(state, opts) do
+      {:ok, state}
+    else
+      # All Linear callbacks run before either local lock is acquired. A changed
+      # inbox snapshot is retried so an old absence cannot erase a new version.
+      result = scan_result(scan_due(state, binding, fetch, opts), state)
+      scan_opts = Keyword.put_new(opts, :inbox_lock_timeout, 750)
+      committed = transaction(binding, issue, scan_opts, &commit_if_current(&1, state, result))
+      retry_changed(committed, binding, issue, fetch, opts, remaining)
+    end
+  end
+
+  defp commit_if_current(current, previous, result) do
+    if current == previous, do: result, else: {:retry, current}
+  end
+
+  defp retry_changed({:retry, _}, binding, issue, fetch, opts, remaining) when remaining > 1,
+    do: scan_attempt(binding, issue, fetch, opts, remaining - 1)
+
+  defp retry_changed({:retry, _}, _binding, _issue, _fetch, _opts, _remaining), do: {:error, :comment_scan_raced}
+  defp retry_changed(committed, _binding, _issue, _fetch, _opts, _remaining), do: committed
 
   defp scan_result({:ok, _state} = result, _previous), do: result
   defp scan_result({:save_error, failed, reason}, _previous), do: {:save_error, failed, reason}
@@ -202,12 +240,23 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   defp signal_key(_signal), do: nil
   defp clock(opts), do: Keyword.get(opts, :background_now, fn -> System.system_time(:millisecond) end).()
 
-  defp observe_fetch({:ok, comments}, state, binding, opts), do: observe(state, comments, binding, opts)
+  defp observe_fetch({:ok, comments}, state, binding, opts) do
+    with {:ok, snapshot} <- CommentJournal.observation_snapshot(binding, Keyword.get(opts, :journal_request), opts) do
+      observe(state, comments, binding, classification_opts(opts, binding, snapshot))
+    end
+  end
 
-  defp observe_fetch({:error, {:comment_scan_incomplete, reason, comments}}, state, binding, opts),
-    do: observe_partial(state, comments, reason, binding, opts)
+  defp observe_fetch({:error, {:comment_scan_incomplete, reason, comments}}, state, binding, opts) do
+    with {:ok, snapshot} <- CommentJournal.observation_snapshot(binding, Keyword.get(opts, :journal_request), opts) do
+      observe_partial(state, comments, reason, binding, classification_opts(opts, binding, snapshot))
+    end
+  end
 
   defp observe_fetch({:error, _} = error, _state, _binding, _opts), do: error
+
+  defp classification_opts(opts, binding, snapshot) do
+    Keyword.put_new(opts, :classify, &CommentJournal.classify_snapshot(snapshot, binding, &1))
+  end
 
   @spec read(map(), map()) :: {:ok, map()} | {:error, term()}
   def read(binding, issue) do
@@ -301,14 +350,17 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   end
 
   defp transaction(binding, issue, opts, callback) do
-    IssueLease.with_journal_lock(path(binding, issue), fn ->
-      with {:ok, state} <- read(binding, issue) do
-        save_result(callback.(state), binding, issue, opts)
-      end
-    end)
+    IssueLease.with_journal_lock(
+      path(binding, issue),
+      fn ->
+        with {:ok, state} <- read(binding, issue) do
+          save_result(callback.(state), binding, issue, opts)
+        end
+      end,
+      Keyword.get(opts, :inbox_lock_timeout, 10_000),
+      "inbox-transaction"
+    )
   end
-
-  defp save_result({:cached, state}, _binding, _issue, _opts), do: {:ok, state}
 
   defp save_result({:ok, state}, binding, issue, opts) do
     with :ok <- persist(binding, issue, state, opts), do: {:ok, state}

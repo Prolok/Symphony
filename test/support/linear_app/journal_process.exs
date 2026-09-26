@@ -22,7 +22,8 @@ request = fn payload ->
 
   case field.name do
     "comment" ->
-      comment = File.read!(Path.join(remote, arguments["id"])) |> Jason.decode!()
+      path = Path.join(remote, arguments["id"])
+      comment = if File.exists?(path), do: path |> File.read!() |> Jason.decode!()
       {:ok, %{status: 200, body: %{"data" => %{"comment" => comment}}}}
 
     "viewer" ->

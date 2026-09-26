@@ -68,7 +68,8 @@ defmodule SymphonyElixir.Relay do
   def candidates(session, _), do: {:error, {:relay_not_ready, session.status, session.error}}
 
   defp stamp_issue(issue, record) do
-    epoch = Store.digest({record["generation"], record["epochs"][issue.id]})
+    blocker_epochs = issue.blocked_by |> Enum.map(&{&1.id, record["epochs"][&1.id]}) |> Enum.sort()
+    epoch = Store.digest({record["generation"], record["epochs"][issue.id], blocker_epochs})
     %{issue | last_comment_signal: Map.put(issue.last_comment_signal || %{}, :relay_epoch, epoch), relay_event: get_in(record, ["event_positions", issue.id])}
   end
 

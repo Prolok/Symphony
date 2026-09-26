@@ -12,6 +12,13 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     def status(_order, _opts), do: {:error, :openclaw_gateway_unavailable}
   end
 
+  defmodule PermanentPreflightFailure do
+    def preflight(_agent, opts) do
+      send(opts[:test_pid], :preflight_attempted)
+      {:error, :openclaw_version_unsupported}
+    end
+  end
+
   defp run_group(group, issues, project, opts), do: Runner.run(group, issues, project, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
   defp tick(state, issues, opts), do: Coordinator.tick(state, issues, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
 
@@ -263,6 +270,25 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
     assert logs =~ "state=local_error reason=openclaw_binary_missing"
     assert logs =~ "action=OpenClaw-Aufruf fehlgeschlagen"
+  end
+
+  test "repeated OpenClaw preflight failure stops before Linear reads", %{issues: issues, opts: opts} do
+    {:ok, record} = Store.read("incoming")
+    record = Map.merge(record, %{"last_failure_reason" => ":openclaw_version_unsupported", "failure_count" => 1, "retry_at" => System.system_time(:millisecond) - 1})
+    assert :ok = Store.write("incoming", record)
+
+    retry_opts =
+      opts
+      |> Keyword.put(:openclaw_adapter, PermanentPreflightFailure)
+      |> Keyword.put(:test_pid, self())
+      |> Keyword.put(:fetch, fn _ -> flunk("Linear issue read must follow a successful local preflight") end)
+
+    for _ <- 1..2 do
+      assert {:error, :openclaw_version_unsupported} = run_group("incoming", issues, issues, retry_opts)
+      assert_receive :preflight_attempted
+    end
+
+    assert {:ok, %{"failure_count" => 3}} = Store.read("incoming")
   end
 
   test "blank selection never calls OpenClaw through start, poll, replay or lease checks", %{context: context, issues: issues, opts: opts} do

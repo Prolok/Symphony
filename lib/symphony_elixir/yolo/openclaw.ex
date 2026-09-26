@@ -6,6 +6,12 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, OwnerTransport, Recovery, ToolBridge}
   alias SymphonyElixir.Yolo.Scope
 
+  @spec retry_preflight(keyword()) :: :ok | {:error, term()}
+  def retry_preflight(opts) do
+    adapter = Keyword.get(opts, :openclaw_adapter, Gateway)
+    OwnerTransport.within(fn -> adapter.preflight(Config.openclaw_yolo_agent(), opts) end)
+  end
+
   @spec run(map(), String.t(), [map()], String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issues, run_id, opts) do
     adapter = Keyword.get(opts, :openclaw_adapter, Gateway)

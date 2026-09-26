@@ -33,6 +33,11 @@ defmodule SymphonyElixir.Yolo.Observation do
   @spec fingerprint(map()) :: String.t()
   def fingerprint(observations), do: Digest.digest(Enum.map(Enum.sort(observations), fn {id, data} -> {id, data["semantic"]} end))
 
+  @spec relay_signal(map()) :: String.t()
+  def relay_signal(issue) do
+    Digest.digest({issue.id, issue.state, issue.updated_at, issue.last_comment_signal, issue.assignee_id, issue.delegate_id, issue.title, issue.description, issue.labels, issue.blocked_by})
+  end
+
   defp observe(issue, previous, generation, opts) do
     semantic = semantic_issue(issue)
     semantic = if generation > 0, do: Map.put(semantic, :dependency_generation, generation), else: semantic

@@ -1171,6 +1171,15 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     refute_receive {:start, _}
   end
 
+  test "an incomplete dependency refresh cannot dispatch a partial group", %{issues: issues} do
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    assert tick(state, issues,
+             dependencies: fn _ -> {:ok, tl(issues)} end,
+             start: fn _, _ -> flunk("incomplete group must not start") end
+           ).yolo_runs == %{}
+  end
+
   test "review comment create edit delete and replay have exact scan and session counts", %{issues: [issue | _]} do
     review = %{issue | state: "Yolo Review"}
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
@@ -1332,7 +1341,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       recipient: self()
     ]
 
-    assert :ok = run_group("incoming", issues, issues, opts)
+    scheduled = Enum.map(issues, &%{&1 | last_comment_signal: %{relay_epoch: "relay-current"}})
+    assert :ok = run_group("incoming", scheduled, scheduled, opts)
     assert_receive {:yolo_event, "incoming", %{session_id: "shared-session"}}
     assert {:ok, completed} = Store.read("incoming")
     assert completed["processed"] == fingerprint
@@ -1429,6 +1439,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   end
 
   test "normal session exit and partial receipts cannot claim completion", %{issues: issues, root: root} do
+    issues = Enum.map(issues, &%{&1 | last_comment_signal: nil})
+
     opts = [
       fetch: fn _ -> {:ok, issues} end,
       lease: fn _issue, callback -> callback.() end,
@@ -1445,6 +1457,44 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert record["processed"] == nil
     assert record["retry_at"] > System.system_time(:millisecond)
     assert record["attempt"]["members"] == Enum.map(issues, & &1.id)
+  end
+
+  test "member readiness is checked immediately before PO delivery", %{issues: [issue | _], root: root} do
+    issue = %{issue | last_comment_signal: nil}
+
+    opts = [
+      fetch: fn _ -> {:ok, [issue]} end,
+      lease: fn _, callback -> callback.() end,
+      lease_ready: fn _ -> {:error, :synthetic_member_unavailable} end,
+      scan: &scan/1,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{inputs: []}} end,
+      before_action: fn _ -> :ok end,
+      session: fn _, _, _, _ -> flunk("unready member must not be delivered") end
+    ]
+
+    assert {:error, :synthetic_member_unavailable} = run_group("incoming", [issue], [issue], opts)
+  end
+
+  test "a retry uses a fresh dependency field when its scheduled copy is missing", %{issues: [issue | _]} do
+    scheduled = %{issue | blocked_by: nil}
+    {:ok, record} = Store.read("incoming")
+
+    :ok =
+      Store.write(
+        "incoming",
+        Map.merge(record, %{"retry_at" => System.system_time(:millisecond) - 1, "relay_signals" => %{issue.id => Observation.relay_signal(issue)}})
+      )
+
+    assert {:error, :synthetic_nonstart} =
+             run_group("incoming", [scheduled], [scheduled],
+               fetch: fn _ -> {:ok, [issue]} end,
+               lease: fn _, callback -> callback.() end,
+               dependencies: fn _ -> flunk("a due retry reuses its dependency snapshot") end,
+               scan: &scan/1,
+               workspace: fn _, _ -> {:error, :synthetic_nonstart} end
+             )
   end
 
   test "terminal local turn failure ends delivery without claiming a decision", %{issues: [issue | _], root: root} do
@@ -1707,6 +1757,326 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     assert {:error, :yolo_review_waiting} = run_group("review", [review], [review], Keyword.put(base, :project, changed))
     assert Process.get(:project_checks) == 2
+  end
+
+  test "failed PO starter spends at most one Linear request per retry over 30 simulated minutes", %{issues: [issue | _]} do
+    review = %{issue | state: "Yolo Review"}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    Process.put(:po_linear_reads, 0)
+    Process.put(:po_scans, 0)
+
+    read = fn -> Process.put(:po_linear_reads, Process.get(:po_linear_reads) + 1) end
+
+    opts = [
+      dependencies: fn issues ->
+        if issues != [], do: read.()
+        {:ok, issues}
+      end,
+      scan: fn _ ->
+        read.()
+        Process.put(:po_scans, Process.get(:po_scans) + 1)
+        {:ok, inbox()}
+      end,
+      start: fn "review", _ ->
+        assert {:error, :synthetic_po_failure} =
+                 run_group("review", [review], [review],
+                   dependencies: fn issues -> {:ok, issues} end,
+                   fetch: fn _ ->
+                     read.()
+                     {:error, :synthetic_po_failure}
+                   end,
+                   lease: fn _, callback -> callback.() end
+                 )
+
+        {:error, :synthetic_po_failure}
+      end
+    ]
+
+    tick(state, [review], opts)
+    assert {:ok, %{"retry_at" => retry_at} = record} = Store.read("review")
+    assert record["relay_signals"] == %{review.id => Observation.relay_signal(review)}
+    assert retry_at > System.system_time(:millisecond)
+    assert Process.get(:po_linear_reads) == 3
+    assert Process.get(:po_scans) == 1
+
+    {_deadline, retries} =
+      Enum.reduce(5_000..1_800_000//5_000, {30_000, 0}, fn elapsed, {deadline, retries} ->
+        due? = elapsed >= deadline
+
+        if due? do
+          {:ok, current} = Store.read("review")
+          :ok = Store.write("review", %{current | "retry_at" => System.system_time(:millisecond) - 1})
+        end
+
+        before_reads = Process.get(:po_linear_reads)
+        tick(state, [review], opts)
+        assert Process.get(:po_linear_reads) - before_reads == if(due?, do: 1, else: 0)
+        assert Process.get(:po_scans) == 1
+
+        if due? do
+          {:ok, current} = Store.read("review")
+          count = retries + 2
+          assert current["failure_count"] == count
+          delay = min(30_000 * Integer.pow(2, min(count - 1, 5)), 900_000)
+          assert (current["retry_at"] - System.system_time(:millisecond)) in (delay - 2_000)..delay
+          {elapsed + delay, retries + 1}
+        else
+          {deadline, retries}
+        end
+      end)
+
+    assert retries == 5
+    assert Process.get(:po_linear_reads) == 3 + retries
+  end
+
+  test "a due retry holds the real app lease without preloading Linear before a failed fetch", %{issues: [issue | _]} do
+    {:ok, record} = Store.read("incoming")
+
+    record =
+      Map.merge(record, %{
+        "retry_at" => System.system_time(:millisecond) - 1,
+        "relay_signals" => %{issue.id => Observation.relay_signal(issue)},
+        "last_failure_reason" => ":synthetic_po_failure",
+        "failure_count" => 1
+      })
+
+    assert :ok = Store.write("incoming", record)
+    Process.put(:po_retry_fetches, 0)
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ ->
+      flunk("a failed retry must not enter the delegated lease's Linear checks")
+    end)
+
+    for _ <- 1..2 do
+      assert {:error, :synthetic_po_failure} =
+               run_group("incoming", [issue], [issue],
+                 fetch: fn _ ->
+                   Process.put(:po_retry_fetches, Process.get(:po_retry_fetches) + 1)
+                   {:error, :synthetic_po_failure}
+                 end
+               )
+    end
+
+    assert Process.get(:po_retry_fetches) == 2
+  end
+
+  test "foreign relay comment and dependency status changes wake a failed PO group immediately", %{issues: [issue | _]} do
+    review = %{issue | state: "Yolo Review", blocked_by: [%{id: "fix", state: "Review"}]}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    Process.put(:po_issue, review)
+    Process.put(:po_scans, 0)
+    Process.put(:po_starts, 0)
+
+    opts = [
+      dependencies: fn issues -> {:ok, issues} end,
+      scan: fn _ ->
+        Process.put(:po_scans, Process.get(:po_scans) + 1)
+        {:ok, inbox()}
+      end,
+      start: fn group, _ ->
+        Process.put(:po_starts, Process.get(:po_starts) + 1)
+        current = Process.get(:po_issue)
+
+        assert {:error, :synthetic_po_failure} =
+                 run_group(group, [current], [current],
+                   fetch: fn _ -> {:error, :synthetic_po_failure} end,
+                   lease: fn _, callback -> callback.() end
+                 )
+
+        {:error, :synthetic_po_failure}
+      end
+    ]
+
+    tick(state, [review], opts)
+    assert Process.get(:po_starts) == 1
+    assert Process.get(:po_scans) == 1
+
+    dependency = %{review | blocked_by: [%{id: "fix", state: "Fertig"}]}
+    Process.put(:po_issue, dependency)
+    tick(state, [dependency], opts)
+    assert Process.get(:po_starts) == 2
+    assert Process.get(:po_scans) == 2
+
+    comment = %{dependency | last_comment_signal: %{relay_epoch: 1}}
+    Process.put(:po_issue, comment)
+    tick(state, [comment], opts)
+    assert Process.get(:po_starts) == 3
+    assert Process.get(:po_scans) == 3
+    assert {:ok, %{"failure_count" => 1, "retry_at" => retry_at}} = Store.read("review")
+    assert retry_at > System.system_time(:millisecond)
+
+    planning = %{comment | state: "Planung"}
+    Process.put(:po_issue, planning)
+    tick(state, [planning], opts)
+    assert Process.get(:po_starts) == 4
+    assert Process.get(:po_scans) == 4
+  end
+
+  test "a persistent PO failure is logged once until its reason changes", %{issues: [issue | _]} do
+    review = %{issue | state: "Yolo Review"}
+    Process.put(:po_failure, :first_failure)
+
+    opts = [
+      fetch: fn _ -> {:error, Process.get(:po_failure)} end,
+      lease: fn _, callback -> callback.() end
+    ]
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        for _ <- 1..3, do: assert({:error, :first_failure} = run_group("review", [review], [review], opts))
+        Process.put(:po_failure, :second_failure)
+        assert {:error, :second_failure} = run_group("review", [review], [review], opts)
+      end)
+
+    assert length(Regex.scan(~r/YOLO group retry group=review/, log)) == 2
+    assert {:ok, %{"failure_count" => 1, "last_failure_reason" => ":second_failure"}} = Store.read("review")
+  end
+
+  test "a failed PO starter keeps observations and spends no Linear requests over 30 simulated minutes", %{issues: [issue | _]} do
+    review = %{issue | state: "Yolo Review"}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    Process.put(:po_scans, 0)
+    Process.put(:po_starts, 0)
+    Process.put(:po_linear_reads, 0)
+
+    opts = [
+      dependencies: fn issues ->
+        if issues != [], do: Process.put(:po_linear_reads, Process.get(:po_linear_reads) + 1)
+        {:ok, issues}
+      end,
+      scan: fn _ ->
+        Process.put(:po_scans, Process.get(:po_scans) + 1)
+        Process.put(:po_linear_reads, Process.get(:po_linear_reads) + 1)
+        {:ok, inbox()}
+      end,
+      start: fn _, _ ->
+        Process.put(:po_starts, Process.get(:po_starts) + 1)
+        {:error, :starter_broken}
+      end
+    ]
+
+    tick(state, [review], opts)
+    assert {:ok, %{"observations" => observations, "retry_at" => retry_at}} = Store.read("review")
+    assert is_map(observations[review.id])
+    assert retry_at > System.system_time(:millisecond)
+    assert Process.get(:po_linear_reads) == 2
+    tick(state, [review], opts)
+    assert Process.get(:po_scans) == 1
+    assert Process.get(:po_starts) == 1
+
+    {_deadline, retries} =
+      Enum.reduce(5_000..1_800_000//5_000, {30_000, 0}, fn elapsed, {deadline, retries} ->
+        due? = elapsed >= deadline
+
+        if due? do
+          {:ok, current} = Store.read("review")
+          :ok = Store.write("review", %{current | "retry_at" => System.system_time(:millisecond) - 1})
+        end
+
+        before_reads = Process.get(:po_linear_reads)
+        tick(state, [review], opts)
+        assert Process.get(:po_linear_reads) == before_reads
+
+        if due? do
+          count = retries + 2
+          {:ok, current} = Store.read("review")
+          assert current["failure_count"] == count
+          {elapsed + min(30_000 * Integer.pow(2, min(count - 1, 5)), 900_000), retries + 1}
+        else
+          {deadline, retries}
+        end
+      end)
+
+    assert retries == 5
+    assert Process.get(:po_scans) == 1
+    assert Process.get(:po_starts) == 1 + retries
+    assert Process.get(:po_linear_reads) == 2
+  end
+
+  test "a failed review retry keeps its fresh dependency snapshot when Relay is stale", %{issues: [issue | _]} do
+    relay = %{issue | state: "Yolo Review", blocked_by: [%{id: "external", state: "Test (AI)"}]}
+    refreshed = %{relay | blocked_by: [%{id: "external", state: "Review"}]}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    Process.put(:dependency_reads, 0)
+    Process.put(:review_starts, 0)
+    Process.put(:review_scans, 0)
+
+    opts = [
+      dependencies: fn issues ->
+        if issues != [], do: Process.put(:dependency_reads, Process.get(:dependency_reads) + 1)
+        {:ok, Enum.map(issues, &%{&1 | blocked_by: refreshed.blocked_by})}
+      end,
+      scan: fn _ ->
+        Process.put(:review_scans, Process.get(:review_scans) + 1)
+        {:ok, inbox()}
+      end,
+      start: fn "review", _ ->
+        Process.put(:review_starts, Process.get(:review_starts) + 1)
+        {:error, :synthetic_po_failure}
+      end
+    ]
+
+    tick(state, [relay], opts)
+    assert Process.get(:dependency_reads) == 1
+    assert Process.get(:review_starts) == 1
+    assert Process.get(:review_scans) == 1
+    assert {:ok, %{"retry_at" => retry_at, "dependency_snapshot" => snapshot} = record} = Store.read("review")
+    assert retry_at > System.system_time(:millisecond)
+    assert get_in(snapshot, [issue.id, Access.at(0), "state"]) == "Review"
+
+    tick(state, [relay], opts)
+    assert Process.get(:dependency_reads) == 1
+    assert Process.get(:review_starts) == 1
+    assert Process.get(:review_scans) == 1
+
+    :ok = Store.write("review", %{record | "retry_at" => System.system_time(:millisecond) - 1})
+    tick(state, [relay], opts)
+    assert Process.get(:dependency_reads) == 1
+    assert Process.get(:review_starts) == 2
+    assert Process.get(:review_scans) == 1
+  end
+
+  test "runner reuses the coordinator observation after a local startup failure", %{issues: [issue | _]} do
+    relay_issue = %{issue | last_comment_signal: %{relay_epoch: "current"}}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    Process.put(:po_scans, 0)
+    Process.put(:po_reads, 0)
+
+    opts = [
+      dependencies: fn issues ->
+        if issues != [], do: Process.put(:po_reads, Process.get(:po_reads) + 1)
+        {:ok, issues}
+      end,
+      scan: fn _ ->
+        Process.put(:po_scans, Process.get(:po_scans) + 1)
+        Process.put(:po_reads, Process.get(:po_reads) + 1)
+        {:ok, inbox()}
+      end,
+      fetch: fn _ ->
+        Process.put(:po_reads, Process.get(:po_reads) + 1)
+        {:ok, [issue]}
+      end,
+      lease: fn _, callback -> callback.() end,
+      workspace: fn _, _ -> {:error, :synthetic_create_failure} end
+    ]
+
+    start = fn _, _ ->
+      assert {:error, :synthetic_create_failure} = run_group("incoming", [relay_issue], [relay_issue], opts)
+      {:error, :synthetic_create_failure}
+    end
+
+    tick(state, [relay_issue], Keyword.put(opts, :start, start))
+    assert Process.get(:po_scans) == 1
+    assert {:ok, %{"observations" => observations, "retry_at" => retry_at}} = Store.read("incoming")
+    assert is_map(observations[issue.id])
+    assert retry_at > System.system_time(:millisecond)
+
+    {:ok, record} = Store.read("incoming")
+    :ok = Store.write("incoming", %{record | "retry_at" => System.system_time(:millisecond) - 1})
+    before_reads = Process.get(:po_reads)
+    tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [relay_issue], Keyword.put(opts, :start, start))
+    assert Process.get(:po_scans) == 1
+    assert Process.get(:po_reads) - before_reads == 1
   end
 
   test "failed review start removes its newly created checkout", %{issues: [issue | _], root: root, context: context} do

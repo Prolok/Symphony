@@ -43,6 +43,8 @@ defmodule SymphonyElixir.IssueLeaseTest do
   test "in-memory fixtures run without a Linear issue lease" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     assert :memory = IssueLease.run(%Issue{id: "issue"}, fn -> :memory end)
+    assert :pending = IssueLease.run_pending(%Issue{id: "issue"}, fn -> :pending end)
+    assert :ok = IssueLease.ready_for_delivery(%Issue{id: "issue"})
   end
 
   test "helper backend failure is unavailable, never a competing issue owner", %{helper_dir: helper_dir} do

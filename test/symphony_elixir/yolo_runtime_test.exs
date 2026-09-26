@@ -1171,6 +1171,15 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     refute_receive {:start, _}
   end
 
+  test "an incomplete dependency refresh cannot dispatch a partial group", %{issues: issues} do
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    assert tick(state, issues,
+             dependencies: fn _ -> {:ok, tl(issues)} end,
+             start: fn _, _ -> flunk("incomplete group must not start") end
+           ).yolo_runs == %{}
+  end
+
   test "review comment create edit delete and replay have exact scan and session counts", %{issues: [issue | _]} do
     review = %{issue | state: "Yolo Review"}
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
@@ -1430,6 +1439,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   end
 
   test "normal session exit and partial receipts cannot claim completion", %{issues: issues, root: root} do
+    issues = Enum.map(issues, &%{&1 | last_comment_signal: nil})
+
     opts = [
       fetch: fn _ -> {:ok, issues} end,
       lease: fn _issue, callback -> callback.() end,
@@ -1446,6 +1457,44 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert record["processed"] == nil
     assert record["retry_at"] > System.system_time(:millisecond)
     assert record["attempt"]["members"] == Enum.map(issues, & &1.id)
+  end
+
+  test "member readiness is checked immediately before PO delivery", %{issues: [issue | _], root: root} do
+    issue = %{issue | last_comment_signal: nil}
+
+    opts = [
+      fetch: fn _ -> {:ok, [issue]} end,
+      lease: fn _, callback -> callback.() end,
+      lease_ready: fn _ -> {:error, :synthetic_member_unavailable} end,
+      scan: &scan/1,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{inputs: []}} end,
+      before_action: fn _ -> :ok end,
+      session: fn _, _, _, _ -> flunk("unready member must not be delivered") end
+    ]
+
+    assert {:error, :synthetic_member_unavailable} = run_group("incoming", [issue], [issue], opts)
+  end
+
+  test "a retry uses a fresh dependency field when its scheduled copy is missing", %{issues: [issue | _]} do
+    scheduled = %{issue | blocked_by: nil}
+    {:ok, record} = Store.read("incoming")
+
+    :ok =
+      Store.write(
+        "incoming",
+        Map.merge(record, %{"retry_at" => System.system_time(:millisecond) - 1, "relay_signals" => %{issue.id => Observation.relay_signal(issue)}})
+      )
+
+    assert {:error, :synthetic_nonstart} =
+             run_group("incoming", [scheduled], [scheduled],
+               fetch: fn _ -> {:ok, [issue]} end,
+               lease: fn _, callback -> callback.() end,
+               dependencies: fn _ -> flunk("a due retry reuses its dependency snapshot") end,
+               scan: &scan/1,
+               workspace: fn _, _ -> {:error, :synthetic_nonstart} end
+             )
   end
 
   test "terminal local turn failure ends delivery without claiming a decision", %{issues: [issue | _], root: root} do

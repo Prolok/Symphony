@@ -394,6 +394,7 @@ defmodule SymphonyElixir.YoloAgentTest do
 
     ProjectContext.with_context(context, fn ->
       assert :ok = IssueLease.run(issue, fn -> :ok end)
+      assert :ok = IssueLease.ready_for_delivery(issue)
     end)
   end
 end

@@ -62,6 +62,65 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert File.exists?(pending)
   end
 
+  test "confirmed lookups wait for a journal transaction", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+    payload = put_in(variable_create("reply", "Antwort"), ["variables", "input", "parentId"], "parent")
+    assert {:ok, _} = CommentJournal.execute(binding, payload, &graphql_request/1)
+    owner = self()
+
+    holder =
+      Task.async(fn ->
+        IssueLease.with_journal_lock(binding["state_root"], fn ->
+          send(owner, :journal_held)
+
+          receive do
+            :release -> :ok
+          end
+        end)
+      end)
+
+    assert_receive :journal_held, 1_000
+
+    lookups = [
+      fn -> CommentJournal.confirmed_comment_id?(binding, "reply") end,
+      fn -> CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "reply", "action" => "create"}) end,
+      fn -> CommentJournal.confirmed_reply_after?(binding, "parent", 0) end
+    ]
+
+    tasks = Enum.map(lookups, fn lookup -> Task.async(lookup) end)
+    assert Enum.all?(tasks, &(Task.yield(&1, 100) == nil))
+    send(holder.pid, :release)
+    assert :ok = Task.await(holder)
+    assert Enum.map(tasks, &Task.await(&1)) == [true, true, true]
+  end
+
+  test "reconciliation keeps a rejection archived during its remote lookup", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("old", "Alt"), fn _ -> {:error, :offline} end)
+    [intent] = journal_files(binding, "intent")
+    record = intent |> File.read!() |> Jason.decode!() |> Map.put("written_at", "2026-08-01T00:00:00Z")
+    :ok = DurableState.write(intent, record)
+    owner = self()
+
+    reconciling =
+      Task.async(fn ->
+        CommentJournal.reconcile(binding, fn _ ->
+          send(owner, :lookup_started)
+
+          receive do
+            :continue_lookup -> response(%{"comment" => nil})
+          end
+        end)
+      end)
+
+    assert_receive :lookup_started, 1_000
+    rejected = String.replace_suffix(intent, ".intent.json", ".rejected.json")
+    assert :ok = IssueLease.with_journal_lock(binding["state_root"], fn -> DurableState.write(rejected, %{"state" => "rejected"}) end)
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    refute File.exists?(intent)
+    send(reconciling.pid, :continue_lookup)
+    assert {:ok, [%{"state" => "rejected"}]} = Task.await(reconciling)
+  end
+
   test "an old receipt with an unverified outcome stays active", %{binding: binding} do
     assert {:error, :offline} = CommentJournal.execute(binding, variable_create("unclear", "Erwartet"), fn _ -> {:error, :offline} end)
     [intent] = journal_files(binding, "intent")

@@ -109,14 +109,22 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   @spec reconcile(map(), (map() -> term())) :: {:ok, [map()]} | {:error, term()}
   def reconcile(binding, request) do
-    with {:ok, records} <- IssueLease.with_journal_lock(binding["state_root"], fn -> intents(binding) end) do
-      collect(records, &reconcile_record(binding, &1, request))
+    with {:ok, entries} <- locked_entries(binding, 10_000, "reconcile-read") do
+      collect(entries, &reconcile_record(binding, &1, request))
     end
   end
 
-  defp reconcile_record(binding, record, request) do
+  defp locked_entries(binding, timeout, purpose) do
+    IssueLease.with_journal_lock(binding["state_root"], fn -> read_entries(binding) end, timeout, purpose)
+  end
+
+  defp read_entries(binding) do
+    with {:ok, records} <- intents(binding), do: read_many(records, &snapshot_entry(binding, &1))
+  end
+
+  defp reconcile_record(binding, %{record: record, rejected: rejected}, request) do
     cond do
-      rejected?(binding, record) ->
+      rejected ->
         {:ok, result(record, "rejected")}
 
       record["_archived"] == true ->
@@ -131,13 +139,22 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp confirm_prefetched(binding, record, response, timeout, purpose) do
     IssueLease.with_journal_lock(
       binding["state_root"],
-      fn ->
-        confirm_remote(binding, record, fn _ -> response end)
-      end,
+      fn -> confirm_current_record(binding, record, response) end,
       timeout,
       purpose
     )
   end
+
+  defp confirm_current_record(binding, record, response) do
+    with {:ok, catalog} <- archive_catalog(binding) do
+      confirm_from_catalog(binding, record, response, catalog[record["operation_id"]])
+    end
+  end
+
+  defp confirm_from_catalog(binding, record, response, nil), do: confirm_remote(binding, record, fn _ -> response end)
+
+  defp confirm_from_catalog(_binding, _record, _response, archived),
+    do: {:ok, result(archived, if(archived["_rejected"], do: "rejected", else: "confirmed"))}
 
   @spec classify(map(), map()) :: :own | :pending | :foreign | {:error, term()}
   def classify(binding, comment) do
@@ -445,10 +462,17 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   @spec confirmed_comment_id?(map(), String.t()) :: boolean()
   def confirmed_comment_id?(binding, id) do
-    case intents(binding) do
-      {:ok, records} -> Enum.any?(records, &(&1["comment_id"] == id and confirmed?(binding, &1)))
-      _ -> false
-    end
+    IssueLease.with_journal_lock(
+      binding["state_root"],
+      fn ->
+        case intents(binding) do
+          {:ok, records} -> Enum.any?(records, &(&1["comment_id"] == id and confirmed?(binding, &1)))
+          _ -> false
+        end
+      end,
+      10_000,
+      "confirmed-comment-lookup"
+    ) == true
   end
 
   @spec confirmed_relay_event?(map(), map()) :: boolean()
@@ -457,13 +481,17 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     operation = if action == "create", do: "commentCreate", else: "commentUpdate"
     version = get_in(event, ["payload", "updatedAt"]) || event["sourceTime"]
 
-    case intents(binding) do
-      {:ok, records} ->
-        Enum.any?(records, &confirmed_relay_record?(binding, &1, id, operation, action, version))
-
-      _ ->
-        false
-    end
+    IssueLease.with_journal_lock(
+      binding["state_root"],
+      fn ->
+        case intents(binding) do
+          {:ok, records} -> Enum.any?(records, &confirmed_relay_record?(binding, &1, id, operation, action, version))
+          _ -> false
+        end
+      end,
+      10_000,
+      "relay-echo-lookup"
+    ) == true
   end
 
   def confirmed_relay_event?(_binding, _event), do: false
@@ -502,6 +530,15 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   @spec confirmed_reply_after?(map(), String.t(), integer()) :: boolean()
   def confirmed_reply_after?(binding, parent_id, after_ms) do
+    IssueLease.with_journal_lock(
+      binding["state_root"],
+      fn -> confirmed_reply_records?(binding, parent_id, after_ms) end,
+      10_000,
+      "confirmed-reply-lookup"
+    ) == true
+  end
+
+  defp confirmed_reply_records?(binding, parent_id, after_ms) do
     case intents(binding) do
       {:ok, records} ->
         Enum.any?(records, fn record ->
@@ -532,14 +569,12 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp reconcile_observation(_binding, nil), do: :ok
 
   defp reconcile_observation(binding, request) do
-    with {:ok, records} <- IssueLease.with_journal_lock(binding["state_root"], fn -> intents(binding) end, 750, "scan-reconcile-read"),
-         pending = pending_records(binding, records),
+    with {:ok, entries} <- locked_entries(binding, 750, "scan-reconcile-read"),
+         pending = entries |> Enum.filter(&pending_entry?(&1, binding)) |> Enum.map(& &1.record),
          {:ok, _results} <- collect(pending, &reconcile_observation_record(binding, &1, request)) do
       :ok
     end
   end
-
-  defp pending_records(binding, records), do: Enum.reject(records, &(confirmed?(binding, &1) or rejected?(binding, &1)))
 
   defp reconcile_observation_record(binding, record, request) do
     response = request.(%{"query" => @lookup, "variables" => %{"id" => record["comment_id"]}})

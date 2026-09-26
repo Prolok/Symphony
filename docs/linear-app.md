@@ -1522,8 +1522,11 @@ bereits geladenen Kontexts.
 Unter dem vorhandenen projektlokalen `state_root/inputs/` hält `DurableState`
 pro Issue die Bindung, beobachtete Quellversionen (auch aus Vor-/Nachscan-Signalen), Baseline, letzten vollständigen
 Abruf, Scanfehler und Zustände `recognized`, `delivered`, `processed` fest.
-Die bestehende OS-Journal-Sperre serialisiert Scan/Ack; Beobachtungen werden mit
-App-Schreibvorgängen serialisiert und unbestätigte Schreibbelege abgeglichen.
+Eine Issue-eigene Scan-Sperre serialisiert parallele Scans. Linear-Abrufe laufen
+außerhalb der OS-Journal-Sperre; diese schützt kurze lokale Journal-Snapshots,
+Belegbestätigungen und App-Schreibbelege. Der Scan gleicht unbestätigte Belege
+vor der Entscheidung ab und übernimmt den Inbox-Stand nur bei unverändertem
+lokalem Ausgangszustand. Ack und Scan-Commit sind getrennte lokale Transaktionen.
 Die Paginierung prüft sichtbare Änderungen, liefert aber keinen atomaren Snapshot.
 Ein fehlgeschlagener Scan ersetzt keinen vollständigen Stand. Schon gelesene
 Seiten bleiben als offene Beobachtungen erhalten. Das gilt auch für gültige

@@ -71,7 +71,7 @@ defmodule SymphonyElixir.Projects do
 
   @impl true
   def handle_info(:check_idle, contexts) do
-    snapshots = Enum.map(contexts, &Orchestrator.snapshot(server(&1), 1_000))
+    snapshots = contexts |> project_snapshots(1_000) |> Enum.map(&elem(&1, 1))
 
     if globally_idle?(snapshots) do
       Task.start(fn -> Application.stop(:symphony_elixir) end)
@@ -90,7 +90,7 @@ defmodule SymphonyElixir.Projects do
 
   @impl true
   def handle_call(:snapshot, _from, contexts) do
-    snapshots = Enum.map(contexts, fn context -> {context, Orchestrator.snapshot(server(context), 10_000)} end)
+    snapshots = project_snapshots(contexts, 10_000)
 
     if Enum.all?(snapshots, fn {_, snapshot} -> is_map(snapshot) end) do
       result = %{
@@ -113,6 +113,20 @@ defmodule SymphonyElixir.Projects do
     Enum.each(contexts, &GenServer.cast(server(&1), :request_refresh))
     result = %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll", "reconcile"]}
     {:reply, result, contexts}
+  end
+
+  defp project_snapshots(contexts, timeout) do
+    contexts
+    |> Task.async_stream(&Orchestrator.snapshot(server(&1), timeout),
+      max_concurrency: max(length(contexts), 1),
+      timeout: timeout + 100,
+      on_timeout: :kill_task
+    )
+    |> Enum.zip(contexts)
+    |> Enum.map(fn
+      {{:ok, snapshot}, context} -> {context, snapshot}
+      {{:exit, _reason}, context} -> {context, :unavailable}
+    end)
   end
 
   defp load_contexts(roots, workflow, env, code_root) do

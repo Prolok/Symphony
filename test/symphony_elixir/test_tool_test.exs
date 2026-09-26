@@ -123,9 +123,11 @@ defmodule SymphonyElixir.Codex.TestToolTest do
   end
 
   test "Unix transport handles receipts, rejections and uncertain responses without retry" do
+    socket_root = SymphonyElixir.TestSupport.routine_socket_root()
+
     for response <- [~s({"status":"running"}), ~s({"error":"source_mismatch"}), "not-json", "[]", :closed] do
-      path = Path.join(File.cwd!(), "tmp/executor-#{System.unique_integer([:positive])}.sock")
-      File.mkdir_p!(Path.dirname(path))
+      path = Path.join(socket_root, "executor-#{System.unique_integer([:positive])}.sock")
+      assert byte_size(path) < 104
       {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ip: {:local, String.to_charlist(path)}, packet: :line])
       parent = self()
 

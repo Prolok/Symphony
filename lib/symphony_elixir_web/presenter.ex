@@ -109,7 +109,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: issue_id_from_entries(running, retry, waiting),
       status: issue_status(running, retry, waiting),
       workspace: %{
-        path: workspace_path(issue_identifier, running, retry),
+        path: workspace_path(issue_identifier, running, retry, waiting),
         host: workspace_host(running, retry)
       },
       attempts: %{
@@ -223,10 +223,11 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp workspace_path(issue_identifier, running, retry) do
+  defp workspace_path(issue_identifier, running, retry, waiting) do
     (running && Map.get(running, :workspace_path)) ||
       (retry && Map.get(retry, :workspace_path)) ||
-      Path.join(Config.settings!().workspace.root, issue_identifier)
+      (waiting && Map.get(waiting, :workspace_path)) ||
+      Path.join(Config.settings!().workspace.root, (waiting && waiting.identifier) || issue_identifier)
   end
 
   defp workspace_host(running, retry) do

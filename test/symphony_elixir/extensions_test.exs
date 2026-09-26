@@ -1313,7 +1313,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   test "dashboard and API show capacity waiting separately from retry errors" do
     waiting = [
-      %{issue_id: "queued-1", identifier: "PRO-967", project: "Alpha", project_qualifier: "Alpha"},
+      %{issue_id: "queued-1", identifier: "PRO-967", project: "Alpha", project_qualifier: "Alpha", workspace_path: "/projects/alpha/worktrees/PRO-967"},
       %{issue_id: "queued-2", identifier: "PRI-177", project: "Alpha", project_qualifier: "Alpha"}
     ]
 
@@ -1330,6 +1330,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     queued_issue = get(build_conn(), "/api/v1/Alpha%3APRO-967") |> json_response(200)
     assert queued_issue["status"] == "waiting"
     assert queued_issue["last_error"] == nil
+    assert queued_issue["workspace"]["path"] == "/projects/alpha/worktrees/PRO-967"
 
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Tickets in Warteschlange"

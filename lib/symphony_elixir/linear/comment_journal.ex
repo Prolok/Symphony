@@ -399,10 +399,11 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp archive_matches?(record, comment) do
+    same_id? = comment["id"] == record["comment_id"]
     same_author? = get_in(comment, ["user", "id"]) == record["author_id"]
     same_issue? = is_nil(record["issue_id"]) or record["issue_id"] in [get_in(comment, ["issue", "id"]), get_in(comment, ["issue", "identifier"])]
 
-    same_author? and same_issue? and
+    same_id? and same_author? and same_issue? and
       fingerprint(actual_match(comment, record["match_keys"])) == record["match_hash"] and
       record["_confirmed"] == true
   end

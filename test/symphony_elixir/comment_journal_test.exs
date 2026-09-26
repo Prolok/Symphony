@@ -50,7 +50,12 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert journal_files(binding, "intent") == [pending]
     assert CommentJournal.classify(binding, remote) == :own
     assert CommentJournal.classify(binding, %{remote | "body" => "fremde Änderung"}) == :pending
-    assert {:ok, %{"old-own" => [%{record: %{"_archived" => true, "parent_id" => "parent"}}]}} = CommentJournal.snapshot(binding)
+
+    assert {:ok, %{"old-own" => [%{record: %{"_archived" => true, "parent_id" => "parent"}}] = archived}} =
+             CommentJournal.snapshot(binding)
+
+    different = %{remote | "id" => "different"}
+    assert CommentJournal.classify_snapshot(%{"different" => archived}, binding, different) == :pending
     assert CommentJournal.confirmed_comment_id?(binding, "old-own")
     assert CommentJournal.confirmed_relay_event?(binding, %{"commentId" => "old-own", "action" => "create"})
     assert CommentJournal.confirmed_reply_after?(binding, "parent", 0)
@@ -133,7 +138,8 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert {:ok, %{"pending" => [%{confirmed: nil}]}} =
              CommentJournal.observation_snapshot(binding, fn _ -> response(%{"comment" => nil}) end)
 
-    assert :observed = CommentJournal.observe(binding, fn _ -> response(%{"comment" => comment(record)}) end, fn -> :observed end)
+    lookup = fn _ -> response(%{"comment" => comment(record)}) end
+    assert :observed = CommentJournal.observe(binding, lookup, fn -> :observed end)
     assert {:ok, %{"pending" => [%{confirmed: confirmed}]}} = CommentJournal.observation_snapshot(binding, nil)
     assert confirmed["id"] == "pending"
 
@@ -272,7 +278,8 @@ defmodule SymphonyElixir.CommentJournalTest do
   test "a reader crash and an unreadable journal fail closed", %{binding: binding} do
     assert {:error, :offline} = CommentJournal.execute(binding, variable_create("pending", "Text"), fn _ -> {:error, :offline} end)
     Process.flag(:trap_exit, true)
-    assert {:error, :comment_journal_unavailable} = CommentJournal.snapshot(binding, journal_reader: fn _ -> raise "reader crashed" end)
+    crashing_reader = fn _ -> raise "reader crashed" end
+    assert {:error, :comment_journal_unavailable} = CommentJournal.snapshot(binding, journal_reader: crashing_reader)
     directory = Path.join(binding["state_root"], "comments")
     File.chmod!(directory, 0o000)
     assert {:error, :comment_journal_unavailable} = CommentJournal.snapshot(binding)

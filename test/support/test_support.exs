@@ -183,6 +183,13 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   def write_workflow_file!(path, overrides \\ []) do
+    {:ok, target} = SymphonyElixir.PathSafety.canonicalize(path)
+    {:ok, shipped} = SymphonyElixir.PathSafety.canonicalize(@repo_workflow_file)
+
+    if target == shipped do
+      raise ArgumentError, "Tests dürfen die versionierte WORKFLOW.md nicht überschreiben"
+    end
+
     workflow = workflow_content(overrides)
     File.write!(path, workflow)
 

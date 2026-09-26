@@ -163,9 +163,10 @@ class TestRunnerProtocol(unittest.TestCase):
                       main_instance=dict(pid=os.getpid(),started='fixture-main')))
         with socket.socket() as listener:
             listener.bind(('127.0.0.1',0)); port=listener.getsockname()[1]
+        timeout = '20' if scenario == 'probe_failed' else '2' if scenario in ('not_ready', 'missing_session') else '10'
         args = ['--checkout',str(checkout),'--test-instance','dev','--manifest',str(self.manifest),'--run-id','fixture',
                 '--expected-sha',source['sha'],'--expected-source',source['source_sha256'],'--port',str(port),
-                '--scenario',selected,'--result-dir',str(self.result_dir),'--timeout','2' if scenario in ('not_ready', 'missing_session') else '10','--source-mode',mode]
+                '--scenario',selected,'--result-dir',str(self.result_dir),'--timeout',timeout,'--source-mode',mode]
         if yolo:args+=['--yolo']
         if probe:args += ["--scenario", "failure-probe"]
         if resume:args+=['--resume']

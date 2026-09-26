@@ -3,6 +3,25 @@ defmodule SymphonyElixir.TestSupportTest do
 
   alias SymphonyElixir.TestSupport
 
+  @tag tmp_dir: true
+  test "workflow fixture writer protects the shipped workflow and accepts a fixture", %{tmp_dir: tmp_dir} do
+    shipped = Path.expand("../../WORKFLOW.md", __DIR__)
+    original = File.read!(shipped)
+    alias_path = Path.join(tmp_dir, "workflow-alias")
+    File.ln_s!(shipped, alias_path)
+
+    for path <- [shipped, alias_path] do
+      assert_raise ArgumentError, ~r/versionierte WORKFLOW.md/, fn ->
+        TestSupport.write_workflow_file!(path)
+      end
+    end
+
+    assert File.read!(shipped) == original
+    fixture = Path.join(tmp_dir, "WORKFLOW.md")
+    assert :ok = TestSupport.write_workflow_file!(fixture)
+    assert File.read!(fixture) != original
+  end
+
   test "fixture isolation clears and restores inherited OpenClaw notification sessions" do
     key = "OPENCLAW_YOLO_NOTIFY_SESSION"
     previous = System.get_env(key)

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import shutil
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
@@ -28,11 +29,16 @@ class PipelinePlan(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.module = load()
+        self.main_checkout = self.root.with_name(self.root.name + '-main')
+        self.main_checkout.mkdir()
+        self.addCleanup(shutil.rmtree, self.main_checkout)
         self.workflow = (REPO / 'WORKFLOW.md').read_text()
         (self.root / 'WORKFLOW.md').write_text(self.workflow)
         self.source = dict(checkout=str(self.root), sha='a' * 40, source_sha256='b' * 64, dirty=True)
         (self.root / 'source.json').write_text(json.dumps(self.source))
-        (self.root / 'manifest.json').write_text(json.dumps(dict(project_root=str(self.root / 'fixtures'))))
+        self.manifest = dict(project_root=str(self.root / 'fixtures'),
+                             main_instance=dict(checkout=str(self.main_checkout), projects=[]))
+        (self.root / 'manifest.json').write_text(json.dumps(self.manifest))
         self.args = argparse.Namespace(source=self.root / 'source.json', manifest=self.root / 'manifest.json',
                                        result_dir=self.root / '_build/run', run_id='pipeline-fixture',
                                        issue_id=['11111111-1111-4111-8111-111111111111'],
@@ -58,6 +64,21 @@ class PipelinePlan(unittest.TestCase):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 self.module.prepare(argparse.Namespace(**(vars(self.args) | values)))
         with mock.patch.object(self.module.TEST, 'source', return_value={}), self.assertRaisesRegex(ValueError, 'source_changed'):
+            self.module.prepare(self.args)
+        self.assertFalse(self.args.result_dir.exists())
+
+    def test_rejects_active_checkout_before_writing_workflow_overlay(self):
+        (self.root / 'nested').mkdir()
+        for checkout in (self.root, self.root / 'nested'):
+            self.manifest['main_instance']['checkout'] = str(checkout)
+            self.args.manifest.write_text(json.dumps(self.manifest))
+            with self.subTest(checkout=checkout), self.assertRaisesRegex(ValueError, 'überlappt'):
+                self.module.prepare(self.args)
+            self.assertFalse(self.args.result_dir.exists())
+        self.manifest['main_instance']['checkout'] = str(self.main_checkout)
+        self.manifest['main_instance']['projects'] = [{'root': str(self.root)}]
+        self.args.manifest.write_text(json.dumps(self.manifest))
+        with self.assertRaises(ValueError):
             self.module.prepare(self.args)
         self.assertFalse(self.args.result_dir.exists())
 

@@ -80,6 +80,25 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     end
   end
 
+  test "idle check retains the service when a snapshot task exceeds its deadline" do
+    contexts = contexts()
+    start_servers(contexts)
+    task = Task.async(fn -> Projects.handle_info(:check_idle, contexts) end)
+
+    try do
+      requests = receive_requests(contexts)
+      {_id, from} = hd(requests)
+      {_id, suspended_from} = List.last(requests)
+      {suspended_pid, _ref} = suspended_from
+      :erlang.suspend_process(suspended_pid)
+      GenServer.reply(from, snapshot(hd(contexts).id))
+
+      assert {:noreply, ^contexts} = Task.await(task, 2_000)
+    after
+      if Process.alive?(task.pid), do: Task.shutdown(task, :brutal_kill)
+    end
+  end
+
   defp assert_parallel_requests(contexts, fun) do
     task = Task.async(fun)
 

@@ -310,6 +310,7 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   ohne Wert erfolgen keine OpenClaw-Zugriffe. Aktivierung verlangt den separaten
   Live-Nachweis, Standardgates bleiben unabhängig; [Vertrag](docs/openclaw-yolo.md).
   Belegte technische Nichtstarts der Review-Gruppe entfernen nur ihren eigenen unveränderten Checkout und erhalten begrenztes wachsendes Retry-Backoff; unklare oder veränderte Checkouts sperren weitere Starts bis zur Prüfung. Verwaiste Altcheckouts nur über den [Betreiberweg](docs/linear-app.md#verwaiste-po-reviewcheckouts) mit Trockenlauf bereinigen.
+  Fehlgeschlagene PO-Gruppen behalten ihre Beobachtungen und vermeiden bei unverändertem Relay-Signal ticketbezogene Linear-Reads zwischen Wiederholungen. Gleiche Fehlergründe erhalten Backoff von 30 Sekunden bis 15 Minuten; fremde Kommentar- oder Statussignale wecken sofort. Frische Prüfungen vor einer Zustellung bleiben bindend; [Details](docs/linear-app.md#agentenbindung).
   Belegte OpenClaw-Vorab-Ablehnung gibt nur den nicht gestarteten Auftrag frei;
   unklare Annahme bleibt reserviert. Neue unterbrochene Aufträge dürfen nach
   wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung technisch

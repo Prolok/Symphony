@@ -281,6 +281,35 @@ defmodule SymphonyElixir.YoloAgentTest do
     assert Enum.map(limited[context.id], & &1.id) == ["todo"]
   end
 
+  test "a predecessor relay event changes a waiting review member signal even before its cached relation is refreshed", %{context: context} do
+    context = %{context | assignee_ids: ["local"], human_handoff_id: "local", yolo_agent_id: "pai"}
+    context = put_in(context.settings.tracker.assignee, "local")
+
+    review = %{
+      "id" => "review",
+      "identifier" => "PRO-1",
+      "title" => "Review",
+      "state" => %{"name" => "Yolo Review"},
+      "project" => %{"slugId" => "project"},
+      "delegate" => %{"id" => "pai"},
+      "assignee" => %{"id" => "local", "app" => false},
+      "inverseRelations" => %{"nodes" => [%{"type" => "blocks", "issue" => %{"id" => "fix", "identifier" => "PRO-2", "state" => %{"name" => "Test (AI)"}}}]}
+    }
+
+    session = %Relay.Session{
+      status: :ready,
+      contexts: [context],
+      record: %{"issues" => %{"review" => review}, "generation" => "g", "epochs" => %{"review" => 1, "fix" => 1}}
+    }
+
+    assert {:ok, first} = Relay.candidates(session, [context])
+    first_signal = hd(first[context.id]).last_comment_signal
+
+    changed = put_in(session.record["epochs"]["fix"], 2)
+    assert {:ok, second} = Relay.candidates(changed, [context])
+    refute hd(second[context.id]).last_comment_signal == first_signal
+  end
+
   test "agent binding and assignee ordering are restart-bound", %{context: context, root: root} do
     File.write!(Path.join(root, ".symphony/.env.local"), "LINEAR_YOLO_AGENT=Pai\n")
     {:ok, original} = ProjectContext.load(root, context.workflow_path, %{})

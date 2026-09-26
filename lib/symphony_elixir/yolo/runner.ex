@@ -16,40 +16,70 @@ defmodule SymphonyElixir.Yolo.Runner do
     end)
   end
 
+  @spec record_start_failure(String.t(), [map()], term()) :: {:error, term()}
+  def record_start_failure(group, issues, reason), do: record_result(group, Ecto.UUID.generate(), {:error, reason}, issues)
+
   defp start_locked(group, issues, project_issues, opts) do
-    with :ok <- Delivery.reconcile(group),
-         {:ok, record} <- Store.read(group),
-         :ok <- checkout_available(group, record),
-         {:ok, epoch} <- ReviewReadiness.epoch(group) do
-      record = Map.put(record, "capture_epoch", epoch)
-      run_id = Ecto.UUID.generate()
-      callback = fn -> run_locked(group, issues, project_issues, run_id, record, opts) end
-      result = with_members(Enum.sort_by(issues, & &1.id), callback, Keyword.get(opts, :lease, &IssueLease.run/2))
-      record_result(group, run_id, result, issues)
-    end
+    run_id = Ecto.UUID.generate()
+
+    result =
+      with :ok <- Delivery.reconcile(group),
+           {:ok, record} <- Store.read(group),
+           :ok <- checkout_available(group, record),
+           :ok <- retry_openclaw(record, opts),
+           {:ok, epoch} <- ReviewReadiness.epoch(group) do
+        record = Map.put(record, "capture_epoch", epoch)
+        retry? = tentative_retry?(record)
+        lease = Keyword.get(opts, :lease, default_lease(retry?))
+        ready = lease_ready(retry?, opts)
+        opts = Keyword.put_new(opts, :lease_ready, ready)
+        callback = fn -> run_locked(group, issues, project_issues, run_id, record, opts) end
+        with_members(Enum.sort_by(issues, & &1.id), callback, lease)
+      end
+
+    record_result(group, run_id, result, issues)
   end
+
+  defp default_lease(true), do: &IssueLease.run_pending/2
+  defp default_lease(false), do: &IssueLease.run/2
+
+  defp lease_ready(true, opts) do
+    if Keyword.has_key?(opts, :lease), do: fn _ -> :ok end, else: &IssueLease.ready_for_delivery/1
+  end
+
+  defp lease_ready(false, _opts), do: fn _ -> :ok end
+
+  defp retry_openclaw(%{"last_failure_reason" => ":openclaw_" <> _}, opts) do
+    if is_binary(Config.openclaw_yolo_agent()), do: OpenClaw.retry_preflight(opts), else: :ok
+  end
+
+  defp retry_openclaw(_, _), do: :ok
 
   defp record_result(_group, _run_id, :ok, _issues), do: :ok
 
   defp record_result(group, run_id, {:error, reason} = result, issues) do
     member_context = Enum.map_join(issues, " ", &"issue_id=#{&1.id} issue_identifier=#{&1.identifier}")
-    Logger.warning("YOLO group failed group=#{group} run_id=#{run_id} #{member_context} reason=#{inspect(reason)}")
 
     with {:ok, current} <- Store.read(group) do
       attempt = if(get_in(current, ["attempt", "id"]) == run_id, do: current["attempt"], else: %{})
-      {count, delay} = retry_delay(group, current["nonstart"], attempt)
+      reason_text = inspect(reason)
+      same_reason? = current["last_failure_reason"] == reason_text
+      failure_count = if same_reason?, do: (current["failure_count"] || 0) + 1, else: 1
+      nonstart_count = nonstart_count(group, current["nonstart"], attempt, same_reason?)
+      delay = min(30_000 * Integer.pow(2, min(max(failure_count, nonstart_count) - 1, 5)), 900_000)
 
       update = %{
-        "error" => inspect(reason),
+        "error" => reason_text,
+        "last_failure_reason" => reason_text,
+        "failure_count" => failure_count,
         "retry_at" => System.system_time(:millisecond) + delay,
-        "failure" => %{"group" => group, "run_id" => run_id, "reason" => inspect(reason), "checkout_cleanup" => attempt["checkout_cleanup"]}
+        "failure" => %{"group" => group, "run_id" => run_id, "reason" => reason_text, "checkout_cleanup" => attempt["checkout_cleanup"]},
+        "nonstart" => if(nonstart_count > 0, do: %{"fingerprint" => attempt["fingerprint"], "members" => attempt["members"], "count" => nonstart_count})
       }
 
-      update = if(count > 0, do: Map.put(update, "nonstart", %{"fingerprint" => attempt["fingerprint"], "members" => attempt["members"], "count" => count}), else: update)
-
-      Logger.warning(
-        "YOLO group retry group=#{group} run_id=#{run_id} #{member_context} reason=#{inspect(reason)} checkout_cleanup=#{inspect(attempt["checkout_cleanup"])} nonstart_count=#{count} retry_ms=#{delay}"
-      )
+      if not same_reason? do
+        Logger.warning("YOLO group retry group=#{group} run_id=#{run_id} #{member_context} reason=#{reason_text} checkout_cleanup=#{inspect(attempt["checkout_cleanup"])} retry_ms=#{delay}")
+      end
 
       Store.write(group, Map.merge(current, update))
     end
@@ -57,14 +87,13 @@ defmodule SymphonyElixir.Yolo.Runner do
     result
   end
 
-  defp retry_delay("review", previous, %{"checkout_cleanup" => "removed"} = attempt) do
+  defp nonstart_count("review", previous, %{"checkout_cleanup" => "removed"} = attempt, same_reason?) do
     previous = previous || %{}
-    same? = previous["fingerprint"] == attempt["fingerprint"] and previous["members"] == attempt["members"]
-    count = if(same?, do: previous["count"] + 1, else: 1)
-    {count, min(30_000 * Integer.pow(2, min(count - 1, 5)), 900_000)}
+    same? = same_reason? and previous["fingerprint"] == attempt["fingerprint"] and previous["members"] == attempt["members"]
+    if same?, do: previous["count"] + 1, else: 1
   end
 
-  defp retry_delay(_, _, _), do: {0, 30_000}
+  defp nonstart_count(_, _, _, _), do: 0
 
   defp checkout_available("review", %{"checkout_cleanup_blocked" => true}), do: {:error, :yolo_review_checkout_cleanup_unconfirmed}
 
@@ -96,16 +125,18 @@ defmodule SymphonyElixir.Yolo.Runner do
 
   defp run_locked(group, issues, project_issues, run_id, record, opts) do
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+    retry? = tentative_retry?(record)
 
     with {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
          true <- Enum.sort(Enum.map(fresh, & &1.id)) == Enum.sort(Enum.map(issues, & &1.id)),
-         {:ok, fresh} <- Dependencies.refresh(fresh, opts),
+         fresh = with_relay_epochs(fresh, issues),
+         {:ok, fresh} <- tentative_dependencies(fresh, opts, retry?),
          true <- Enum.all?(fresh, &Dependencies.dispatchable?/1),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))),
-         {:ok, project_issues} <- current_project(group, fresh, project_issues, opts),
-         observation_issues = if(group == "review", do: Group.groups(project_issues)["review"] || [], else: fresh),
+         {:ok, project_issues} <- tentative_project(group, fresh, project_issues, opts, retry?),
+         observation_issues = if(group == "review" and not retry?, do: Group.groups(project_issues)["review"] || [], else: fresh),
          {:ok, all_observations, fingerprint} <-
-           Observation.capture(observation_issues, %{}, Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
+           Observation.capture(observation_issues, pending_observations(record), Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
          observations = Map.take(all_observations, Enum.map(fresh, & &1.id)),
          record = Delivery.migrate(record, observations),
          {:ok, operations} <- Operations.pending(Enum.map(fresh, & &1.id)),
@@ -120,6 +151,38 @@ defmodule SymphonyElixir.Yolo.Runner do
       _ -> {:error, :yolo_group_changed}
     end
   end
+
+  defp tentative_retry?(%{"retry_at" => retry_at, "relay_signals" => signals}),
+    do: is_integer(retry_at) and is_map(signals) and map_size(signals) > 0
+
+  defp tentative_retry?(_), do: false
+
+  defp with_relay_epochs(fresh, scheduled) do
+    scheduled = Map.new(scheduled, &{&1.id, &1})
+
+    Enum.map(fresh, fn issue ->
+      relay_epoch = scheduled[issue.id].last_comment_signal && scheduled[issue.id].last_comment_signal[:relay_epoch]
+
+      if is_nil(relay_epoch) do
+        issue
+      else
+        %{issue | last_comment_signal: Map.put(issue.last_comment_signal || %{}, :relay_epoch, relay_epoch)}
+      end
+    end)
+  end
+
+  defp tentative_dependencies(fresh, _opts, true), do: {:ok, fresh}
+  defp tentative_dependencies(fresh, opts, false), do: Dependencies.refresh(fresh, opts)
+
+  defp tentative_project(_group, _fresh, project_issues, _opts, true), do: {:ok, project_issues}
+  defp tentative_project(group, fresh, project_issues, opts, false), do: current_project(group, fresh, project_issues, opts)
+
+  defp pending_observations(%{"relay_signals" => signals, "observations" => observations} = record)
+       when is_map(signals) and map_size(signals) > 0 do
+    if record["processed"] == Observation.fingerprint(observations), do: %{}, else: observations
+  end
+
+  defp pending_observations(_), do: %{}
 
   defp execute(group, issues, project_issues, run_id, record, observations, fingerprint, opts) do
     create = Keyword.get(opts, :workspace, &Workspace.create/2)
@@ -305,6 +368,8 @@ defmodule SymphonyElixir.Yolo.Runner do
           "processed" => observations |> Map.take(Enum.map(retained, & &1.id)) |> Observation.fingerprint(),
           "attempt" => Map.put(finished["attempt"], "session_id", result.session_id),
           "error" => nil,
+          "last_failure_reason" => nil,
+          "failure_count" => 0,
           "retry_at" => nil,
           "nonstart" => nil,
           "checkout_cleanup_blocked" => false
@@ -317,7 +382,8 @@ defmodule SymphonyElixir.Yolo.Runner do
   end
 
   defp reserve_delivery(group, issues, run_id, observations, opts) do
-    with :ok <- Delivery.reserve(group, run_id, observations),
+    with :ok <- ready_members(issues, opts),
+         :ok <- Delivery.reserve(group, run_id, observations),
          :ok <- if(group == "blocker", do: BlockerBrake.reserve(issues, run_id, opts), else: :ok) do
       :ok
     else
@@ -326,6 +392,15 @@ defmodule SymphonyElixir.Yolo.Runner do
         if group == "blocker", do: BlockerBrake.release(issues, run_id)
         error
     end
+  end
+
+  defp ready_members(issues, opts) do
+    Enum.reduce_while(issues, :ok, fn issue, _ ->
+      case opts[:lease_ready].(issue) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
   end
 
   defp release_delivery(group, issues, run_id) do

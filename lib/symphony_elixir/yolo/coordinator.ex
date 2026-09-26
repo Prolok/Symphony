@@ -21,13 +21,14 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
     if is_binary(Config.yolo_agent_id()) do
       issues = recover_origins(state, issues, opts)
+      relay_signals = relay_signals(issues)
+      retrying_groups = retrying_groups(relay_signals)
+      opts = opts |> Keyword.put(:relay_signals, relay_signals) |> Keyword.put(:retrying_groups, retrying_groups)
+      {retrying, regular} = Enum.split_with(issues, &Map.get(retrying_groups, Group.name(&1), false))
 
-      case Dependencies.refresh(issues, opts) do
-        {:ok, issues} ->
-          retry_notifications(state, issues, opts)
-          :ok = Recovery.resume(state, issues, opts)
-          {issues, state} = admit(issues, state, opts)
-          schedule_groups(state, issues, opts)
+      case Dependencies.refresh(regular, opts) do
+        {:ok, refreshed} ->
+          schedule_refreshed(state, issues, refreshed ++ retrying, opts)
 
         {:error, reason} ->
           Logger.warning("YOLO dependencies unavailable project_root=#{ProjectContext.current().root} reason=#{inspect(reason)}")
@@ -84,6 +85,48 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp log_notification_retry(issue, {:error, reason}) do
     Logger.warning("YOLO notification waiting issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+  end
+
+  defp schedule_refreshed(state, original, refreshed, opts) do
+    case complete_refresh(original, refreshed) do
+      {:ok, issues} ->
+        retry_notifications(state, issues, opts)
+        :ok = Recovery.resume(state, issues, opts)
+        {issues, state} = admit(issues, state, opts)
+        schedule_groups(state, issues, opts)
+
+      {:error, reason} ->
+        Logger.warning("YOLO dependencies unavailable project_root=#{ProjectContext.current().root} reason=#{inspect(reason)}")
+        state
+    end
+  end
+
+  defp complete_refresh(issues, refreshed) do
+    if Enum.sort(Enum.map(issues, & &1.id)) == Enum.sort(Enum.map(refreshed, & &1.id)) do
+      by_id = Map.new(refreshed, &{&1.id, &1})
+      {:ok, Enum.map(issues, &Map.fetch!(by_id, &1.id))}
+    else
+      {:error, :yolo_dependencies_incomplete}
+    end
+  end
+
+  defp relay_signals(issues) do
+    issues
+    |> Enum.reject(&is_nil(Group.name(&1)))
+    |> Enum.group_by(&Group.name/1)
+    |> Map.new(fn {group, members} -> {group, Map.new(members, &{&1.id, Observation.relay_signal(&1)})} end)
+  end
+
+  defp retrying_groups(signals) do
+    Map.new(signals, fn {group, current} ->
+      unchanged? =
+        case Store.read(group) do
+          {:ok, %{"retry_at" => retry_at, "relay_signals" => ^current}} when is_integer(retry_at) -> true
+          _ -> false
+        end
+
+      {group, unchanged?}
+    end)
   end
 
   defp recover_external(state, opts) do
@@ -219,7 +262,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
     issues =
       Enum.flat_map(issues, fn issue ->
-        if Admission.eligible?(issue) and Admission.needed?(issue) and
+        if not Map.get(opts[:retrying_groups] || %{}, Group.name(issue), false) and
+             Admission.eligible?(issue) and Admission.needed?(issue) and
              Dependencies.dispatchable?(issue) and
              not Group.terminal?(issue) and issue.id not in reserved and not Map.has_key?(state.running, issue.id) do
           [prepare_issue(issue, prepare)]
@@ -268,8 +312,12 @@ defmodule SymphonyElixir.Yolo.Coordinator do
          {:ok, record} <- Store.read(group),
          {:ok, record} <- Impulse.observe(members, record, opts),
          {:ok, observations, _fingerprint} <-
-           Observation.capture(members, record["observations"], Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
+           capture_group(group, members, record, Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
          record = Delivery.migrate(record, observations),
+         signals = get_in(opts[:relay_signals] || %{}, [group]),
+         record = reset_changed_retry(record, signals),
+         :ok <- persist_observations(group, record, observations, signals),
+         record = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}}),
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          effective = if(operations == [], do: record, else: Map.put(record, "processed", nil)),
          pending = Delivery.pending(members, observations, effective),
@@ -289,6 +337,28 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       _ ->
         :waiting
     end
+  end
+
+  defp capture_group(group, members, record, opts) do
+    if Map.get(opts[:retrying_groups] || %{}, group, false) and
+         Enum.all?(members, &is_map(get_in(record, ["observations", &1.id]))) do
+      observations = Map.take(record["observations"], Enum.map(members, & &1.id))
+      {:ok, observations, Observation.fingerprint(observations)}
+    else
+      Observation.capture(members, record["observations"], opts)
+    end
+  end
+
+  defp reset_changed_retry(%{"retry_at" => retry_at, "relay_signals" => previous} = record, current)
+       when is_integer(retry_at) and is_map(current) and previous != current do
+    Map.merge(record, %{"retry_at" => nil, "nonstart" => nil, "failure_count" => 0, "last_failure_reason" => nil, "error" => nil})
+  end
+
+  defp reset_changed_retry(record, _), do: record
+
+  defp persist_observations(group, record, observations, signals) do
+    updated = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}})
+    if updated == record, do: :ok, else: Store.write(group, updated)
   end
 
   defp reset_changed_nonstart(%{"nonstart" => %{"fingerprint" => fingerprint, "members" => ids}} = record, pending, observations) do
@@ -342,6 +412,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
         end
       end)
 
+    prior_record = Store.read(group)
+
     case start.(group, callback) do
       {:ok, pid} ->
         %{
@@ -351,14 +423,25 @@ defmodule SymphonyElixir.Yolo.Coordinator do
             last_activity_at_ms: System.monotonic_time(:millisecond)
         }
 
-      _ ->
-        if opts[:recovering] do
-          %{state | claimed: MapSet.union(state.claimed, MapSet.new(members, & &1.id)), max_concurrent_agents: 0}
-        else
-          state
-        end
+      {:error, reason} ->
+        handle_start_failure(state, group, members, opts, prior_record, reason)
     end
   end
+
+  defp handle_start_failure(state, group, members, opts, prior_record, reason) do
+    unless opts[:recovering] == true or reason in [:capacity, :worker_capacity] or
+             start_effect_recorded?(group, prior_record) do
+      Runner.record_start_failure(group, members, reason)
+    end
+
+    if opts[:recovering] do
+      %{state | claimed: MapSet.union(state.claimed, MapSet.new(members, & &1.id)), max_concurrent_agents: 0}
+    else
+      state
+    end
+  end
+
+  defp start_effect_recorded?(group, prior_record), do: Store.read(group) != prior_record
 
   @spec event(map(), String.t(), map()) :: map()
   def event(runs, group, message) do

@@ -19,6 +19,38 @@ defmodule SymphonyElixir.Linear.IssueLease do
     end
   end
 
+  @doc "Hold a delegated member locally while a retry checks whether delivery is possible."
+  @spec run_pending(map(), (-> term())) :: term()
+  def run_pending(issue, callback) do
+    case Config.settings!().tracker do
+      %{kind: "linear", auth_mode: "app", app: binding} ->
+        run_pending_owned(binding, issue, callback)
+
+      _ ->
+        callback.()
+    end
+  end
+
+  defp run_pending_owned(binding, issue, callback) do
+    with :ok <- OpenClawJournal.member_available(issue.id),
+         :ok <- SymphonyElixir.Relay.execution_allowed(issue) do
+      with_lock(binding["workspace_id"], issue.id, fn -> pending_target(issue.id, callback) end)
+    end
+  end
+
+  defp pending_target(id, callback) do
+    with :ok <- ready_target(id), do: callback.()
+  end
+
+  @doc "Complete the member checks inside an already held pending lease before PO delivery."
+  @spec ready_for_delivery(map()) :: :ok | {:error, term()}
+  def ready_for_delivery(issue) do
+    case Config.settings!().tracker do
+      %{kind: "linear", auth_mode: "app", app: binding} -> run_ready(binding, issue, fn -> :ok end)
+      _ -> :ok
+    end
+  end
+
   defp run_owned(binding, issue, callback) do
     with :ok <- OpenClawJournal.member_available(issue.id),
          :ok <- SymphonyElixir.Relay.execution_allowed(issue) do

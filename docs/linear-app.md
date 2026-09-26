@@ -219,6 +219,16 @@ PO-Turns, wenn das Backlog-Ticket inzwischen blockiert wurde. Zusammenhängende 
 externe Vorgänger. Unabhängige Arbeit erzeugt keine globale Review-Warteschleife.
 Beobachtete Blockierung und erneute Freigabe werden je Mitglied und Phase
 dauerhaft gezählt; auch ein identischer freier Endstand erlaubt genau eine neue Bewertung.
+
+Nach einem Gruppenfehler bleibt die vollständige Beobachtung auch ohne
+erfolgreichen PO-Start erhalten. Unveränderte Relay-Signale lösen während des
+Cooldowns keine ticketbezogenen Linear-Lesezugriffe aus. Derselbe Fehlergrund
+wiederholt nach 30, 60, 120, 240, 480 und höchstens 900 Sekunden; sein Wechsel
+wird einmal protokolliert. Eine fremde Kommentar- oder Statusänderung im Relay
+setzt den Cooldown zurück und lässt die Gruppe sofort neu prüfen. Vor einer
+tatsächlichen Zustellung gelten weiterhin die frischen Mitglieds-, Abhängigkeits-
+und Kommentarprüfungen.
+
 Ein belegter lokaler App-Server-Fehler vor `turn/start` gibt den Zustellversuch
 für einen technischen Retry frei. Unklare oder bereits gestartete Turns bleiben
 zunächst reserviert. Neue unterbrochene OpenClaw-Aufträge darf Symphony nach

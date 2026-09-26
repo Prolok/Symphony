@@ -589,7 +589,9 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     state = %Orchestrator.State{max_concurrent_agents: 0, poll_interval_ms: 30_000, retry_attempts: %{issue.id => retry}}
     human("pending", "Neue Eingabe nach technischem Review")
     assert {:noreply, resumed} = Orchestrator.handle_info({:retry_issue, issue.id, token}, state)
-    assert resumed.retry_attempts[issue.id].error == "no available orchestrator slots"
+    assert resumed.retry_attempts[issue.id].error == nil
+    assert resumed.retry_attempts[issue.id].capacity_wait
+    assert Enum.any?(resumed.waiting, &(&1.issue_id == issue.id))
     Process.cancel_timer(resumed.retry_attempts[issue.id].timer_ref)
     refute_received :status_mutation
     establish(issue)

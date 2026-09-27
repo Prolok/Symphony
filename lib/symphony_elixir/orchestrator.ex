@@ -435,7 +435,7 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
       state = YoloCoordinator.tick(state, issues)
       state = reconcile_idle_review_stays(state, issues)
-      state = retain_visible_completed_states(state, issues)
+      state = reconcile_observed_completed_states(state, issues)
       state = retain_visible_dialog_observations(state, issues)
 
       state = if available_slots(state) > 0, do: choose_issues(state, issues), else: state
@@ -613,6 +613,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
     review_departure = review_departure_running_entry(issue, state)
+    state = clear_completed_state_after_status_change(state, issue)
 
     next_state =
       cond do
@@ -1940,6 +1941,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
     terminal_states = terminal_state_set()
     metadata = reconcile_retry_review_stay(issue, metadata)
+    state = clear_completed_state_after_status_change(state, issue)
 
     cond do
       cancel_issue_state?(issue.state) ->
@@ -2311,35 +2313,41 @@ defmodule SymphonyElixir.Orchestrator do
   defp completed_timestamp(%DateTime{} = updated_at), do: DateTime.to_iso8601(updated_at)
   defp completed_timestamp(_updated_at), do: nil
 
-  defp retain_visible_completed_states(%State{} = state, issues) when is_list(issues) do
-    visible_issue_ids =
-      issues
-      |> Enum.flat_map(fn
-        %Issue{id: issue_id} when is_binary(issue_id) -> [issue_id]
-        _ -> []
-      end)
-      |> MapSet.new()
-
-    completed_states =
-      Enum.reduce(state.completed_states, %{}, fn {issue_id, normalized_state}, acc ->
-        if MapSet.member?(visible_issue_ids, issue_id) do
-          Map.put(acc, issue_id, normalized_state)
-        else
-          acc
-        end
-      end)
-
-    completed =
-      Enum.reduce(state.completed, MapSet.new(), fn issue_id, acc ->
-        if MapSet.member?(visible_issue_ids, issue_id) do
-          MapSet.put(acc, issue_id)
-        else
-          acc
-        end
-      end)
-
-    %{state | completed_states: completed_states, completed: completed}
+  defp reconcile_observed_completed_states(%State{} = state, issues) when is_list(issues) do
+    Enum.reduce(issues, state, fn
+      %Issue{} = issue, state_acc -> clear_completed_state_after_status_change(state_acc, issue)
+      _issue, state_acc -> state_acc
+    end)
   end
+
+  defp clear_completed_state_after_status_change(
+         %State{} = state,
+         %Issue{id: issue_id, state: issue_state} = issue
+       )
+       when is_binary(issue_id) and is_binary(issue_state) do
+    current_state = normalize_issue_state(issue_state)
+
+    completed_state =
+      case Map.get(state.completed_states, issue_id) do
+        {status, _updated_at} when is_binary(status) -> status
+        status when is_binary(status) -> status
+        _marker -> nil
+      end
+
+    if current_state != "" and is_binary(completed_state) and completed_state != current_state do
+      Logger.info("Completion marker cleared after status change: #{issue_context(issue)} completed_state=#{inspect(completed_state)} current_state=#{inspect(issue_state)}")
+
+      %{
+        state
+        | completed_states: Map.delete(state.completed_states, issue_id),
+          completed: MapSet.delete(state.completed, issue_id)
+      }
+    else
+      state
+    end
+  end
+
+  defp clear_completed_state_after_status_change(state, _issue), do: state
 
   defp retain_visible_dialog_observations(%State{} = state, issues) when is_list(issues) do
     visible_dialog_issue_ids =

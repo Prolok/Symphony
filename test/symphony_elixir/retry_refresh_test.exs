@@ -9,7 +9,135 @@ defmodule SymphonyElixir.RetryRefreshTest do
     @impl true
     def init(issue), do: {:ok, issue}
     @impl true
+    def handle_call({:candidates, _id}, _from, {:error, _} = error), do: {:reply, error, error}
     def handle_call({:candidates, _id}, _from, issue), do: {:reply, {:ok, List.wrap(issue)}, issue}
+    def handle_call({:set_issue, issue}, _from, _previous), do: {:reply, :ok, issue}
+  end
+
+  test "Merge to Test to BLOCKER to Merge dispatches again after the observed status change" do
+    {context, merge_issue, _workspace, state} = completion_fixture(:stale)
+    context = put_in(context.settings.codex.command, "sleep 20")
+    start_task_supervisor()
+
+    ProjectContext.with_context(context, fn ->
+      test_issue = %{merge_issue | state: "Test (AI)"}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [test_issue])
+      completed = finish_worker(state, merge_issue)
+      assert completed.completed_states[merge_issue.id] == "merge (ai)"
+
+      retry = completed.retry_attempts[merge_issue.id]
+
+      retry_log =
+        capture_log(fn ->
+          assert {:noreply, testing} = Orchestrator.handle_info({:retry_issue, merge_issue.id, retry.retry_token}, completed)
+          send(self(), {:testing_state, testing})
+        end)
+
+      assert_receive {:testing_state, testing}
+      assert testing.running[merge_issue.id].dispatch_issue.state == "Test (AI)"
+      refute Map.has_key?(testing.completed_states, merge_issue.id)
+      assert retry_log =~ "issue_id=#{merge_issue.id}"
+      assert retry_log =~ "issue_identifier=#{merge_issue.identifier}"
+      assert retry_log =~ "completed_state=\"merge (ai)\""
+      assert retry_log =~ "current_state=\"Test (AI)\""
+
+      blocker = %{merge_issue | state: "BLOCKER"}
+      blocked = Orchestrator.reconcile_issue_states_for_test([blocker], testing)
+      assert blocked.running == %{}
+      refute Map.has_key?(blocked.completed_states, merge_issue.id)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [merge_issue])
+      assert {:noreply, returned} = Orchestrator.handle_info(:run_poll_cycle, blocked)
+      assert returned.running[merge_issue.id].dispatch_issue.state == "Merge (AI)"
+      cancel_poll_timer(returned)
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, returned.running[merge_issue.id].pid)
+    end)
+  end
+
+  test "a completed status is dispatchable after BLOCKER without an intervening run" do
+    {context, issue, _workspace, state} = completion_fixture(:stale)
+    context = put_in(context.settings.codex.command, "sleep 20")
+    start_task_supervisor()
+
+    ProjectContext.with_context(context, fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      completed = finish_worker(state, issue)
+      assert {:noreply, released} = Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
+      assert {:noreply, stayed} = Orchestrator.handle_info(:run_poll_cycle, released)
+      assert stayed.running == %{}
+      assert stayed.completed_states[issue.id] == "merge (ai)"
+      cancel_poll_timer(stayed)
+
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, %{issue | state: "BLOCKER"}})
+
+      log =
+        capture_log(fn ->
+          assert {:noreply, blocked} = Orchestrator.handle_info(:run_poll_cycle, stayed)
+          send(self(), {:blocked_poll, blocked})
+        end)
+
+      assert_receive {:blocked_poll, blocked}
+      refute Map.has_key?(blocked.completed_states, issue.id)
+      assert log =~ "issue_id=#{issue.id}"
+      assert log =~ "issue_identifier=#{issue.identifier}"
+      assert log =~ "completed_state=\"merge (ai)\""
+      assert log =~ "current_state=\"BLOCKER\""
+      cancel_poll_timer(blocked)
+
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, issue})
+      assert {:noreply, returned} = Orchestrator.handle_info(:run_poll_cycle, blocked)
+      assert returned.running[issue.id].dispatch_issue.state == "Merge (AI)"
+      cancel_poll_timer(returned)
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, returned.running[issue.id].pid)
+    end)
+  end
+
+  test "running-state reconciliation clears an older marker when it observes a different status" do
+    {context, issue, _workspace, state} = completion_fixture(:stale)
+    state = %{state | completed_states: %{issue.id => "test (ai)"}, completed: MapSet.new([issue.id])}
+    blocker = %{issue | state: "BLOCKER"}
+
+    ProjectContext.with_context(context, fn ->
+      log =
+        capture_log(fn ->
+          reconciled = Orchestrator.reconcile_issue_states_for_test([blocker], state)
+          send(self(), {:reconciled_state, reconciled})
+        end)
+
+      assert_receive {:reconciled_state, reconciled}
+      refute Map.has_key?(reconciled.completed_states, issue.id)
+      refute MapSet.member?(reconciled.completed, issue.id)
+      assert log =~ "completed_state=\"test (ai)\""
+      assert log =~ "current_state=\"BLOCKER\""
+    end)
+  end
+
+  test "same-state completion blocks poll and continuation retry even after missing candidate or fetch error" do
+    {context, issue, _workspace, state} = completion_fixture(:stale)
+
+    ProjectContext.with_context(context, fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      completed = finish_worker(state, issue)
+
+      retry_log =
+        capture_log(fn ->
+          assert {:noreply, retried} = Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
+          send(self(), {:same_state_retry, retried})
+        end)
+
+      assert_receive {:same_state_retry, retried}
+      assert retry_log =~ "Issue already completed in current state during retry"
+      assert retried.running == %{}
+      assert retried.completed_states[issue.id] == "merge (ai)"
+
+      for candidate <- [[], {:error, :temporary_unavailable}, %{issue | state: nil}, issue] do
+        assert :ok = GenServer.call(ProjectPoller, {:set_issue, candidate})
+        assert {:noreply, polled} = Orchestrator.handle_info(:run_poll_cycle, retried)
+        assert polled.running == %{}
+        assert polled.completed_states[issue.id] == "merge (ai)"
+        cancel_poll_timer(polled)
+      end
+    end)
   end
 
   for cache <- [:stale, :missing] do
@@ -61,6 +189,7 @@ defmodule SymphonyElixir.RetryRefreshTest do
       completed = finish_worker(state, issue)
       retry = completed.retry_attempts[issue.id]
       assert {:noreply, pending} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, completed)
+      assert pending.completed_states[issue.id] == "merge (ai)"
       assert MapSet.member?(pending.claimed, issue.id)
       assert File.dir?(workspace)
       retained = pending.retry_attempts[issue.id]
@@ -216,6 +345,7 @@ defmodule SymphonyElixir.RetryRefreshTest do
           completed = finish_worker(state, issue)
           retry = completed.retry_attempts[issue.id]
           assert {:noreply, pending} = Orchestrator.handle_info({:retry_issue, issue.id, retry.retry_token}, completed)
+          assert pending.completed_states[issue.id] == "merge (ai)"
           assert MapSet.member?(pending.claimed, issue.id)
           assert File.dir?(workspace)
           retained = pending.retry_attempts[issue.id]
@@ -412,6 +542,15 @@ defmodule SymphonyElixir.RetryRefreshTest do
   end
 
   defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+
+  defp start_task_supervisor do
+    if is_nil(Process.whereis(SymphonyElixir.TaskSupervisor)) do
+      start_supervised!({Task.Supervisor, name: SymphonyElixir.TaskSupervisor})
+    end
+  end
+
+  defp cancel_poll_timer(%{tick_timer_ref: timer_ref}) when is_reference(timer_ref), do: Process.cancel_timer(timer_ref)
+  defp cancel_poll_timer(_state), do: :ok
 
   defp completion_fixture(cache) do
     root = Path.join([File.cwd!(), "_build", "completion-refresh-#{System.unique_integer([:positive])}"])

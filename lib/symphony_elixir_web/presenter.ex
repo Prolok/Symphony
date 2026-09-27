@@ -156,6 +156,7 @@ defmodule SymphonyElixirWeb.Presenter do
       last_event_at: iso8601(entry.last_codex_timestamp),
       tokens: %{
         input_tokens: entry.codex_input_tokens,
+        cached_input_tokens: Map.get(entry, :codex_cached_input_tokens, 0),
         output_tokens: entry.codex_output_tokens,
         total_tokens: entry.codex_total_tokens
       }
@@ -206,6 +207,7 @@ defmodule SymphonyElixirWeb.Presenter do
       last_event_at: iso8601(running.last_codex_timestamp),
       tokens: %{
         input_tokens: running.codex_input_tokens,
+        cached_input_tokens: Map.get(running, :codex_cached_input_tokens, 0),
         output_tokens: running.codex_output_tokens,
         total_tokens: running.codex_total_tokens
       }

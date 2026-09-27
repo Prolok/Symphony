@@ -228,7 +228,8 @@ cache checkpoint while preserving already accumulated cache usage. The terminal
 dashboard displays `cached_input_tokens / input_tokens` as a rounded whole
 percentage beside `in`. Zero input displays `0% cached`; inconsistent cache
 totals are clamped to 0–100% for display. The meanings of `in`, `out` and
-`total` are unchanged.
+`total` are unchanged. The observability State and Issue API token maps expose
+the cached input count alongside the existing counters.
 
 ### Preferred source order
 

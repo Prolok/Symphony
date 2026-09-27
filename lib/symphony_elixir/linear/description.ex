@@ -224,6 +224,11 @@ defmodule SymphonyElixir.Linear.Description do
 
   defp plain_backslashes(line, _), do: line
 
+  # A top-level bullet can interrupt a paragraph regardless of its punctuation.
+  # Keep the narrower observed rule for ordered lists, whose CommonMark opener
+  # is subject to different restrictions.
+  defp list_gap({:list, _} = item, previous, rest), do: [item, {:text, previous} | rest]
+
   defp list_gap(item, previous, rest) do
     if String.ends_with?(previous, ":") do
       [item, {:text, previous} | rest]

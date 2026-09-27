@@ -73,7 +73,7 @@ defmodule SymphonyElixir.Yolo.API do
   @spec issue(String.t(), keyword()) :: {:ok, map() | nil} | {:error, term()}
   def issue(id, opts) do
     document =
-      "query YoloCreatedIssue($id: ID!) { issues(filter: {id: {eq: $id}}, first: 2) { nodes { id identifier url title description project { id } team { id } assignee { id } delegate { id } state { id name } } pageInfo { hasNextPage } } }"
+      "query YoloCreatedIssue($id: ID!) { issues(filter: {id: {eq: $id}}, first: 2) { nodes { id createdAt identifier url title description project { id } team { id } assignee { id } delegate { id } state { id name } } pageInfo { hasNextPage } } }"
 
     case query(document, %{id: id}, opts) do
       {:ok, %{"issues" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}} ->

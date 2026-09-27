@@ -5,6 +5,8 @@ defmodule SymphonyElixir.Yolo.Followup do
   alias SymphonyElixir.TestRun.Derived, as: Derived
   alias SymphonyElixir.Yolo.{ActionScope, API, GeneratedLabel, Operations, Relations, Scope}
 
+  @created_history "query YoloCreatedHistory($id: String!, $after: String) { issue(id: $id) { history(first: 100, after: $after) { nodes { id createdAt fromTitle toTitle updatedDescription fromAssigneeId toAssigneeId fromDelegate { id } toDelegate { id } fromStateId toStateId fromProjectId toProjectId fromTeamId toTeamId addedLabelIds removedLabelIds actor { id app } botActor { id } } pageInfo { hasNextPage endCursor } } } }"
+
   @spec invoke(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def invoke(%{"kind" => kind, "origin_ids" => ids} = args, opts) when kind in ["aggregate", "followup"] and is_list(ids) do
     request = Map.take(args, ~w(kind origin_ids operation_key title description validation blocked_by blocks_origins)) |> Map.update!("origin_ids", &Enum.sort(Enum.uniq(&1)))
@@ -163,45 +165,175 @@ defmodule SymphonyElixir.Yolo.Followup do
 
     with :ok <- API.confirmed(document, %{input: intent["input"]}, ["issueCreate", "issue"], intent["issue_id"], opts),
          {:ok, created} <- API.issue(intent["issue_id"], opts),
-         do: verify_created(created, intent, opts)
+         do: verify_created(created, intent, opts, false)
   end
 
-  defp create_or_verify(existing, intent, opts), do: verify_created(existing, intent, opts)
+  defp create_or_verify(existing, intent, opts), do: verify_created(existing, intent, opts, true)
 
-  defp verify_created(created, intent, opts) when is_map(created) do
+  defp verify_created(created, intent, opts, recovery?) when is_map(created) do
     input = intent["input"]
 
     # API.issue/2 already requires the returned issue ID to match the requested ID.
-    with :ok <- equal("project.id", input["projectId"], get_in(created, ["project", "id"])),
-         :ok <- equal("team.id", input["teamId"], get_in(created, ["team", "id"])),
-         :ok <- equal("title", input["title"], created["title"]),
-         :ok <- equal("description", input["description"], created["description"], &Description.equivalent?/2),
-         :ok <- equal("assignee.id", input["assigneeId"], get_in(created, ["assignee", "id"])),
-         :ok <- equal("delegate.id", input["delegateId"], get_in(created, ["delegate", "id"])),
-         :ok <- equal("state.id", input["stateId"], get_in(created, ["state", "id"])),
-         {:ok, labels} <- API.labels(input["id"], opts),
-         :ok <- required_labels(input["labelIds"], labels) do
-      {:ok, created}
-    else
+    checks = [
+      {"project.id", input["projectId"], get_in(created, ["project", "id"])},
+      {"team.id", input["teamId"], get_in(created, ["team", "id"])},
+      {"title", input["title"], created["title"]},
+      {"description", input["description"], created["description"]},
+      {"assignee.id", input["assigneeId"], get_in(created, ["assignee", "id"])},
+      {"delegate.id", input["delegateId"], get_in(created, ["delegate", "id"])},
+      {"state.id", input["stateId"], get_in(created, ["state", "id"])}
+    ]
+
+    changed = Enum.reject(checks, fn {field, expected, actual} -> comparable?(field, expected, actual) end)
+
+    case {recovery?, changed} do
+      {false, [first | _]} -> changed_error(first)
+      _ -> verify_labels(created, input, changed, opts, recovery?)
+    end
+  end
+
+  defp verify_created(_, _, _, _), do: {:error, :yolo_created_issue_unconfirmed}
+
+  defp comparable?("description", expected, actual), do: Description.equivalent?(expected, actual)
+  defp comparable?(_, expected, actual), do: expected == actual
+
+  defp verify_labels(created, input, changed, opts, recovery?) do
+    with {:ok, labels} <- API.labels(input["id"], opts) do
+      missing =
+        input["labelIds"]
+        |> Enum.with_index()
+        |> Enum.reject(fn {id, _} -> Enum.any?(labels, &(&1["id"] == id)) end)
+        |> Enum.map(fn {id, index} -> {"labelIds", id, Enum.map(labels, & &1["id"]), index} end)
+
+      case changed ++ missing do
+        [] -> {:ok, created}
+        [first | _] = differences when recovery? -> verify_history(created, differences, first, opts)
+        [first | _] -> changed_error(first)
+      end
+    end
+  end
+
+  defp changed_error({"labelIds", expected, actual, index}),
+    do: {:error, {:yolo_created_issue_changed, %{field: "labelIds", at: "labelIds[#{index}]", expected: expected, actual: actual}}}
+
+  defp changed_error({field, expected, actual}),
+    do: {:error, {:yolo_created_issue_changed, difference(field, expected, actual)}}
+
+  defp verify_history(created, differences, first, opts) do
+    case DateTime.from_iso8601(created["createdAt"] || "") do
+      {:ok, created_at, _} -> verify_history_pages(created, differences, first, opts, created_at)
+      _ -> changed_error(first)
+    end
+  end
+
+  defp verify_history_pages(created, differences, first, opts, created_at) do
+    case API.pages(@created_history, %{id: created["id"]}, ["issue", "history"], opts) do
+      {:ok, nodes} -> verify_history_nodes(created, differences, first, nodes, created_at)
       {:error, _} = error -> error
     end
   end
 
-  defp verify_created(_, _, _), do: {:error, :yolo_created_issue_unconfirmed}
-
-  defp equal(field, expected, actual, comparable? \\ &Kernel.==/2) do
-    if comparable?.(expected, actual) do
-      :ok
+  defp verify_history_nodes(created, differences, first, nodes, created_at) do
+    with {:ok, events} <- dated_history(nodes),
+         true <- Enum.all?(differences, &human_change?(&1, events, created_at)) do
+      {:ok, created}
     else
-      {:error, {:yolo_created_issue_changed, difference(field, expected, actual)}}
+      _ -> changed_error(first)
     end
   end
 
-  defp required_labels(expected, actual) do
-    case Enum.find_index(expected, fn id -> not Enum.any?(actual, &(&1["id"] == id)) end) do
-      nil -> :ok
-      index -> {:error, {:yolo_created_issue_changed, %{field: "labelIds", at: "labelIds[#{index}]", expected: Enum.at(expected, index), actual: Enum.map(actual, & &1["id"])}}}
+  defp dated_history(nodes) do
+    Enum.reduce_while(nodes, {:ok, []}, fn node, {:ok, acc} ->
+      case DateTime.from_iso8601(node["createdAt"] || "") do
+        {:ok, at, _} -> {:cont, {:ok, [{at, node} | acc]}}
+        _ -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, events} -> {:ok, Enum.sort(events, fn {left, _}, {right, _} -> DateTime.compare(left, right) == :lt end)}
+      _ -> :error
     end
+  end
+
+  defp human_change?({"description", _expected, _actual}, events, created_at) do
+    events
+    |> Enum.filter(fn {_at, node} -> node["updatedDescription"] == true end)
+    |> List.last()
+    |> case do
+      {at, node} -> DateTime.compare(at, created_at) == :gt and human_actor?(node)
+      _ -> false
+    end
+  end
+
+  defp human_change?({field, expected, actual}, events, created_at) do
+    result =
+      events
+      |> Enum.filter(fn {at, _node} -> DateTime.compare(at, created_at) == :gt end)
+      |> Enum.flat_map(&field_event(&1, field))
+      |> Enum.reduce_while({:ok, expected, false}, &advance_field(&1, &2, created_at))
+
+    case result do
+      {:ok, ^actual, true} -> true
+      _ -> false
+    end
+  end
+
+  defp human_change?({"labelIds", expected, _actual, _index}, events, created_at) do
+    events
+    |> Enum.filter(fn {at, _node} -> DateTime.compare(at, created_at) == :gt end)
+    |> Enum.flat_map(&label_event(&1, expected))
+    |> Enum.reduce_while({:ok, :present, false}, &advance_label(&1, &2, created_at))
+    |> Kernel.==({:ok, :missing, true})
+  end
+
+  defp field_event({at, node}, field) do
+    case field_change(field, node) do
+      nil -> []
+      change -> [{at, node, change}]
+    end
+  end
+
+  defp advance_field({at, node, {from, to}}, {:ok, prior, _}, created_at) do
+    if DateTime.compare(at, created_at) == :gt and from == prior do
+      {:cont, {:ok, to, human_actor?(node)}}
+    else
+      {:halt, :error}
+    end
+  end
+
+  defp label_event({at, node}, id) do
+    added? = id in (node["addedLabelIds"] || [])
+    removed? = id in (node["removedLabelIds"] || [])
+
+    case {added?, removed?} do
+      {true, true} -> [{at, node, :ambiguous}]
+      {true, false} -> [{at, node, :added}]
+      {false, true} -> [{at, node, :removed}]
+      _ -> []
+    end
+  end
+
+  defp advance_label({at, node, action}, {:ok, prior, _}, created_at) do
+    case {DateTime.compare(at, created_at), prior, action} do
+      {:gt, :present, :removed} -> {:cont, {:ok, :missing, human_actor?(node)}}
+      {:gt, :missing, :added} -> {:cont, {:ok, :present, human_actor?(node)}}
+      _ -> {:halt, :error}
+    end
+  end
+
+  defp field_change("title", node), do: changed_pair(node["fromTitle"], node["toTitle"])
+  defp field_change("assignee.id", node), do: changed_pair(node["fromAssigneeId"], node["toAssigneeId"])
+  defp field_change("delegate.id", node), do: changed_pair(get_in(node, ["fromDelegate", "id"]), get_in(node, ["toDelegate", "id"]))
+  defp field_change("state.id", node), do: changed_pair(node["fromStateId"], node["toStateId"])
+  defp field_change("project.id", node), do: changed_pair(node["fromProjectId"], node["toProjectId"])
+  defp field_change("team.id", node), do: changed_pair(node["fromTeamId"], node["toTeamId"])
+
+  defp changed_pair(from, to) when from != to, do: {from, to}
+  defp changed_pair(_, _), do: nil
+
+  defp human_actor?(node) do
+    actor = node["actor"]
+    is_map(actor) and is_binary(actor["id"]) and actor["app"] == false and is_nil(node["botActor"])
   end
 
   defp difference("description", expected, actual) when is_binary(expected) and is_binary(actual),

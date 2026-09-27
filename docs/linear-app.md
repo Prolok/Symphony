@@ -260,8 +260,12 @@ entsteht das Backlog-Ticket ohne beide Zuweisungen. Aggregation übernimmt die
 Delegation unabhängig vom Startmodus. Das dauerhafte Journal `yolo-actions/`
 reserviert die ID vor Anlage und erhält den genauen Auftrag, Anforderungen und
 Relationsplan. Wiederaufnahme gleicht dieselbe ID ab; eine veränderte Operation
-oder Quelle wird abgewiesen. Vollständig gelesene Abhängigkeiten werden in beide
-Richtungen übertragen; erkannte Zyklen verhindern Relationsschreiben und
+oder Quelle wird abgewiesen. Beim Rücklesen eines bereits angelegten Tickets
+dürfen nur spätere menschliche Feldänderungen mit passender, vollständig gelesener
+Linear-Historie vom Anlageauftrag abweichen; die Zielzuweisung wird nicht
+wiederhergestellt. Fehlende oder unpassende Belege bleiben Anlagenfehler,
+Lesefehler behalten ihre ursprüngliche Fehlerklasse. Vollständig gelesene
+Abhängigkeiten werden in beide Richtungen übertragen; erkannte Zyklen verhindern Relationsschreiben und
 Ursprungabschluss. Ursprünge schließen erst nach bestätigten Links. Unfertige
 Anlagen sperren die menschliche Schlussübergabe. Bleibt nach dem letzten
 Ursprungabschluss eine Aggregationsoperation offen, lädt der Eingangslauf die
@@ -1302,7 +1306,8 @@ Fehlresultate bleiben erhalten, Exitstatus 1 und `status=failed` bleiben auch be
 Für neu angelegte YOLO-Tickets verwenden Anlageabgleich und abgeleitete
 Testfixtures denselben begrenzten Beschreibungsvergleich: `-`/`*` bei
 obersten Listen, zusammengefasste leere Zeilen, eine Leerzeile zwischen
-Doppelpunkt-Einleitung und oberster Aufzählung oder `1. `-Liste sowie belegte
+Textabsatz und oberster Bullet-Liste unabhängig vom Satzzeichen oder zwischen
+Doppelpunkt-Einleitung und `1. `-Liste sowie belegte
 Linear-Issuelinks am Zeilenende oder im Fließtext: Die nackte URL und
 `[ISSUE-SCHLÜSSEL](URL)` sind nur bei identischem URL-Schlüssel austauschbar.
 Das gilt auch neben Code-Spans, aber nie innerhalb von Code-Spans. Nummerierung,
@@ -1322,8 +1327,12 @@ HTML oder unbestätigter Linksyntax sind von dieser Toleranz ausgeschlossen.
 Anlagepayload und journalisierter Intent werden dabei nicht umgeschrieben.
 Codeblöcke bleiben unverändert; Dokumente mit
 eingerückten Blöcken oder rohem HTML verlangen weiterhin Bytegleichheit.
-Andere Texte, Links, Einrückungen, Checkboxen, Titel, Identitäten, Status und
-Zuweisungen bleiben strikt geprüft. Bei abweichenden angelegten Tickets nennt
+Andere Texte, Links, Einrückungen und Checkboxen bleiben strikt geprüft.
+Bei der Recovery einer bereits vorhandenen Anlage mit journalisierter ID dürfen
+spätere menschliche Änderungen an abweichenden Feldern bestehen bleiben, wenn
+die vollständig gelesene Issue-Historie den Feldwechsel nach der Anlage belegt;
+Zuweisungen werden dabei nicht erneut gesetzt. Ohne passende Historie scheitert
+der Abgleich weiterhin. Bei abweichenden angelegten Tickets nennt
 `yolo_created_issue_changed` das erste abweichende Feld und seine Stelle; die
 Beschreibung erhält Byteposition, Zeile, Spalte und kurze Textfragmente der
 normalisierten Vergleichsfassung.

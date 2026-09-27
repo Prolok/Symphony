@@ -368,6 +368,8 @@ Reguläre Relay-Abrufe erfolgen standardmäßig alle fünf Sekunden. Kein automa
 Rechnerwechsel oder Linear-Ersatzpoll bei Relay-Störung. Frische kritische Prüfungen,
 lokale Leases und Pflichtgates bleiben erhalten. Einrichtung und gemeinsamer
 Versionswechsel: [LinearRelay](docs/linear-app.md#linearrelay-empfang-zuständigkeit-und-gemeinsame-umstellung).
+Unsichtbare Completion-Marker werden frühestens alle fünf Minuten erneut geprüft;
+Statusrundreisen und begrenzte Retention sind unter [Projektbindung und Polling](docs/linear-app.md#projektbindung-und-polling) beschrieben.
 
 ### Linear-Zugriff
 

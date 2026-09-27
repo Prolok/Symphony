@@ -194,6 +194,217 @@ defmodule SymphonyElixir.RetryRefreshTest do
     end)
   end
 
+  for lookup <- [:same_state, :missing, :error] do
+    test "an invisible completed merge with #{lookup} lookup is checked once over twelve polls" do
+      {context, issue, _workspace, state} = completion_fixture(:missing)
+      clock = start_supervised!({Agent, fn -> 0 end})
+      Process.put(:completion_refresh_now_fun, fn -> Agent.get(clock, & &1) end)
+      on_exit(fn -> Process.delete(:completion_refresh_now_fun) end)
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+      ProjectContext.with_context(context, fn ->
+        Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+        completed = finish_worker(state, issue)
+
+        assert {:noreply, released} =
+                 Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
+
+        if unquote(lookup) == :missing,
+          do: Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+        if unquote(lookup) == :error do
+          Application.put_env(:symphony_elixir, :memory_tracker_state_error, :temporary_unavailable)
+          on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_state_error) end)
+        end
+
+        assert :ok = GenServer.call(ProjectPoller, {:set_issue, []})
+        drain_state_reads()
+
+        final =
+          Enum.reduce(1..12, released, fn _, current ->
+            assert {:noreply, next} = Orchestrator.handle_info(:run_poll_cycle, current)
+            cancel_poll_timer(next)
+            assert next.running == %{}
+            assert next.completed_states[issue.id] == "merge (ai)"
+            next
+          end)
+
+        assert final.running == %{}
+        assert length(drain_state_reads()) == 1
+
+        Agent.update(clock, fn _ -> 299_999 end)
+        assert {:noreply, before_interval} = Orchestrator.handle_info(:run_poll_cycle, final)
+        cancel_poll_timer(before_interval)
+        assert drain_state_reads() == []
+
+        Agent.update(clock, fn _ -> 300_000 end)
+        assert {:noreply, after_interval} = Orchestrator.handle_info(:run_poll_cycle, before_interval)
+        cancel_poll_timer(after_interval)
+        assert length(drain_state_reads()) == 1
+        assert after_interval.completed_states[issue.id] == "merge (ai)"
+      end)
+    end
+  end
+
+  test "a changed issue version checks state history before releasing a returned merge" do
+    {context, issue, _workspace, state} = completion_fixture(:missing)
+    baseline = DateTime.utc_now()
+    issue = %{issue | updated_at: baseline}
+    state = put_in(state.running[issue.id].issue, issue)
+    state = put_in(state.running[issue.id].dispatch_issue, issue)
+    context = put_in(context.settings.codex.command, "sleep 20")
+    start_task_supervisor()
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+    ProjectContext.with_context(context, fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      completed = finish_worker(state, issue)
+
+      assert {:noreply, released} =
+               Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
+
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, []})
+      assert {:noreply, hidden} = Orchestrator.handle_info(:run_poll_cycle, released)
+      cancel_poll_timer(hidden)
+
+      transition = DateTime.add(completed.completion_refreshes[issue.id].completed_at, 1, :second)
+      updated = %{issue | updated_at: DateTime.add(transition, 2, :second)}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [updated])
+
+      Application.put_env(:symphony_elixir, :memory_tracker_state_history, %{
+        issue.id => [
+          %{"stateId" => "blocker-state", "state" => %{"name" => "BLOCKER"}, "startedAt" => DateTime.to_iso8601(transition), "endedAt" => DateTime.to_iso8601(DateTime.add(transition, 1, :second))}
+        ]
+      })
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_state_history) end)
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, updated})
+
+      log =
+        capture_log(fn ->
+          assert {:noreply, returned} = Orchestrator.handle_info(:run_poll_cycle, hidden)
+          send(self(), {:returned_after_history, returned})
+        end)
+
+      issue_id = issue.id
+      assert_receive {:memory_tracker_fetch_issue_state_history, ^issue_id}
+      assert_receive {:returned_after_history, returned}
+      refute Map.has_key?(returned.completed_states, issue.id)
+      assert returned.running[issue.id].dispatch_issue.state == "Merge (AI)"
+      assert log =~ "Completion marker cleared after status change"
+      cancel_poll_timer(returned)
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, returned.running[issue.id].pid)
+    end)
+  end
+
+  test "incomplete history keeps a marker and retries at the safety interval" do
+    {context, issue, _workspace, state} = completion_fixture(:stale)
+    clock = start_supervised!({Agent, fn -> 0 end})
+    Process.put(:completion_refresh_now_fun, fn -> Agent.get(clock, & &1) end)
+    on_exit(fn -> Process.delete(:completion_refresh_now_fun) end)
+    issue = %{issue | updated_at: DateTime.utc_now()}
+    state = put_in(state.running[issue.id].issue, issue)
+    state = put_in(state.running[issue.id].dispatch_issue, issue)
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+    ProjectContext.with_context(context, fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      completed = finish_worker(state, issue)
+
+      assert {:noreply, released} =
+               Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
+
+      updated = %{issue | updated_at: DateTime.add(issue.updated_at, 10, :second)}
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [updated])
+      Application.put_env(:symphony_elixir, :memory_tracker_state_history, %{issue.id => [%{"stateId" => "unknown"}]})
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_state_history) end)
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, updated})
+      drain_state_reads()
+
+      final =
+        Enum.reduce(1..12, released, fn _, current ->
+          assert {:noreply, next} = Orchestrator.handle_info(:run_poll_cycle, current)
+          cancel_poll_timer(next)
+          assert next.completed_states[issue.id] == "merge (ai)"
+          assert next.running == %{}
+          next
+        end)
+
+      assert length(drain_state_reads()) == 1
+      assert length(drain_history_reads()) == 1
+
+      Agent.update(clock, fn _ -> 300_000 end)
+      assert {:noreply, retried} = Orchestrator.handle_info(:run_poll_cycle, final)
+      cancel_poll_timer(retried)
+      assert retried.completed_states[issue.id] == "merge (ai)"
+      assert length(drain_state_reads()) == 1
+      assert length(drain_history_reads()) == 1
+    end)
+  end
+
+  test "two missing checks over a day collect an unclaimed marker" do
+    {context, issue, _workspace, state} = completion_fixture(:missing)
+    clock = start_supervised!({Agent, fn -> 0 end})
+    Process.put(:completion_refresh_now_fun, fn -> Agent.get(clock, & &1) end)
+    on_exit(fn -> Process.delete(:completion_refresh_now_fun) end)
+
+    ProjectContext.with_context(context, fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      completed = finish_worker(state, issue)
+
+      assert {:noreply, released} =
+               Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, []})
+      assert {:noreply, first} = Orchestrator.handle_info(:run_poll_cycle, released)
+      cancel_poll_timer(first)
+      assert first.completed_states[issue.id] == "merge (ai)"
+
+      Agent.update(clock, fn _ -> 86_400_000 end)
+
+      log =
+        capture_log(fn ->
+          assert {:noreply, collected} = Orchestrator.handle_info(:run_poll_cycle, first)
+          send(self(), {:collected_marker, collected})
+        end)
+
+      assert_receive {:collected_marker, collected}
+      cancel_poll_timer(collected)
+      refute Map.has_key?(collected.completed_states, issue.id)
+      refute Map.has_key?(collected.completion_refreshes, issue.id)
+      refute Map.has_key?(collected.status_change_observations, issue.id)
+      assert log =~ "Completion marker expired after repeated missing issue"
+    end)
+  end
+
+  test "a visible stale candidate retains its observation until a day of absence" do
+    {context, issue, _workspace, state} = completion_fixture(:missing)
+    clock = start_supervised!({Agent, fn -> 86_400_000 end})
+    Process.put(:completion_refresh_now_fun, fn -> Agent.get(clock, & &1) end)
+    on_exit(fn -> Process.delete(:completion_refresh_now_fun) end)
+    Application.put_env(:symphony_elixir, :memory_tracker_state_error, :temporary_unavailable)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_state_error) end)
+    state = %{state | running: %{}, claimed: MapSet.new(), status_change_observations: %{issue.id => {"blocker", 0}}}
+
+    ProjectContext.with_context(context, fn ->
+      {visible, []} = Orchestrator.reconcile_completed_states_for_test(state, [issue])
+      assert visible.status_change_observations[issue.id] == {"blocker", 86_400_000}
+
+      Agent.update(clock, fn _ -> 172_799_999 end)
+      {recently_missing, []} = Orchestrator.reconcile_completed_states_for_test(visible, [])
+      assert Map.has_key?(recently_missing.status_change_observations, issue.id)
+
+      Agent.update(clock, fn _ -> 172_800_000 end)
+      {expired, []} = Orchestrator.reconcile_completed_states_for_test(recently_missing, [])
+      refute Map.has_key?(expired.status_change_observations, issue.id)
+      refute Map.has_key?(expired.completion_refreshes, issue.id)
+    end)
+  end
+
   for cache <- [:stale, :missing] do
     test "normal merge completion cleans up with #{cache} candidates" do
       {context, issue, workspace, state} = completion_fixture(unquote(cache))
@@ -605,6 +816,22 @@ defmodule SymphonyElixir.RetryRefreshTest do
 
   defp cancel_poll_timer(%{tick_timer_ref: timer_ref}) when is_reference(timer_ref), do: Process.cancel_timer(timer_ref)
   defp cancel_poll_timer(_state), do: :ok
+
+  defp drain_state_reads(acc \\ []) do
+    receive do
+      {:memory_tracker_fetch_issue_states, ids} -> drain_state_reads([ids | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
+  defp drain_history_reads(acc \\ []) do
+    receive do
+      {:memory_tracker_fetch_issue_state_history, id} -> drain_history_reads([id | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
 
   defp completion_fixture(cache) do
     root = Path.join([File.cwd!(), "_build", "completion-refresh-#{System.unique_integer([:positive])}"])

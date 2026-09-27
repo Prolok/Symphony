@@ -34,6 +34,8 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Linear.{Issue, RateLimit}
 
   @continuation_retry_delay_ms 1_000
+  @completion_refresh_interval_ms 300_000
+  @completion_missing_retention_ms 86_400_000
   @failure_retry_base_ms 10_000
   @worker_exit_finalize_drain_ms 250
   @idle_shutdown_message "Symphony nach Inaktivität beendet"
@@ -85,6 +87,7 @@ defmodule SymphonyElixir.Orchestrator do
       yolo_operation_retries: MapSet.new(),
       completed: MapSet.new(),
       completed_states: %{},
+      completion_refreshes: %{},
       status_change_observations: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
@@ -1761,10 +1764,21 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp complete_issue(%State{} = state, issue_id, issue_state) do
+    now_ms = completion_refresh_now(state)
+
     %{
       state
       | completed: MapSet.put(state.completed, issue_id),
         completed_states: put_completed_state(state.completed_states, issue_id, issue_state),
+        completion_refreshes:
+          Map.put(state.completion_refreshes, issue_id, %{
+            completed_at: DateTime.utc_now(),
+            observed_updated_at: completion_issue_updated_at(issue_state),
+            history_checked_updated_at: completion_issue_updated_at(issue_state),
+            next_at: now_ms,
+            missing_since: nil,
+            missing_count: 0
+          }),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
         waiting: Enum.reject(state.waiting, &(&1.issue_id == issue_id))
     }
@@ -2046,7 +2060,9 @@ defmodule SymphonyElixir.Orchestrator do
         claimed: MapSet.delete(state.claimed, issue_id),
         completed: MapSet.delete(state.completed, issue_id),
         completed_states: Map.delete(state.completed_states, issue_id),
+        completion_refreshes: Map.delete(state.completion_refreshes, issue_id),
         dialog_observations: Map.delete(state.dialog_observations, issue_id),
+        status_change_observations: Map.delete(state.status_change_observations, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
         waiting: Enum.reject(state.waiting, &(&1.issue_id == issue_id))
     }
@@ -2315,11 +2331,77 @@ defmodule SymphonyElixir.Orchestrator do
   defp completed_timestamp(_updated_at), do: nil
 
   defp reconcile_observed_completed_states(%State{} = state, issues) when is_list(issues) do
-    refresh_ids = completed_state_refresh_ids(state, issues)
+    now_ms = completion_refresh_now(state)
+    state = prune_completed_observations(state, issues, now_ms)
+    guarded_ids = completed_state_refresh_ids(state, issues)
+    refresh_ids = Enum.filter(guarded_ids, &completion_refresh_due?(state, &1, issues, now_ms))
 
     if refresh_ids == [],
-      do: {state, issues},
-      else: reconcile_refreshed_completed_states(state, issues, refresh_ids)
+      do: {state, Enum.reject(issues, &guarded_candidate?(&1, MapSet.new(guarded_ids)))},
+      else: reconcile_refreshed_completed_states(state, issues, guarded_ids, refresh_ids, now_ms)
+  end
+
+  @doc false
+  @spec reconcile_completed_states_for_test(term(), [Issue.t()]) :: {term(), [Issue.t()]}
+  def reconcile_completed_states_for_test(%State{} = state, issues) when is_list(issues) do
+    reconcile_observed_completed_states(state, issues)
+  end
+
+  defp completion_refresh_now(_state) do
+    case Process.get(:completion_refresh_now_fun) do
+      fun when is_function(fun, 0) -> fun.()
+      _ -> System.monotonic_time(:millisecond)
+    end
+  end
+
+  defp completion_issue_updated_at(%Issue{updated_at: updated_at}), do: completed_timestamp(updated_at)
+  defp completion_issue_updated_at(_issue), do: nil
+
+  defp completion_refresh_due?(state, id, issues, now_ms) do
+    case Map.get(state.completion_refreshes, id) do
+      nil ->
+        true
+
+      %{next_at: next_at} = entry ->
+        candidate = find_issue_by_id(issues, id)
+        current = completion_issue_updated_at(candidate)
+        candidate_state = completion_candidate_state(candidate)
+
+        now_ms >= next_at or (is_binary(current) and current != Map.get(entry, :candidate_updated_at)) or
+          (is_binary(candidate_state) and candidate_state != Map.get(entry, :candidate_state))
+    end
+  end
+
+  defp prune_completed_observations(state, issues, now_ms) do
+    candidate_ids = MapSet.new(for %Issue{id: id} <- issues, is_binary(id), do: id)
+
+    observations =
+      Enum.reduce(state.status_change_observations, %{}, fn {id, observation}, acc ->
+        case retained_completion_observation(observation, MapSet.member?(candidate_ids, id), now_ms) do
+          :expired -> acc
+          retained -> Map.put(acc, id, retained)
+        end
+      end)
+
+    %{state | status_change_observations: observations}
+    |> retain_active_completion_refreshes()
+  end
+
+  defp retained_completion_observation({status, _at}, true, now_ms), do: {status, now_ms}
+
+  defp retained_completion_observation({_status, at} = observation, false, now_ms) when is_integer(at) do
+    if now_ms - at < @completion_missing_retention_ms, do: observation, else: :expired
+  end
+
+  defp retained_completion_observation(observation, _visible?, _now_ms), do: observation
+
+  defp retain_active_completion_refreshes(state) do
+    refreshes =
+      Map.filter(state.completion_refreshes, fn {id, _entry} ->
+        Map.has_key?(state.completed_states, id) or Map.has_key?(state.status_change_observations, id)
+      end)
+
+    %{state | completion_refreshes: refreshes}
   end
 
   defp completed_state_refresh_ids(state, issues) do
@@ -2328,7 +2410,14 @@ defmodule SymphonyElixir.Orchestrator do
     marker_ids =
       state.completed_states
       |> Enum.flat_map(fn {id, marker} ->
-        if completed_candidate_matches_marker?(find_issue_by_id(issues, id), marker), do: [], else: [id]
+        candidate = find_issue_by_id(issues, id)
+        entry = Map.get(state.completion_refreshes, id, %{})
+
+        changed_version =
+          is_binary(completion_issue_updated_at(candidate)) and
+            completion_issue_updated_at(candidate) != Map.get(entry, :history_checked_updated_at)
+
+        if completed_candidate_matches_marker?(candidate, marker) and not changed_version, do: [], else: [id]
       end)
 
     observation_ids = Enum.filter(Map.keys(state.status_change_observations), &MapSet.member?(candidate_ids, &1))
@@ -2341,16 +2430,163 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp completed_candidate_matches_marker?(_issue, _marker), do: false
 
-  defp reconcile_refreshed_completed_states(state, issues, ids) do
-    guarded_ids = MapSet.new(ids)
+  defp reconcile_refreshed_completed_states(state, issues, guarded_ids, ids, now_ms) do
+    guarded_ids = MapSet.new(guarded_ids)
+    state = mark_completion_refresh_attempts(state, ids, issues, now_ms)
 
-    case Tracker.fetch_issue_states_by_ids(ids) do
+    case IssueReadCache.fetch(ids, now: now_ms) do
       {:ok, refreshed} ->
+        state = reconcile_completed_history(state, refreshed)
+        state = observe_completion_refresh_results(state, ids, refreshed, now_ms)
         accept_refreshed_completed_states(state, issues, guarded_ids, refreshed)
 
       {:error, reason} ->
         Logger.warning("Completion marker status refresh failed: #{inspect(reason)}")
         {state, Enum.reject(issues, &guarded_candidate?(&1, guarded_ids))}
+    end
+  end
+
+  defp completion_candidate_state(%Issue{state: state}) when is_binary(state), do: normalize_issue_state(state)
+  defp completion_candidate_state(_issue), do: nil
+
+  defp mark_completion_refresh_attempts(state, ids, issues, now_ms) do
+    refreshes =
+      Enum.reduce(ids, state.completion_refreshes, fn id, acc ->
+        entry = Map.get(acc, id, %{completed_at: DateTime.utc_now(), observed_updated_at: nil, history_checked_updated_at: nil, missing_since: nil, missing_count: 0})
+        candidate = find_issue_by_id(issues, id)
+
+        Map.put(
+          acc,
+          id,
+          entry
+          |> Map.put(:next_at, now_ms + @completion_refresh_interval_ms)
+          |> Map.put(:candidate_state, completion_candidate_state(candidate))
+          |> Map.put(:candidate_updated_at, completion_issue_updated_at(candidate))
+        )
+      end)
+
+    %{state | completion_refreshes: refreshes}
+  end
+
+  defp reconcile_completed_history(state, refreshed) do
+    Enum.reduce(refreshed, state, &reconcile_completed_history_issue/2)
+  end
+
+  defp reconcile_completed_history_issue(%Issue{id: id, state: issue_state} = issue, state) do
+    marker = completed_marker_state(Map.get(state.completed_states, id))
+    entry = Map.get(state.completion_refreshes, id)
+    updated_at = completion_issue_updated_at(issue)
+
+    if is_binary(marker) and marker == normalize_issue_state(issue_state) and is_map(entry) and
+         is_binary(updated_at) and updated_at != Map.get(entry, :history_checked_updated_at) do
+      apply_completion_history_result(state, issue, marker, entry, updated_at)
+    else
+      state
+    end
+  end
+
+  defp apply_completion_history_result(state, issue, marker, entry, updated_at) do
+    case completion_history_result(issue, marker, entry) do
+      {:changed, changed_state} ->
+        clear_completed_state_after_status_change(state, %{issue | state: changed_state})
+
+      :unchanged ->
+        put_in(state.completion_refreshes[issue.id].history_checked_updated_at, updated_at)
+
+      {:error, reason} ->
+        Logger.warning("Completion marker history refresh failed: #{issue_context(issue)} reason=#{inspect(reason)}")
+        state
+    end
+  end
+
+  defp completion_history_result(issue, marker, entry) do
+    case Budget.pressure(Config.settings!().tracker.app) do
+      :critical -> {:error, :linear_budget_reserved}
+      _ -> classify_completion_history(Tracker.fetch_issue_state_history(issue.id), marker, entry.completed_at)
+    end
+  end
+
+  defp classify_completion_history({:ok, spans}, marker, completed_at) do
+    if Enum.all?(spans, &complete_completion_span?/1) do
+      case Enum.find(spans, &completion_history_changed?(&1, marker, completed_at)) do
+        nil -> :unchanged
+        changed -> {:changed, get_in(changed, ["state", "name"])}
+      end
+    else
+      {:error, :issue_state_history_incomplete}
+    end
+  end
+
+  defp classify_completion_history({:error, _} = error, _marker, _completed_at), do: error
+
+  defp complete_completion_span?(%{
+         "stateId" => state_id,
+         "state" => %{"name" => name},
+         "startedAt" => started_at,
+         "endedAt" => ended_at
+       }) do
+    is_binary(state_id) and is_binary(name) and valid_history_timestamp?(started_at) and
+      (is_nil(ended_at) or valid_history_timestamp?(ended_at))
+  end
+
+  defp complete_completion_span?(_span), do: false
+
+  defp valid_history_timestamp?(timestamp) when is_binary(timestamp),
+    do: match?({:ok, _, _}, DateTime.from_iso8601(timestamp))
+
+  defp valid_history_timestamp?(_timestamp), do: false
+
+  defp completion_history_changed?(%{"state" => %{"name" => name}} = span, marker, completed_at)
+       when is_binary(name) and is_binary(marker) and is_struct(completed_at, DateTime) do
+    normalize_issue_state(name) != marker and
+      Enum.any?([span["startedAt"], span["endedAt"]], fn timestamp ->
+        case DateTime.from_iso8601(timestamp || "") do
+          {:ok, time, _} -> DateTime.compare(time, completed_at) != :lt
+          _ -> false
+        end
+      end)
+  end
+
+  defp completion_history_changed?(_span, _marker, _completed_at), do: false
+
+  defp observe_completion_refresh_results(state, ids, refreshed, now_ms) do
+    by_id = Map.new(refreshed, &{&1.id, &1})
+    Enum.reduce(ids, state, fn id, acc -> observe_completion_refresh_result(acc, id, Map.get(by_id, id), now_ms) end)
+  end
+
+  defp observe_completion_refresh_result(state, id, issue, now_ms) do
+    case {state.completion_refreshes[id], issue} do
+      {nil, _} ->
+        state
+
+      {entry, %Issue{} = present} ->
+        updated_at = completion_issue_updated_at(present)
+        entry = %{entry | missing_since: nil, missing_count: 0, observed_updated_at: updated_at}
+        put_in(state.completion_refreshes[id], entry)
+
+      {entry, nil} ->
+        observe_missing_completion(state, id, entry, now_ms)
+    end
+  end
+
+  defp observe_missing_completion(state, id, entry, now_ms) do
+    missing_since = entry.missing_since || now_ms
+    count = entry.missing_count + 1
+
+    if count >= 2 and now_ms - missing_since >= @completion_missing_retention_ms and
+         not Map.has_key?(state.running, id) and not Map.has_key?(state.retry_attempts, id) and
+         not MapSet.member?(state.claimed, id) do
+      Logger.info("Completion marker expired after repeated missing issue: issue_id=#{id} missing_checks=#{count}")
+
+      %{
+        state
+        | completed: MapSet.delete(state.completed, id),
+          completed_states: Map.delete(state.completed_states, id),
+          completion_refreshes: Map.delete(state.completion_refreshes, id),
+          status_change_observations: Map.delete(state.status_change_observations, id)
+      }
+    else
+      put_in(state.completion_refreshes[id], %{entry | missing_since: missing_since, missing_count: count})
     end
   end
 
@@ -2365,7 +2601,7 @@ defmodule SymphonyElixir.Orchestrator do
         _issue, acc -> acc
       end)
 
-    {%{state | status_change_observations: observations}, candidates}
+    {%{state | status_change_observations: observations} |> retain_active_completion_refreshes(), candidates}
   end
 
   defp validated_candidate(%Issue{id: id} = issue, guarded_ids, fresh_by_id) when is_binary(id) do
@@ -2406,7 +2642,8 @@ defmodule SymphonyElixir.Orchestrator do
         state
         | completed_states: Map.delete(state.completed_states, issue_id),
           completed: MapSet.delete(state.completed, issue_id),
-          status_change_observations: Map.put(state.status_change_observations, issue_id, current_state)
+          completion_refreshes: Map.delete(state.completion_refreshes, issue_id),
+          status_change_observations: Map.put(state.status_change_observations, issue_id, {current_state, completion_refresh_now(state)})
       }
     else
       state

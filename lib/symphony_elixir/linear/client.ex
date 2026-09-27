@@ -97,6 +97,18 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @issue_state_history_query """
+  query SymphonyIssueStateHistory($id: String!, $after: String) {
+    issue(id: $id) {
+      id
+      stateHistory(first: 50, after: $after) {
+        nodes { stateId state { name } startedAt endedAt }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+  """
+
   @comment_selection """
   id
   body
@@ -610,6 +622,39 @@ defmodule SymphonyElixir.Linear.Client do
              {:ok, assignee_filter} <- routing_assignee_filter() do
           do_fetch_issue_states(ids, scope, assignee_filter)
         end
+    end
+  end
+
+  @spec fetch_issue_state_history(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_state_history(issue_id) when is_binary(issue_id) do
+    fetch_issue_state_history_page(issue_id, nil, [], 0)
+  end
+
+  defp fetch_issue_state_history_page(_issue_id, _after, _acc, pages) when pages >= 10,
+    do: {:error, :issue_state_history_page_limit}
+
+  defp fetch_issue_state_history_page(issue_id, after_cursor, acc, pages) do
+    case graphql(@issue_state_history_query, %{id: issue_id, after: after_cursor}) do
+      {:ok, %{"data" => %{"issue" => %{"id" => ^issue_id, "stateHistory" => %{"nodes" => nodes, "pageInfo" => page}}}}}
+      when is_list(nodes) and is_map(page) ->
+        updated = acc ++ nodes
+
+        case page do
+          %{"hasNextPage" => false} ->
+            {:ok, updated}
+
+          %{"hasNextPage" => true, "endCursor" => cursor} when is_binary(cursor) and cursor != after_cursor ->
+            fetch_issue_state_history_page(issue_id, cursor, updated, pages + 1)
+
+          _ ->
+            {:error, :issue_state_history_incomplete}
+        end
+
+      {:error, _} = error ->
+        error
+
+      _ ->
+        {:error, :issue_state_history_incomplete}
     end
   end
 

@@ -40,7 +40,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   defp background_blockers(%{id: id, blocked_by: blockers, relations_complete: complete?, last_comment_signal: %{relay_epoch: epoch}}, opts)
        when is_list(blockers) and is_binary(epoch) do
     cond do
-      not opts[:relay_background] -> blockers(id, opts)
+      opts[:relay_background] != true -> blockers(id, opts)
       complete? and Enum.all?(blockers, &is_binary(Map.get(&1, :state_type))) -> {:ok, blockers}
       Budget.allow_background_lookup?(SymphonyElixir.Config.settings!().tracker.app, id) -> blockers(id, opts)
       true -> {:error, :linear_budget_reserved}

@@ -546,6 +546,86 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, :yolo_dependencies_incomplete} = Yolo.Dependencies.actionable([issue], query: query)
   end
 
+  test "foreground refresh loads fresh blockers for a relay-stamped review issue", %{issues: [issue | _]} do
+    review = %{
+      issue
+      | state: "Yolo Review",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "current"}
+    }
+
+    query = fn document, _ ->
+      assert document =~ "YoloBlockers"
+
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "inverseRelations" => %{
+               "nodes" => [
+                 %{
+                   "id" => "relation",
+                   "type" => "blocks",
+                   "issue" => %{"id" => "fix", "identifier" => "PRO-2", "state" => %{"name" => "Review", "type" => "completed"}}
+                 }
+               ],
+               "pageInfo" => %{"hasNextPage" => false}
+             }
+           }
+         }
+       }}
+    end
+
+    assert {:ok, [%{blocked_by: [%{id: "fix", state_type: "completed"}]}]} =
+             Yolo.Dependencies.refresh([review], query: query, wait_comments: fn _ -> {:ok, []} end)
+  end
+
+  test "relay-stamped review runner reaches workspace creation without a dependency start exception", %{issues: [issue | _]} do
+    review = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "current"}}
+
+    query = fn document, _ ->
+      assert document =~ "YoloBlockers"
+      {:ok, %{"data" => %{"issue" => %{"inverseRelations" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}}}}}
+    end
+
+    opts = [
+      fetch: fn _ -> {:ok, [%{review | last_comment_signal: nil}]} end,
+      lease: fn _, callback -> callback.() end,
+      query: query,
+      wait_comments: fn _ -> {:ok, []} end,
+      scan: &scan/1,
+      project: fn -> {:ok, [review]} end,
+      workspace: fn _, _ -> {:error, :synthetic_create_failure} end
+    ]
+
+    assert {:error, :synthetic_create_failure} = Yolo.Runner.run("review", [review], [review], opts)
+  end
+
+  test "coordinator keeps complete relay blockers without a background lookup", %{issues: [issue | _]} do
+    review = %{
+      issue
+      | state: "Yolo Review",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "current"}
+    }
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      query: fn document, _ ->
+        if document =~ "YoloBlockers", do: flunk("complete relay snapshot must not query blockers")
+        {:error, :unexpected_query}
+      end,
+      wait_comments: fn _ -> {:ok, []} end,
+      scan: &scan/1,
+      start: fn _, _ -> {:error, :capacity} end
+    ]
+
+    assert %Orchestrator.State{} = Coordinator.tick(state, [review], opts)
+  end
+
   test "relay blocker status types are reused and legacy entries are freshly checked", %{issues: [issue | _]} do
     app = Config.settings!().tracker.app
 

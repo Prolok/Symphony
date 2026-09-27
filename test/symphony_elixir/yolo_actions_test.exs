@@ -196,6 +196,25 @@ defmodule SymphonyElixir.YoloActionsTest do
   defp writes(name), do: Enum.filter(db().calls, &(elem(&1, 0) == name))
   defp relation(from, to), do: %{"id" => "#{from}:#{to}", "type" => "blocks", "issue" => %{"id" => from}, "relatedIssue" => %{"id" => to}}
 
+  test "relay-stamped review handoff checks fresh blockers without a dependency exception", %{issues: [issue, blocker | _], workspace: workspace} do
+    review = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "current"}}
+    change(&%{&1 | issues: Map.put(&1.issues, review.id, review), relations: [relation(blocker.id, review.id)]})
+    options = Keyword.delete(opts(), :dependencies)
+
+    Scope.with_scope(
+      "review",
+      [review],
+      "run",
+      fn ->
+        assert {:error, :yolo_acceptance_incomplete} =
+                 Handoff.invoke(%{"kind" => "handoff", "issue_id" => review.id, "report" => "Geprüft", "review" => ReviewFixture.evidence()}, options)
+      end,
+      workspace: workspace
+    )
+
+    assert length(writes("YoloBlockers")) == 2
+  end
+
   @tag :review_regression
   test "a backlog dependency added during the turn blocks actions using fresh relations", %{issues: [issue, blocker | _]} do
     group([issue], fn ->

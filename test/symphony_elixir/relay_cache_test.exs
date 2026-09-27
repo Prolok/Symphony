@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.RelayCacheTest do
   use ExUnit.Case, async: true
+  alias SymphonyElixir.Linear.Budget
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.Relay.{Session, Store}
   alias SymphonyElixir.RelayFixture, as: Server
@@ -318,6 +319,33 @@ defmodule SymphonyElixir.RelayCacheTest do
     assert s.record["reconcile_at"] == deadline
     assert {:ok, restarted} = open(c)
     assert restarted.record["issues"]["issue"] == unblocked
+  end
+
+  test "a due reduced-budget reconcile still hydrates a dirty event", c do
+    parent = self()
+    app = %{"workspace_id" => "reconcile-#{System.unique_integer([:positive])}", "client_id" => "relay-cache-test"}
+    changed = issue("2026-09-14T20:01:00Z")
+
+    {:ok, session} =
+      open(c,
+        contexts: [%{settings: %{tracker: %{app: app}}}],
+        fetch: fn ids ->
+          send(parent, {:hydrated, ids})
+          {:ok, [changed]}
+        end
+      )
+
+    session = Session.tick(session)
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "1500"})
+    assert Budget.pressure(app) == :reduced
+    Agent.update(c.clock, fn _ -> session.record["reconcile_at"] end)
+    Server.publish(c.server, "workspace")
+
+    refreshed = Session.tick(session)
+    assert_received {:hydrated, ["issue"]}
+    assert refreshed.status == :ready
+    assert refreshed.record["dirty"] == []
+    assert refreshed.record["issues"]["issue"] == changed
   end
 
   test "retention loss, server signals, receipt conflict and consumer expiry resnapshot conservatively", c do

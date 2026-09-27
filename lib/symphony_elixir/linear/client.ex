@@ -1392,6 +1392,7 @@ defmodule SymphonyElixir.Linear.Client do
       workspace_id: context && context.settings.tracker.app["workspace_id"],
       last_comment_signal: extract_last_comment_signal(issue),
       blocked_by: extract_blockers(issue),
+      relations_complete: complete_relay_relations?(issue["inverseRelations"]),
       labels: extract_labels(issue),
       assigned_to_worker:
         assigned_to_worker?(assignee, assignee_filter) and issue_in_context?(issue, context) and

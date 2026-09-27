@@ -375,8 +375,8 @@ defmodule SymphonyElixir.Relay.Session do
 
   defp refresh(session, page) do
     cond do
-      session.clock.() >= session.record["reconcile_at"] -> reconcile(session, page)
       session.record["dirty"] != [] -> hydrate(session, page)
+      session.clock.() >= session.record["reconcile_at"] -> reconcile(session, page)
       true -> ready(session, page)
     end
   end

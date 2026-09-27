@@ -103,6 +103,11 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
     old_node = put_in(node["inverseRelations"]["nodes"], [put_in(blocker["issue"]["state"], %{"name" => "Abgeschlossen"})])
     refute Client.complete_relay_issue?(old_node, context)
+
+    truncated = put_in(node["inverseRelations"]["nodes"], List.duplicate(blocker, 50))
+    refute Client.complete_relay_issue?(truncated, context)
+    incomplete = ProjectContext.with_context(context, fn -> Client.relay_issue(truncated) end)
+    refute incomplete.relations_complete
   end
 
   for active <- [0, 5] do

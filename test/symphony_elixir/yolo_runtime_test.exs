@@ -549,7 +549,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     relay = %{
       issue
       | blocked_by: [%{id: "fix", identifier: "PRO-2", state: "Abgeschlossen", state_type: "completed"}],
-        last_comment_signal: %{relay_epoch: "current"}
+        last_comment_signal: %{relay_epoch: "current"},
+        relations_complete: true
     }
 
     no_query = fn _, _ -> flunk("complete relay blockers must not be read again") end
@@ -583,6 +584,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     end
 
     assert {:ok, [checked]} = Yolo.Dependencies.refresh([legacy], Keyword.put(opts, :query, query))
+
+    truncated = %{relay | relations_complete: false}
+    assert {:ok, [checked_truncated]} = Yolo.Dependencies.refresh([truncated], Keyword.put(opts, :query, query))
+    assert checked_truncated.blocked_by == checked.blocked_by
     assert Yolo.Dependencies.dispatchable?(checked)
   end
 

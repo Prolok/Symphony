@@ -360,7 +360,10 @@ Verarbeitungsschritt des bestehenden Pollers. Andere Workspaces behalten ihren
 regulären Takt; Fehler beenden das Aufholen und beachten den bestehenden Backoff.
 `reconcile_ms` ist standardmäßig eine Stunde, mindestens fünf Minuten, zusätzlich
 mit stabilem Jitter bis 25 Prozent je Workspace/Consumer. Datenänderungen laden
-gezielt nach. Laufende Issue-Reads nutzen den vollständigen Relay-Stand nach
+gezielt nach, auch wenn gleichzeitig ein Budget-Reconcile fällig ist. YOLO-
+Hintergrundblocker verwenden Relay-Relationen nur bei vollständigem Stand;
+abgeschnittene Relationslisten werden begrenzt direkt abgeglichen. Laufende
+Issue-Reads nutzen den vollständigen Relay-Stand nach
 einem Linear-Abgleich je Epoche und spätestens nach 15 Minuten; fehlende Felder
 oder ein abweichender Linear-Stand erzwingen einen neuen Abgleich. Bestätigte
 lokale Issue-Updates entwerten den Cache bis zur Relay-Aktualisierung. Status- und

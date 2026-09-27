@@ -1,9 +1,9 @@
 defmodule SymphonyElixir.RelayBudgetTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, WorkerCapacity}
+  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, Tracker, WorkerCapacity}
   alias SymphonyElixir.Linear.IssueReadCache
   alias SymphonyElixir.RelayFixture, as: Server
-  alias SymphonyElixir.Yolo.Dependencies
+  alias SymphonyElixir.Yolo.{Coordinator, Dependencies, Operations}
 
   test "the actual five-second timer fetches an available event then stays Linear-free on warm ticks" do
     root = Path.dirname(Workflow.workflow_file_path())
@@ -118,15 +118,28 @@ defmodule SymphonyElixir.RelayBudgetTest do
       counts = start_supervised!({Agent, fn -> %{} end})
       {:ok, operations} = Agent.start_link(fn -> %{} end)
       {:ok, clock} = Agent.start_link(fn -> 0 end)
+      {:ok, recovery_attempts} = Agent.start_link(fn -> 0 end)
       [context] = contexts(root, ["one"])
       context = put_in(context.settings.polling.interval_ms, 5_000)
 
-      nodes =
+      active_nodes =
         for index <- 0..(active - 1)//1, active > 0 do
           issue_node(context)
           |> Map.put("id", "issue-#{index}")
           |> Map.put("identifier", "PRO-#{index}")
         end
+
+      delegated_nodes =
+        for index <- 1..4 do
+          issue_node(context)
+          |> Map.put("id", "yolo-#{index}")
+          |> Map.put("identifier", "PRO-#{100 + index}")
+          |> Map.put("state", %{"name" => "Yolo Review"})
+          |> Map.put("delegate", %{"id" => "pai"})
+          |> Map.put("labels", %{"nodes" => Enum.map([~s(Skip "Freigabe Implementierung"), ~s(Skip "Freigabe Review")], &%{"name" => &1})})
+        end
+
+      nodes = active_nodes ++ delegated_nodes
 
       bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
       configure_http(server, [context], nodes, bump)
@@ -143,7 +156,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
       end)
 
       ProjectContext.with_context(context, fn ->
-        for node <- nodes do
+        for node <- active_nodes do
           assert {:ok, [_]} = IssueReadCache.fetch([node["id"]], now: 0)
           assert {:ok, _} = CommentCheckpoint.background_scan(Client.relay_issue(node), background_now: fn -> 0 end)
         end
@@ -163,33 +176,73 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      for seconds <- 5..1_800//5 do
-        Agent.update(clock, fn _ -> seconds * 1_000 end)
-        before_event = if seconds in [600, 1_200], do: Agent.get(counts, & &1), else: %{}
+      context = %{context | yolo_agent_id: "pai", assignee_ids: ["human"], human_handoff_id: "human"}
+      yolo_state = %SymphonyElixir.Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}
 
-        if active > 0 and seconds == 600,
-          do: Server.publish(server, "one", %{"type" => "Comment", "issueId" => "issue-0", "commentId" => "human-comment"})
+      ProjectContext.with_context(context, fn ->
+        assert :ok =
+                 Operations.save(%{
+                   "key" => "followup:budget",
+                   "request" => %{"kind" => "followup", "origin_ids" => ["yolo-1"]},
+                   "issue_id" => Ecto.UUID.generate(),
+                   "done" => false
+                 })
+      end)
 
-        if active > 0 and seconds == 1_200,
-          do: Server.publish(server, "one", %{"issueId" => "issue-1"})
+      yolo_state =
+        Enum.reduce(5..1_800//5, yolo_state, fn seconds, yolo_state ->
+          Agent.update(clock, fn _ -> seconds * 1_000 end)
+          before_event = if seconds in [600, 1_200], do: Agent.get(counts, & &1), else: %{}
 
-        ProjectPoller.refresh()
-        assert {:ok, _} = ProjectPoller.candidates(context)
+          if active > 0 and seconds == 600,
+            do: Server.publish(server, "one", %{"type" => "Comment", "issueId" => "issue-0", "commentId" => "human-comment"})
 
-        ProjectContext.with_context(context, fn ->
-          for node <- nodes do
-            issue = Client.relay_issue(node)
-            assert {:ok, _} = CommentCheckpoint.background_scan(issue, background_now: fn -> seconds * 1_000 end)
-            assert {:ok, [_]} = IssueReadCache.fetch([issue.id], now: seconds * 1_000)
-          end
+          if active > 0 and seconds == 1_200,
+            do: Server.publish(server, "one", %{"issueId" => "issue-1"})
+
+          ProjectPoller.refresh()
+          assert {:ok, _} = ProjectPoller.candidates(context)
+
+          ProjectContext.with_context(context, fn ->
+            for node <- active_nodes do
+              issue = Client.relay_issue(node)
+              assert {:ok, _} = CommentCheckpoint.background_scan(issue, background_now: fn -> seconds * 1_000 end)
+              assert {:ok, [_]} = IssueReadCache.fetch([issue.id], now: seconds * 1_000)
+            end
+          end)
+
+          yolo_state =
+            ProjectContext.with_context(context, fn ->
+              delegated =
+                Enum.map(delegated_nodes, fn node ->
+                  %{Client.relay_issue(node) | last_comment_signal: %{relay_epoch: "budget-stable"}}
+                end)
+
+              Coordinator.tick(yolo_state, delegated,
+                background_now: fn -> seconds * 1_000 end,
+                recovery_now: fn -> seconds * 1_000 end,
+                lease: fn _, callback -> callback.() end,
+                invoke: fn _, _ ->
+                  Agent.update(recovery_attempts, &(&1 + 1))
+                  assert {:ok, _} = Tracker.fetch_issue_comment_bodies("yolo-1")
+                  {:error, :yolo_created_issue_changed}
+                end,
+                scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
+                start: fn _, _ -> {:error, :capacity} end
+              )
+            end)
+
+          if active > 0 and seconds == 600,
+            do: assert(Map.get(Agent.get(counts, & &1), :comments, 0) > Map.get(before_event, :comments, 0))
+
+          if active > 0 and seconds == 1_200,
+            do: assert(Map.get(Agent.get(counts, & &1), :read, 0) > Map.get(before_event, :read, 0))
+
+          yolo_state
         end)
 
-        if active > 0 and seconds == 600,
-          do: assert(Map.get(Agent.get(counts, & &1), :comments, 0) > Map.get(before_event, :comments, 0))
-
-        if active > 0 and seconds == 1_200,
-          do: assert(Map.get(Agent.get(counts, & &1), :read, 0) > Map.get(before_event, :read, 0))
-      end
+      assert map_size(yolo_state.yolo_marker_cache) == 4
+      assert Agent.get(recovery_attempts, & &1) == 4
 
       requests = Agent.get(counts, & &1)
       by_operation = Agent.get(operations, & &1)

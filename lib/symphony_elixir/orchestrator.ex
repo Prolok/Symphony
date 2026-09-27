@@ -81,6 +81,8 @@ defmodule SymphonyElixir.Orchestrator do
       shutdown_requested: false,
       running: %{},
       yolo_runs: %{},
+      yolo_marker_cache: %{},
+      yolo_operation_retries: MapSet.new(),
       completed: MapSet.new(),
       completed_states: %{},
       claimed: MapSet.new(),

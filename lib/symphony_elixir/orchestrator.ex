@@ -1763,7 +1763,7 @@ defmodule SymphonyElixir.Orchestrator do
     |> max(1)
   end
 
-  defp complete_issue(%State{} = state, issue_id, issue_state) do
+  defp complete_issue(%State{} = state, issue_id, issue_state, identifier \\ nil) do
     now_ms = completion_refresh_now(state)
 
     %{
@@ -1772,6 +1772,7 @@ defmodule SymphonyElixir.Orchestrator do
         completed_states: put_completed_state(state.completed_states, issue_id, issue_state),
         completion_refreshes:
           Map.put(state.completion_refreshes, issue_id, %{
+            identifier: completion_issue_identifier(issue_state, identifier),
             completed_at: DateTime.utc_now(),
             observed_updated_at: completion_issue_updated_at(issue_state),
             history_checked_updated_at: completion_issue_updated_at(issue_state),
@@ -1783,6 +1784,9 @@ defmodule SymphonyElixir.Orchestrator do
         waiting: Enum.reject(state.waiting, &(&1.issue_id == issue_id))
     }
   end
+
+  defp completion_issue_identifier(%Issue{identifier: identifier}, _fallback) when is_binary(identifier), do: identifier
+  defp completion_issue_identifier(_issue_state, fallback), do: fallback
 
   defp schedule_issue_retry(%State{} = state, issue_id, attempt, metadata)
        when is_binary(issue_id) and is_map(metadata) do
@@ -2417,7 +2421,10 @@ defmodule SymphonyElixir.Orchestrator do
           is_binary(completion_issue_updated_at(candidate)) and
             completion_issue_updated_at(candidate) != Map.get(entry, :history_checked_updated_at)
 
-        if completed_candidate_matches_marker?(candidate, marker) and not changed_version, do: [], else: [id]
+        if completed_candidate_matches_marker?(candidate, marker) and
+             (Dialog.state?(candidate.state) or not changed_version),
+           do: [],
+           else: [id]
       end)
 
     observation_ids = Enum.filter(Map.keys(state.status_change_observations), &MapSet.member?(candidate_ids, &1))
@@ -2576,7 +2583,7 @@ defmodule SymphonyElixir.Orchestrator do
     if count >= 2 and now_ms - missing_since >= @completion_missing_retention_ms and
          not Map.has_key?(state.running, id) and not Map.has_key?(state.retry_attempts, id) and
          not MapSet.member?(state.claimed, id) do
-      Logger.info("Completion marker expired after repeated missing issue: issue_id=#{id} missing_checks=#{count}")
+      Logger.info("Completion marker expired after repeated missing issue: issue_id=#{id} issue_identifier=#{entry[:identifier] || id} missing_checks=#{count}")
 
       %{
         state
@@ -4521,7 +4528,7 @@ defmodule SymphonyElixir.Orchestrator do
       :ok ->
         Logger.info("Completed clean review handoff from recovered subagent result without dispatch: #{issue_context(issue)} next_state=#{next_state}")
 
-        {:noreply, state |> complete_issue(issue_id, issue.state) |> release_issue_claim(issue_id)}
+        {:noreply, state |> complete_issue(issue_id, issue.state, issue.identifier) |> release_issue_claim(issue_id)}
 
       {:error, {:comment_inputs_pending, _inputs}} ->
         Logger.info("Resuming main worker for pending review input: #{issue_context(issue)}")

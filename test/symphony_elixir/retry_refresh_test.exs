@@ -378,7 +378,35 @@ defmodule SymphonyElixir.RetryRefreshTest do
       refute Map.has_key?(collected.completion_refreshes, issue.id)
       refute Map.has_key?(collected.status_change_observations, issue.id)
       assert log =~ "Completion marker expired after repeated missing issue"
+      assert log =~ "issue_identifier=#{issue.identifier}"
     end)
+  end
+
+  test "a completed dialog candidate remains available while a history check is delayed" do
+    issue = %Issue{
+      id: "dialog-completion-refresh",
+      identifier: "PRO-DIALOG",
+      state: "Todo (Dialog-AI)",
+      updated_at: ~U[2026-09-27 19:00:00Z],
+      last_comment_signal: %{relay_epoch: "new-comment"}
+    }
+
+    state = %Orchestrator.State{
+      completed_states: %{issue.id => {"todo (dialog-ai)", "2026-09-27T18:00:00Z"}},
+      completion_refreshes: %{
+        issue.id => %{
+          next_at: 300_000,
+          candidate_state: "todo (dialog-ai)",
+          candidate_updated_at: "2026-09-27T19:00:00Z",
+          history_checked_updated_at: "2026-09-27T18:00:00Z"
+        }
+      }
+    }
+
+    Process.put(:completion_refresh_now_fun, fn -> 0 end)
+    on_exit(fn -> Process.delete(:completion_refresh_now_fun) end)
+
+    assert {^state, [^issue]} = Orchestrator.reconcile_completed_states_for_test(state, [issue])
   end
 
   test "a visible stale candidate retains its observation until a day of absence" do

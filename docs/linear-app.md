@@ -315,6 +315,9 @@ Fehler warten nach dem ersten 30-Sekunden-Versuch 5, 10 und höchstens 15 Minute
 Transport-, Rate-Limit- und Relay-Fehler bleiben bei 30 Sekunden. Änderungen
 am Ursprung oder seiner Relay-Kommentar-Epoche und ein Neustart wecken sofort.
 Anlagejournal, reservierte ID und Ergebnis werden dadurch nicht ersetzt.
+Die Einstufung verwendet bekannte Fehlerkennungen und strukturierte Client-Fehler;
+Freitext aus Fehlerdetails, etwa Titel- oder Beschreibungsfragmente, zählt nicht.
+Unbekannte Gründe erhalten den Backoff für dauerhafte Fehler.
 
 ### Verwaiste PO-Reviewcheckouts
 

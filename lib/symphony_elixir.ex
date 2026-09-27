@@ -50,6 +50,7 @@ defmodule SymphonyElixir.Application do
           {Phoenix.PubSub, name: SymphonyElixir.PubSub},
           {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
           SymphonyElixir.Linear.Budget,
+          SymphonyElixir.Linear.IssueReadCache,
           SymphonyElixir.WorkflowStore,
           orchestrator_child(),
           SymphonyElixir.HttpServer,

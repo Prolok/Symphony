@@ -185,8 +185,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
   defp foreign_relay_changed?(%{"foreign_relay_epoch" => previous}, opts) do
     current = opts[:foreign_relay_epoch]
-    previous = if is_integer(previous), do: previous, else: 0
-    is_integer(current) and current != previous
+    not is_nil(current) and current != previous
   end
 
   defp foreign_relay_changed?(_cache, _opts), do: false

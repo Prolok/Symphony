@@ -14,7 +14,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.Codex.ReviewState
   alias SymphonyElixir.CommentCheckpoint
-  alias SymphonyElixir.Linear.WriteContext
+  alias SymphonyElixir.Linear.{Budget, IssueReadCache, WriteContext}
   alias SymphonyElixir.Linear.YoloAgent
 
   alias SymphonyElixir.{
@@ -1343,7 +1343,7 @@ defmodule SymphonyElixir.Orchestrator do
          preferred_worker_host \\ nil,
          run_opts \\ []
        ) do
-    case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
+    case revalidate_issue_for_dispatch(issue, &IssueReadCache.fetch/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
         maybe_dispatch_waiting_plan(state, refreshed_issue, attempt, preferred_worker_host, run_opts)
 
@@ -4436,12 +4436,21 @@ defmodule SymphonyElixir.Orchestrator do
     now = System.monotonic_time(:millisecond)
     {deadline, previous_epoch} = comment_scan_schedule(due[id], now)
     foreign_epoch = comment_foreign_epoch(context, id)
-    previous_epoch = if is_integer(previous_epoch), do: previous_epoch, else: 0
-    urgent = is_integer(foreign_epoch) and foreign_epoch != previous_epoch
+    urgent = not is_nil(foreign_epoch) and foreign_epoch != previous_epoch
+    fallback_transition = is_nil(foreign_epoch) and not is_nil(previous_epoch)
 
-    if comment_scan_ready?(entry, previous, now, deadline, urgent) do
-      schedule = %{at: now + CommentCheckpoint.background_interval_ms(), foreign_epoch: foreign_epoch}
-      {start_comment_scan(id, entry, scans, context, urgent), Map.put(due, id, schedule)}
+    pressure = Budget.pressure(Config.settings!().tracker.app)
+
+    scan_ready = comment_scan_ready?(entry, previous, now, deadline, urgent or fallback_transition)
+
+    if scan_ready and (urgent or pressure != :critical) do
+      interval =
+        if is_nil(foreign_epoch),
+          do: max(30_000, Config.settings!().polling.interval_ms),
+          else: CommentCheckpoint.background_interval_ms()
+
+      schedule = %{at: now + interval, foreign_epoch: foreign_epoch}
+      {start_comment_scan(id, entry, scans, context, urgent or fallback_transition), Map.put(due, id, schedule)}
     else
       {scans, due}
     end
@@ -4453,7 +4462,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp comment_foreign_epoch(context, id) do
     case SymphonyElixir.ProjectPoller.comment_epoch(context, id) do
-      {:ok, {_, _, epoch}} -> epoch
+      {:ok, {generation, _, epoch}} -> "#{generation}:#{epoch}"
       _ -> nil
     end
   end

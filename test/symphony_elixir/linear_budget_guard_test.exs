@@ -8,10 +8,10 @@ defmodule SymphonyElixir.LinearBudgetGuardTest do
     binding = %{"workspace_id" => "budget-#{System.unique_integer([:positive])}", "client_id" => "app"}
     now = System.monotonic_time(:millisecond)
     headers = %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "1000"}
-    :ok = Budget.record(binding, :comment_signal, headers, now: now)
+    :ok = Budget.record(binding, :comment_signal, headers, now: now, operation: "SymphonyCommentScanSignal")
     refute Budget.low?(binding)
 
-    :ok = Budget.record(binding, :comments, %{headers | "x-ratelimit-requests-remaining" => "999"}, now: now + 1)
+    :ok = Budget.record(binding, :comments, %{headers | "x-ratelimit-requests-remaining" => "999"}, now: now + 1, operation: "SymphonyLinearIssueComments")
     assert Budget.low?(binding)
 
     :ok = Budget.record(binding, :read, %{headers | "x-ratelimit-requests-remaining" => "unknown"}, now: now + 2)
@@ -28,5 +28,21 @@ defmodule SymphonyElixir.LinearBudgetGuardTest do
     assert log =~ "comments: 1"
     assert log =~ "write: 1"
     assert log =~ "remaining=1000 limit=5000"
+    assert log =~ "SymphonyCommentScanSignal"
+    assert log =~ "SymphonyLinearIssueComments"
+  end
+
+  test "shared remaining budget distinguishes forty and twenty percent with stale fallback" do
+    binding = %{"workspace_id" => "pressure-#{System.unique_integer([:positive])}", "client_id" => "app"}
+    now = System.monotonic_time(:millisecond)
+    headers = %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "1999"}
+    assert Budget.pressure(binding) == :normal
+    Budget.record(binding, :read, headers, now: now)
+    assert Budget.pressure(binding) == :reduced
+    assert Budget.allow_background_lookup?(binding, "PRO-1")
+    refute Budget.allow_background_lookup?(binding, "PRO-1")
+    Budget.record(binding, :read, %{headers | "x-ratelimit-requests-remaining" => "999"}, now: now + 1)
+    assert Budget.pressure(binding) == :critical
+    refute Budget.allow_background_lookup?(binding, "PRO-2")
   end
 end

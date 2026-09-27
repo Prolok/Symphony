@@ -36,7 +36,7 @@ defmodule SymphonyElixir.BudgetCapture do
       event: "request",
       transport: transport,
       measurement: Map.take(measurements, [:requests, :duration_ms]),
-      metadata: Map.take(metadata, [:workspace_id, :kind, :status, :headers])
+      metadata: Map.take(metadata, [:workspace_id, :kind, :operation, :status, :headers])
     })
   end
 

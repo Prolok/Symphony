@@ -974,10 +974,13 @@ Nutze dies nur, wenn der Abschluss durch fehlende erforderliche Tools oder fehle
 ## Kommentar-Checkpoints für reguläre Arbeit
 
 Für tatsächlich übernommene aktive Issues ist der Kommentareingang Standard.
-Der Hintergrundabgleich beobachtet Kommentare frühestens alle
-`max(30 Sekunden, polling.interval_ms)`; mit Relay im Regelbudget frühestens alle
-60 Sekunden, unter 20 % App-Restbudget frühestens alle 180 Sekunden. Fremde
-Relay-Kommentarereignisse lösen unabhängig vom Takt sofort einen Scan aus.
+Der Hintergrundabgleich beobachtet Kommentare ohne bereites Relay frühestens alle
+`max(30 Sekunden, polling.interval_ms)`. Bei bereitem Relay nutzt er die lokale
+Kommentar-Epoche; fremde Ereignisse lösen sofort einen Vollscan aus, sonst ist
+frühestens nach 15 Minuten ein Sicherheitsvollscan fällig. Unter 40 % gemeinsamem
+App-Restbudget wird er verlängert, unter 20 % entfallen nicht ereignisbedingte
+Hintergrund- und Sicherheitsabfragen. Vor statusändernden Aktionen bleiben
+frische Linear- und Kommentarprüfungen bindend.
 Laufende Turns werden nicht unterbrochen.
 Phasenstart und Fortsetzung liefern offene Quellversionen an den Hauptworker. Nach Meilensteinen und vor Handoffs ruft dieser
 `symphony_comments` mit `operation: "checkpoint"` auf; `issue_id` ist die interne

@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ProjectPoller do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.Linear.{Client, RateLimit}
+  alias SymphonyElixir.Linear.{Client, Issue, RateLimit}
   alias SymphonyElixir.{ProjectContext, Projects, Relay}
   alias SymphonyElixir.Relay.Session
 
@@ -21,6 +21,9 @@ defmodule SymphonyElixir.ProjectPoller do
 
   @spec relay_issues(ProjectContext.t() | nil, [String.t()]) :: {:ok, list()} | {:error, term()}
   def relay_issues(context, ids), do: relay_call({:relay_issues, context, ids})
+
+  @spec read_issues(ProjectContext.t() | nil, [String.t()]) :: {:ok, [{term(), Issue.t()}]} | {:error, term()}
+  def read_issues(context, ids), do: relay_call({:read_issues, context, ids})
 
   @spec comment_epoch(ProjectContext.t() | nil, String.t()) :: {:ok, term()} | {:error, term()}
   def comment_epoch(context, id), do: relay_call({:comment_epoch, context, id})
@@ -122,6 +125,21 @@ defmodule SymphonyElixir.ProjectPoller do
     end
   end
 
+  def handle_call({:read_issues, %ProjectContext{} = context, ids}, _from, state) do
+    workspace = context.settings.tracker.app["workspace_id"]
+
+    result =
+      case state.relays[workspace] do
+        %Session{status: :ready, record: record} ->
+          ProjectContext.with_context(context, fn -> read_relay_entries(record, context, ids) end)
+
+        _ ->
+          {:error, :relay_unavailable}
+      end
+
+    {:reply, result, state}
+  end
+
   def handle_call({:comment_epoch, %ProjectContext{} = context, id}, _from, state) do
     workspace = context.settings.tracker.app["workspace_id"]
 
@@ -141,8 +159,26 @@ defmodule SymphonyElixir.ProjectPoller do
     {:reply, result, state}
   end
 
-  def handle_call({operation, _, _}, _from, state) when operation in [:relay_issues, :comment_epoch],
+  def handle_call({operation, _, _}, _from, state) when operation in [:relay_issues, :read_issues, :comment_epoch],
     do: {:reply, {:error, :relay_context_required}, state}
+
+  defp read_relay_entries(record, context, ids) do
+    Enum.reduce_while(ids, {:ok, []}, fn id, {:ok, acc} ->
+      node = get_in(record, ["issues", id])
+
+      if Client.complete_relay_issue?(node, context) and id in record["known"] do
+        epoch = {record["generation"], record["epochs"][id]}
+        issue = node |> Client.relay_issue() |> Relay.stamp_issue(record)
+        {:cont, {:ok, [{epoch, issue} | acc]}}
+      else
+        {:halt, {:error, :relay_issue_incomplete}}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      error -> error
+    end
+  end
 
   @impl true
   def handle_cast(:refresh, state) do

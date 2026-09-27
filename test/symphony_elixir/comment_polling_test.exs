@@ -1,7 +1,28 @@
 defmodule SymphonyElixir.CommentPollingTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, WaitMarker}
-  alias SymphonyElixir.Linear.{Budget, RateLimit}
+  alias SymphonyElixir.Linear.{Budget, Client, RateLimit}
+
+  test "relay page scan rejects an epoch race while preserving observed comments without GraphQL signals" do
+    parent = self()
+    source = %{"id" => "comment", "body" => "Menschlicher Hinweis", "issue" => %{"id" => "issue"}, "user" => %{"id" => "human", "app" => false}}
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+      send(parent, {:query, payload["query"]})
+      {:ok, %{status: 200, body: %{"data" => %{"issue" => %{"comments" => %{"nodes" => [source], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}}}
+    end)
+
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+    {:ok, epoch} = Agent.start_link(fn -> 0 end)
+    version = fn -> Agent.get_and_update(epoch, fn n -> {{:ok, n}, n + 1} end) end
+
+    assert {:error, {:comment_scan_incomplete, :relay_epoch_changed, [%{source: ^source}]}} =
+             Client.scan_issue_comments_relay("issue", version)
+
+    assert_received {:query, query}
+    assert query =~ "SymphonyLinearIssueComments"
+    refute_received {:query, _}
+  end
 
   test "low app budget slows relay background scans and defers cross-workspace wait lookups, not writes" do
     unique = System.unique_integer([:positive])
@@ -19,7 +40,7 @@ defmodule SymphonyElixir.CommentPollingTest do
     assert Budget.low?(target_app)
 
     ProjectContext.with_context(source, fn ->
-      assert CommentCheckpoint.background_interval_ms() == 180_000
+      assert CommentCheckpoint.background_interval_ms() == 3_600_000
       issue = %{id: "waiting", identifier: "PRO-1", description: "Wartet auf: PRI-1"}
       query = fn _, _ -> {:ok, %{"data" => %{"issues" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}}}} end
 
@@ -31,10 +52,13 @@ defmodule SymphonyElixir.CommentPollingTest do
         budget_background: true
       ]
 
-      assert {:error, {:wait_marker_unresolved, "PRI-1", :wait_target_unresolved}} = WaitMarker.targets(issue, opts)
       assert {:error, :linear_budget_reserved} = WaitMarker.targets(issue, opts)
       assert {:error, {:wait_marker_unresolved, "PRI-1", :wait_target_unresolved}} = WaitMarker.targets(issue, Keyword.put(opts, :budget_background, false))
     end)
+
+    Budget.record(source_app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "1500"})
+    assert Budget.pressure(source_app) == :reduced
+    ProjectContext.with_context(source, fn -> assert CommentCheckpoint.background_interval_ms() == 1_800_000 end)
 
     write = fn -> {:ok, %{status: 200, headers: %{}, body: %{}}} end
     assert {:ok, _} = RateLimit.request(target_app, write, budget_kind: :write)
@@ -140,5 +164,23 @@ defmodule SymphonyElixir.CommentPollingTest do
     assert cleaned.comment_scans == %{}
     assert cleaned.comment_scan_due == %{}
     assert Process.alive?(worker)
+
+    # A lost ready relay must not retain its old fifteen-minute scan deadline.
+    future = System.monotonic_time(:millisecond) + 900_000
+    previous_relay = %{at: future, foreign_epoch: "generation:1"}
+    recovered = %{cleaned | running: %{issue.id => entry}, comment_scan_due: %{issue.id => previous_relay}}
+    app = Config.settings!().tracker.app
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
+    assert Budget.pressure(app) == :critical
+    assert {:noreply, reserved} = Orchestrator.handle_info(:run_poll_cycle, recovered)
+    refute Map.has_key?(reserved.comment_scans, issue.id)
+
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"})
+    assert Budget.pressure(app) == :normal
+    assert {:noreply, fallback} = Orchestrator.handle_info(:run_poll_cycle, recovered)
+    assert_receive {:signal, fallback_scan}, 2_000
+    assert fallback.comment_scans[issue.id] == fallback_scan
+    assert fallback.comment_scan_due[issue.id].foreign_epoch == nil
+    assert fallback.comment_scan_due[issue.id].at <= System.monotonic_time(:millisecond) + 30_000
   end
 end

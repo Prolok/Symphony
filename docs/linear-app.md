@@ -359,10 +359,16 @@ Bei Rückstand folgen weitere Seiten unmittelbar, jeweils in einem eigenen
 Verarbeitungsschritt des bestehenden Pollers. Andere Workspaces behalten ihren
 regulären Takt; Fehler beenden das Aufholen und beachten den bestehenden Backoff.
 `reconcile_ms` ist standardmäßig eine Stunde, mindestens fünf Minuten, zusätzlich
-mit stabilem Jitter bis 25 Prozent je Workspace/Consumer. Diese Sicherheitsabgleiche
-und Änderungen laden Daten gezielt nach. Explizite Checkpoints, Schreiboperationen,
-Dispatch-Refresh sowie Status- und Merge-Gates prüfen Linear weiterhin frisch und
-unter den gemeinsamen App-Budgets. Eine Linear-Sperrfrist blockiert neue Starts,
+mit stabilem Jitter bis 25 Prozent je Workspace/Consumer. Datenänderungen laden
+gezielt nach, auch wenn gleichzeitig ein Budget-Reconcile fällig ist. YOLO-
+Hintergrundblocker verwenden Relay-Relationen nur bei vollständigem Stand;
+abgeschnittene Relationslisten werden begrenzt direkt abgeglichen. Laufende
+Issue-Reads nutzen den vollständigen Relay-Stand nach
+einem Linear-Abgleich je Epoche und spätestens nach 15 Minuten; fehlende Felder
+oder ein abweichender Linear-Stand erzwingen einen neuen Abgleich. Bestätigte
+lokale Issue-Updates entwerten den Cache bis zur Relay-Aktualisierung. Status- und
+Merge-Gates prüfen Linear weiterhin frisch und unter den gemeinsamen App-Budgets.
+Eine Linear-Sperrfrist blockiert neue Starts,
 während Relay-Empfang möglich bleibt.
 
 Die bestehende Status-API unterscheidet `initializing`, `catching_up`, `ready`, `resyncing`,
@@ -1421,22 +1427,21 @@ bindet Projekt, App-Workspace, Client, App-User, Beratungsauswahl, Issue und Sig
 Übernahme entwerten ihn nicht. Scanfehler erhalten die letzte verlässliche
 Beobachtung, sperren aber die Abkürzung bis zum nächsten erfolgreichen Vollscan.
 Erst ein vollständiger Scan aktualisiert `last_successful_scan`; ein Signalcheck
-beweist weder Vollständigkeit noch Löschung. Ein ausgefallener Poller ist ein
-sichtbarer Fehler, kein Anlass für direkte Ersatzabfragen gegen Linear.
+beweist weder Vollständigkeit noch Löschung. Ein ausgefallener Poller sperrt neue
+Starts; für bereits laufende Worker gilt der bisherige Linear-Kommentar-Fallback.
 
-Ein GraphQL-Request liest den neuesten Kommentar und den neuesten Kommentar
-eines anderen Autors. Ein unverändertes Signal benötigt keinen Seitenabruf;
-bestätigte eigene Kommentarversionen aus dem Journal bleiben ohne Vollscan.
-Fremde oder ungeklärte Relay-Kommentarereignisse lösen sofort einen Vollscan aus,
-auch bei unverändertem Signal. Offene `held`-Stränge erzwingen für sich allein
-keinen Vollscan. Eigene Relay-Echos verlangen einen Beleg für die konkrete
-Schreibaktion und bei Updates die bestätigte Kommentarversion; unklare Echos
-gelten als fremde Ereignisse. Ohne Relay erfolgt spätestens nach fünf Minuten ein
-Sicherheitsvollscan, mit Relay spätestens nach 30 Minuten. Der reguläre
-Hintergrundtakt beträgt mit Relay mindestens 60 Sekunden, unter 20 %
-App-Restbudget mindestens 180 Sekunden; fremde Ereignisse überholen diese Frist.
-Explizite Checkpoints, Acks und Status-/Merge-Aktionen führen immer einen frischen
-Vollscan aus, auch nach einem Cache-Hit oder einem bereits laufenden Hintergrundscan. Die erste vollständige Beobachtung ist historische
+Ohne bereites Relay liest ein GraphQL-Signal den neuesten Kommentar und den
+neuesten Kommentar eines anderen Autors. Mit bereitem Relay entfällt diese
+periodische Signalabfrage; unveränderte Epochen nutzen den vollständigen lokalen
+Scanstand. Bestätigte eigene Kommentarversionen aus dem Journal bleiben ohne
+Vollscan. Fremde oder ungeklärte Relay-Kommentarereignisse lösen sofort einen
+Vollscan aus. Offene `held`-Stränge erzwingen für sich allein keinen Vollscan.
+Eigene Relay-Echos verlangen einen Beleg für die konkrete Schreibaktion und bei
+Updates die bestätigte Kommentarversion; unklare Echos gelten als fremde
+Ereignisse. Ohne bereites Relay gilt der bisherige Sicherheitsvollscan; mit
+bereitem Relay ist er frühestens nach 15 Minuten fällig. Worker-Checkpoints und
+Acks verwenden bis zum Epochenwechsel den lokalen Stand; vor statusändernden
+Aktionen wird vollständig frisch gescannt. Die erste vollständige Beobachtung ist historische
 Baseline. Der Worker erhält sie einmal zur Übernahme noch offener Hinweise;
 bereits zuvor erkannte offene Versionen bleiben erhalten. Manuelle Gates und
 Dialog-AI werden durch diesen Eingang nicht dispatcht.
@@ -1622,13 +1627,14 @@ nicht verlängert und durch parallele Antworten nicht verkürzt. Dies koordinier
 Prozesse auf demselben Rechner, keine Budgets zwischen mehreren Rechnern.
 Budgetdiagnosen enthalten nur erlaubte Zahlenheader und gültiges `Retry-After`,
 einschließlich `X-Complexity`; erfolgreiche Antworten sind im Debug-Log sichtbar.
-Der Dienst zählt Requests je App-Bindung nach Anfrageart und protokolliert bei
-laufendem Verkehr alle fünf Minuten `Linear budget summary` mit Restbudget und
-Zählern. Unter 20 % von `x-ratelimit-requests-limit` werden nur Hintergrundscans
-und wiederholte workspaceübergreifende Wartemarker-Lookups verlängert;
-deren erste Prüfung bleibt möglich und Hintergrund-Wiederholungen erfolgen
-frühestens nach zwei Minuten. Frische Aktionsprüfungen sowie Kandidatenabfragen,
-Checkpoints, Handoffs und Schreibvorgänge bleiben vorrangig.
+Der Dienst zählt tatsächliche HTTP-Requests je App-Bindung nach Anfrageart und
+begrenztem GraphQL-Operationsnamen, auch Token- und Fehlerantworten. Bei laufendem
+Verkehr protokolliert er alle fünf Minuten `Linear budget summary` mit eigener
+Last und dem zuletzt gemeldeten Restbudget des gemeinsamen Kontingents. Unter
+40 % werden Hintergrund- und Sicherheitsreads gestreckt; unter 20 % entfallen
+sie ohne menschliches Relay-Ereignis. Schreibvorgänge, nötige Handoff-Checkpoints
+und menschlich ausgelöste Aktionen bleiben vorrangig; veraltete oder fehlende
+Budgetheader lösen keine neue Drosselstufe aus.
 
 Die historische Vorher-Referenz aus PRO-715/PRO-716 verglich 3.600 simulierte Sekunden
 mit 5-Sekunden-Arbeitstakt, einer Seite je Abfrage und unveränderten Kommentaren,
@@ -1649,7 +1655,7 @@ je Szenario 60 Ticks (fünf simulierte Minuten) sowie Kommentar- und Reconcilefr
 gezielt an ihren Grenzen; ein echter 5-Sekunden-Timer bleibt abgedeckt. Diese
 Kurztests sind keine neue Stunden- oder Livemessung. Kaltstart, Reconcile und Aktionen werden
 separat erfasst (eine Snapshotseite pro Workspace; ein vollständiger unveränderter
-Kommentarcheck benötigt in dieser Fixture drei Requests).
+Kommentarcheck benötigt mit bereitem Relay eine Linear-Seite).
 Weitere Relay-Regressionen messen getrennt Kaltstart, warme Leerticks, gebündelte
 Änderungen, Sicherheitsabgleiche, Störung und frische Checkpoints. Die Zähler der
 lokalen Fixtures sind synthetisch; insbesondere deren Complexity-Header sind

@@ -7,6 +7,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   alias SymphonyElixir.CommentCheckpoint
   alias SymphonyElixir.Linear.IssueLease
+  alias SymphonyElixir.Linear.IssueReadCache
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.Linear.YoloAgent
 
@@ -77,7 +78,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &IssueReadCache.fetch/1)
 
     case maybe_skip_manual_issue_state(issue, issue_state_fetcher, worker_host) do
       {:ok, %Issue{}, :stop} ->
@@ -234,6 +235,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
+    # A bound MCP mutation may run in another BEAM process; turn boundaries need Linear's current state.
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     turn_context = %{

@@ -1,8 +1,9 @@
 defmodule SymphonyElixir.YoloRuntimeTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.{ProjectContext, WaitMarker, Yolo}
+  alias SymphonyElixir.{Config, ProjectContext, WaitMarker, Yolo}
 
   alias SymphonyElixir.Codex.DynamicTool
+  alias SymphonyElixir.Linear.Budget
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.Linear.WriteContext
@@ -543,6 +544,67 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     end
 
     assert {:error, :yolo_dependencies_incomplete} = Yolo.Dependencies.actionable([issue], query: query)
+  end
+
+  test "relay blocker status types are reused and legacy entries are freshly checked", %{issues: [issue | _]} do
+    app = Config.settings!().tracker.app
+
+    Budget.record(app, :read, %{
+      "x-ratelimit-requests-limit" => "5000",
+      "x-ratelimit-requests-remaining" => "5000"
+    })
+
+    assert Budget.pressure(app) == :normal
+
+    relay = %{
+      issue
+      | blocked_by: [%{id: "fix", identifier: "PRO-2", state: "Abgeschlossen", state_type: "completed"}],
+        last_comment_signal: %{relay_epoch: "current"},
+        relations_complete: true
+    }
+
+    no_query = fn _, _ -> flunk("complete relay blockers must not be read again") end
+    opts = [relay_background: true, wait_comments: fn _ -> {:ok, []} end]
+
+    assert {:ok, [ready]} = Yolo.Dependencies.refresh([relay], Keyword.put(opts, :query, no_query))
+    assert Yolo.Dependencies.dispatchable?(ready)
+
+    legacy = %{relay | blocked_by: [%{id: "fix", identifier: "PRO-2", state: "Abgeschlossen"}]}
+
+    relation = %{
+      "id" => "relation",
+      "type" => "blocks",
+      "issue" => %{"id" => "fix", "identifier" => "PRO-2", "state" => %{"name" => "Abgeschlossen", "type" => "completed"}}
+    }
+
+    query = fn document, _ ->
+      assert document =~ "YoloBlockers"
+
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "inverseRelations" => %{
+               "nodes" => [relation],
+               "pageInfo" => %{"hasNextPage" => false}
+             }
+           }
+         }
+       }}
+    end
+
+    assert {:ok, [checked]} = Yolo.Dependencies.refresh([legacy], Keyword.put(opts, :query, query))
+
+    truncated = %{relay | relations_complete: false}
+    assert {:ok, [checked_truncated]} = Yolo.Dependencies.refresh([truncated], Keyword.put(opts, :query, query))
+    assert checked_truncated.blocked_by == checked.blocked_by
+    assert Yolo.Dependencies.dispatchable?(checked)
+
+    foreground = opts |> Keyword.put(:query, query) |> Keyword.put(:relay_background, false)
+    assert {:ok, [_]} = Yolo.Dependencies.refresh([legacy], foreground)
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
+    assert Budget.pressure(app) == :critical
+    assert {:error, :linear_budget_reserved} = Yolo.Dependencies.refresh([legacy], Keyword.put(opts, :query, no_query))
   end
 
   test "an unavailable configured merge worker cannot authorize acceptance", %{issues: [issue | _], context: context, root: root} do

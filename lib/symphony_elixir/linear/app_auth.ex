@@ -109,12 +109,33 @@ defmodule SymphonyElixir.Linear.AppAuth do
     end
   end
 
+  defp budget_operation(payload) do
+    query = payload[:query] || payload["query"] || ""
+    name = payload[:operationName] || payload["operationName"] || query_operation(query)
+
+    if valid_operation_name?(name),
+      do: name,
+      else: "unknown"
+  end
+
+  defp query_operation(query) do
+    case Regex.run(~r/\A\s*(?:query|mutation|subscription)\s+([A-Za-z_][A-Za-z0-9_]*)\b/, query) do
+      [_, parsed] -> parsed
+      _ -> "anonymous"
+    end
+  end
+
+  defp valid_operation_name?(name) when is_binary(name),
+    do: byte_size(name) <= 64 and Regex.match?(~r/\A[A-Za-z_][A-Za-z0-9_]*\z/, name)
+
+  defp valid_operation_name?(_), do: false
+
   @spec request(map(), map(), (map(), list() -> term()), keyword()) :: {:ok, map()} | {:error, term()}
   def request(tracker, payload, request_fun, opts \\ []) do
     opts = Keyword.put(opts, :assignee, tracker.assignee)
 
     guarded_request = fn body, headers ->
-      RateLimit.request(tracker.app, fn -> request_fun.(body, headers) end, Keyword.put(opts, :budget_kind, budget_kind(body)))
+      RateLimit.request(tracker.app, fn -> request_fun.(body, headers) end, opts |> Keyword.put(:budget_kind, budget_kind(body)) |> Keyword.put(:budget_operation, budget_operation(body)))
     end
 
     with :ok <- validate(tracker),
@@ -240,7 +261,7 @@ defmodule SymphonyElixir.Linear.AppAuth do
   defp acquire(binding, secret, now, request, opts) do
     form = %{"grant_type" => "client_credentials", "scope" => "read,write", "client_id" => binding["client_id"], "client_secret" => secret}
 
-    result = RateLimit.request(binding, fn -> request.(form) end, Keyword.put(opts, :budget_kind, :token))
+    result = RateLimit.request(binding, fn -> request.(form) end, opts |> Keyword.put(:budget_kind, :token) |> Keyword.put(:budget_operation, "OAuthToken"))
     with :ok <- RateLimit.check(binding, opts), do: token_result(result, secret, now)
   rescue
     _ -> {:error, :linear_app_token_unavailable}

@@ -7,7 +7,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   alias SymphonyElixir.{Config, Dialog, ProjectContext, Tracker, Workpad}
   alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryThreads}
-  alias SymphonyElixir.Linear.{Budget, Client, CommentInbox, CommentVersion, Issue, WriteContext}
+  alias SymphonyElixir.Linear.{Budget, Client, CommentInbox, CommentVersion, Issue, IssueReadCache, WriteContext}
 
   @spec active?(map()) :: boolean()
   def active?(issue) do
@@ -20,9 +20,9 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   @spec scan(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def scan(issue, opts \\ []) do
-    opts = Keyword.put_new(opts, :cache_key, background_key(issue))
+    opts = opts |> Keyword.put_new(:cache_key, background_key(issue)) |> relay_scan_opts(issue)
 
-    opts = Keyword.put_new_lazy(opts, :foreign_relay_epoch, fn -> foreign_relay_epoch(issue) end)
+    opts = Keyword.put_new_lazy(opts, :foreign_relay_epoch, fn -> foreign_relay_epoch(issue, opts) end)
 
     opts = Keyword.put_new(opts, :journal_request, &journal_request/1)
     opts = Keyword.put_new(opts, :confirm_absence, &Client.confirm_comment_absence(issue.id, &1))
@@ -52,7 +52,11 @@ defmodule SymphonyElixir.CommentCheckpoint do
     base = max(30_000, Config.settings!().polling.interval_ms)
 
     if SymphonyElixir.Relay.enabled?() do
-      if Budget.low?(Config.settings!().tracker.app), do: max(base, 180_000), else: max(base, 60_000)
+      case Budget.pressure(Config.settings!().tracker.app) do
+        :normal -> max(base, 900_000)
+        :reduced -> max(base, 1_800_000)
+        :critical -> max(base, 3_600_000)
+      end
     else
       base
     end
@@ -61,24 +65,61 @@ defmodule SymphonyElixir.CommentCheckpoint do
   @spec background_scan(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def background_scan(issue, opts \\ []) do
     if SymphonyElixir.Relay.enabled?() do
-      with {:ok, epoch} <- SymphonyElixir.ProjectPoller.comment_epoch(ProjectContext.current(), issue.id) do
-        background_scan_with_epoch(issue, opts |> Keyword.put(:relay_epoch, epoch) |> Keyword.put(:foreign_relay_epoch, elem(epoch, 2)))
+      case SymphonyElixir.ProjectPoller.comment_epoch(ProjectContext.current(), issue.id) do
+        {:ok, epoch} -> background_scan_with_epoch(issue, opts |> Keyword.put(:relay_epoch, epoch) |> Keyword.put(:foreign_relay_epoch, foreign_key(epoch)), true)
+        _ -> background_scan_with_epoch(issue, opts, false)
       end
     else
-      background_scan_with_epoch(issue, opts)
+      background_scan_with_epoch(issue, opts, false)
     end
   end
 
-  defp background_scan_with_epoch(issue, opts) do
+  defp background_scan_with_epoch(issue, opts, ready?) do
+    fetch = if ready?, do: fn -> relay_full_scan(issue) end, else: fn -> Client.scan_issue_comments(issue.id) end
+
     opts =
       opts
-      |> Keyword.put(:background_key, background_key(issue))
-      |> Keyword.put(:background_interval, background_interval_ms())
-      |> Keyword.put(:maximum_full_age, if(SymphonyElixir.Relay.enabled?(), do: 1_800_000, else: 300_000))
-      |> Keyword.put_new(:signal, fn -> Client.comment_scan_signal(issue.id) end)
-      |> Keyword.put_new(:fetch_after_signal, &Client.scan_issue_comments(issue.id, &1))
+      |> Keyword.put(:background_key, if(ready? or not SymphonyElixir.Relay.enabled?(), do: background_key(issue), else: background_key(issue) <> ":fallback"))
+      |> Keyword.put(:background_interval, if(ready?, do: background_interval_ms(), else: max(30_000, Config.settings!().polling.interval_ms)))
+      |> Keyword.put(:maximum_full_age, if(ready?, do: background_interval_ms(), else: 300_000))
+      |> Keyword.put_new(:signal, if(ready?, do: fn -> {:ok, []} end, else: fn -> Client.comment_scan_signal(issue.id) end))
+      |> Keyword.put_new(:fetch_after_signal, if(ready?, do: fn _ -> fetch.() end, else: &Client.scan_issue_comments(issue.id, &1)))
+      |> Keyword.put_new(:fetch, fetch)
 
     scan(issue, opts)
+  end
+
+  defp relay_scan_opts(opts, issue) do
+    if SymphonyElixir.Relay.enabled?() do
+      case relay_comment_epoch(opts, issue) do
+        {:ok, {generation, epoch, foreign}} ->
+          ready_scan_opts(opts, issue, {generation, epoch, foreign})
+
+        _ ->
+          opts
+      end
+    else
+      opts
+    end
+  end
+
+  defp ready_scan_opts(opts, issue, {generation, epoch, foreign}) do
+    fetch = if opts[:linear_signal], do: fn -> Client.scan_issue_comments(issue.id) end, else: fn -> relay_full_scan(issue) end
+
+    opts
+    |> Keyword.put_new(:background_key, background_key(issue))
+    |> Keyword.put_new(:background_interval, background_interval_ms())
+    |> Keyword.put_new(:maximum_full_age, background_interval_ms())
+    |> Keyword.put(:foreign_relay_epoch, foreign_key({generation, epoch, foreign}))
+    |> Keyword.put(:relay_epoch, {generation, epoch, foreign})
+    |> Keyword.put_new(:signal, fn -> {:ok, []} end)
+    |> Keyword.put_new(:fetch_after_signal, fn _ -> fetch.() end)
+    |> Keyword.put_new(:fetch, fetch)
+  end
+
+  defp relay_full_scan(issue) do
+    context = ProjectContext.current()
+    Client.scan_issue_comments_relay(issue.id, fn -> SymphonyElixir.ProjectPoller.comment_epoch(context, issue.id) end)
   end
 
   defp background_key(issue) do
@@ -87,14 +128,20 @@ defmodule SymphonyElixir.CommentCheckpoint do
     :crypto.hash(:sha256, :erlang.term_to_binary({binding, tracker.advisory_agent_ids, issue.id, :signal_v2})) |> Base.encode16()
   end
 
-  defp foreign_relay_epoch(issue) do
+  defp foreign_relay_epoch(issue, opts) do
     if SymphonyElixir.Relay.enabled?() do
-      case SymphonyElixir.ProjectPoller.comment_epoch(ProjectContext.current(), issue.id) do
-        {:ok, {_, _, epoch}} -> epoch
+      case relay_comment_epoch(opts, issue) do
+        {:ok, epoch} -> foreign_key(epoch)
         _ -> nil
       end
     end
   end
+
+  defp relay_comment_epoch(opts, issue) do
+    Keyword.get(opts, :relay_comment_epoch, &SymphonyElixir.ProjectPoller.comment_epoch/2).(ProjectContext.current(), issue.id)
+  end
+
+  defp foreign_key({generation, _, foreign}), do: "#{generation}:#{foreign}"
 
   @spec checkpoint(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def checkpoint(issue, opts \\ []) do
@@ -106,6 +153,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   @spec before_action(map(), keyword()) :: :ok | {:error, term()}
   def before_action(issue, opts \\ []) do
+    opts = opts |> Keyword.put(:force_full, true) |> Keyword.put(:linear_signal, true)
     with {:ok, state} <- scan(issue, opts), do: require_processed(state, issue, opts)
   end
 
@@ -132,7 +180,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   @spec bound_issue(String.t(), keyword()) :: {:ok, Issue.t()} | {:error, term()}
   def bound_issue(id, opts \\ []) do
-    fetch = Keyword.get(opts, :fetch_issue, &Client.fetch_issue_states_by_ids/1)
+    fetch = Keyword.get(opts, :fetch_issue, fn ids -> IssueReadCache.fetch(ids, critical: true) end)
     owner = WriteContext.current()["issue_id"]
 
     with true <- is_binary(id) and (is_nil(owner) or owner == id or YoloScope.member?(id)) and allowed_issue?(id),

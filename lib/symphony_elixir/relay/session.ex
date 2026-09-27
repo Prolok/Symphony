@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Relay.Session do
   @moduledoc "Serialized receive → persist → ack → refresh state machine for one workspace consumer."
-  alias SymphonyElixir.Linear.{CommentJournal, DurableState}
+  alias SymphonyElixir.Linear.{Budget, CommentJournal, DurableState}
   alias SymphonyElixir.Relay.{Contract, Store}
 
   defstruct path: nil,
@@ -375,13 +375,29 @@ defmodule SymphonyElixir.Relay.Session do
 
   defp refresh(session, page) do
     cond do
-      session.clock.() >= session.record["reconcile_at"] -> reconcile(session, page)
       session.record["dirty"] != [] -> hydrate(session, page)
+      session.clock.() >= session.record["reconcile_at"] -> reconcile(session, page)
       true -> ready(session, page)
     end
   end
 
   defp reconcile(session, page) do
+    pressure =
+      case session.contexts do
+        [%{settings: %{tracker: %{app: app}}} | _] -> Budget.pressure(app)
+        _ -> :normal
+      end
+
+    if pressure == :normal do
+      reconcile_snapshot(session, page)
+    else
+      delay = if pressure == :critical, do: 3_600_000, else: 1_800_000
+      r = Map.put(session.record, "reconcile_at", session.clock.() + delay)
+      continue_saved(session, r, &ready(&1, page))
+    end
+  end
+
+  defp reconcile_snapshot(session, page) do
     case session.snapshot.(session.record["known"]) do
       {:ok, issues} ->
         r = replace_issues(session.record, issues, session.record["known"] ++ Enum.map(issues, & &1["id"]))

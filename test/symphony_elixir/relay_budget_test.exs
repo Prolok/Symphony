@@ -1,7 +1,9 @@
 defmodule SymphonyElixir.RelayBudgetTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, WorkerCapacity}
+  alias SymphonyElixir.Linear.IssueReadCache
   alias SymphonyElixir.RelayFixture, as: Server
+  alias SymphonyElixir.Yolo.Dependencies
 
   test "the actual five-second timer fetches an available event then stays Linear-free on warm ticks" do
     root = Path.dirname(Workflow.workflow_file_path())
@@ -51,6 +53,151 @@ defmodule SymphonyElixir.RelayBudgetTest do
       end)
 
       assert Agent.get(counts, & &1) == %{}
+    end
+  end
+
+  test "complete relay issue is reused after one full Linear comparison" do
+    root = Path.dirname(Workflow.workflow_file_path())
+    server = start_supervised!(Server)
+    counts = start_supervised!({Agent, fn -> %{} end})
+    [context] = contexts(root, ["one"])
+    assert Client.complete_relay_issue?(issue_node(context), context)
+    refute Client.complete_relay_issue?(Map.delete(issue_node(context), "labels"), context)
+    refute Client.complete_relay_issue?(put_in(issue_node(context)["labels"]["nodes"], List.duplicate(%{"name" => "label"}, 50)), context)
+    bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
+    configure_http(server, [context], [issue_node(context)], bump)
+    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    start_supervised!({ProjectPoller, contexts: [context]})
+    context = ProjectPoller.context(context)
+    assert {:ok, [{_, _}]} = ProjectPoller.read_issues(context, ["issue-0"])
+    Agent.update(counts, fn _ -> %{} end)
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, [_]} = IssueReadCache.fetch(["issue-0"])
+      assert Agent.get_and_update(counts, &{&1, %{}}) == %{read: 1}
+      assert {:ok, [_]} = IssueReadCache.fetch(["issue-0"])
+      assert Agent.get(counts, & &1) == %{}
+    end)
+
+    Server.publish(server, "one", %{"issueId" => "issue-0"})
+    ProjectPoller.refresh()
+    assert {:ok, [_]} = ProjectPoller.candidates(context)
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, [_]} = IssueReadCache.fetch(["issue-0"])
+      assert Agent.get(counts, & &1) == %{read: 2}
+    end)
+  end
+
+  test "relay blocker types preserve custom terminal states and reject old incomplete cache nodes" do
+    root = Path.dirname(Workflow.workflow_file_path())
+    [context] = contexts(root, ["one"])
+    blocker = %{"type" => "blocks", "issue" => %{"id" => "blocker", "identifier" => "PRO-2", "state" => %{"name" => "Abgeschlossen", "type" => "completed"}}}
+    node = put_in(issue_node(context)["inverseRelations"]["nodes"], [blocker])
+
+    assert Client.complete_relay_issue?(node, context)
+    issue = ProjectContext.with_context(context, fn -> Client.relay_issue(node) end)
+    assert [%{state_type: "completed"} = dependency] = issue.blocked_by
+    assert Dependencies.terminal?(dependency)
+
+    old_node = put_in(node["inverseRelations"]["nodes"], [put_in(blocker["issue"]["state"], %{"name" => "Abgeschlossen"})])
+    refute Client.complete_relay_issue?(old_node, context)
+
+    truncated = put_in(node["inverseRelations"]["nodes"], List.duplicate(blocker, 50))
+    refute Client.complete_relay_issue?(truncated, context)
+    incomplete = ProjectContext.with_context(context, fn -> Client.relay_issue(truncated) end)
+    refute incomplete.relations_complete
+  end
+
+  for active <- [0, 5] do
+    test "thirty-minute virtual relay load with #{active} running tickets stays within instance budget" do
+      active = unquote(active)
+      root = Path.dirname(Workflow.workflow_file_path())
+      server = start_supervised!(Server)
+      counts = start_supervised!({Agent, fn -> %{} end})
+      {:ok, operations} = Agent.start_link(fn -> %{} end)
+      {:ok, clock} = Agent.start_link(fn -> 0 end)
+      [context] = contexts(root, ["one"])
+      context = put_in(context.settings.polling.interval_ms, 5_000)
+
+      nodes =
+        for index <- 0..(active - 1)//1, active > 0 do
+          issue_node(context)
+          |> Map.put("id", "issue-#{index}")
+          |> Map.put("identifier", "PRO-#{index}")
+        end
+
+      bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
+      configure_http(server, [context], nodes, bump)
+      start_supervised!({WorkerCapacity, contexts: [context]})
+      start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+      start_supervised!({ProjectPoller, contexts: [context]})
+      context = ProjectPoller.context(context)
+      assert {:ok, _} = ProjectPoller.candidates(context)
+
+      :sys.replace_state(ProjectPoller, fn state ->
+        session = state.relays["one"]
+        session = %{session | record: Map.put(session.record, "reconcile_at", 1_800_001), clock: fn -> Agent.get(clock, & &1) end}
+        put_in(state.relays["one"], session)
+      end)
+
+      ProjectContext.with_context(context, fn ->
+        for node <- nodes do
+          assert {:ok, [_]} = IssueReadCache.fetch([node["id"]], now: 0)
+          assert {:ok, _} = CommentCheckpoint.background_scan(Client.relay_issue(node), background_now: fn -> 0 end)
+        end
+      end)
+
+      Agent.update(counts, fn _ -> %{} end)
+      handler = "thirty-minute-budget-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler,
+        [:symphony, :linear, :request],
+        fn _, _, metadata, pid ->
+          Agent.update(pid, &Map.update(&1, metadata.operation, 1, fn n -> n + 1 end))
+        end,
+        operations
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      for seconds <- 5..1_800//5 do
+        Agent.update(clock, fn _ -> seconds * 1_000 end)
+        before_event = if seconds in [600, 1_200], do: Agent.get(counts, & &1), else: %{}
+
+        if active > 0 and seconds == 600,
+          do: Server.publish(server, "one", %{"type" => "Comment", "issueId" => "issue-0", "commentId" => "human-comment"})
+
+        if active > 0 and seconds == 1_200,
+          do: Server.publish(server, "one", %{"issueId" => "issue-1"})
+
+        ProjectPoller.refresh()
+        assert {:ok, _} = ProjectPoller.candidates(context)
+
+        ProjectContext.with_context(context, fn ->
+          for node <- nodes do
+            issue = Client.relay_issue(node)
+            assert {:ok, _} = CommentCheckpoint.background_scan(issue, background_now: fn -> seconds * 1_000 end)
+            assert {:ok, [_]} = IssueReadCache.fetch([issue.id], now: seconds * 1_000)
+          end
+        end)
+
+        if active > 0 and seconds == 600,
+          do: assert(Map.get(Agent.get(counts, & &1), :comments, 0) > Map.get(before_event, :comments, 0))
+
+        if active > 0 and seconds == 1_200,
+          do: assert(Map.get(Agent.get(counts, & &1), :read, 0) > Map.get(before_event, :read, 0))
+      end
+
+      requests = Agent.get(counts, & &1)
+      by_operation = Agent.get(operations, & &1)
+      total = Enum.sum(Map.values(by_operation))
+      IO.puts("thirty-minute relay budget active=#{active} requests=#{total} operations=#{inspect(by_operation)}")
+      assert total == Enum.sum(Map.values(requests))
+      assert total <= if(active == 0, do: 50, else: 375)
+      refute Map.has_key?(by_operation, "SymphonyCommentScanSignal")
     end
   end
 
@@ -192,7 +339,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
         end)
       end
 
-      assert Agent.get_and_update(counts, &{&1, %{}}) == if(active == 0, do: %{}, else: %{comments: active * 3})
+      assert Agent.get_and_update(counts, &{&1, %{}}) == %{}
 
       for workspace <- Enum.uniq(workspaces),
           do: Server.fault(server, workspace, "one", :poll, {:error, {:relay_http, 503, "unavailable"}})
@@ -233,9 +380,20 @@ defmodule SymphonyElixir.RelayBudgetTest do
       "id" => "issue-#{index}",
       "identifier" => "PRO-#{index}",
       "title" => "Budget",
+      "description" => "",
+      "priority" => 0,
+      "branchName" => nil,
+      "url" => nil,
+      "delegate" => nil,
+      "team" => nil,
+      "createdAt" => nil,
+      "updatedAt" => nil,
       "state" => %{"name" => "In Arbeit (AI)"},
       "project" => %{"slugId" => context.settings.tracker.project_slug},
-      "assignee" => %{"id" => "human", "email" => "human@example.com", "app" => false}
+      "assignee" => %{"id" => "human", "email" => "human@example.com", "app" => false},
+      "labels" => %{"nodes" => []},
+      "inverseRelations" => %{"nodes" => []},
+      "comments" => %{"nodes" => []}
     }
   end
 
@@ -273,25 +431,44 @@ defmodule SymphonyElixir.RelayBudgetTest do
       app = Config.settings!().tracker.app
       projects = contexts |> Enum.filter(&(&1.settings.tracker.app["workspace_id"] == app["workspace_id"])) |> Enum.map(& &1.settings.tracker.project_slug)
 
-      {kind, data} =
-        cond do
-          query =~ "SymphonyAppIdentity" ->
-            {:identity, %{"viewer" => %{"id" => app["user_id"], "app" => true, "organization" => %{"id" => app["workspace_id"]}}}}
-
-          query =~ "SymphonyHumanAssignees" ->
-            {:assignees, %{"users" => %{"nodes" => [%{"id" => "human", "email" => "human@example.com", "app" => false}], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}
-
-          query =~ "comments(" and not (query =~ "SymphonyWorkspacePoll") ->
-            {:comments, %{"issue" => %{"comments" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
-
-          true ->
-            {:read, %{"issues" => %{"nodes" => Enum.filter(nodes, &(&1["project"]["slugId"] in projects)), "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}
-        end
+      {kind, data} = budget_response(query, payload, app, projects, nodes)
 
       bump.(kind)
       {:ok, %{status: 200, body: %{"data" => data}}}
     end)
 
     on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+  end
+
+  defp budget_response(query, payload, app, projects, nodes) do
+    cond do
+      query =~ "SymphonyAppIdentity" ->
+        {:identity, %{"viewer" => %{"id" => app["user_id"], "app" => true, "organization" => %{"id" => app["workspace_id"]}}}}
+
+      query =~ "SymphonyHumanAssignees" ->
+        {:assignees, %{"users" => %{"nodes" => [%{"id" => "human", "email" => "human@example.com", "app" => false}], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}
+
+      query =~ "SymphonyLinearIssuesById" ->
+        {:read, budget_issues_by_id(payload, projects, nodes)}
+
+      query =~ "SymphonyWorkspacePoll" ->
+        {:read, budget_workspace_issues(projects, nodes)}
+
+      query =~ "comments(" ->
+        {:comments, %{"issue" => %{"comments" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
+
+      true ->
+        {:read, budget_workspace_issues(projects, nodes)}
+    end
+  end
+
+  defp budget_issues_by_id(payload, projects, nodes) do
+    variables = payload[:variables] || payload["variables"] || %{}
+    ids = variables[:ids] || variables["ids"] || []
+    %{"issues" => %{"nodes" => Enum.filter(nodes, &(&1["id"] in ids and &1["project"]["slugId"] in projects))}}
+  end
+
+  defp budget_workspace_issues(projects, nodes) do
+    %{"issues" => %{"nodes" => Enum.filter(nodes, &(&1["project"]["slugId"] in projects)), "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}
   end
 end

@@ -68,7 +68,8 @@ defmodule SymphonyElixir.RetryRefreshTest do
       assert stayed.completed_states[issue.id] == "merge (ai)"
       cancel_poll_timer(stayed)
 
-      assert :ok = GenServer.call(ProjectPoller, {:set_issue, %{issue | state: "BLOCKER"}})
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "BLOCKER"}])
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, []})
 
       log =
         capture_log(fn ->
@@ -84,8 +85,61 @@ defmodule SymphonyElixir.RetryRefreshTest do
       assert log =~ "current_state=\"BLOCKER\""
       cancel_poll_timer(blocked)
 
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
       assert :ok = GenServer.call(ProjectPoller, {:set_issue, issue})
       assert {:noreply, returned} = Orchestrator.handle_info(:run_poll_cycle, blocked)
+      assert returned.running[issue.id].dispatch_issue.state == "Merge (AI)"
+      cancel_poll_timer(returned)
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, returned.running[issue.id].pid)
+    end)
+  end
+
+  test "stale candidate status cannot clear a newer completion marker or start a duplicate run" do
+    {context, issue, _workspace, state} = completion_fixture(:stale)
+
+    ProjectContext.with_context(context, fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      completed = finish_worker(state, issue)
+      assert {:noreply, released} = Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
+
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, %{issue | state: "Test (AI)"}})
+      assert {:noreply, stale} = Orchestrator.handle_info(:run_poll_cycle, released)
+      assert stale.running == %{}
+      assert stale.completed_states[issue.id] == "merge (ai)"
+      cancel_poll_timer(stale)
+
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, issue})
+      assert {:noreply, current} = Orchestrator.handle_info(:run_poll_cycle, stale)
+      assert current.running == %{}
+      assert current.completed_states[issue.id] == "merge (ai)"
+      cancel_poll_timer(current)
+    end)
+  end
+
+  test "a stale candidate stays suppressed after a direct lookup observes BLOCKER" do
+    {context, issue, _workspace, state} = completion_fixture(:stale)
+    context = put_in(context.settings.codex.command, "sleep 20")
+    start_task_supervisor()
+
+    ProjectContext.with_context(context, fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      completed = finish_worker(state, issue)
+      assert {:noreply, released} = Orchestrator.handle_info({:retry_issue, issue.id, completed.retry_attempts[issue.id].retry_token}, completed)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [%{issue | state: "BLOCKER"}])
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, %{issue | state: "Test (AI)"}})
+      assert {:noreply, blocked} = Orchestrator.handle_info(:run_poll_cycle, released)
+      refute Map.has_key?(blocked.completed_states, issue.id)
+      assert blocked.running == %{}
+      cancel_poll_timer(blocked)
+
+      assert {:noreply, still_blocked} = Orchestrator.handle_info(:run_poll_cycle, blocked)
+      assert still_blocked.running == %{}
+      cancel_poll_timer(still_blocked)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      assert :ok = GenServer.call(ProjectPoller, {:set_issue, issue})
+      assert {:noreply, returned} = Orchestrator.handle_info(:run_poll_cycle, still_blocked)
       assert returned.running[issue.id].dispatch_issue.state == "Merge (AI)"
       cancel_poll_timer(returned)
       Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, returned.running[issue.id].pid)

@@ -85,6 +85,7 @@ defmodule SymphonyElixir.Orchestrator do
       yolo_operation_retries: MapSet.new(),
       completed: MapSet.new(),
       completed_states: %{},
+      status_change_observations: %{},
       claimed: MapSet.new(),
       retry_attempts: %{},
       waiting: [],
@@ -435,7 +436,7 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
       state = YoloCoordinator.tick(state, issues)
       state = reconcile_idle_review_stays(state, issues)
-      state = reconcile_observed_completed_states(state, issues)
+      {state, issues} = reconcile_observed_completed_states(state, issues)
       state = retain_visible_dialog_observations(state, issues)
 
       state = if available_slots(state) > 0, do: choose_issues(state, issues), else: state
@@ -2314,11 +2315,80 @@ defmodule SymphonyElixir.Orchestrator do
   defp completed_timestamp(_updated_at), do: nil
 
   defp reconcile_observed_completed_states(%State{} = state, issues) when is_list(issues) do
-    Enum.reduce(issues, state, fn
-      %Issue{} = issue, state_acc -> clear_completed_state_after_status_change(state_acc, issue)
-      _issue, state_acc -> state_acc
-    end)
+    refresh_ids = completed_state_refresh_ids(state, issues)
+
+    if refresh_ids == [],
+      do: {state, issues},
+      else: reconcile_refreshed_completed_states(state, issues, refresh_ids)
   end
+
+  defp completed_state_refresh_ids(state, issues) do
+    candidate_ids = MapSet.new(for %Issue{id: id} <- issues, is_binary(id), do: id)
+
+    marker_ids =
+      state.completed_states
+      |> Enum.flat_map(fn {id, marker} ->
+        if completed_candidate_matches_marker?(find_issue_by_id(issues, id), marker), do: [], else: [id]
+      end)
+
+    observation_ids = Enum.filter(Map.keys(state.status_change_observations), &MapSet.member?(candidate_ids, &1))
+    Enum.uniq(marker_ids ++ observation_ids)
+  end
+
+  defp completed_candidate_matches_marker?(%Issue{state: issue_state}, marker) when is_binary(issue_state) do
+    completed_marker_state(marker) == normalize_issue_state(issue_state)
+  end
+
+  defp completed_candidate_matches_marker?(_issue, _marker), do: false
+
+  defp reconcile_refreshed_completed_states(state, issues, ids) do
+    guarded_ids = MapSet.new(ids)
+
+    case Tracker.fetch_issue_states_by_ids(ids) do
+      {:ok, refreshed} ->
+        accept_refreshed_completed_states(state, issues, guarded_ids, refreshed)
+
+      {:error, reason} ->
+        Logger.warning("Completion marker status refresh failed: #{inspect(reason)}")
+        {state, Enum.reject(issues, &guarded_candidate?(&1, guarded_ids))}
+    end
+  end
+
+  defp accept_refreshed_completed_states(state, issues, guarded_ids, refreshed) do
+    fresh_by_id = Map.new(refreshed, fn %Issue{id: id} = issue -> {id, issue} end)
+    state = Enum.reduce(refreshed, state, fn issue, acc -> clear_completed_state_after_status_change(acc, issue) end)
+    candidates = Enum.flat_map(issues, &validated_candidate(&1, guarded_ids, fresh_by_id))
+
+    observations =
+      Enum.reduce(candidates, state.status_change_observations, fn
+        %Issue{id: id}, acc when is_binary(id) -> Map.delete(acc, id)
+        _issue, acc -> acc
+      end)
+
+    {%{state | status_change_observations: observations}, candidates}
+  end
+
+  defp validated_candidate(%Issue{id: id} = issue, guarded_ids, fresh_by_id) when is_binary(id) do
+    if MapSet.member?(guarded_ids, id),
+      do: validated_fresh_candidate(issue, Map.get(fresh_by_id, id)),
+      else: [issue]
+  end
+
+  defp validated_candidate(issue, _guarded_ids, _fresh_by_id), do: [issue]
+
+  defp validated_fresh_candidate(%Issue{state: candidate_state}, %Issue{state: fresh_state} = fresh)
+       when is_binary(candidate_state) and is_binary(fresh_state) do
+    if normalize_issue_state(candidate_state) == normalize_issue_state(fresh_state), do: [fresh], else: []
+  end
+
+  defp validated_fresh_candidate(_candidate, _fresh), do: []
+
+  defp guarded_candidate?(%Issue{id: id}, guarded_ids), do: MapSet.member?(guarded_ids, id)
+  defp guarded_candidate?(_issue, _guarded_ids), do: false
+
+  defp completed_marker_state({status, _updated_at}) when is_binary(status), do: status
+  defp completed_marker_state(status) when is_binary(status), do: status
+  defp completed_marker_state(_marker), do: nil
 
   defp clear_completed_state_after_status_change(
          %State{} = state,
@@ -2327,12 +2397,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(issue_id) and is_binary(issue_state) do
     current_state = normalize_issue_state(issue_state)
 
-    completed_state =
-      case Map.get(state.completed_states, issue_id) do
-        {status, _updated_at} when is_binary(status) -> status
-        status when is_binary(status) -> status
-        _marker -> nil
-      end
+    completed_state = completed_marker_state(Map.get(state.completed_states, issue_id))
 
     if current_state != "" and is_binary(completed_state) and completed_state != current_state do
       Logger.info("Completion marker cleared after status change: #{issue_context(issue)} completed_state=#{inspect(completed_state)} current_state=#{inspect(issue_state)}")
@@ -2340,7 +2405,8 @@ defmodule SymphonyElixir.Orchestrator do
       %{
         state
         | completed_states: Map.delete(state.completed_states, issue_id),
-          completed: MapSet.delete(state.completed, issue_id)
+          completed: MapSet.delete(state.completed, issue_id),
+          status_change_observations: Map.put(state.status_change_observations, issue_id, current_state)
       }
     else
       state

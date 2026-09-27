@@ -3483,6 +3483,29 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Delivery.waiting_reason([issue], %{issue.id => %{"semantic" => "new"}}, mismatched) == "delivery_end_unconfirmed"
   end
 
+  test "archived order without a valid state keeps its delivery unresolved", %{issues: [issue | _]} do
+    alias SymphonyElixir.Relay.Store, as: Digest
+    alias SymphonyElixir.Yolo.Delivery
+    {:ok, record} = Store.read("review")
+    record = Map.put(record, "deliveries", %{issue.id => %{"run_id" => "old-run", "semantic" => "old"}})
+    assert :ok = Store.write("review", record)
+
+    archive = Path.join(Journal.path("review") <> ".history", Digest.digest("old-run") <> ".json")
+    File.mkdir_p!(Path.dirname(archive))
+    assert :ok = DurableState.write(archive, %{"id" => "old-run", "group" => "review", "members" => [%{"id" => issue.id}]})
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert :ok = Delivery.reconcile("review")
+        assert :ok = Delivery.reconcile("review")
+      end)
+
+    assert {:ok, waiting} = Store.read("review")
+    assert get_in(waiting, ["delivery_ends", "old-run"]) == nil
+    assert Delivery.waiting_reason([issue], %{issue.id => %{"semantic" => "new"}}, waiting) == "delivery_end_unconfirmed"
+    assert length(Regex.scan(~r/YOLO delivery end unconfirmed group=review .*run_id=old-run reason=:order_invalid/, log)) == 1
+  end
+
   test "current nonterminal order keeps its delivery unresolved", %{issues: [issue | _]} do
     alias SymphonyElixir.Yolo.Delivery
     {:ok, record} = Store.read("review")

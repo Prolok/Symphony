@@ -429,18 +429,26 @@ defmodule SymphonyElixir.CommentInboxTest do
           ctx.binding,
           ctx.issue,
           fn ->
-            Agent.update(fetches, &(&1 + 1))
-            send(owner, :scan_fetched)
+            attempt = Agent.get_and_update(fetches, fn count -> {count + 1, count + 1} end)
+            send(owner, {:scan_fetched, attempt})
+
+            if attempt == 2 do
+              receive do
+                :continue_scan -> :ok
+              end
+            end
+
             {:ok, []}
           end,
           scan_lock_timeout: 1
         )
       end)
 
-    assert_receive :scan_fetched, 1_000
-    Process.sleep(100)
+    assert_receive {:scan_fetched, 1}, 1_000
+    assert_receive {:scan_fetched, 2}, 3_000
     send(holder.pid, :release)
     assert :ok = Task.await(holder)
+    send(scan.pid, :continue_scan)
     assert {:ok, _} = Task.await(scan)
     assert Agent.get(fetches, & &1) >= 2
   end

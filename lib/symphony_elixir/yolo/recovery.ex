@@ -187,8 +187,10 @@ defmodule SymphonyElixir.Yolo.Recovery do
 
   defp transient?(reason) when is_atom(reason), do: reason in @transient_reasons
   defp transient?({:linear_api_request, reason}), do: transient?(reason)
-  defp transient?({:linear_api_status, 403, %{classification: "rate_limited"}}), do: true
+  defp transient?({:linear_api_status, _, %{classification: "rate_limited"}}), do: true
   defp transient?({:linear_api_status, status, _}) when status in [408, 429, 500, 502, 503, 504], do: true
+  defp transient?({:wait_marker_unresolved, _identifier, reason}), do: transient?(reason)
+  defp transient?({:wait_marker_unresolved, _identifier, reason, write_reason}), do: transient?(reason) or transient?(write_reason)
   defp transient?(%Req.TransportError{}), do: true
   defp transient?(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: transient?(elem(reason, 0))
   defp transient?(_), do: false

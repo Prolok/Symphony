@@ -904,8 +904,12 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       {:relay_not_ready, :offline, "connection details"},
       {:linear_api_request, :linear_app_request_unavailable},
       {:linear_api_request, {:linear_app_rate_limited, %{retry_after_ms: 1_000}}},
+      {:linear_api_status, 200, %{classification: "rate_limited"}},
+      {:linear_api_status, 400, %{classification: "rate_limited"}},
       {:linear_api_status, 403, %{classification: "rate_limited"}},
-      {:linear_api_status, 503, %{classification: "server_error"}}
+      {:linear_api_status, 503, %{classification: "server_error"}},
+      {:wait_marker_unresolved, "PRI-173", {:linear_api_request, :linear_app_request_unavailable}},
+      {:wait_marker_unresolved, "PRI-173", :wait_target_unresolved, {:linear_api_request, :linear_app_request_unavailable}}
     ]
 
     state =

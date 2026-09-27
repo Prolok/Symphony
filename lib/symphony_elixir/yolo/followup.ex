@@ -220,9 +220,21 @@ defmodule SymphonyElixir.Yolo.Followup do
     do: {:error, {:yolo_created_issue_changed, difference(field, expected, actual)}}
 
   defp verify_history(created, differences, first, opts) do
-    with {:ok, created_at, _} <- DateTime.from_iso8601(created["createdAt"] || ""),
-         {:ok, nodes} <- API.pages(@created_history, %{id: created["id"]}, ["issue", "history"], opts),
-         {:ok, events} <- dated_history(nodes),
+    case DateTime.from_iso8601(created["createdAt"] || "") do
+      {:ok, created_at, _} -> verify_history_pages(created, differences, first, opts, created_at)
+      _ -> changed_error(first)
+    end
+  end
+
+  defp verify_history_pages(created, differences, first, opts, created_at) do
+    case API.pages(@created_history, %{id: created["id"]}, ["issue", "history"], opts) do
+      {:ok, nodes} -> verify_history_nodes(created, differences, first, nodes, created_at)
+      {:error, _} = error -> error
+    end
+  end
+
+  defp verify_history_nodes(created, differences, first, nodes, created_at) do
+    with {:ok, events} <- dated_history(nodes),
          true <- Enum.all?(differences, &human_change?(&1, events, created_at)) do
       {:ok, created}
     else

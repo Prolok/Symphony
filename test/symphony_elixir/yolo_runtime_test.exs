@@ -857,7 +857,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     test "created issue description fragments with #{name} keep permanent recovery backoff", %{issues: [issue | _]} do
       fragment = unquote(fragment)
       expected = "Ein Absatz vor der Liste.\n- #{fragment}\n"
-      actual = "Ein Absatz vor der Liste.\n\n- #{fragment}\n"
+      actual = "Ein Absatz vor der Liste.\n\n#{fragment}\n"
       refute Description.equivalent?(expected, actual)
       difference = Description.first_difference(expected, actual)
       assert difference.expected_fragment =~ fragment

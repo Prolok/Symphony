@@ -95,6 +95,8 @@ Anforderungen/Validierung, dasselbe Projekt und passende Team,
 auch ohne `--yolo`. Anlage und Verknüpfung müssen bestätigt sein, bevor Ursprünge
 nach `Umsetzungsticket erstellt` wechseln. Vorhandene Anforderungen und
 Abhängigkeiten erhalten bzw. übertragen; keine Duplikate bei Wiederaufnahme.
+Spätere, historisch belegte menschliche Änderungen am angelegten Ticket bleiben
+bei der Wiederaufnahme erhalten; die Relationsbestätigung bleibt bindend.
 
 Prüfe Abhängigkeiten untereinander und zu laufender Arbeit, setze erforderliche
 `blockedBy`-Relationen ohne Zyklen und übergib ausführbare Tickets nach `Todo (AI)`.

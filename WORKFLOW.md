@@ -439,6 +439,9 @@ lesen.
   Mit Agentenkonfiguration erhalten sie unabhängig von `--yolo` Agent und
   konfigurierten Menschen, sonst keine dieser Zuweisungen. Unklare Schreibausgänge mit derselben
   Operation abgleichen; ohne bestätigte Labels/Links keinen Erfolg melden.
+  Bei journalisierter Wiederaufnahme dürfen nur nach der Anlage durch passende,
+  vollständig gelesene Linear-Historie belegte menschliche Feldänderungen vom
+  Sollstand abweichen; unbelegte Abweichungen bleiben Fehler und belegte erhalten.
 - Nutze den blocked-access escape hatch nur für echte externe Blocker (fehlende erforderliche Tools/Auth), nachdem dokumentierte Fallbacks ausgeschöpft wurden.
 
 ### Turn-Abschlussvertrag für aktive AI-Status

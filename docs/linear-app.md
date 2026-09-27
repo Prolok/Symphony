@@ -260,8 +260,12 @@ entsteht das Backlog-Ticket ohne beide Zuweisungen. Aggregation übernimmt die
 Delegation unabhängig vom Startmodus. Das dauerhafte Journal `yolo-actions/`
 reserviert die ID vor Anlage und erhält den genauen Auftrag, Anforderungen und
 Relationsplan. Wiederaufnahme gleicht dieselbe ID ab; eine veränderte Operation
-oder Quelle wird abgewiesen. Vollständig gelesene Abhängigkeiten werden in beide
-Richtungen übertragen; erkannte Zyklen verhindern Relationsschreiben und
+oder Quelle wird abgewiesen. Beim Rücklesen eines bereits angelegten Tickets
+dürfen nur spätere menschliche Feldänderungen mit passender, vollständig gelesener
+Linear-Historie vom Anlageauftrag abweichen; die Zielzuweisung wird nicht
+wiederhergestellt. Fehlende oder unpassende Belege bleiben Anlagenfehler,
+Lesefehler behalten ihre ursprüngliche Fehlerklasse. Vollständig gelesene
+Abhängigkeiten werden in beide Richtungen übertragen; erkannte Zyklen verhindern Relationsschreiben und
 Ursprungabschluss. Ursprünge schließen erst nach bestätigten Links. Unfertige
 Anlagen sperren die menschliche Schlussübergabe. Bleibt nach dem letzten
 Ursprungabschluss eine Aggregationsoperation offen, lädt der Eingangslauf die

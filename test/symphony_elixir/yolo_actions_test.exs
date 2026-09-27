@@ -1153,6 +1153,13 @@ defmodule SymphonyElixir.YoloActionsTest do
         assert {:error, {:yolo_created_issue_changed, %{field: "assignee.id"}}} = Followup.invoke(request, opts())
       end
 
+      history_unavailable =
+        Keyword.put(opts(), :query, fn document, variables ->
+          if String.contains?(document, "query YoloCreatedHistory"), do: {:error, :offline}, else: query(document, variables)
+        end)
+
+      assert {:error, :offline} = Followup.invoke(request, history_unavailable)
+
       change(&%{&1 | created: %{id => Map.put(ticket, "title", "different")}, history: [base]})
       assert {:error, {:yolo_created_issue_changed, %{field: "title"}}} = Followup.invoke(request, opts())
       assert writes("YoloRelation") == []

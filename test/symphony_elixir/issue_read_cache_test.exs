@@ -4,8 +4,13 @@ defmodule SymphonyElixir.IssueReadCacheTest do
   alias SymphonyElixir.Linear.{Budget, Client, IssueReadCache}
   alias SymphonyElixir.ProjectContext
 
-  test "relay reads reuse a verified epoch, then refresh on change or fifteen-minute safety deadline" do
+  defp relay_settings do
     settings = put_in(Config.settings!().tracker.relay, %{})
+    put_in(settings.tracker.app["workspace_id"], "read-cache-#{System.unique_integer([:positive])}")
+  end
+
+  test "relay reads reuse a verified epoch, then refresh on change or fifteen-minute safety deadline" do
+    settings = relay_settings()
     context = %ProjectContext{id: "read-#{System.unique_integer([:positive])}", settings: settings}
     issue = %Issue{id: "issue", state: "In Arbeit (AI)", assignee_id: "human", blocked_by: []}
     {:ok, state} = Agent.start_link(fn -> %{epoch: 1, relay: issue, reads: 0, available: true} end)
@@ -37,7 +42,7 @@ defmodule SymphonyElixir.IssueReadCacheTest do
   end
 
   test "incomplete or disagreeing relay data cannot authorize a cached read" do
-    settings = put_in(Config.settings!().tracker.relay, %{})
+    settings = relay_settings()
     context = %ProjectContext{id: "read-#{System.unique_integer([:positive])}", settings: settings}
     linear_issue = %Issue{id: "issue", state: "Review", assignee_id: "human", blocked_by: []}
     stale = %{linear_issue | state: "In Arbeit (AI)"}
@@ -68,7 +73,7 @@ defmodule SymphonyElixir.IssueReadCacheTest do
     end
 
     relay = fn _, _ -> Agent.get(source, fn current -> {:ok, [{{"generation", current.epoch}, current.relay}]} end) end
-    opts = [context: context, relay: relay, fetch_linear: linear]
+    opts = [context: context, relay: relay, fetch_linear: linear, critical: true]
 
     assert {:ok, [^old]} = IssueReadCache.fetch([old.id], Keyword.put(opts, :now, 0))
     Agent.update(source, &%{&1 | linear: updated})
@@ -95,7 +100,7 @@ defmodule SymphonyElixir.IssueReadCacheTest do
   end
 
   test "a pre-update Linear verification cannot restore an invalidated epoch" do
-    settings = put_in(Config.settings!().tracker.relay, %{})
+    settings = relay_settings()
     context = %ProjectContext{id: "race-#{System.unique_integer([:positive])}", settings: settings}
     issue = %Issue{id: "issue", state: "In Arbeit (AI)", assignee_id: "human", blocked_by: []}
     {:ok, reads} = Agent.start_link(fn -> 0 end)
@@ -113,7 +118,7 @@ defmodule SymphonyElixir.IssueReadCacheTest do
   end
 
   test "critical shared budget defers new background verification while bound checkpoints may verify" do
-    settings = put_in(Config.settings!().tracker.relay, %{})
+    settings = relay_settings()
     app = Map.put(settings.tracker.app, "workspace_id", "critical-#{System.unique_integer([:positive])}")
     settings = put_in(settings.tracker.app, app)
     context = %ProjectContext{id: "critical-#{System.unique_integer([:positive])}", settings: settings}
@@ -137,7 +142,7 @@ defmodule SymphonyElixir.IssueReadCacheTest do
   end
 
   test "empty reads skip both transports and a global invalidation requires verification again" do
-    settings = put_in(Config.settings!().tracker.relay, %{})
+    settings = relay_settings()
     context = %ProjectContext{id: "all-#{System.unique_integer([:positive])}", settings: settings}
     issue = %Issue{id: "issue", state: "In Arbeit (AI)", assignee_id: "human", blocked_by: []}
     {:ok, reads} = Agent.start_link(fn -> 0 end)
@@ -159,7 +164,7 @@ defmodule SymphonyElixir.IssueReadCacheTest do
   end
 
   test "a failed second relay read does not mark its first epoch as verified" do
-    settings = put_in(Config.settings!().tracker.relay, %{})
+    settings = relay_settings()
     context = %ProjectContext{id: "epoch-#{System.unique_integer([:positive])}", settings: settings}
     issue = %Issue{id: "issue", state: "In Arbeit (AI)", assignee_id: "human", blocked_by: []}
     {:ok, calls} = Agent.start_link(fn -> %{relay: 0, linear: 0} end)

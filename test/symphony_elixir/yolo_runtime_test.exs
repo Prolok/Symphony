@@ -5,6 +5,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.Linear.Budget
   alias SymphonyElixir.Linear.CommentActionGuard
+  alias SymphonyElixir.Linear.Description
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.Yolo.{BlockerBrake, Completion, Coordinator, Escalation, Group, Impulse}
@@ -846,6 +847,43 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, %{"done" => true}} = DurableState.read(Operations.path(intent["key"]))
   end
 
+  for {name, fragment} <- [
+        {"blockiert", "Folgefix blockiert den Ursprung"},
+        {"Relay", "Relay-Epoche"},
+        {"Budget", "Budget-Zusammenfassung"},
+        {"Linear-Link", "https://linear.app/prolok/issue/PRO-923"},
+        {"Timeout", "Timeout"}
+      ] do
+    test "created issue description fragments with #{name} keep permanent recovery backoff", %{issues: [issue | _]} do
+      fragment = unquote(fragment)
+      expected = "Ein Absatz vor der Liste.\n- #{fragment}\n"
+      actual = "Ein Absatz vor der Liste.\n\n- #{fragment}\n"
+      refute Description.equivalent?(expected, actual)
+      difference = Description.first_difference(expected, actual)
+      assert difference.expected_fragment =~ fragment
+      reason = {:yolo_created_issue_changed, Map.put(difference, :field, "description")}
+
+      intent = %{"key" => "followup:fragment", "request" => %{"kind" => "followup", "origin_ids" => [issue.id]}, "issue_id" => Ecto.UUID.generate(), "done" => false}
+      assert :ok = Operations.save(intent)
+      {:ok, clock} = Agent.start_link(fn -> 0 end)
+      opts = [lease: fn _, callback -> callback.() end, recovery_now: fn -> Agent.get(clock, & &1) end, invoke: fn _, _ -> {:error, reason} end]
+
+      state = Yolo.Recovery.resume_with_state(%Orchestrator.State{}, [issue], opts)
+      assert {:ok, first} = Store.read("incoming")
+      assert first["operation_retries"][intent["key"]]["retry_at"] == 30_000
+
+      Agent.update(clock, fn _ -> 30_000 end)
+      state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+      assert {:ok, second} = Store.read("incoming")
+      assert second["operation_retries"][intent["key"]]["retry_at"] == 330_000
+
+      Agent.update(clock, fn _ -> 330_000 end)
+      _state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+      assert {:ok, third} = Store.read("incoming")
+      assert third["operation_retries"][intent["key"]]["retry_at"] == 930_000
+    end
+  end
+
   test "transport, rate limit and relay recovery errors retain thirty-second retries but missing state backs off", %{issues: [issue | _]} do
     intent = %{"key" => "followup:transient", "request" => %{"kind" => "followup", "origin_ids" => [issue.id]}, "issue_id" => Ecto.UUID.generate(), "done" => false}
     assert :ok = Operations.save(intent)
@@ -858,15 +896,29 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       invoke: fn _, _ -> {:error, Agent.get(failure, & &1)} end
     ]
 
+    transient_reasons = [
+      :transport_error,
+      :rate_limited,
+      :relay_not_ready,
+      :linear_app_request_unavailable,
+      {:relay_not_ready, :offline, "connection details"},
+      {:linear_api_request, :linear_app_request_unavailable},
+      {:linear_api_request, {:linear_app_rate_limited, %{retry_after_ms: 1_000}}},
+      {:linear_api_status, 403, %{classification: "rate_limited"}},
+      {:linear_api_status, 503, %{classification: "server_error"}}
+    ]
+
     state =
-      Enum.reduce([:transport_error, :rate_limited, :relay_not_ready, :relay_not_ready], %Orchestrator.State{}, fn reason, state ->
-        Agent.update(failure, fn _ -> reason end)
-        state = Yolo.Recovery.resume_with_state(state, [issue], opts)
-        now = Agent.get(clock, & &1)
-        assert {:ok, record} = Store.read("incoming")
-        assert record["operation_retries"][intent["key"]]["retry_at"] == now + 30_000
-        Agent.update(clock, &(&1 + 30_000))
-        state
+      Enum.reduce(transient_reasons, %Orchestrator.State{}, fn reason, state ->
+        Enum.reduce(1..2, state, fn _, state ->
+          Agent.update(failure, fn _ -> reason end)
+          state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+          now = Agent.get(clock, & &1)
+          assert {:ok, record} = Store.read("incoming")
+          assert record["operation_retries"][intent["key"]]["retry_at"] == now + 30_000
+          Agent.update(clock, &(&1 + 30_000))
+          state
+        end)
       end)
 
     assert MapSet.member?(state.yolo_operation_retries, {"incoming", intent["key"]})

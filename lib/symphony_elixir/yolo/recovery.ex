@@ -6,6 +6,20 @@ defmodule SymphonyElixir.Yolo.Recovery do
   alias SymphonyElixir.Yolo.{Admission, Followup, Group, Operations, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
 
+  @transient_reasons [
+    :transport_error,
+    :timeout,
+    :timed_out,
+    :offline,
+    :rate_limited,
+    :linear_app_rate_limited,
+    :linear_app_request_unavailable,
+    :relay_not_ready,
+    :linear_budget_reserved,
+    :issue_already_owned,
+    :issue_lease_unavailable
+  ]
+
   @spec resume(map(), [map()], keyword()) :: :ok
   def resume(state, issues, opts) do
     _ = resume_with_state(state, issues, opts)
@@ -171,10 +185,13 @@ defmodule SymphonyElixir.Yolo.Recovery do
     if transient?(reason) or count == 1, do: 30_000, else: min(900_000, (count - 1) * 300_000)
   end
 
-  defp transient?(reason) do
-    text = reason |> inspect() |> String.downcase()
-    Enum.any?(~w(transport timeout timed_out offline rate_limit ratelimited relay http budget connection lease lock linear_app_request_unavailable), &String.contains?(text, &1))
-  end
+  defp transient?(reason) when is_atom(reason), do: reason in @transient_reasons
+  defp transient?({:linear_api_request, reason}), do: transient?(reason)
+  defp transient?({:linear_api_status, 403, %{classification: "rate_limited"}}), do: true
+  defp transient?({:linear_api_status, status, _}) when status in [408, 429, 500, 502, 503, 504], do: true
+  defp transient?(%Req.TransportError{}), do: true
+  defp transient?(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: transient?(elem(reason, 0))
+  defp transient?(_), do: false
 
   defp with_leases([], _lease, callback), do: callback.()
   defp with_leases([issue | rest], lease, callback), do: lease.(issue, fn -> with_leases(rest, lease, callback) end)

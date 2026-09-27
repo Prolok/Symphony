@@ -1167,6 +1167,134 @@ defmodule SymphonyElixir.YoloActionsTest do
     end)
   end
 
+  test "post-create readback still rejects a changed title before recovery", %{issues: [source | _]} do
+    group([source], fn ->
+      query = fn document, variables ->
+        result = query(document, variables)
+
+        if String.contains?(document, "mutation YoloCreate") do
+          change(&%{&1 | created: Map.new(&1.created, fn {id, ticket} -> {id, Map.put(ticket, "title", "changed during creation")} end)})
+        end
+
+        result
+      end
+
+      assert {:error, {:yolo_created_issue_changed, %{field: "title"}}} =
+               Followup.invoke(args([source], "followup"), Keyword.put(opts(), :query, query))
+
+      assert writes("YoloCreatedHistory") == []
+    end)
+  end
+
+  test "recovery accepts only a dated human description edit", %{issues: [source | _]} do
+    request = args([source], "followup")
+
+    group([source], fn ->
+      change(&%{&1 | fail: "YoloCreate"})
+      assert {:error, :response_lost} = Followup.invoke(request, opts())
+      [{id, ticket}] = Map.to_list(db().created)
+      changed_description = ticket["description"] <> "\n\nHuman note."
+      change(&%{&1 | fail: nil, created: %{id => Map.put(ticket, "description", changed_description)}})
+
+      edit = %{
+        "id" => "description-edit",
+        "createdAt" => "2026-09-25T10:18:00.000Z",
+        "updatedDescription" => true,
+        "actor" => %{"id" => "human", "app" => false},
+        "botActor" => nil
+      }
+
+      change(&%{&1 | created: %{id => Map.put(ticket, "createdAt", "invalid") |> Map.put("description", changed_description)}, history: [edit]})
+      assert {:error, {:yolo_created_issue_changed, %{field: "description"}}} = Followup.invoke(request, opts())
+
+      change(&%{&1 | created: %{id => Map.put(ticket, "description", changed_description)}})
+      change(&%{&1 | history: [%{edit | "createdAt" => "invalid"}]})
+      assert {:error, {:yolo_created_issue_changed, %{field: "description"}}} = Followup.invoke(request, opts())
+
+      change(&%{&1 | history: [%{edit | "updatedDescription" => false}]})
+      assert {:error, {:yolo_created_issue_changed, %{field: "description"}}} = Followup.invoke(request, opts())
+
+      change(&%{&1 | history: [edit]})
+      assert {:ok, %{"id" => ^id}} = Followup.invoke(request, opts())
+      assert db().created[id]["description"] == changed_description
+      assert writes("YoloUpdate") == []
+    end)
+  end
+
+  test "recovery accepts the final human removal of a generated label", %{issues: [source | _]} do
+    request = args([source], "followup")
+
+    group([source], fn ->
+      change(&%{&1 | fail: "YoloCreate"})
+      assert {:error, :response_lost} = Followup.invoke(request, opts())
+      [{id, ticket}] = Map.to_list(db().created)
+      change(&%{&1 | fail: nil, created: %{id => Map.put(ticket, "labelIds", [])}})
+
+      removed = %{
+        "id" => "human-removal",
+        "createdAt" => "2026-09-25T10:18:00.000Z",
+        "addedLabelIds" => [],
+        "removedLabelIds" => ["generated"],
+        "actor" => %{"id" => "human", "app" => false},
+        "botActor" => nil
+      }
+
+      change(&%{&1 | history: [Map.put(removed, "addedLabelIds", ["generated"])]})
+      assert {:error, {:yolo_created_issue_changed, %{field: "labelIds"}}} = Followup.invoke(request, opts())
+
+      added = %{
+        removed
+        | "id" => "app-addition",
+          "createdAt" => "2026-09-26T10:18:00.000Z",
+          "removedLabelIds" => [],
+          "addedLabelIds" => ["generated"],
+          "actor" => %{"id" => "symphony", "app" => true}
+      }
+
+      last_removal = %{removed | "id" => "final-removal", "createdAt" => "2026-09-27T10:18:00.000Z"}
+      unrelated = %{removed | "id" => "unrelated-label", "createdAt" => "2026-09-24T10:18:00.000Z", "removedLabelIds" => [], "addedLabelIds" => ["other"]}
+      change(&%{&1 | history: [last_removal, added, removed, unrelated]})
+      assert {:ok, %{"id" => ^id}} = Followup.invoke(request, opts())
+      assert db().created[id]["labelIds"] == []
+      assert writes("YoloUpdate") == []
+    end)
+  end
+
+  test "recovery verifies human project, team and state moves field by field", %{issues: [source | _]} do
+    request = args([source], "followup")
+
+    group([source], fn ->
+      change(&%{&1 | fail: "YoloCreate"})
+      assert {:error, :response_lost} = Followup.invoke(request, opts())
+      [{id, ticket}] = Map.to_list(db().created)
+
+      moved =
+        ticket
+        |> put_in(["project", "id"], "other-project")
+        |> put_in(["team", "id"], "other-team")
+        |> put_in(["state", "id"], "other-state")
+
+      change(&%{&1 | fail: nil, created: %{id => moved}})
+
+      move = %{
+        "id" => "human-move",
+        "createdAt" => "2026-09-25T10:18:00.000Z",
+        "fromProjectId" => "project",
+        "toProjectId" => "other-project",
+        "fromTeamId" => "team",
+        "toTeamId" => "other-team",
+        "fromStateId" => "Backlog",
+        "toStateId" => "other-state",
+        "actor" => %{"id" => "human", "app" => false},
+        "botActor" => nil
+      }
+
+      change(&%{&1 | history: [move]})
+      assert {:ok, %{"id" => ^id}} = Followup.invoke(request, opts())
+      assert writes("YoloUpdate") == []
+    end)
+  end
+
   test "late source changes and comment errors stop relations and final closure", %{issues: issues} do
     for boundary <- ["YoloCreate", "YoloRelation"] do
       request = Map.put(args(issues, "followup"), "operation_key", boundary)

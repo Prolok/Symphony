@@ -81,6 +81,9 @@ defmodule SymphonyElixir.Linear.Adapter do
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
 
+  @spec fetch_issue_state_history(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_state_history(issue_id) when is_binary(issue_id), do: client_module().fetch_issue_state_history(issue_id)
+
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, term()} | {:error, term()}
   def fetch_issue_by_identifier(identifier) when is_binary(identifier) do
     client_module().fetch_issue_by_identifier(identifier)

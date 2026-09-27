@@ -87,6 +87,39 @@ defmodule SymphonyElixir.LinearAppPathsTest do
     refute inspect(records) =~ "synthetic-secret"
   end
 
+  test "issue state history is fully paginated and rejects an incomplete page" do
+    parent = self()
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+      query = payload[:query] || payload["query"]
+
+      if query =~ "SymphonyIssueStateHistory" do
+        variables = payload[:variables] || payload["variables"]
+        send(parent, {:history_page, variables})
+
+        page =
+          case variables[:after] || variables["after"] do
+            nil -> %{"nodes" => [%{"stateId" => "old"}], "pageInfo" => %{"hasNextPage" => true, "endCursor" => "next"}}
+            "next" -> %{"nodes" => [%{"stateId" => "new"}], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}
+          end
+
+        {:ok, %{status: 200, body: %{"data" => %{"issue" => %{"id" => "issue", "stateHistory" => page}}}}}
+      else
+        request(payload, headers)
+      end
+    end)
+
+    assert {:ok, [%{"stateId" => "old"}, %{"stateId" => "new"}]} = Client.fetch_issue_state_history("issue")
+    assert_receive {:history_page, %{id: "issue", after: nil}}
+    assert_receive {:history_page, %{id: "issue", after: "next"}}
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn _payload, _headers ->
+      {:ok, %{status: 200, body: %{"data" => %{"issue" => %{"id" => "issue", "stateHistory" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => true}}}}}}}
+    end)
+
+    assert {:error, :issue_state_history_incomplete} = Client.fetch_issue_state_history("issue")
+  end
+
   for outcome <- [:applied, :unchanged, :foreign] do
     test "lost status response with #{outcome} state is read back without replay" do
       Process.put(:remote_state, "original")

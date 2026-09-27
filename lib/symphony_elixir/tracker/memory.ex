@@ -27,12 +27,26 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
-    wanted_ids = MapSet.new(issue_ids)
+    send_event({:memory_tracker_fetch_issue_states, issue_ids})
 
-    {:ok,
-     Enum.filter(issue_entries(), fn %Issue{id: id} ->
-       MapSet.member?(wanted_ids, id)
-     end)}
+    case Application.get_env(:symphony_elixir, :memory_tracker_state_error) do
+      nil ->
+        wanted_ids = MapSet.new(issue_ids)
+
+        {:ok,
+         Enum.filter(issue_entries(), fn %Issue{id: id} ->
+           MapSet.member?(wanted_ids, id)
+         end)}
+
+      reason ->
+        {:error, reason}
+    end
+  end
+
+  @spec fetch_issue_state_history(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_state_history(issue_id) when is_binary(issue_id) do
+    send_event({:memory_tracker_fetch_issue_state_history, issue_id})
+    {:ok, Application.get_env(:symphony_elixir, :memory_tracker_state_history, %{}) |> Map.get(issue_id, [])}
   end
 
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, Issue.t()} | {:error, term()}

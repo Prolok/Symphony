@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Tracker do
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
+  @callback fetch_issue_state_history(String.t()) :: {:ok, [map()]} | {:error, term()}
   @callback fetch_issue_by_identifier(String.t()) :: {:ok, term()} | {:error, term()}
   @callback fetch_issue_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
   @callback fetch_issue_comment_bodies(String.t()) :: {:ok, [String.t()]} | {:error, term()}
@@ -38,6 +39,11 @@ defmodule SymphonyElixir.Tracker do
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
     adapter().fetch_issue_states_by_ids(issue_ids)
+  end
+
+  @spec fetch_issue_state_history(String.t()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_state_history(issue_id) when is_binary(issue_id) do
+    adapter().fetch_issue_state_history(issue_id)
   end
 
   @spec fetch_issue_by_identifier(String.t()) :: {:ok, term()} | {:error, term()}

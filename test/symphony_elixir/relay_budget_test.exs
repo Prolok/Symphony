@@ -178,6 +178,14 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
       context = %{context | yolo_agent_id: "pai", assignee_ids: ["human"], human_handoff_id: "human"}
       yolo_state = %SymphonyElixir.Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}
+      Process.put(:completion_refresh_now_fun, fn -> Agent.get(clock, & &1) end)
+      on_exit(fn -> Process.delete(:completion_refresh_now_fun) end)
+
+      marker_state = %SymphonyElixir.Orchestrator.State{
+        max_concurrent_agents: 0,
+        completed: MapSet.new(["invisible-merge"]),
+        completed_states: %{"invisible-merge" => "merge (ai)"}
+      }
 
       ProjectContext.with_context(context, fn ->
         assert :ok =
@@ -189,8 +197,8 @@ defmodule SymphonyElixir.RelayBudgetTest do
                  })
       end)
 
-      yolo_state =
-        Enum.reduce(5..1_800//5, yolo_state, fn seconds, yolo_state ->
+      {yolo_state, marker_state} =
+        Enum.reduce(5..1_800//5, {yolo_state, marker_state}, fn seconds, {yolo_state, marker_state} ->
           Agent.update(clock, fn _ -> seconds * 1_000 end)
           before_event = if seconds in [600, 1_200], do: Agent.get(counts, & &1), else: %{}
 
@@ -210,6 +218,13 @@ defmodule SymphonyElixir.RelayBudgetTest do
               assert {:ok, [_]} = IssueReadCache.fetch([issue.id], now: seconds * 1_000)
             end
           end)
+
+          marker_state =
+            ProjectContext.with_context(context, fn ->
+              {next, []} = SymphonyElixir.Orchestrator.reconcile_completed_states_for_test(marker_state, [])
+              assert next.completed_states["invisible-merge"] == "merge (ai)"
+              next
+            end)
 
           yolo_state =
             ProjectContext.with_context(context, fn ->
@@ -238,10 +253,11 @@ defmodule SymphonyElixir.RelayBudgetTest do
           if active > 0 and seconds == 1_200,
             do: assert(Map.get(Agent.get(counts, & &1), :read, 0) > Map.get(before_event, :read, 0))
 
-          yolo_state
+          {yolo_state, marker_state}
         end)
 
       assert map_size(yolo_state.yolo_marker_cache) == 4
+      assert marker_state.completed_states["invisible-merge"] == "merge (ai)"
       assert Agent.get(recovery_attempts, & &1) == 4
 
       requests = Agent.get(counts, & &1)

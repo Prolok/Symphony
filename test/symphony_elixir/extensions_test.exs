@@ -25,6 +25,11 @@ defmodule SymphonyElixir.ExtensionsTest do
       {:ok, issue_ids}
     end
 
+    def fetch_issue_state_history(issue_id) do
+      send(self(), {:fetch_issue_state_history_called, issue_id})
+      {:ok, [%{"stateId" => "previous"}]}
+    end
+
     def fetch_issue_by_identifier(identifier) do
       send(self(), {:fetch_issue_by_identifier_called, identifier})
       {:ok, identifier}
@@ -713,6 +718,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert {:ok, ["issue-1"]} = Adapter.fetch_issue_states_by_ids(["issue-1"])
     assert_receive {:fetch_issue_states_by_ids_called, ["issue-1"]}
+
+    assert {:ok, [%{"stateId" => "previous"}]} = Adapter.fetch_issue_state_history("issue-1")
+    assert_receive {:fetch_issue_state_history_called, "issue-1"}
 
     Process.put(
       {FakeLinearClient, :issue_comment_bodies_result},

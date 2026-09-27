@@ -91,6 +91,15 @@ verifizierter Gruppen nicht; Authentifizierungs-, Bindungs- und
 Konfigurationsfehler bleiben dienstweit fail-closed. Sind alle Gruppen gesperrt,
 richtet sich der nächste Poll nach der frühesten fälligen Gruppe.
 
+Completion-Marker ohne passenden Kandidaten werden zunächst einmal frisch über
+`IssueReadCache` geprüft. Gleiche, fehlende und fehlgeschlagene Antworten lösen
+frühestens nach fünf Minuten eine weitere Prüfung aus. Ein geänderter Kandidatenstatus
+oder `updated_at` weckt den Abgleich sofort; bei gleicher Rückkehr prüft er die
+Statushistorie seit dem Laufende, bevor er den Marker entfernt. Nur beobachtete
+abweichende Status entfernen Marker mit Info-Log. Wiederholt nicht lieferbare,
+unbeanspruchte Marker und verwaiste Statusbeobachtungen verfallen nach 24 Stunden;
+einzelne Fehlantworten bewahren sie.
+
 Worktree-Erzeugung und Cleanup verwenden `on_create_worktree.py` bzw.
 `on_remove_worktree.py` aus dem jeweiligen Projektroot. Dialog, Retry und
 Reconciliation laufen im selben Projektkontext. Die Workflow-Gates bleiben

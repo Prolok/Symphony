@@ -314,8 +314,11 @@ Läufe aus dem aktuellen oder archivierten Auftrag. Nur ein Auftrag derselben Gr
 und Lauf-ID, der alle betroffenen Mitglieder enthält und `completed`, `failed`,
 `cancelled` oder `retired` ist, belegt das Ende. Die Markierung bestätigt keine
 Mitgliedsentscheidung; die normale Prüfung offener Mitglieder folgt danach.
-Fehlende, unlesbare oder widersprüchliche Aufträge lassen die Zustellung reserviert
-und erzeugen einmal je Lauf einen dauerhaften Warnbeleg im Gruppenrecord.
+Bei lesbarem aktuellem Gruppenjournal lassen fehlende, unlesbare oder
+widersprüchliche Aufträge die Zustellung reserviert und erzeugen einmal je Lauf
+einen dauerhaften Warnbeleg im Gruppenrecord. Ist das aktuelle Gruppenjournal
+unlesbar, stoppt die Beobachtung schon bei der Verfügbarkeitsprüfung ohne diesen
+Laufwarnbeleg.
 
 Neue Kommentare werden vor Aktionen und Abschluss frisch abgeglichen. Entzogene
 Mitglieder verlieren ihre Schreibberechtigung; Gesamtentzug fordert Abbruch an.

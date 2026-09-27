@@ -9,13 +9,22 @@ defmodule SymphonyElixir.WaitMarker do
 
   @spec targets(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def targets(issue, opts \\ []) do
+    with {:ok, markers} <- workpad_markers(issue, opts), do: resolve_targets(issue, markers, opts)
+  end
+
+  @spec workpad_markers(map(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def workpad_markers(issue, opts) do
     comments = Keyword.get(opts, :wait_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comment_bodies/1))
 
     with {:ok, bodies} <- comments.(issue.id) do
       workpads = bodies |> Enum.map(&comment_body/1) |> Enum.filter(&(is_binary(&1) and String.starts_with?(&1, Workpad.marker())))
-      markers = Enum.uniq(parse(issue.description || "") ++ Enum.flat_map(workpads, &parse/1))
-      resolve_markers(issue, markers, opts)
+      {:ok, workpads |> Enum.flat_map(&parse/1) |> Enum.uniq()}
     end
+  end
+
+  @spec resolve_targets(map(), [String.t()], keyword()) :: {:ok, [map()]} | {:error, term()}
+  def resolve_targets(issue, workpad_markers, opts) do
+    resolve_markers(issue, Enum.uniq(parse(issue.description || "") ++ workpad_markers), opts)
   end
 
   defp comment_body(%{body: body}), do: body

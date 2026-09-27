@@ -27,13 +27,17 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       {retrying, regular} = Enum.split_with(issues, &Map.has_key?(retrying_groups, Group.name(&1)))
       retrying = Enum.map(retrying, &%{&1 | blocked_by: retrying_groups[Group.name(&1)][&1.id]})
 
-      case Dependencies.refresh(regular, Keyword.put(opts, :relay_background, true)) do
-        {:ok, refreshed} ->
-          schedule_refreshed(state, issues, refreshed ++ retrying, opts)
+      case Dependencies.refresh_background(regular, state.yolo_marker_cache, Keyword.put(opts, :relay_background, true)) do
+        {:ok, refreshed, marker_cache} ->
+          schedule_refreshed(%{state | yolo_marker_cache: marker_cache}, issues, refreshed ++ retrying, opts)
 
         {:error, reason} ->
           Logger.warning("YOLO dependencies unavailable project_root=#{ProjectContext.current().root} reason=#{inspect(reason)}")
           state
+
+        {:error, reason, marker_cache} ->
+          Logger.warning("YOLO dependencies unavailable project_root=#{ProjectContext.current().root} reason=#{inspect(reason)}")
+          %{state | yolo_marker_cache: marker_cache}
       end
     else
       state
@@ -92,7 +96,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     case complete_refresh(original, refreshed) do
       {:ok, issues} ->
         retry_notifications(state, issues, opts)
-        :ok = Recovery.resume(state, issues, opts)
+        state = Recovery.resume_with_state(state, issues, opts)
         {issues, state} = admit(issues, state, opts)
         schedule_groups(state, issues, opts)
 

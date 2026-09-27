@@ -301,6 +301,21 @@ die reservierten IDs und den erforderlichen Abgleich, ohne die Operationen als
 erledigt zu markieren. Review-Übergaben verlangen weiterhin abgeschlossene
 Anlagen und Links.
 
+Der Coordinator hält gelesene `Wartet auf:`-Kennungen aus dem Workpad nur im
+laufenden Prozess. Bei bereitem Relay liest er die Kommentare bei fehlendem Stand,
+geänderter Kommentar-Epoche oder nach mindestens 15 Minuten erneut; unter
+Budgetdruck verlängert sich der Sicherheitsabstand. Beschreibung und
+Zielstatus werden pro Takt neu ausgewertet. Ohne bereites Relay bleibt der
+budgetgedrosselte Linear-Rückfall. `planning_action` läuft beim Dispatch von
+`Planung (AI)` und gehört nicht zum periodischen YOLO-Takt.
+
+Die Recovery offener Anlageoperationen hält je Operationsschlüssel Grund,
+Ursprungssignal und nächsten Versuch im Gruppen-Store. Gleiche dauerhafte
+Fehler warten nach dem ersten 30-Sekunden-Versuch 5, 10 und höchstens 15 Minuten;
+Transport-, Rate-Limit- und Relay-Fehler bleiben bei 30 Sekunden. Änderungen
+am Ursprung oder seiner Relay-Kommentar-Epoche und ein Neustart wecken sofort.
+Anlagejournal, reservierte ID und Ergebnis werden dadurch nicht ersetzt.
+
 ### Verwaiste PO-Reviewcheckouts
 
 Ein technischer Nichtstart vor bestätigter Zustellung entfernt seinen eigenen

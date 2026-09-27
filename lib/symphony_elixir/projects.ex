@@ -83,7 +83,7 @@ defmodule SymphonyElixir.Projects do
   end
 
   defp globally_idle?(snapshots) do
-    Enum.all?(snapshots, &(is_map(&1) and &1.running == [] and &1.retrying == [] and &1.idle_shutdown_ms > 0)) and
+    Enum.all?(snapshots, &(is_map(&1) and &1.running == [] and &1.retrying == [] and Map.get(&1, :waiting, []) == [] and &1.idle_shutdown_ms > 0)) and
       System.monotonic_time(:millisecond) - Enum.max(Enum.map(snapshots, & &1.last_activity_at_ms)) >=
         Enum.max(Enum.map(snapshots, & &1.idle_shutdown_ms))
   end
@@ -97,6 +97,7 @@ defmodule SymphonyElixir.Projects do
         projects: Enum.map(contexts, & &1.name),
         running: entries(snapshots, :running),
         retrying: entries(snapshots, :retrying),
+        waiting: entries(snapshots, :waiting),
         codex_totals: totals(snapshots),
         rate_limits: snapshots |> Enum.map(fn {_, s} -> s.rate_limits end) |> Enum.find(&(not is_nil(&1))),
         polling: SymphonyElixir.ProjectPoller.polling()
@@ -141,7 +142,7 @@ defmodule SymphonyElixir.Projects do
   defp entries(snapshots, key) do
     Enum.flat_map(snapshots, fn {context, snapshot} ->
       Enum.map(
-        Map.fetch!(snapshot, key),
+        Map.get(snapshot, key, []),
         fn entry ->
           Map.merge(entry, %{
             project: context.name,

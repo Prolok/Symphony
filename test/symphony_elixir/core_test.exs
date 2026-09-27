@@ -347,7 +347,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Wenn Symphony mit `--yolo` gestartet wird"
     assert prompt =~ "die Hauptmaske zeigt"
     assert prompt =~ "`--yolo`"
-    assert prompt =~ "des Assignees."
+    assert prompt =~ "`--yolo` als Modus."
     assert prompt =~ "Pfadkontext für Skills in diesem Turn:"
     assert prompt =~ "Aktiv bearbeitetes Repository/Worktree: `{{ runtime.active_repo_root }}`"
     assert prompt =~ "Repo-lokaler Skill-Pfad: `{{ runtime.active_repo_skill_root }}`"

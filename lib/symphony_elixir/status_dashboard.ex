@@ -46,6 +46,7 @@ defmodule SymphonyElixir.StatusDashboard do
     :enabled_override,
     :render_interval_ms_override,
     :render_fun,
+    :snapshot_fun,
     :token_samples,
     :last_tps_second,
     :last_tps_value,
@@ -64,6 +65,7 @@ defmodule SymphonyElixir.StatusDashboard do
           enabled_override: boolean() | nil,
           render_interval_ms_override: pos_integer() | nil,
           render_fun: (String.t() -> term()),
+          snapshot_fun: (-> {:ok, map()} | :error),
           token_samples: [{integer(), integer()}],
           last_tps_second: integer() | nil,
           last_tps_value: float() | nil,
@@ -115,6 +117,7 @@ defmodule SymphonyElixir.StatusDashboard do
        enabled_override: enabled_override,
        render_interval_ms_override: render_interval_ms_override,
        render_fun: render_fun,
+       snapshot_fun: Keyword.get(opts, :snapshot_fun, &snapshot_payload/0),
        token_samples: [],
        last_tps_second: nil,
        last_tps_value: nil,
@@ -192,7 +195,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp maybe_render(state) do
     now_ms = System.monotonic_time(:millisecond)
-    {snapshot_data, token_samples} = snapshot_with_samples(state.token_samples, now_ms)
+    {snapshot_data, token_samples} = snapshot_with_samples(state.token_samples, now_ms, state.snapshot_fun)
     state = Map.put(state, :token_samples, token_samples)
 
     current_tokens = snapshot_total_tokens(snapshot_data)
@@ -305,8 +308,8 @@ defmodule SymphonyElixir.StatusDashboard do
       %{state | pending_content: nil, flush_timer_ref: nil}
   end
 
-  defp snapshot_with_samples(token_samples, now_ms) do
-    case snapshot_payload() do
+  defp snapshot_with_samples(token_samples, now_ms, snapshot_fun) do
+    case snapshot_fun.() do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         total_tokens = Map.get(codex_totals, :total_tokens, 0)
 
@@ -315,6 +318,7 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             waiting: Map.get(snapshot, :waiting, []),
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
@@ -333,9 +337,8 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
-        rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
-        assignee_lines = format_assignee_lines()
+        mode_lines = if(Config.yolo?(), do: [colorize("│ Mode: ", @ansi_bold) <> colorize("--yolo", @ansi_cyan)], else: [])
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
@@ -347,6 +350,7 @@ defmodule SymphonyElixir.StatusDashboard do
         running_rows = format_running_rows(running, running_event_width)
         running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
         backoff_rows = format_retry_rows(retrying)
+        waiting_lines = format_waiting_lines(Map.get(snapshot, :waiting, []), terminal_columns_override || terminal_columns())
 
         ([
            colorize("╭─ SYMPHONY STATUS", @ansi_bold),
@@ -363,9 +367,8 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("out #{format_count(codex_output_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
-           colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
-           assignee_lines,
+           mode_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
            "│",
@@ -374,6 +377,7 @@ defmodule SymphonyElixir.StatusDashboard do
          ] ++
            running_rows ++
            running_to_backoff_spacer ++
+           waiting_lines ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
            [closing_border()])
@@ -386,7 +390,7 @@ defmodule SymphonyElixir.StatusDashboard do
           colorize("│ Orchestrator snapshot unavailable", @ansi_red),
           colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
           format_project_link_lines(),
-          format_assignee_lines(),
+          if(Config.yolo?(), do: [colorize("│ Mode: ", @ansi_bold) <> colorize("--yolo", @ansi_cyan)], else: []),
           format_project_refresh_line(nil),
           closing_border()
         ]
@@ -422,20 +426,6 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_linear_scope_line(_error) do
     colorize("│ Project: ", @ansi_bold) <> colorize("n/a", @ansi_gray)
-  end
-
-  defp format_assignee_lines do
-    if Config.yolo?() do
-      [colorize("│ Assignee: ", @ansi_bold) <> colorize("--yolo", @ansi_cyan)]
-    else
-      case Config.settings!().tracker.assignee do
-        assignee when is_binary(assignee) and assignee != "" ->
-          [colorize("│ Assignee: ", @ansi_bold) <> colorize(assignee, @ansi_cyan)]
-
-        _ ->
-          []
-      end
-    end
   end
 
   defp format_project_refresh_line(%{checking?: true}) do
@@ -590,6 +580,7 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             waiting: Map.get(snapshot, :waiting, []),
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
@@ -702,6 +693,44 @@ defmodule SymphonyElixir.StatusDashboard do
       |> Enum.map_join(", ", &format_retry_summary/1)
       |> String.split(", ")
     end
+  end
+
+  defp format_waiting_lines([], _columns), do: []
+
+  defp format_waiting_lines(waiting, columns) do
+    duplicate_identifiers =
+      waiting
+      |> Enum.frequencies_by(& &1.identifier)
+      |> Map.filter(fn {_identifier, count} -> count > 1 end)
+
+    identifiers =
+      Enum.map(waiting, fn entry ->
+        if Map.has_key?(duplicate_identifiers, entry.identifier) do
+          "#{Map.get(entry, :project_qualifier, Map.get(entry, :project))}:#{entry.identifier}"
+        else
+          entry.identifier
+        end
+      end)
+
+    heading = "├─ Tickets in Warteschlange: "
+
+    {lines, prefix, current} =
+      Enum.reduce(identifiers, {[], heading, ""}, fn identifier, {lines, prefix, current} ->
+        next = if current == "", do: identifier, else: current <> ", " <> identifier
+
+        cond do
+          String.length(prefix <> next) <= columns ->
+            {lines, prefix, next}
+
+          current == "" and prefix == heading ->
+            {lines ++ [String.trim_trailing(heading)], "│  ", identifier}
+
+          true ->
+            {lines ++ [prefix <> current], "│  ", identifier}
+        end
+      end)
+
+    Enum.map(lines ++ [prefix <> current], &colorize(&1, @ansi_cyan)) ++ ["│"]
   end
 
   defp format_retry_summary(retry_entry) do
@@ -973,126 +1002,11 @@ defmodule SymphonyElixir.StatusDashboard do
   defp in_bucket?(timestamp, bucket_start, bucket_end, false),
     do: timestamp >= bucket_start and timestamp < bucket_end
 
-  defp format_rate_limits(nil), do: colorize("unavailable", @ansi_gray)
-
-  defp format_rate_limits(rate_limits) when is_map(rate_limits) do
-    limit_id =
-      map_value(rate_limits, ["limit_id", :limit_id, "limit_name", :limit_name]) ||
-        "unknown"
-
-    primary = format_rate_limit_bucket(map_value(rate_limits, ["primary", :primary]))
-    secondary = format_rate_limit_bucket(map_value(rate_limits, ["secondary", :secondary]))
-    credits = format_rate_limit_credits(map_value(rate_limits, ["credits", :credits]))
-
-    colorize(to_string(limit_id), @ansi_yellow) <>
-      colorize(" | ", @ansi_gray) <>
-      colorize("primary #{primary}", @ansi_cyan) <>
-      colorize(" | ", @ansi_gray) <>
-      colorize("secondary #{secondary}", @ansi_cyan) <>
-      colorize(" | ", @ansi_gray) <>
-      colorize(credits, @ansi_green)
-  end
-
-  defp format_rate_limits(other) do
-    other
-    |> inspect(limit: 10)
-    |> truncate(80)
-    |> colorize(@ansi_gray)
-  end
-
-  defp format_rate_limit_bucket(nil), do: "n/a"
-
-  defp format_rate_limit_bucket(bucket) when is_map(bucket) do
-    remaining = map_value(bucket, ["remaining", :remaining])
-    limit = map_value(bucket, ["limit", :limit])
-
-    reset_value =
-      map_value(bucket, [
-        "reset_in_seconds",
-        :reset_in_seconds,
-        "resetInSeconds",
-        :resetInSeconds,
-        "reset_at",
-        :reset_at,
-        "resetAt",
-        :resetAt,
-        "resets_at",
-        :resets_at,
-        "resetsAt",
-        :resetsAt
-      ])
-
-    base =
-      cond do
-        integer_like?(remaining) and integer_like?(limit) ->
-          "#{format_count(remaining)}/#{format_count(limit)}"
-
-        integer_like?(remaining) ->
-          "remaining #{format_count(remaining)}"
-
-        integer_like?(limit) ->
-          "limit #{format_count(limit)}"
-
-        map_size(bucket) == 0 ->
-          "n/a"
-
-        true ->
-          bucket |> inspect(limit: 6) |> truncate(40)
-      end
-
-    if is_nil(reset_value) do
-      base
-    else
-      "#{base} reset #{format_reset_value(reset_value)}"
-    end
-  end
-
-  defp format_rate_limit_bucket(other), do: to_string(other)
-
-  defp format_rate_limit_credits(nil), do: "credits n/a"
-
-  defp format_rate_limit_credits(credits) when is_map(credits) do
-    unlimited = map_value(credits, ["unlimited", :unlimited]) == true
-    has_credits = map_value(credits, ["has_credits", :has_credits]) == true
-    balance = map_value(credits, ["balance", :balance])
-
-    cond do
-      unlimited ->
-        "credits unlimited"
-
-      has_credits and is_number(balance) ->
-        "credits #{format_number(balance)}"
-
-      has_credits ->
-        "credits available"
-
-      true ->
-        "credits none"
-    end
-  end
-
-  defp format_rate_limit_credits(other), do: "credits #{to_string(other)}"
-
-  defp format_reset_value(value) when is_integer(value), do: "#{format_count(value)}s"
-  defp format_reset_value(value) when is_binary(value), do: value
-  defp format_reset_value(value), do: to_string(value)
-
-  defp format_number(value) when is_integer(value), do: format_count(value)
-
-  defp format_number(value) when is_float(value) do
-    value
-    |> Float.round(2)
-    |> :erlang.float_to_binary(decimals: 2)
-  end
-
   defp map_value(map, keys) when is_map(map) and is_list(keys) do
     Enum.find_value(keys, &Map.get(map, &1))
   end
 
   defp map_value(_map, _keys), do: nil
-
-  defp integer_like?(value) when is_integer(value), do: true
-  defp integer_like?(_value), do: false
 
   defp status_dot(color_code) do
     colorize("●", color_code)

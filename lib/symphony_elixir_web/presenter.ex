@@ -18,6 +18,7 @@ defmodule SymphonyElixirWeb.Presenter do
           counts: counts(snapshot),
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
+          waiting: Enum.map(Map.get(snapshot, :waiting, []), &waiting_entry_payload/1),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits,
           relay: get_in(snapshot, [:polling, :relay]) || %{}
@@ -55,8 +56,10 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp project_issue_payload(snapshot, reference) do
+    waiting = Map.get(snapshot, :waiting, [])
+
     identities =
-      (snapshot.running ++ snapshot.retrying)
+      (snapshot.running ++ snapshot.retrying ++ waiting)
       |> Enum.filter(&matches_reference?(&1, split_reference(reference)))
       |> Enum.uniq_by(&entry_identity/1)
 
@@ -67,7 +70,8 @@ defmodule SymphonyElixirWeb.Presenter do
       [entry] ->
         running = Enum.find(snapshot.running, &(entry_identity(&1) == entry_identity(entry)))
         retry = Enum.find(snapshot.retrying, &(entry_identity(&1) == entry_identity(entry)))
-        {:ok, issue_payload_body(reference, running, retry)}
+        waiting_entry = Enum.find(waiting, &(entry_identity(&1) == entry_identity(entry)))
+        {:ok, issue_payload_body(reference, running, retry, waiting_entry)}
 
       _ ->
         {:error, :ambiguous_issue_identifier}
@@ -99,13 +103,13 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp issue_payload_body(issue_identifier, running, retry) do
+  defp issue_payload_body(issue_identifier, running, retry, waiting) do
     %{
       issue_identifier: issue_identifier,
-      issue_id: issue_id_from_entries(running, retry),
-      status: issue_status(running, retry),
+      issue_id: issue_id_from_entries(running, retry, waiting),
+      status: issue_status(running, retry, waiting),
       workspace: %{
-        path: workspace_path(issue_identifier, running, retry),
+        path: workspace_path(issue_identifier, running, retry, waiting),
         host: workspace_host(running, retry)
       },
       attempts: %{
@@ -123,17 +127,17 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp issue_id_from_entries(running, retry),
-    do: (running && running.issue_id) || (retry && retry.issue_id)
+  defp issue_id_from_entries(running, retry, waiting),
+    do: (running && running.issue_id) || (retry && retry.issue_id) || (waiting && waiting.issue_id)
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0
   defp retry_attempt(retry), do: retry.attempt || 0
 
-  defp issue_status(%{external: %{reserved: true}}, _retry), do: "reserved"
-  defp issue_status(_running, nil), do: "running"
-  defp issue_status(nil, _retry), do: "retrying"
-  defp issue_status(_running, _retry), do: "running"
+  defp issue_status(%{external: %{reserved: true}}, _retry, _waiting), do: "reserved"
+  defp issue_status(nil, nil, _waiting), do: "waiting"
+  defp issue_status(nil, _retry, _waiting), do: "retrying"
+  defp issue_status(_running, _retry, _waiting), do: "running"
 
   defp running_entry_payload(entry) do
     %{
@@ -180,6 +184,15 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
+  defp waiting_entry_payload(entry) do
+    %{
+      project: Map.get(entry, :project),
+      issue_reference: issue_reference(entry),
+      issue_id: entry.issue_id,
+      issue_identifier: entry.identifier
+    }
+  end
+
   defp running_issue_payload(running) do
     %{
       worker_host: Map.get(running, :worker_host),
@@ -210,10 +223,11 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp workspace_path(issue_identifier, running, retry) do
+  defp workspace_path(issue_identifier, running, retry, waiting) do
     (running && Map.get(running, :workspace_path)) ||
       (retry && Map.get(retry, :workspace_path)) ||
-      Path.join(Config.settings!().workspace.root, issue_identifier)
+      (waiting && Map.get(waiting, :workspace_path)) ||
+      Path.join(Config.settings!().workspace.root, (waiting && waiting.identifier) || issue_identifier)
   end
 
   defp workspace_host(running, retry) do

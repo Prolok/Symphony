@@ -1,6 +1,31 @@
 defmodule SymphonyElixir.StatusDashboardTerminalTest do
   use SymphonyElixir.TestSupport
 
+  test "runtime terminal render receives the waiting queue from the snapshot" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      waiting: [%{issue_id: "queued", identifier: "PRO-967"}],
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      rate_limits: nil
+    }
+
+    parent = self()
+
+    {:ok, dashboard} =
+      StatusDashboard.init(
+        enabled: true,
+        refresh_ms: 100_000,
+        snapshot_fun: fn -> {:ok, snapshot} end,
+        render_fun: fn content -> send(parent, {:rendered, content}) end
+      )
+
+    assert {:noreply, _dashboard} = StatusDashboard.handle_info(:refresh, dashboard)
+    assert_receive {:rendered, content}
+    assert content =~ "Tickets in Warteschlange:"
+    assert content =~ "PRO-967"
+  end
+
   test "terminal redraw preserves full rows and removes shortened rows and the old tail" do
     {:ok, dashboard} = StatusDashboard.init(enabled: false)
 

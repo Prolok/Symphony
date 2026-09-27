@@ -549,6 +549,11 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   test "relay blocker status types are reused and legacy entries are freshly checked", %{issues: [issue | _]} do
     app = Config.settings!().tracker.app
 
+    on_exit(fn ->
+      Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"})
+      Budget.pressure(app)
+    end)
+
     Budget.record(app, :read, %{
       "x-ratelimit-requests-limit" => "5000",
       "x-ratelimit-requests-remaining" => "5000"

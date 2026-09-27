@@ -122,17 +122,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <section class="section-card">
           <div class="section-header">
             <div>
-              <h2 class="section-title">Rate limits</h2>
-              <p class="section-copy">Latest upstream rate-limit snapshot, when available.</p>
-            </div>
-          </div>
-
-          <pre class="code-panel"><%= pretty_value(@payload.rate_limits) %></pre>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
               <h2 class="section-title">Sessions and reservations</h2>
               <p class="section-copy">Current ticket state, agent activity, and unresolved reservations.</p>
             </div>
@@ -226,6 +215,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
               </table>
             </div>
           <% end %>
+        </section>
+
+        <section :if={@payload.waiting != []} class="section-card">
+          <h2 class="section-title">Tickets in Warteschlange</h2>
+          <p class="section-copy">Warten auf freie Worker-Kapazität.</p>
+          <p class="issue-id">
+            <%= Enum.map_join(@payload.waiting, ", ", & &1.issue_reference) %>
+          </p>
         </section>
 
         <section class="section-card">
@@ -346,7 +343,4 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp schedule_runtime_tick do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)
   end
-
-  defp pretty_value(nil), do: "n/a"
-  defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
 end

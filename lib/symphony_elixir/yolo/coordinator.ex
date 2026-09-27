@@ -34,6 +34,10 @@ defmodule SymphonyElixir.Yolo.Coordinator do
         {:error, reason} ->
           Logger.warning("YOLO dependencies unavailable project_root=#{ProjectContext.current().root} reason=#{inspect(reason)}")
           state
+
+        {:error, reason, marker_cache} ->
+          Logger.warning("YOLO dependencies unavailable project_root=#{ProjectContext.current().root} reason=#{inspect(reason)}")
+          %{state | yolo_marker_cache: marker_cache}
       end
     else
       state

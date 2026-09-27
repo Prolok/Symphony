@@ -15,7 +15,8 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     refresh.(issues)
   end
 
-  @spec refresh_background([map()], map(), keyword()) :: {:ok, [map()], map()} | {:error, term()}
+  @spec refresh_background([map()], map(), keyword()) ::
+          {:ok, [map()], map()} | {:error, term()} | {:error, term(), map()}
   def refresh_background(issues, cache, opts) do
     case opts[:dependencies] do
       nil ->
@@ -38,7 +39,8 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     |> Enum.reduce_while({:ok, [], cache}, fn issue, {:ok, acc, entries} ->
       case refresh_background_issue(issue, entries, opts) do
         {:ok, refreshed, updated} -> {:cont, {:ok, [refreshed | acc], updated}}
-        error -> {:halt, error}
+        {:error, reason, updated} -> {:halt, {:error, reason, updated}}
+        {:error, reason} -> {:halt, {:error, reason, entries}}
       end
     end)
     |> finish_background()
@@ -49,15 +51,23 @@ defmodule SymphonyElixir.Yolo.Dependencies do
 
   defp refresh_background_issue(issue, cache, opts) do
     if YoloAgent.delegated?(issue) and issue.state in @waiting_states do
-      marker_opts = Keyword.put_new(opts, :budget_background, true)
-
-      with {:ok, blockers} <- background_blockers(issue, opts),
-           {:ok, workpad_markers, cache} <- background_markers(issue, cache, opts),
-           {:ok, markers} <- WaitMarker.resolve_targets(issue, workpad_markers, marker_opts) do
-        {:ok, %{issue | blocked_by: blockers ++ markers}, cache}
-      end
+      refresh_waiting_issue(issue, cache, opts)
     else
       {:ok, issue, cache}
+    end
+  end
+
+  defp refresh_waiting_issue(issue, cache, opts) do
+    marker_opts = Keyword.put_new(opts, :budget_background, true)
+
+    with {:ok, blockers} <- background_blockers(issue, opts),
+         {:ok, workpad_markers, updated} <- background_markers(issue, cache, opts) do
+      case WaitMarker.resolve_targets(issue, workpad_markers, marker_opts) do
+        {:ok, markers} -> {:ok, %{issue | blocked_by: blockers ++ markers}, updated}
+        {:error, reason} -> {:error, reason, updated}
+      end
+    else
+      {:error, reason} -> {:error, reason, cache}
     end
   end
 

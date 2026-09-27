@@ -172,7 +172,7 @@ defmodule SymphonyElixir.Yolo.Recovery do
 
   defp transient?(reason) do
     text = reason |> inspect() |> String.downcase()
-    Enum.any?(~w(transport timeout timed_out offline rate_limited ratelimited relay http budget unavailable connection lease lock), &String.contains?(text, &1))
+    Enum.any?(~w(transport timeout timed_out offline rate_limit ratelimited relay http budget connection lease lock linear_app_request_unavailable), &String.contains?(text, &1))
   end
 
   defp with_leases([], _lease, callback), do: callback.()

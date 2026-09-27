@@ -710,6 +710,33 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Agent.get(reads, & &1) == 7
   end
 
+  test "a later dependency failure retains earlier completed marker scans", %{issues: [first, second | _]} do
+    first = %{first | last_comment_signal: %{relay_epoch: "first"}, blocked_by: [], relations_complete: true}
+    second = %{second | last_comment_signal: %{relay_epoch: "second"}, blocked_by: [], relations_complete: true}
+    {:ok, reads} = Agent.start_link(fn -> %{} end)
+
+    opts = [
+      relay_background: true,
+      relay_ready: fn _ -> true end,
+      background_now: fn -> 0 end,
+      wait_comments: fn id ->
+        Agent.update(reads, &Map.update(&1, id, 1, fn count -> count + 1 end))
+        if id == second.id, do: {:error, :offline}, else: {:ok, ["## Symphony Workpad\n"]}
+      end
+    ]
+
+    assert {:error, :offline, cache} = Yolo.Dependencies.refresh_background([first, second], %{}, opts)
+    assert Agent.get(reads, & &1) == %{first.id => 1, second.id => 1}
+    assert {:error, :offline, _cache} = Yolo.Dependencies.refresh_background([first, second], cache, opts)
+    assert Agent.get(reads, & &1) == %{first.id => 1, second.id => 2}
+
+    state = Coordinator.tick(%Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}, [first, second], opts)
+    assert Map.has_key?(state.yolo_marker_cache, {ProjectContext.current().id, first.id})
+    assert Agent.get(reads, & &1) == %{first.id => 2, second.id => 3}
+    _state = Coordinator.tick(state, [first, second], opts)
+    assert Agent.get(reads, & &1) == %{first.id => 2, second.id => 4}
+  end
+
   test "permanent operation recovery backs off and changed source wakes it", %{issues: [issue | _]} do
     intent = %{"key" => "followup:test", "request" => %{"kind" => "followup", "origin_ids" => [issue.id]}, "issue_id" => Ecto.UUID.generate(), "done" => false}
     assert :ok = Operations.save(intent)
@@ -773,7 +800,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, %{"done" => true}} = DurableState.read(Operations.path(intent["key"]))
   end
 
-  test "transport, rate limit and relay recovery errors retain thirty-second retries", %{issues: [issue | _]} do
+  test "transport, rate limit and relay recovery errors retain thirty-second retries but missing state backs off", %{issues: [issue | _]} do
     intent = %{"key" => "followup:transient", "request" => %{"kind" => "followup", "origin_ids" => [issue.id]}, "issue_id" => Ecto.UUID.generate(), "done" => false}
     assert :ok = Operations.save(intent)
     {:ok, clock} = Agent.start_link(fn -> 0 end)
@@ -797,6 +824,17 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       end)
 
     assert MapSet.member?(state.yolo_operation_retries, {"incoming", intent["key"]})
+
+    Agent.update(failure, fn _ -> {:yolo_state_unavailable, "Backlog"} end)
+    state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+    now = Agent.get(clock, & &1)
+    assert {:ok, first_missing} = Store.read("incoming")
+    assert first_missing["operation_retries"][intent["key"]]["retry_at"] == now + 30_000
+    Agent.update(clock, &(&1 + 30_000))
+    _state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+    now = Agent.get(clock, & &1)
+    assert {:ok, repeated_missing} = Store.read("incoming")
+    assert repeated_missing["operation_retries"][intent["key"]]["retry_at"] == now + 300_000
   end
 
   test "relay blocker status types are reused and legacy entries are freshly checked", %{issues: [issue | _]} do

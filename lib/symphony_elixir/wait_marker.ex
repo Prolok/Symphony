@@ -13,7 +13,7 @@ defmodule SymphonyElixir.WaitMarker do
   end
 
   @spec workpad_markers(map(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
-  def workpad_markers(issue, opts \\ []) do
+  def workpad_markers(issue, opts) do
     comments = Keyword.get(opts, :wait_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comment_bodies/1))
 
     with {:ok, bodies} <- comments.(issue.id) do
@@ -23,7 +23,7 @@ defmodule SymphonyElixir.WaitMarker do
   end
 
   @spec resolve_targets(map(), [String.t()], keyword()) :: {:ok, [map()]} | {:error, term()}
-  def resolve_targets(issue, workpad_markers, opts \\ []) do
+  def resolve_targets(issue, workpad_markers, opts) do
     resolve_markers(issue, Enum.uniq(parse(issue.description || "") ++ workpad_markers), opts)
   end
 

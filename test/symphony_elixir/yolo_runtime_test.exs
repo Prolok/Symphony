@@ -694,8 +694,23 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
     assert Agent.get(reads, & &1) == 2
     Process.put(:marker_now, 900_000)
-    assert {:ok, [_], _cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
+    assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
     assert Agent.get(reads, & &1) == 3
+
+    app = Config.settings!().tracker.app
+
+    on_exit(fn ->
+      Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"})
+      Budget.pressure(app)
+    end)
+
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
+    assert Budget.pressure(app) == :critical
+    Process.put(:marker_now, 1_800_000)
+    assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
+    assert Agent.get(reads, & &1) == 3
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"})
+    assert Budget.pressure(app) == :normal
 
     fallback = %{changed | last_comment_signal: nil}
     assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([fallback], cache, opts)
@@ -735,6 +750,37 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Agent.get(reads, & &1) == %{first.id => 2, second.id => 3}
     _state = Coordinator.tick(state, [first, second], opts)
     assert Agent.get(reads, & &1) == %{first.id => 2, second.id => 4}
+  end
+
+  test "a target lookup failure retains the completed workpad marker scan", %{issues: [issue | _]} do
+    issue = %{
+      issue
+      | description: "Wartet auf: PRI-1",
+        last_comment_signal: %{relay_epoch: "first"},
+        blocked_by: [],
+        relations_complete: true
+    }
+
+    {:ok, reads} = Agent.start_link(fn -> 0 end)
+
+    opts = [
+      relay_background: true,
+      relay_ready: fn _ -> true end,
+      background_now: fn -> 0 end,
+      wait_comments: fn _ ->
+        Agent.update(reads, &(&1 + 1))
+        {:ok, ["## Symphony Workpad\nWartet auf: PRI-2"]}
+      end,
+      resolve: fn _, _ -> {:error, :linear_budget_reserved} end
+    ]
+
+    assert {:error, :linear_budget_reserved, cache} = Yolo.Dependencies.refresh_background([issue], %{}, opts)
+    assert Map.has_key?(cache, {ProjectContext.current().id, issue.id})
+
+    ready = Keyword.put(opts, :resolve, fn identifier, _ -> {:ok, %{id: identifier, identifier: identifier, state: "Review", marker: true}} end)
+    assert {:ok, [%{blocked_by: targets}], _cache} = Yolo.Dependencies.refresh_background([issue], cache, ready)
+    assert Enum.map(targets, & &1.identifier) == ["PRI-1", "PRI-2"]
+    assert Agent.get(reads, & &1) == 1
   end
 
   test "permanent operation recovery backs off and changed source wakes it", %{issues: [issue | _]} do
@@ -835,6 +881,58 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     now = Agent.get(clock, & &1)
     assert {:ok, repeated_missing} = Store.read("incoming")
     assert repeated_missing["operation_retries"][intent["key"]]["retry_at"] == now + 300_000
+  end
+
+  test "recovery leaves an intent pending when its group lock or state is unavailable", %{issues: [issue | _]} do
+    intent = %{"key" => "followup:unavailable", "request" => %{"kind" => "followup", "origin_ids" => [issue.id]}, "issue_id" => Ecto.UUID.generate(), "done" => false}
+    assert :ok = Operations.save(intent)
+    state = %Orchestrator.State{}
+    opts = [invoke: fn _, _ -> flunk("unavailable group must not invoke an intent") end]
+
+    assert ^state = Store.lock("incoming", fn -> Yolo.Recovery.resume_with_state(state, [issue], opts) end)
+    File.mkdir_p!(Path.dirname(Store.path("incoming")))
+    File.write!(Store.path("incoming"), "invalid state")
+    assert ^state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+  end
+
+  test "recovery keeps remaining intents pending when state becomes corrupt during an invocation", %{issues: [issue | _]} do
+    for key <- ["followup:corrupt-1", "followup:corrupt-2"] do
+      assert :ok = Operations.save(%{"key" => key, "request" => %{"kind" => "followup", "origin_ids" => [issue.id]}, "issue_id" => Ecto.UUID.generate(), "done" => false})
+    end
+
+    {:ok, attempts} = Agent.start_link(fn -> 0 end)
+    state = %Orchestrator.State{}
+
+    opts = [
+      lease: fn _, callback -> callback.() end,
+      invoke: fn _, _ ->
+        Agent.update(attempts, &(&1 + 1))
+        File.mkdir_p!(Path.dirname(Store.path("incoming")))
+        File.write!(Store.path("incoming"), "invalid state")
+        {:error, :offline}
+      end
+    ]
+
+    assert ^state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+    assert Agent.get(attempts, & &1) == 1
+  end
+
+  test "recovery does not claim a retry when durable persistence fails", %{issues: [issue | _]} do
+    intent = %{"key" => "followup:persist", "request" => %{"kind" => "followup", "origin_ids" => [issue.id]}, "issue_id" => Ecto.UUID.generate(), "done" => false}
+    assert :ok = Operations.save(intent)
+
+    opts = [
+      lease: fn _, callback -> callback.() end,
+      invoke: fn _, _ -> {:error, :yolo_created_issue_changed} end,
+      recovery_write: fn _, _ -> {:error, :persist_failed} end
+    ]
+
+    assert %Orchestrator.State{yolo_operation_retries: retries} =
+             Yolo.Recovery.resume_with_state(%Orchestrator.State{}, [issue], opts)
+
+    assert MapSet.size(retries) == 0
+    assert {:ok, record} = Store.read("incoming")
+    assert record["operation_retries"] == nil
   end
 
   test "relay blocker status types are reused and legacy entries are freshly checked", %{issues: [issue | _]} do

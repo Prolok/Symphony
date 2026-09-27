@@ -40,7 +40,6 @@ defmodule SymphonyElixir.Yolo.Dependencies do
       case refresh_background_issue(issue, entries, opts) do
         {:ok, refreshed, updated} -> {:cont, {:ok, [refreshed | acc], updated}}
         {:error, reason, updated} -> {:halt, {:error, reason, updated}}
-        {:error, reason} -> {:halt, {:error, reason, entries}}
       end
     end)
     |> finish_background()

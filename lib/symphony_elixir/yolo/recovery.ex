@@ -144,8 +144,9 @@ defmodule SymphonyElixir.Yolo.Recovery do
     entry = %{"signal" => details.signal, "reason" => inspect(reason), "count" => count, "retry_at" => details.now + retry_delay(reason, count)}
     retries = Map.put(current["operation_retries"] || %{}, details.intent["key"], entry)
     record = current |> Map.delete("operation_retry_at") |> Map.put("operation_retries", retries)
+    write = Keyword.get(details.opts, :recovery_write, &Store.write/2)
 
-    case Store.write(details.group, record) do
+    case write.(details.group, record) do
       :ok -> %{state | yolo_operation_retries: MapSet.put(state.yolo_operation_retries, details.key)}
       _ -> state
     end

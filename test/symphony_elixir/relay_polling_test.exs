@@ -160,11 +160,21 @@ defmodule SymphonyElixir.RelayPollingTest do
       Server.fault(server, "synthetic-workspace", "one", :poll, {:error, {:relay_http, 503, "unavailable"}})
       ProjectPoller.refresh()
       assert {:error, {:relay_not_ready, :degraded, _}} = ProjectPoller.candidates(context)
+      assert {:error, :relay_unavailable} = ProjectPoller.read_issues(context, ["issue"])
       assert {:error, _} = Relay.background_issues(["issue"])
       assert {:ok, _} = CommentCheckpoint.background_scan(issue)
       assert_received {:linear, _}
       # Explicit checkpoints keep working through a relay outage and record no relay epoch.
       assert {:ok, _} = CommentCheckpoint.scan(issue, fetch: fn -> {:ok, []} end, confirm_absence: fn _ -> :deleted end)
+      {:ok, epoch_calls} = Agent.start_link(fn -> 0 end)
+
+      relay_comment_epoch = fn _, _ ->
+        count = Agent.get_and_update(epoch_calls, &{&1, &1 + 1})
+        if count == 0, do: {:error, :relay_unavailable}, else: {:ok, {"generation", 1, 1}}
+      end
+
+      assert {:ok, _} = CommentCheckpoint.scan(issue, relay_comment_epoch: relay_comment_epoch, fetch: fn -> {:ok, []} end)
+      assert Agent.get(epoch_calls, & &1) == 2
       assert ProjectPoller.polling().relay["synthetic-workspace"].status == :degraded
       snapshot = %{running: [], retrying: [], codex_totals: %{}, rate_limits: nil, polling: ProjectPoller.polling()}
 

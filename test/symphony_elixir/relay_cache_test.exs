@@ -346,6 +346,15 @@ defmodule SymphonyElixir.RelayCacheTest do
     assert refreshed.status == :ready
     assert refreshed.record["dirty"] == []
     assert refreshed.record["issues"]["issue"] == changed
+
+    reduced = Session.tick(refreshed)
+    assert reduced.record["reconcile_at"] == Agent.get(c.clock, & &1) + 1_800_000
+
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
+    assert Budget.pressure(app) == :critical
+    Agent.update(c.clock, fn _ -> reduced.record["reconcile_at"] end)
+    critical = Session.tick(reduced)
+    assert critical.record["reconcile_at"] == Agent.get(c.clock, & &1) + 3_600_000
   end
 
   test "retention loss, server signals, receipt conflict and consumer expiry resnapshot conservatively", c do

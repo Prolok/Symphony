@@ -56,6 +56,10 @@ defmodule SymphonyElixir.CommentPollingTest do
       assert {:error, {:wait_marker_unresolved, "PRI-1", :wait_target_unresolved}} = WaitMarker.targets(issue, Keyword.put(opts, :budget_background, false))
     end)
 
+    Budget.record(source_app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "1500"})
+    assert Budget.pressure(source_app) == :reduced
+    ProjectContext.with_context(source, fn -> assert CommentCheckpoint.background_interval_ms() == 1_800_000 end)
+
     write = fn -> {:ok, %{status: 200, headers: %{}, body: %{}}} end
     assert {:ok, _} = RateLimit.request(target_app, write, budget_kind: :write)
   end

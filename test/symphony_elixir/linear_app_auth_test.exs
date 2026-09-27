@@ -89,6 +89,16 @@ defmodule SymphonyElixir.LinearAppAuthTest do
     assert_received {:token_issued, 2}
   end
 
+  test "a non-text GraphQL operation name is counted as unknown", ctx do
+    handler = "invalid-operation-#{System.unique_integer([:positive])}"
+    {:ok, observations} = Agent.start_link(fn -> [] end)
+    :ok = :telemetry.attach(handler, [:symphony, :linear, :request], fn _, _, metadata, pid -> Agent.update(pid, &[metadata | &1]) end, observations)
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert {:ok, _} = call(ctx, payload: %{query: "query Viewer { viewer { id } }", operationName: 123})
+    assert Enum.any?(Agent.get(observations, & &1), &(&1.kind == :read and &1.operation == "unknown"))
+  end
+
   test "the authenticated app email cannot select the app as human assignee", ctx do
     tracker = %{ctx.tracker | assignee: " APP@example.invalid "}
 
@@ -563,11 +573,12 @@ defmodule SymphonyElixir.LinearAppAuthTest do
 
   defp call(ctx, opts \\ []) do
     request = Keyword.get(opts, :request, fn _, _ -> identity() end)
+    payload = Keyword.get(opts, :payload, %{query: "mutation { write }", variables: %{}})
     rate_now = Process.get(:auth_rate_now, Keyword.get(opts, :now, fn -> 200 end).() * 1_000)
 
     AppAuth.request(
       ctx.tracker,
-      %{query: "mutation { write }", variables: %{}},
+      payload,
       request,
       Keyword.merge(
         [

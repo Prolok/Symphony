@@ -22,7 +22,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
   def scan(issue, opts \\ []) do
     opts = opts |> Keyword.put_new(:cache_key, background_key(issue)) |> relay_scan_opts(issue)
 
-    opts = Keyword.put_new_lazy(opts, :foreign_relay_epoch, fn -> foreign_relay_epoch(issue) end)
+    opts = Keyword.put_new_lazy(opts, :foreign_relay_epoch, fn -> foreign_relay_epoch(issue, opts) end)
 
     opts = Keyword.put_new(opts, :journal_request, &journal_request/1)
     opts = Keyword.put_new(opts, :confirm_absence, &Client.confirm_comment_absence(issue.id, &1))
@@ -91,7 +91,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   defp relay_scan_opts(opts, issue) do
     if SymphonyElixir.Relay.enabled?() do
-      case SymphonyElixir.ProjectPoller.comment_epoch(ProjectContext.current(), issue.id) do
+      case relay_comment_epoch(opts, issue) do
         {:ok, {generation, epoch, foreign}} ->
           ready_scan_opts(opts, issue, {generation, epoch, foreign})
 
@@ -128,13 +128,17 @@ defmodule SymphonyElixir.CommentCheckpoint do
     :crypto.hash(:sha256, :erlang.term_to_binary({binding, tracker.advisory_agent_ids, issue.id, :signal_v2})) |> Base.encode16()
   end
 
-  defp foreign_relay_epoch(issue) do
+  defp foreign_relay_epoch(issue, opts) do
     if SymphonyElixir.Relay.enabled?() do
-      case SymphonyElixir.ProjectPoller.comment_epoch(ProjectContext.current(), issue.id) do
+      case relay_comment_epoch(opts, issue) do
         {:ok, epoch} -> foreign_key(epoch)
         _ -> nil
       end
     end
+  end
+
+  defp relay_comment_epoch(opts, issue) do
+    Keyword.get(opts, :relay_comment_epoch, &SymphonyElixir.ProjectPoller.comment_epoch/2).(ProjectContext.current(), issue.id)
   end
 
   defp foreign_key({generation, _, foreign}), do: "#{generation}:#{foreign}"

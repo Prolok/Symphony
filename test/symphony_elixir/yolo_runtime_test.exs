@@ -599,6 +599,12 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, [checked_truncated]} = Yolo.Dependencies.refresh([truncated], Keyword.put(opts, :query, query))
     assert checked_truncated.blocked_by == checked.blocked_by
     assert Yolo.Dependencies.dispatchable?(checked)
+
+    foreground = opts |> Keyword.put(:query, query) |> Keyword.put(:relay_background, false)
+    assert {:ok, [_]} = Yolo.Dependencies.refresh([legacy], foreground)
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
+    assert Budget.pressure(app) == :critical
+    assert {:error, :linear_budget_reserved} = Yolo.Dependencies.refresh([legacy], Keyword.put(opts, :query, no_query))
   end
 
   test "an unavailable configured merge worker cannot authorize acceptance", %{issues: [issue | _], context: context, root: root} do

@@ -135,4 +135,48 @@ defmodule SymphonyElixir.IssueReadCacheTest do
     assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], opts)
     assert Agent.get(count, & &1) == 1
   end
+
+  test "empty reads skip both transports and a global invalidation requires verification again" do
+    settings = put_in(Config.settings!().tracker.relay, %{})
+    context = %ProjectContext{id: "all-#{System.unique_integer([:positive])}", settings: settings}
+    issue = %Issue{id: "issue", state: "In Arbeit (AI)", assignee_id: "human", blocked_by: []}
+    {:ok, reads} = Agent.start_link(fn -> 0 end)
+
+    linear = fn _ ->
+      Agent.update(reads, &(&1 + 1))
+      {:ok, [issue]}
+    end
+
+    opts = [context: context, relay: fn _, _ -> {:ok, [{{"generation", 1}, issue}]} end, fetch_linear: linear]
+    assert {:ok, []} = IssueReadCache.fetch([], opts)
+    assert Agent.get(reads, & &1) == 0
+    assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :now, 0))
+    assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :now, 1))
+    assert Agent.get(reads, & &1) == 1
+    assert :ok = IssueReadCache.invalidate(:all)
+    assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :now, 2))
+    assert Agent.get(reads, & &1) == 2
+  end
+
+  test "a failed second relay read does not mark its first epoch as verified" do
+    settings = put_in(Config.settings!().tracker.relay, %{})
+    context = %ProjectContext{id: "epoch-#{System.unique_integer([:positive])}", settings: settings}
+    issue = %Issue{id: "issue", state: "In Arbeit (AI)", assignee_id: "human", blocked_by: []}
+    {:ok, calls} = Agent.start_link(fn -> %{relay: 0, linear: 0} end)
+
+    relay = fn _, _ ->
+      count = Agent.get_and_update(calls, fn current -> {current.relay, %{current | relay: current.relay + 1}} end)
+      if count == 1, do: {:error, :relay_unavailable}, else: {:ok, [{{"generation", 1}, issue}]}
+    end
+
+    linear = fn _ ->
+      Agent.update(calls, &%{&1 | linear: &1.linear + 1})
+      {:ok, [issue]}
+    end
+
+    opts = [context: context, relay: relay, fetch_linear: linear]
+    assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :now, 0))
+    assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :now, 1))
+    assert Agent.get(calls, & &1.linear) == 2
+  end
 end

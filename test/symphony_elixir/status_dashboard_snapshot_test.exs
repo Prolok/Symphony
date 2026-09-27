@@ -84,6 +84,28 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     Snapshot.assert_dashboard_snapshot!("idle", render_snapshot(snapshot_data, 0.0))
   end
 
+  test "cached input percentage handles zero, rounding and inconsistent counters" do
+    for {input, cached, expected} <- [
+          {0, 5, "in 0 (0% cached)"},
+          {200, 1, "in 200 (1% cached)"},
+          {200, 199, "in 200 (100% cached)"},
+          {100, 150, "in 100 (100% cached)"},
+          {100, -5, "in 100 (0% cached)"}
+        ] do
+      snapshot_data =
+        {:ok,
+         %{
+           running: [],
+           retrying: [],
+           codex_totals: %{input_tokens: input, cached_input_tokens: cached, output_tokens: 0, total_tokens: input},
+           rate_limits: nil
+         }}
+
+      rendered = render_snapshot(snapshot_data, 0.0) |> Snapshot.strip_ansi()
+      assert rendered =~ expected
+    end
+  end
+
   test "snapshot fixture: idle dashboard with observability url" do
     previous_port_override = Application.get_env(:symphony_elixir, :server_port_override)
 
@@ -161,6 +183,7 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
          retrying: [],
          codex_totals: %{
            input_tokens: 250_000,
+           cached_input_tokens: 230_000,
            output_tokens: 18_500,
            total_tokens: 268_500,
            seconds_running: 4_321

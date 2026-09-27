@@ -380,6 +380,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_app_server_pid == "4242"
     assert snapshot_entry.codex_input_tokens == 12
+    assert snapshot_entry.codex_cached_input_tokens == 0
     assert snapshot_entry.codex_output_tokens == 4
     assert snapshot_entry.codex_total_tokens == 16
     assert snapshot_entry.turn_count == 1
@@ -389,6 +390,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     completed_state = :sys.get_state(pid)
 
     assert completed_state.codex_totals.input_tokens == 12
+    assert completed_state.codex_totals.cached_input_tokens == 0
     assert completed_state.codex_totals.output_tokens == 4
     assert completed_state.codex_totals.total_tokens == 16
     assert is_integer(completed_state.codex_totals.seconds_running)
@@ -400,6 +402,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     state = %Orchestrator.State{
       codex_totals: %{
         input_tokens: 80,
+        cached_input_tokens: 64,
         output_tokens: 20,
         total_tokens: 100,
         seconds_running: 0
@@ -410,6 +413,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           codex_token_checkpoint: %{
             thread_id: "thread-resumed",
             input_tokens: 80,
+            cached_input_tokens: 64,
             output_tokens: 20,
             total_tokens: 100
           }
@@ -418,7 +422,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     }
 
     same_thread_usage =
-      token_usage_update(96, 24, 120)
+      token_usage_update(96, 24, 120, 76)
 
     assert {:noreply, same_thread_state} =
              Orchestrator.handle_info(
@@ -428,6 +432,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert same_thread_state.codex_totals == %{
              input_tokens: 96,
+             cached_input_tokens: 76,
              output_tokens: 24,
              total_tokens: 120,
              seconds_running: 0
@@ -436,9 +441,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert same_thread_state.retry_attempts[issue_id].codex_token_checkpoint == %{
              thread_id: "thread-resumed",
              input_tokens: 96,
+             cached_input_tokens: 76,
              output_tokens: 24,
              total_tokens: 120
            }
+
+    for usage <- [same_thread_usage, token_usage_update(90, 22, 112, 70)] do
+      assert {:noreply, replayed_state} =
+               Orchestrator.handle_info({:codex_worker_update, issue_id, usage}, same_thread_state)
+
+      assert replayed_state.codex_totals == same_thread_state.codex_totals
+    end
 
     assert {:noreply, resumed_turn_state} =
              Orchestrator.handle_info(
@@ -454,12 +467,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert {:noreply, same_thread_final_state} =
              Orchestrator.handle_info(
-               {:codex_worker_update, issue_id, token_usage_update(100, 25, 125)},
+               {:codex_worker_update, issue_id, token_usage_update(100, 25, 125, 80)},
                resumed_turn_state
              )
 
     assert same_thread_final_state.codex_totals == %{
              input_tokens: 100,
+             cached_input_tokens: 80,
              output_tokens: 25,
              total_tokens: 125,
              seconds_running: 0
@@ -468,6 +482,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert same_thread_final_state.retry_attempts[issue_id].codex_token_checkpoint == %{
              thread_id: "thread-resumed",
              input_tokens: 100,
+             cached_input_tokens: 80,
              output_tokens: 25,
              total_tokens: 125
            }
@@ -486,12 +501,13 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert {:noreply, final_state} =
              Orchestrator.handle_info(
-               {:codex_worker_update, issue_id, token_usage_update(4, 1, 5)},
+               {:codex_worker_update, issue_id, token_usage_update(4, 1, 5, 3)},
                new_thread_state
              )
 
     assert final_state.codex_totals == %{
              input_tokens: 104,
+             cached_input_tokens: 83,
              output_tokens: 26,
              total_tokens: 130,
              seconds_running: 0
@@ -500,6 +516,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert final_state.retry_attempts[issue_id].codex_token_checkpoint == %{
              thread_id: "thread-new",
              input_tokens: 4,
+             cached_input_tokens: 3,
              output_tokens: 1,
              total_tokens: 5
            }
@@ -561,7 +578,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          event: :turn_completed,
          payload: %{
            method: "turn/completed",
-           usage: %{"input_tokens" => "12", "output_tokens" => 4, "total_tokens" => 16}
+           usage: %{"input_tokens" => "12", "cached_input_tokens" => "10", "output_tokens" => 4, "total_tokens" => 16}
          },
          timestamp: DateTime.utc_now()
        }}
@@ -570,12 +587,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 12
+    assert snapshot_entry.codex_cached_input_tokens == 10
     assert snapshot_entry.codex_output_tokens == 4
     assert snapshot_entry.codex_total_tokens == 16
 
     send(pid, {:DOWN, process_ref, :process, self(), :normal})
     completed_state = :sys.get_state(pid)
     assert completed_state.codex_totals.input_tokens == 12
+    assert completed_state.codex_totals.cached_input_tokens == 10
     assert completed_state.codex_totals.output_tokens == 4
     assert completed_state.codex_totals.total_tokens == 16
   end
@@ -644,6 +663,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                "info" => %{
                  "total_token_usage" => %{
                    "input_tokens" => "2",
+                   "cached_input_tokens" => "1",
                    "output_tokens" => 2,
                    "total_tokens" => 4
                  }
@@ -682,6 +702,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 10
+    assert snapshot_entry.codex_cached_input_tokens == 1
     assert snapshot_entry.codex_output_tokens == 5
     assert snapshot_entry.codex_total_tokens == 15
 
@@ -689,6 +710,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     completed_state = :sys.get_state(pid)
 
     assert completed_state.codex_totals.input_tokens == 10
+    assert completed_state.codex_totals.cached_input_tokens == 1
     assert completed_state.codex_totals.output_tokens == 5
     assert completed_state.codex_totals.total_tokens == 15
   end
@@ -912,8 +934,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     for usage <- [
-          %{"input_tokens" => 8, "output_tokens" => 3, "total_tokens" => 11},
-          %{"input_tokens" => 10, "output_tokens" => 4, "total_tokens" => 14}
+          %{"input_tokens" => 8, "cached_input_tokens" => 6, "output_tokens" => 3, "total_tokens" => 11},
+          %{"input_tokens" => 10, "cached_input_tokens" => 8, "output_tokens" => 4, "total_tokens" => 14}
         ] do
       send(
         pid,
@@ -932,6 +954,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.codex_input_tokens == 10
+    assert snapshot_entry.codex_cached_input_tokens == 8
     assert snapshot_entry.codex_output_tokens == 4
     assert snapshot_entry.codex_total_tokens == 14
   end
@@ -2170,7 +2193,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     do_wait_for_snapshot(pid, predicate, deadline_ms)
   end
 
-  defp token_usage_update(input_tokens, output_tokens, total_tokens) do
+  defp token_usage_update(input_tokens, output_tokens, total_tokens, cached_input_tokens) do
     %{
       event: :notification,
       payload: %{
@@ -2179,6 +2202,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           "tokenUsage" => %{
             "total" => %{
               "inputTokens" => input_tokens,
+              "cachedInputTokens" => cached_input_tokens,
               "outputTokens" => output_tokens,
               "totalTokens" => total_tokens
             }

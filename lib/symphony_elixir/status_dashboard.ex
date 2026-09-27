@@ -341,6 +341,7 @@ defmodule SymphonyElixir.StatusDashboard do
         mode_lines = if(Config.yolo?(), do: [colorize("│ Mode: ", @ansi_bold) <> colorize("--yolo", @ansi_cyan)], else: [])
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
+        codex_cached_input_tokens = Map.get(codex_totals, :cached_input_tokens, 0)
         codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
         codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
         codex_seconds_running = Map.get(codex_totals, :seconds_running, 0)
@@ -362,7 +363,10 @@ defmodule SymphonyElixir.StatusDashboard do
            colorize("│ Runtime: ", @ansi_bold) <>
              colorize(format_runtime_seconds(codex_seconds_running), @ansi_magenta),
            colorize("│ Tokens: ", @ansi_bold) <>
-             colorize("in #{format_count(codex_input_tokens)}", @ansi_yellow) <>
+             colorize(
+               "in #{format_count(codex_input_tokens)} (#{cached_input_percent(codex_cached_input_tokens, codex_input_tokens)}% cached)",
+               @ansi_yellow
+             ) <>
              colorize(" | ", @ansi_gray) <>
              colorize("out #{format_count(codex_output_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
@@ -398,6 +402,15 @@ defmodule SymphonyElixir.StatusDashboard do
         |> Enum.join("\n")
     end
   end
+
+  defp cached_input_percent(_cached, input) when not is_integer(input) or input <= 0, do: 0
+
+  defp cached_input_percent(cached, input) when is_integer(cached) do
+    cached = min(max(cached, 0), input)
+    div(cached * 100 + div(input, 2), input)
+  end
+
+  defp cached_input_percent(_cached, _input), do: 0
 
   defp format_project_link_lines do
     scope_line =

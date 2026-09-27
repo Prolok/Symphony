@@ -169,6 +169,20 @@ defmodule SymphonyElixir.Codex.ReviewState do
     write!(context, Map.put(record, "thread_id", thread_id))
   end
 
+  @spec discard_unstarted_thread(map() | nil, String.t()) :: :ok | :unsafe
+  def discard_unstarted_thread(nil, _thread_id), do: :unsafe
+
+  def discard_unstarted_thread(context, thread_id) do
+    record = read(context)
+
+    if record["departed"] != true and record["thread_id"] == thread_id and record["calls"] == %{} and record["agents"] == %{} and
+         record["results"] == %{} do
+      write!(context, Map.put(record, "thread_id", nil))
+    else
+      :unsafe
+    end
+  end
+
   @spec observe(map() | nil, map()) :: [String.t()]
   def observe(nil, _payload), do: []
 

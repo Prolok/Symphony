@@ -2027,6 +2027,12 @@ als weitere Starts. Die Historie ergänzt auch bisher fehlende Start-IDs, ohne
 vorhandene Resultate oder Zustellungen zurückzusetzen.
 Eine Wiederaufnahme verwendet `thread/resume` und die vorhandene Historie;
 bereits zugestellte Resultate werden nicht erneut als Zusatzkontext eingespielt.
+Meldet `thread/resume` eindeutig „no rollout found“ für die gespeicherte ID,
+darf Symphony sie nur bei leeren Aufrufen, Child-Bindungen und Resultaten
+verwerfen. Es protokolliert Issue, ID und Grund als Warnung, startet im selben
+Review-Aufenthalt einen neuen Thread und bindet dessen ID dauerhaft. Der
+einmalige Review-Autocommit bleibt erhalten; bei sonstigen Fehlern oder
+Reviewaktivität bleibt die bisherige Schutzsperre bestehen.
 Die fachliche Verarbeitung bleibt im bestehenden Workpad nachgewiesen. Mehrere
 Resultate bleiben nebeneinander erhalten, auch wenn später „Keine Findings“
 folgt; Budget und Pflichtgates bleiben unverändert. Beschädigter Zustand oder

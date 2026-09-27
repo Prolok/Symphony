@@ -65,6 +65,10 @@ defmodule SymphonyElixir.CommentPollingTest do
   end
 
   test "real orchestrator tasks respect due time, interval reloads and scan cleanup" do
+    app = Config.settings!().tracker.app
+    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"})
+    assert Budget.pressure(app) == :normal
+
     orchestrator = Process.whereis(Orchestrator)
     :sys.suspend(orchestrator)
     on_exit(fn -> :sys.resume(orchestrator) end)
@@ -169,7 +173,6 @@ defmodule SymphonyElixir.CommentPollingTest do
     future = System.monotonic_time(:millisecond) + 900_000
     previous_relay = %{at: future, foreign_epoch: "generation:1"}
     recovered = %{cleaned | running: %{issue.id => entry}, comment_scan_due: %{issue.id => previous_relay}}
-    app = Config.settings!().tracker.app
     Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
     assert Budget.pressure(app) == :critical
     assert {:noreply, reserved} = Orchestrator.handle_info(:run_poll_cycle, recovered)

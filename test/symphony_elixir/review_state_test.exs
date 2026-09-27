@@ -157,6 +157,19 @@ defmodule SymphonyElixir.ReviewStateTest do
     assert_raise RuntimeError, "review_thread_binding_mismatch", fn -> ReviewState.bind_thread(ctx.context, "other") end
   end
 
+  test "only the matching unstarted thread can be discarded", ctx do
+    assert :unsafe = ReviewState.discard_unstarted_thread(nil, "parent")
+    assert :unsafe = ReviewState.discard_unstarted_thread(ctx.context, "other")
+    assert :ok = ReviewState.discard_unstarted_thread(ctx.context, "parent")
+    assert ReviewState.read(ctx.context)["thread_id"] == nil
+
+    assert :ok = ReviewState.bind_thread(ctx.context, "parent")
+    record = ReviewState.read(ctx.context)
+    assert :ok = DurableState.write(ctx.context.path, Map.put(record, "departed", true))
+    assert :unsafe = ReviewState.discard_unstarted_thread(ctx.context, "parent")
+    assert ReviewState.read(ctx.context)["thread_id"] == "parent"
+  end
+
   test "stored results must remain present in the bound child's complete history", ctx do
     assert ["child"] = ReviewState.observe(ctx.context, event(activity()))
     assert [%{"text" => "Finding"}] = ReviewState.capture(ctx.context, "child", child(ctx.root, [turn("Finding")]))

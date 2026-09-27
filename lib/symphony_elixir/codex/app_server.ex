@@ -64,14 +64,14 @@ defmodule SymphonyElixir.Codex.AppServer do
       resume_thread_id = ReviewState.read(review_state)["thread_id"] || resume_thread_id
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host, opts),
-           {:ok, thread_id} <-
-             do_start_session(port, expanded_workspace, session_policies, resume_thread_id) do
+           {:ok, thread_id, review_resumed} <-
+             start_review_session(port, expanded_workspace, session_policies, resume_thread_id, review_state, Keyword.get(opts, :issue)) do
         :ok = ReviewState.bind_thread(review_state, thread_id)
 
         {:ok,
          %{
            port: port,
-           metadata: metadata |> Map.put(:review_state, review_state) |> Map.put(:review_resumed, is_binary(resume_thread_id)),
+           metadata: metadata |> Map.put(:review_state, review_state) |> Map.put(:review_resumed, review_resumed),
            approval_policy: session_policies.approval_policy,
            auto_approve_requests: session_policies.approval_policy == "never",
            thread_sandbox: session_policies.thread_sandbox,
@@ -395,6 +395,55 @@ defmodule SymphonyElixir.Codex.AppServer do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp start_review_session(port, workspace, policies, resume_thread_id, review_state, issue) do
+    case do_start_session(port, workspace, policies, resume_thread_id) do
+      {:ok, thread_id} ->
+        {:ok, thread_id, is_binary(resume_thread_id)}
+
+      {:error, {:thread_resume_failed, ^resume_thread_id, _reason}} = error ->
+        maybe_replace_missing_review_thread(port, workspace, policies, review_state, issue, error)
+
+      other ->
+        other
+    end
+  end
+
+  defp maybe_replace_missing_review_thread(
+         port,
+         workspace,
+         policies,
+         review_state,
+         issue,
+         {:error, {:thread_resume_failed, thread_id, {:response_error, reason}}} = error
+       ) do
+    safe_to_replace? =
+      missing_review_rollout_error?(reason, thread_id) and
+        ReviewState.discard_unstarted_thread(review_state, thread_id) == :ok
+
+    if safe_to_replace? do
+      Logger.warning(
+        "Discarded missing review thread for #{issue_context(issue)} " <>
+          "thread_id=#{thread_id} reason=#{inspect(reason)}"
+      )
+
+      case start_thread(port, workspace, policies) do
+        {:ok, new_thread_id} -> {:ok, new_thread_id, false}
+        other -> other
+      end
+    else
+      error
+    end
+  end
+
+  defp maybe_replace_missing_review_thread(_port, _workspace, _policies, _review_state, _issue, error), do: error
+
+  defp missing_review_rollout_error?(%{"code" => -32_600, "message" => message}, thread_id)
+       when is_binary(message) and is_binary(thread_id) do
+    Regex.match?(~r/no rollout found for thread id #{Regex.escape(thread_id)}(?:$|[\s.,;:])/i, message)
+  end
+
+  defp missing_review_rollout_error?(_reason, _thread_id), do: false
 
   defp start_or_resume_thread(port, workspace, session_policies, resume_thread_id)
        when is_binary(resume_thread_id) do

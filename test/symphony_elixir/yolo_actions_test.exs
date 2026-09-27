@@ -41,6 +41,7 @@ defmodule SymphonyElixir.YoloActionsTest do
     Process.put(:action_db, %{
       issues: Map.new(issues, &{&1.id, &1}),
       created: %{},
+      history: [],
       relations: [],
       labels: [%{"id" => "generated", "name" => "symphony-generated", "team" => %{"id" => "team"}}],
       calls: [],
@@ -89,6 +90,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   end
 
   defp respond("YoloCreatedIssue", _, %{"id" => id}), do: ok("issues", connection(if(db().created[id], do: [db().created[id]], else: [])))
+  defp respond("YoloCreatedHistory", _, _), do: ok("issue", %{"history" => connection(db().history)})
 
   defp respond("YoloCreatedLabels", _, %{"id" => id}), do: ok("issue", %{"labels" => connection(Enum.map(db().created[id]["labelIds"], &%{"id" => &1}))})
 
@@ -101,6 +103,7 @@ defmodule SymphonyElixir.YoloActionsTest do
         "assignee" => if(input["assigneeId"], do: %{"id" => input["assigneeId"]}),
         "delegate" => if(input["delegateId"], do: %{"id" => input["delegateId"]}),
         "identifier" => "PRO-99",
+        "createdAt" => "2026-09-23T15:47:00.000Z",
         "url" => "https://linear.app/test/99",
         "team" => %{"id" => input["teamId"]},
         "project" => %{"id" => input["projectId"]}
@@ -1064,6 +1067,96 @@ defmodule SymphonyElixir.YoloActionsTest do
         System.delete_env("SYMPHONY_TEST_RUN_STAGE")
         ProjectContext.bind(current_context)
       end
+    end)
+  end
+
+  test "recovery keeps later human assignment changes and creates the blocking relation", %{issues: [source | _]} do
+    request = args([source], "followup") |> Map.put("description", "Text.\n- a") |> Map.put("blocks_origins", true)
+
+    group([source], fn ->
+      change(&%{&1 | fail: "YoloCreate"})
+      assert {:error, :response_lost} = Followup.invoke(request, opts())
+      [{id, ticket}] = Map.to_list(db().created)
+
+      edited =
+        ticket
+        |> Map.put("description", String.replace(ticket["description"], "Text.\n- a", "Text.\n\n* a"))
+        |> Map.put("assignee", nil)
+        |> Map.put("delegate", nil)
+
+      human_edit = %{
+        "id" => "human-edit",
+        "createdAt" => "2026-09-25T10:18:00.000Z",
+        "fromAssigneeId" => "human",
+        "toAssigneeId" => nil,
+        "fromDelegate" => %{"id" => "pai"},
+        "toDelegate" => nil,
+        "actor" => %{"id" => "human", "app" => false},
+        "botActor" => nil
+      }
+
+      creation = %{
+        "id" => "creation",
+        "createdAt" => ticket["createdAt"],
+        "fromAssigneeId" => nil,
+        "toAssigneeId" => "human",
+        "fromDelegate" => nil,
+        "toDelegate" => %{"id" => "pai"},
+        "actor" => %{"id" => "symphony", "app" => true}
+      }
+
+      change(&%{&1 | fail: nil, created: %{id => edited}, history: [human_edit, creation]})
+      assert {:ok, %{"id" => ^id}} = Followup.invoke(request, opts())
+      assert Enum.any?(db().relations, &(&1["type"] == "blocks" and &1["issue"]["id"] == id and &1["relatedIssue"]["id"] == source.id))
+      assert db().created[id]["assignee"] == nil
+      assert db().created[id]["delegate"] == nil
+      assert writes("YoloUpdate") == []
+      assert length(writes("YoloCreate")) == 1
+      assert {:ok, [intent]} = Operations.related([source.id])
+      assert intent["done"] == true
+    end)
+  end
+
+  test "recovery rejects assignment differences without matching later human history", %{issues: [source | _]} do
+    request = args([source], "followup")
+
+    group([source], fn ->
+      change(&%{&1 | fail: "YoloCreate"})
+      assert {:error, :response_lost} = Followup.invoke(request, opts())
+      [{id, ticket}] = Map.to_list(db().created)
+      change(&%{&1 | fail: nil, created: %{id => Map.put(ticket, "assignee", nil)}})
+
+      base = %{
+        "id" => "edit",
+        "createdAt" => "2026-09-25T10:18:00.000Z",
+        "fromAssigneeId" => "human",
+        "toAssigneeId" => nil,
+        "actor" => %{"id" => "human", "app" => false},
+        "botActor" => nil
+      }
+
+      histories = [
+        [],
+        [%{base | "fromAssigneeId" => "other"}],
+        [%{base | "createdAt" => "2026-09-23T15:46:00.000Z"}],
+        [%{base | "actor" => %{"id" => "app", "app" => true}}],
+        [%{base | "botActor" => %{"id" => "bot"}}],
+        [base |> Map.put("fromAssigneeId", nil) |> Map.put("fromTitle", "Old") |> Map.put("toTitle", "New")],
+        [
+          %{base | "toAssigneeId" => "other"},
+          %{base | "id" => "later-app", "createdAt" => "2026-09-26T10:18:00.000Z", "fromAssigneeId" => "other", "actor" => %{"id" => "app", "app" => true}}
+        ]
+      ]
+
+      for history <- histories do
+        change(&%{&1 | history: history})
+        assert {:error, {:yolo_created_issue_changed, %{field: "assignee.id"}}} = Followup.invoke(request, opts())
+      end
+
+      change(&%{&1 | created: %{id => Map.put(ticket, "title", "different")}, history: [base]})
+      assert {:error, {:yolo_created_issue_changed, %{field: "title"}}} = Followup.invoke(request, opts())
+      assert writes("YoloRelation") == []
+      assert writes("YoloUpdate") == []
     end)
   end
 

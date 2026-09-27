@@ -309,6 +309,17 @@ wiederholbar. Nichtstart markiert keine PO-Entscheidung als verarbeitet; der bes
 Retryabstand bleibt erhalten. Dashboard und Lifecycle nennen bei Unsicherheit die
 Betreiberklärung und nach Ablehnung die freigegebene Reservierung.
 
+Bei der Gruppenbeobachtung ergänzt Symphony fehlende Zustellungs-Endmarken für alte
+Läufe aus dem aktuellen oder archivierten Auftrag. Nur ein Auftrag derselben Gruppe
+und Lauf-ID, der alle betroffenen Mitglieder enthält und `completed`, `failed`,
+`cancelled` oder `retired` ist, belegt das Ende. Die Markierung bestätigt keine
+Mitgliedsentscheidung; die normale Prüfung offener Mitglieder folgt danach.
+Bei lesbarem aktuellem Gruppenjournal lassen fehlende, unlesbare oder
+widersprüchliche Aufträge die Zustellung reserviert und erzeugen einmal je Lauf
+einen dauerhaften Warnbeleg im Gruppenrecord. Ist das aktuelle Gruppenjournal
+unlesbar, stoppt die Beobachtung schon bei der Verfügbarkeitsprüfung ohne diesen
+Laufwarnbeleg.
+
 Neue Kommentare werden vor Aktionen und Abschluss frisch abgeglichen. Entzogene
 Mitglieder verlieren ihre Schreibberechtigung; Gesamtentzug fordert Abbruch an.
 Ein externer Erfolg allein speichert keine verarbeitete Beobachtung: bestätigte

@@ -316,6 +316,9 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   unklare Annahme bleibt reserviert. Neue unterbrochene Aufträge dürfen nach
   wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung technisch
   aufgegeben werden; offene Arbeit wird regulär neu geplant, kein Erfolg fingiert.
+  Fehlende Endmarken alter Zustellungen werden nur aus passenden terminalen
+  aktuellen oder archivierten OpenClaw-Aufträgen übernommen; ohne solchen Beleg
+  bleibt die Gruppe reserviert.
   Belegimporte und ausdrücklich beauftragte administrative Altfallbereinigungen
   erfolgen getrennt durch den Betreiber gemäß diesem Vertrag.
   Optional übergibt `tracker.openclaw_linear_bridge` journalisierte PO-Lifecycles

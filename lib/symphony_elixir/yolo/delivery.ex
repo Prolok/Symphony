@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.Yolo.Delivery do
   @moduledoc "Durable per-member dispatch receipts, independent of group membership and model completion."
+  require Logger
   alias SymphonyElixir.Linear.IssueLease
+  alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{BlockerBrake, Observation, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
 
@@ -44,24 +46,114 @@ defmodule SymphonyElixir.Yolo.Delivery do
   def reconcile(group) do
     case Journal.read(group) do
       {:ok, %{"state" => "rejected", "id" => id} = order} ->
-        reconcile_rejected(group, id, order)
+        with :ok <- reconcile_rejected(group, id, order), do: reconcile_delivery_ends(group, order)
 
-      {:ok, %{"state" => "retired", "id" => id, "retirement" => %{"kind" => "fenced_interruption"} = proof}} ->
-        interrupted(group, id, proof)
+      {:ok, %{"state" => "retired", "id" => id, "retirement" => %{"kind" => "fenced_interruption"} = proof} = order} ->
+        with :ok <- interrupted(group, id, proof), do: reconcile_delivery_ends(group, order)
 
-      {:ok, %{"state" => "completed", "id" => id}} ->
-        completed_session(group, id)
+      {:ok, %{"state" => "completed", "id" => id} = order} ->
+        with :ok <- completed_session(group, id), do: reconcile_delivery_ends(group, order)
 
-      {:ok, %{"state" => state, "id" => id, "terminal" => terminal, "execution_observed" => true}}
+      {:ok, %{"state" => state, "id" => id, "terminal" => terminal, "execution_observed" => true} = order}
       when state in ["failed", "cancelled"] and is_map(terminal) ->
-        completed_session(group, id)
+        with :ok <- completed_session(group, id), do: reconcile_delivery_ends(group, order)
 
-      {:ok, _} ->
-        :ok
+      {:ok, order} ->
+        reconcile_delivery_ends(group, order)
 
       error ->
         error
     end
+  end
+
+  defp reconcile_delivery_ends(group, current_order) do
+    IssueLease.with_journal_lock(Store.path(group) <> ".completion", fn -> reconcile_delivery_ends_locked(group, current_order) end)
+  end
+
+  defp reconcile_delivery_ends_locked(group, current_order) do
+    with {:ok, record} <- Store.read(group) do
+      {updated, notices} = derive_delivery_ends(group, record, current_order)
+      persist_delivery_ends(group, record, updated, notices)
+    end
+  end
+
+  defp persist_delivery_ends(group, record, updated, notices) do
+    result = if updated == record, do: :ok, else: Store.write(group, updated)
+
+    if result == :ok, do: Enum.each(notices, &log_delivery_end_notice(group, &1))
+    result
+  end
+
+  defp derive_delivery_ends(group, record, current_order) do
+    (record["deliveries"] || %{})
+    |> Enum.group_by(fn {_issue_id, receipt} -> if(is_map(receipt), do: receipt["run_id"]) end)
+    |> Enum.reduce({record, []}, &derive_delivery_end(group, current_order, &1, &2))
+  end
+
+  defp derive_delivery_end(group, current_order, {run_id, deliveries}, {record, notices}) do
+    if is_binary(run_id) and not ended?(record, run_id) do
+      group
+      |> read_delivery_order(current_order, run_id)
+      |> apply_delivery_order(group, run_id, deliveries, record, notices)
+    else
+      {record, notices}
+    end
+  end
+
+  defp read_delivery_order(_group, %{"id" => run_id} = current_order, run_id), do: {:ok, current_order}
+  defp read_delivery_order(group, _current_order, run_id), do: Journal.history(group, run_id)
+
+  defp apply_delivery_order({:ok, %{"state" => state} = order}, group, run_id, deliveries, record, notices)
+       when state in ["completed", "failed", "cancelled", "retired"] do
+    terminal_delivery_end(group, run_id, deliveries, record, notices, order, state)
+  end
+
+  defp apply_delivery_order({:ok, %{"state" => state}}, _group, _run_id, _deliveries, record, notices)
+       when state in ["intent", "accepted", "running", "rejected"], do: {record, notices}
+
+  defp apply_delivery_order({:ok, _}, _group, run_id, deliveries, record, notices),
+    do: warn_unconfirmed(record, notices, run_id, deliveries, :order_invalid)
+
+  defp apply_delivery_order({:error, reason}, _group, run_id, deliveries, record, notices),
+    do: warn_unconfirmed(record, notices, run_id, deliveries, reason)
+
+  defp terminal_delivery_end(group, run_id, deliveries, record, notices, order, state) do
+    if matching_order?(group, run_id, deliveries, order) do
+      updated = Map.update(record, "delivery_ends", %{run_id => true}, &Map.put(&1, run_id, true))
+      {updated, [{:ended, run_id, state, deliveries, order} | notices]}
+    else
+      warn_unconfirmed(record, notices, run_id, deliveries, :order_mismatch)
+    end
+  end
+
+  defp matching_order?(group, run_id, deliveries, order) do
+    members = order["members"]
+
+    order["group"] == group and order["id"] == run_id and is_list(members) and
+      (is_nil(order["project_id"]) or order["project_id"] == ProjectContext.current().id) and
+      Enum.all?(deliveries, fn {issue_id, _} -> Enum.any?(members, &(is_map(&1) and &1["id"] == issue_id)) end)
+  end
+
+  defp warn_unconfirmed(record, notices, run_id, deliveries, reason) do
+    if get_in(record, ["delivery_end_warnings", run_id]) == true do
+      {record, notices}
+    else
+      updated = Map.update(record, "delivery_end_warnings", %{run_id => true}, &Map.put(&1, run_id, true))
+      {updated, [{:warning, run_id, reason, deliveries} | notices]}
+    end
+  end
+
+  defp log_delivery_end_notice(group, {:ended, run_id, state, deliveries, order}) do
+    Enum.each(deliveries, fn {issue_id, _} ->
+      member = Enum.find(order["members"], &(is_map(&1) and &1["id"] == issue_id))
+      Logger.info("YOLO delivery end derived group=#{group} issue_id=#{issue_id} issue_identifier=#{member["identifier"] || "unknown"} run_id=#{run_id} order_state=#{state}")
+    end)
+  end
+
+  defp log_delivery_end_notice(group, {:warning, run_id, reason, deliveries}) do
+    issue_ids = Enum.map_join(deliveries, ",", fn {issue_id, _} -> issue_id end)
+    {issue_id, _} = hd(deliveries)
+    Logger.warning("YOLO delivery end unconfirmed group=#{group} issue_id=#{issue_id} issue_identifier=unknown issue_ids=#{issue_ids} run_id=#{run_id} reason=#{inspect(reason)}")
   end
 
   defp reconcile_rejected("blocker" = group, run_id, order) do

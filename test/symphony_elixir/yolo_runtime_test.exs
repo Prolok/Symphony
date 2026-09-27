@@ -1,8 +1,9 @@
 defmodule SymphonyElixir.YoloRuntimeTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.{ProjectContext, WaitMarker, Yolo}
+  alias SymphonyElixir.{Config, ProjectContext, WaitMarker, Yolo}
 
   alias SymphonyElixir.Codex.DynamicTool
+  alias SymphonyElixir.Linear.Budget
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.Linear.WriteContext
@@ -546,14 +547,14 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   end
 
   test "relay blocker status types are reused and legacy entries are freshly checked", %{issues: [issue | _]} do
-    app = SymphonyElixir.Config.settings!().tracker.app
+    app = Config.settings!().tracker.app
 
-    SymphonyElixir.Linear.Budget.record(app, :read, %{
+    Budget.record(app, :read, %{
       "x-ratelimit-requests-limit" => "5000",
       "x-ratelimit-requests-remaining" => "5000"
     })
 
-    assert SymphonyElixir.Linear.Budget.pressure(app) == :normal
+    assert Budget.pressure(app) == :normal
 
     relay = %{
       issue

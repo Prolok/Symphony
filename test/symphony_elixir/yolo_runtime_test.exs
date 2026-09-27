@@ -545,6 +545,47 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, :yolo_dependencies_incomplete} = Yolo.Dependencies.actionable([issue], query: query)
   end
 
+  test "relay blocker status types are reused and legacy entries are freshly checked", %{issues: [issue | _]} do
+    relay = %{
+      issue
+      | blocked_by: [%{id: "fix", identifier: "PRO-2", state: "Abgeschlossen", state_type: "completed"}],
+        last_comment_signal: %{relay_epoch: "current"}
+    }
+
+    no_query = fn _, _ -> flunk("complete relay blockers must not be read again") end
+    opts = [relay_background: true, wait_comments: fn _ -> {:ok, []} end]
+
+    assert {:ok, [ready]} = Yolo.Dependencies.refresh([relay], Keyword.put(opts, :query, no_query))
+    assert Yolo.Dependencies.dispatchable?(ready)
+
+    legacy = %{relay | blocked_by: [%{id: "fix", identifier: "PRO-2", state: "Abgeschlossen"}]}
+
+    relation = %{
+      "id" => "relation",
+      "type" => "blocks",
+      "issue" => %{"id" => "fix", "identifier" => "PRO-2", "state" => %{"name" => "Abgeschlossen", "type" => "completed"}}
+    }
+
+    query = fn document, _ ->
+      assert document =~ "YoloBlockers"
+
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "inverseRelations" => %{
+               "nodes" => [relation],
+               "pageInfo" => %{"hasNextPage" => false}
+             }
+           }
+         }
+       }}
+    end
+
+    assert {:ok, [checked]} = Yolo.Dependencies.refresh([legacy], Keyword.put(opts, :query, query))
+    assert Yolo.Dependencies.dispatchable?(checked)
+  end
+
   test "an unavailable configured merge worker cannot authorize acceptance", %{issues: [issue | _], context: context, root: root} do
     path = System.get_env("PATH")
     ssh = Path.join(root, "ssh")

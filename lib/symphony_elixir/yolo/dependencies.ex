@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Yolo.Dependencies do
   @moduledoc "Complete, fresh dependency snapshots and connected acceptance chains."
-  alias SymphonyElixir.Linear.YoloAgent
+  alias SymphonyElixir.Linear.{Budget, YoloAgent}
   alias SymphonyElixir.WaitMarker
   alias SymphonyElixir.Yolo.{Admission, API}
 
@@ -28,7 +28,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
 
   defp refresh_issue(issue, opts) do
     if YoloAgent.delegated?(issue) and issue.state in ["Backlog", "Todo", "Definiert", "BLOCKER", "Planung", "Yolo Review"] do
-      with {:ok, blockers} <- blockers(issue.id, opts),
+      with {:ok, blockers} <- background_blockers(issue, opts),
            {:ok, markers} <- WaitMarker.targets(issue, Keyword.put_new(opts, :budget_background, true)) do
         {:ok, %{issue | blocked_by: blockers ++ markers}}
       end
@@ -36,6 +36,18 @@ defmodule SymphonyElixir.Yolo.Dependencies do
       {:ok, issue}
     end
   end
+
+  defp background_blockers(%{id: id, blocked_by: blockers, last_comment_signal: %{relay_epoch: epoch}}, opts)
+       when is_list(blockers) and is_binary(epoch) do
+    cond do
+      not opts[:relay_background] -> blockers(id, opts)
+      Enum.all?(blockers, &is_binary(Map.get(&1, :state_type))) -> {:ok, blockers}
+      Budget.allow_background_lookup?(SymphonyElixir.Config.settings!().tracker.app, id) -> blockers(id, opts)
+      true -> {:error, :linear_budget_reserved}
+    end
+  end
+
+  defp background_blockers(issue, opts), do: blockers(issue.id, opts)
 
   @spec blockers(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def blockers(id, opts) do

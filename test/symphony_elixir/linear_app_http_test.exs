@@ -13,6 +13,9 @@ defmodule SymphonyElixir.LinearAppHttpTest do
     end)
 
     owner = self()
+    handler = "operation-#{System.unique_integer([:positive])}"
+    :telemetry.attach(handler, [:symphony, :linear, :request], fn _, _, metadata, pid -> send(pid, {:operation, metadata.operation}) end, owner)
+    on_exit(fn -> :telemetry.detach(handler) end)
 
     Req.default_options(
       plug: fn conn ->
@@ -35,7 +38,11 @@ defmodule SymphonyElixir.LinearAppHttpTest do
     end
 
     for _ <- 1..2, do: assert({:ok, _} = AppAuth.request(tracker, %{"query" => "{viewer{id}}"}, request))
+    assert {:ok, _} = AppAuth.request(tracker, %{"query" => "query NamedRead { viewer { id } }"}, request)
     assert_received :token_request
     refute_received :token_request
+    assert_received {:operation, "OAuthToken"}
+    assert_received {:operation, "SymphonyAppIdentity"}
+    assert_received {:operation, "NamedRead"}
   end
 end

@@ -11,7 +11,7 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.Linear.WriteContext
 
   alias SymphonyElixir.{Config, Dialog, Linear.Issue, ProjectContext}
-  alias SymphonyElixir.Linear.{Assignees, CommentVersion, RateLimit, YoloAgent}
+  alias SymphonyElixir.Linear.{Assignees, CommentMutations, CommentVersion, IssueReadCache, RateLimit, YoloAgent}
 
   @issue_page_size 50
   @typep page_cursors :: %{optional(String.t()) => true}
@@ -51,6 +51,7 @@ defmodule SymphonyElixir.Linear.Client do
         identifier
         state {
           name
+          type
         }
       }
     }
@@ -290,6 +291,48 @@ defmodule SymphonyElixir.Linear.Client do
     {:ok, filter} = routing_assignee_filter()
     normalize_issue(node, filter)
   end
+
+  @spec complete_relay_issue?(term(), ProjectContext.t()) :: boolean()
+  def complete_relay_issue?(node, context) when is_map(node) do
+    complete_relay_scope?(node, context) and complete_relay_fields?(node) and
+      complete_relay_collection?(node["labels"], 50) and complete_relay_relations?(node["inverseRelations"]) and
+      complete_relay_collection?(node["comments"], 2)
+  end
+
+  def complete_relay_issue?(_, _), do: false
+
+  defp complete_relay_scope?(node, context) do
+    case Config.linear_scope(context.settings.tracker) do
+      {:ok, {:project, _}} -> is_map(node["project"])
+      {:ok, {:team, _}} -> is_map(node["team"])
+      _ -> false
+    end
+  end
+
+  defp complete_relay_fields?(node) do
+    is_binary(node["id"]) and is_binary(node["identifier"]) and is_binary(node["title"]) and
+      is_binary(get_in(node, ["state", "name"])) and Map.has_key?(node, "assignee") and
+      (is_nil(node["assignee"]) or is_map(node["assignee"])) and
+      Enum.all?(~w(description priority branchName url delegate project team createdAt updatedAt), &Map.has_key?(node, &1))
+  end
+
+  defp complete_relay_collection?(%{"nodes" => nodes}, max) when is_list(nodes), do: length(nodes) < max
+  defp complete_relay_collection?(_, _), do: false
+
+  defp complete_relay_relations?(%{"nodes" => nodes}) when is_list(nodes) and length(nodes) < 50 do
+    Enum.all?(nodes, fn
+      %{"type" => "blocks", "issue" => %{"id" => id, "identifier" => identifier, "state" => %{"name" => name, "type" => type}}} ->
+        is_binary(id) and is_binary(identifier) and is_binary(name) and is_binary(type)
+
+      %{"type" => type} ->
+        is_binary(type) and String.downcase(type) != "blocks"
+
+      _ ->
+        false
+    end)
+  end
+
+  defp complete_relay_relations?(_), do: false
 
   defp verify_workspace_assignees({workspace, [first | _] = contexts}, :ok) do
     configured = contexts |> Enum.flat_map(&Assignees.parse(&1.settings.tracker.assignee)) |> Enum.uniq()
@@ -621,6 +664,20 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @doc "Scan all pages while a ready relay epoch stays unchanged."
+  @spec scan_issue_comments_relay(String.t(), (-> {:ok, term()} | {:error, term()})) ::
+          {:ok, [map()]} | {:error, term()}
+  def scan_issue_comments_relay(issue_id, epoch) when is_function(epoch, 0) do
+    with {:ok, before} <- epoch.(),
+         {:ok, comments} <- fetch_issue_comments_page(issue_id, nil, [], %{}) do
+      case epoch.() do
+        {:ok, ^before} -> {:ok, comments}
+        {:ok, _} -> incomplete_comments(:relay_epoch_changed, comments)
+        {:error, reason} -> incomplete_comments(reason, comments)
+      end
+    end
+  end
+
   @doc "Continue a background scan using its freshly observed initial signal."
   @spec scan_issue_comments(String.t(), [map()]) :: {:ok, [map()]} | {:error, term()}
   def scan_issue_comments(issue_id, before),
@@ -696,9 +753,28 @@ defmodule SymphonyElixir.Linear.Client do
 
     with :ok <- CommentActionGuard.check(payload),
          :ok <- SymphonyElixir.RoutineTest.prepare_description_updates(payload) do
-      graphql_response(authenticated_request(payload, request_fun), payload)
+      result = graphql_response(authenticated_request(payload, request_fun), payload)
+      invalidate_issue_read_after_update(result, payload)
+      result
     end
   end
+
+  defp invalidate_issue_read_after_update({:ok, body}, payload) when is_map(body) do
+    if String.contains?(payload["query"], "issueUpdate") and Map.get(body, "errors", []) in [nil, []] do
+      payload |> CommentMutations.state_updates(true) |> invalidate_issue_updates()
+    end
+  end
+
+  defp invalidate_issue_read_after_update(_, _), do: :ok
+
+  defp invalidate_issue_updates({:ok, []}), do: :ok
+
+  defp invalidate_issue_updates({:ok, updates}) do
+    ids = Enum.map(updates, & &1["id"])
+    IssueReadCache.invalidate(if(Enum.all?(ids, &is_binary/1), do: ids, else: :all))
+  end
+
+  defp invalidate_issue_updates(_), do: :ok
 
   defp graphql_response(result, payload) do
     case result do
@@ -1575,13 +1651,14 @@ defmodule SymphonyElixir.Linear.Client do
       %{"type" => relation_type, "issue" => blocker_issue}
       when is_binary(relation_type) and is_map(blocker_issue) ->
         if String.downcase(String.trim(relation_type)) == "blocks" do
-          [
-            %{
-              id: blocker_issue["id"],
-              identifier: blocker_issue["identifier"],
-              state: get_in(blocker_issue, ["state", "name"])
-            }
-          ]
+          blocker = %{
+            id: blocker_issue["id"],
+            identifier: blocker_issue["identifier"],
+            state: get_in(blocker_issue, ["state", "name"])
+          }
+
+          type = get_in(blocker_issue, ["state", "type"])
+          [if(is_binary(type), do: Map.put(blocker, :state_type, type), else: blocker)]
         else
           []
         end

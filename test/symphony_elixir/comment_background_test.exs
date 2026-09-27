@@ -38,6 +38,36 @@ defmodule SymphonyElixir.CommentBackgroundTest do
     assert Agent.get(counter, & &1.full) == 3
   end
 
+  test "relay epoch keeps checkpoints local until an event or fifteen-minute safety scan", ctx do
+    parent = self()
+
+    full = fn ->
+      send(parent, :full)
+      {:ok, [source()]}
+    end
+
+    opts = [
+      signal: fn -> {:ok, []} end,
+      fetch_after_signal: fn _ -> full.() end,
+      background_interval: 900_000,
+      maximum_full_age: 900_000,
+      foreign_relay_epoch: 0
+    ]
+
+    assert {:ok, _} = scan(ctx, 0, full, opts)
+    assert_received :full
+    assert {:ok, _} = scan(ctx, 899_999, full, opts)
+    refute_received :full
+    assert {:ok, _} = scan(ctx, 900_000, full, opts)
+    assert_received :full
+    assert {:ok, _} = scan(ctx, 900_001, full, Keyword.put(opts, :foreign_relay_epoch, 1))
+    assert_received :full
+    assert {:ok, _} = scan(ctx, 900_002, full, Keyword.put(opts, :foreign_relay_epoch, 1))
+    refute_received :full
+    assert {:ok, _} = scan(ctx, 900_003, full, Keyword.put(opts, :force_full, true))
+    assert_received :full
+  end
+
   test "concurrent slow scans recheck due time after acquiring the journal lock", ctx do
     parent = self()
 

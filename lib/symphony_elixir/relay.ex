@@ -43,7 +43,7 @@ defmodule SymphonyElixir.Relay do
       tracker = context.settings.tracker
       assignees = context.assignee_ids || Enum.sort(Assignees.parse(tracker.assignee))
       relay = if tracker.relay, do: Map.delete(tracker.relay, "owners")
-      {context.id, %{tracker | assignee: assignees, relay: relay}, context.yolo_agent_id, context.human_handoff_id}
+      {context.id, %{tracker | assignee: assignees, relay: relay}, context.yolo_agent_id, context.human_handoff_id, :blocker_state_type_v1}
     end)
     |> Enum.sort()
     |> Store.digest()
@@ -67,7 +67,8 @@ defmodule SymphonyElixir.Relay do
 
   def candidates(session, _), do: {:error, {:relay_not_ready, session.status, session.error}}
 
-  defp stamp_issue(issue, record) do
+  @spec stamp_issue(SymphonyElixir.Linear.Issue.t(), map()) :: SymphonyElixir.Linear.Issue.t()
+  def stamp_issue(issue, record) do
     blocker_epochs = issue.blocked_by |> Enum.map(&{&1.id, record["epochs"][&1.id]}) |> Enum.sort()
     epoch = Store.digest({record["generation"], record["epochs"][issue.id], blocker_epochs})
     %{issue | last_comment_signal: Map.put(issue.last_comment_signal || %{}, :relay_epoch, epoch), relay_event: get_in(record, ["event_positions", issue.id])}

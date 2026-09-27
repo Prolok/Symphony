@@ -49,12 +49,13 @@ defmodule SymphonyElixir.Linear.RateLimit do
     metadata = %{
       workspace_id: binding["workspace_id"],
       kind: Keyword.get(opts, :budget_kind, :other),
+      operation: Keyword.get(opts, :budget_operation, "unknown"),
       status: response_status(result),
       headers: diagnostics
     }
 
     :telemetry.execute([:symphony, :linear, :request], measurement, metadata)
-    Budget.record(binding, metadata.kind, diagnostics)
+    Budget.record(binding, metadata.kind, diagnostics, operation: metadata.operation)
 
     if Application.get_env(:symphony_elixir, :linear_budget_measurements, false),
       do: Logger.debug("Linear request measurement=" <> Jason.encode!(Map.merge(measurement, metadata)))

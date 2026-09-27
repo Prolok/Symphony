@@ -104,10 +104,12 @@ defmodule SymphonyElixir.RelayPollingTest do
       observed = Orchestrator.observe_dialog_full_check_for_test(dialog, observed, observed_at)
       assert Orchestrator.should_dispatch_issue_for_test(next, observed)
       flush_requests()
-      # Every explicit checkpoint still scans Linear even when the relay is idle.
+      # The older foreign event invalidates the local scan; the next unchanged checkpoint is local.
       assert {:ok, _} = CommentCheckpoint.scan(issue)
       assert_received {:linear, _}
       flush_requests()
+      assert {:ok, _} = CommentCheckpoint.scan(issue)
+      refute_received {:linear, _}
       for _ <- 1..5, do: Server.publish(server, "synthetic-workspace", %{"type" => "Comment", "commentId" => "comment"})
       ProjectPoller.refresh()
       assert {:ok, [_]} = ProjectPoller.candidates(context)
@@ -159,8 +161,8 @@ defmodule SymphonyElixir.RelayPollingTest do
       ProjectPoller.refresh()
       assert {:error, {:relay_not_ready, :degraded, _}} = ProjectPoller.candidates(context)
       assert {:error, _} = Relay.background_issues(["issue"])
-      assert {:error, _} = CommentCheckpoint.background_scan(issue)
-      refute_received {:linear, _}
+      assert {:ok, _} = CommentCheckpoint.background_scan(issue)
+      assert_received {:linear, _}
       # Explicit checkpoints keep working through a relay outage and record no relay epoch.
       assert {:ok, _} = CommentCheckpoint.scan(issue, fetch: fn -> {:ok, []} end, confirm_absence: fn _ -> :deleted end)
       assert ProjectPoller.polling().relay["synthetic-workspace"].status == :degraded

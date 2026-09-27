@@ -24,7 +24,7 @@ defmodule SymphonyElixir.Codex.MergeTool do
   def invoke(arguments, opts \\ []) do
     with %{"head_sha" => head} when is_binary(head) <- arguments,
          true <- Regex.match?(~r/\A[0-9a-f]{40}\z/, head),
-         {:ok, issue} <- CommentCheckpoint.bound_issue(arguments["issue_id"] || WriteContext.current()["issue_id"], opts),
+         {:ok, issue} <- fresh_bound_issue(arguments["issue_id"] || WriteContext.current()["issue_id"], opts),
          true <- issue.state == "Merge (AI)",
          {:ok, workspace} <- workspace(issue, WriteContext.current()["worker_host"]),
          {:ok, port} <- start_port(workspace, issue, head, WriteContext.current()["worker_host"]) do
@@ -146,7 +146,7 @@ defmodule SymphonyElixir.Codex.MergeTool do
   def handle_checkpoint({:ok, %{"operation" => operation}}, issue, opts) when operation in ["labels", "merge"] do
     fetch_labels = Keyword.get(opts, :labels, &labels/1)
     guard = Keyword.get(opts, :guard, &CommentCheckpoint.before_action/1)
-    fetch_issue = Keyword.get(opts, :bound_issue, &CommentCheckpoint.bound_issue/1)
+    fetch_issue = Keyword.get(opts, :bound_issue, &fresh_bound_issue/1)
 
     with {:ok, %{state: "Merge (AI)"}} <- fetch_issue.(issue.id),
          {:ok, labels} <- fetch_labels.(issue.id),
@@ -158,6 +158,10 @@ defmodule SymphonyElixir.Codex.MergeTool do
   end
 
   def handle_checkpoint(_request, _issue, _opts), do: %{"ok" => false, "error" => "Invalid bound request"}
+
+  defp fresh_bound_issue(id, opts \\ []) do
+    CommentCheckpoint.bound_issue(id, Keyword.put_new(opts, :fetch_issue, &Client.fetch_issue_states_by_ids/1))
+  end
 
   defp labels(id), do: labels(id, nil, %{}, [])
 

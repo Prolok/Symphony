@@ -27,7 +27,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       {retrying, regular} = Enum.split_with(issues, &Map.has_key?(retrying_groups, Group.name(&1)))
       retrying = Enum.map(retrying, &%{&1 | blocked_by: retrying_groups[Group.name(&1)][&1.id]})
 
-      case Dependencies.refresh(regular, opts) do
+      case Dependencies.refresh(regular, Keyword.put(opts, :relay_background, true)) do
         {:ok, refreshed} ->
           schedule_refreshed(state, issues, refreshed ++ retrying, opts)
 

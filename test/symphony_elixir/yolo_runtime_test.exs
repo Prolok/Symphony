@@ -901,6 +901,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       :rate_limited,
       :relay_not_ready,
       :linear_app_request_unavailable,
+      %Req.TransportError{reason: :timeout},
       {:relay_not_ready, :offline, "connection details"},
       {:linear_api_request, :linear_app_request_unavailable},
       {:linear_api_request, {:linear_app_rate_limited, %{retry_after_ms: 1_000}}},
@@ -937,6 +938,18 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     now = Agent.get(clock, & &1)
     assert {:ok, repeated_missing} = Store.read("incoming")
     assert repeated_missing["operation_retries"][intent["key"]]["retry_at"] == now + 300_000
+
+    Agent.update(clock, fn _ -> repeated_missing["operation_retries"][intent["key"]]["retry_at"] end)
+    Agent.update(failure, fn _ -> "Timeout in ticket title" end)
+    state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+    now = Agent.get(clock, & &1)
+    assert {:ok, first_text} = Store.read("incoming")
+    assert first_text["operation_retries"][intent["key"]]["retry_at"] == now + 30_000
+    Agent.update(clock, &(&1 + 30_000))
+    _state = Yolo.Recovery.resume_with_state(state, [issue], opts)
+    now = Agent.get(clock, & &1)
+    assert {:ok, repeated_text} = Store.read("incoming")
+    assert repeated_text["operation_retries"][intent["key"]]["retry_at"] == now + 300_000
   end
 
   test "recovery leaves an intent pending when its group lock or state is unavailable", %{issues: [issue | _]} do

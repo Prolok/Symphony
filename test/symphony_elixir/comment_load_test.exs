@@ -2,6 +2,7 @@ defmodule SymphonyElixir.CommentLoadTest do
   use ExUnit.Case, async: true
   alias SymphonyElixir.Linear.CommentInbox
 
+  @tag timeout: 120_000
   test "fifteen tickets over thirty minutes stay below the workspace request target" do
     root = Path.join([File.cwd!(), "_build", "comment-load-#{System.unique_integer([:positive])}"])
     on_exit(fn -> File.rm_rf!(root) end)

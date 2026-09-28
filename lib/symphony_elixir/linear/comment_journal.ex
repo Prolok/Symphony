@@ -998,6 +998,16 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp active_signatures(binding) do
+    with {:ok, files} <- active_files(binding) do
+      if Enum.any?(files, &String.ends_with?(&1, [".intent.json", ".confirmed.json", ".rejected.json"])) do
+        read_active_signatures(binding)
+      else
+        {:ok, %{}}
+      end
+    end
+  end
+
+  defp read_active_signatures(binding) do
     script = Path.join(SymphonyElixir.RuntimePaths.workflow_dir(), "priv/linear_app/journal_signatures.py")
 
     with python when is_binary(python) <- System.find_executable("python3"),

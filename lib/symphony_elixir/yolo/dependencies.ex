@@ -37,6 +37,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     cache =
       Map.reject(cache, fn
         {{context_id, issue_id}, _} -> context_id == project_id and not MapSet.member?(current_ids, issue_id)
+        {{:wait_report, issue_id, _identifier}, _} -> not MapSet.member?(current_ids, issue_id)
         _ -> false
       end)
 
@@ -73,6 +74,12 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     if YoloAgent.delegated?(issue) and issue.state in @waiting_states do
       refresh_waiting_issue(issue, cache, opts)
     else
+      cache =
+        Map.reject(cache, fn
+          {{:wait_report, issue_id, _identifier}, _} -> issue_id == issue.id
+          _ -> false
+        end)
+
       {:ok, issue, cache}
     end
   end

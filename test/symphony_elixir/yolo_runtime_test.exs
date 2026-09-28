@@ -941,7 +941,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_ambiguous}, cache} =
              WaitMarker.resolve_targets_background(waiting, [], %{}, across_workspaces)
 
-    assert map_size(cache) == 2
+    assert map_size(cache) == 3
     assert_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
 
     Process.put(:ambiguous_target_lookups, 0)
@@ -967,7 +967,234 @@ defmodule SymphonyElixir.YoloRuntimeTest do
              WaitMarker.resolve_targets_background(waiting, [], cache, within_workspace)
 
     assert Process.get(:ambiguous_target_lookups) == 1
-    assert_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
+    refute_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
+  end
+
+  test "background wait reports use the real Workpad path once per safety interval", %{issues: [issue | _], context: source} do
+    ProjectContext.bind(put_in(source.settings.tracker.kind, "memory"))
+    previous_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_comments, previous_comments)
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, previous_recipient)
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    foreign = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign") |> Map.put(:id, "foreign")
+    body = "## Symphony Workpad\n\n### Plan\n\n- [ ] Ziel prüfen.\n\n### Validierung\n\n- [ ] Zielbeleg.\n\n### Verlauf\n"
+    response = fn nodes -> {:ok, %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}}} end
+
+    for {case_name, contexts, nodes, reason} <- [
+          {:no_foreign, [source], [], :wait_target_unresolved},
+          {:unknown, [source, foreign], [], :wait_target_unresolved},
+          {:ambiguous, [source, foreign], [%{"id" => "one"}, %{"id" => "two"}], :wait_target_ambiguous}
+        ] do
+      id = "#{issue.id}-#{case_name}"
+
+      waiting = %{
+        issue
+        | id: id,
+          state: "Yolo Review",
+          description: "Wartet auf: PRI-999",
+          blocked_by: [],
+          relations_complete: true,
+          last_comment_signal: %{relay_epoch: "stable"}
+      }
+
+      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{id => [%{id: "workpad-#{case_name}", body: body}]})
+      Process.put(:wait_report_now, 0)
+
+      opts = [
+        contexts: contexts,
+        relay_background: true,
+        relay_ready: fn _ -> true end,
+        background_now: fn -> Process.get(:wait_report_now) end,
+        wait_comments: fn _ -> {:ok, []} end,
+        query: fn _, _ ->
+          send(self(), {:wait_target_query, id})
+          response.(nodes)
+        end
+      ]
+
+      cache =
+        Enum.reduce(0..11, %{}, fn tick, cache ->
+          Process.put(:wait_report_now, tick * 5_000)
+
+          assert {:error, {:wait_marker_unresolved, "PRI-999", ^reason}, updated} =
+                   Yolo.Dependencies.refresh_background([waiting], cache, opts)
+
+          updated
+        end)
+
+      messages = elem(Process.info(self(), :messages), 1)
+      assert Enum.count(messages, &match?({:memory_tracker_fetch_issue_comments, ^id}, &1)) == 1
+      assert Enum.count(messages, &match?({:memory_tracker_comment_update, ^id, _, _}, &1)) == 1
+      assert Enum.count(messages, &match?({:wait_target_query, ^id}, &1)) == if(case_name == :no_foreign, do: 0, else: 1)
+
+      Process.put(:wait_report_now, 300_000)
+
+      assert {:error, {:wait_marker_unresolved, "PRI-999", ^reason}, after_interval} =
+               Yolo.Dependencies.refresh_background([waiting], cache, opts)
+
+      messages = elem(Process.info(self(), :messages), 1)
+      assert Enum.count(messages, &match?({:memory_tracker_fetch_issue_comments, ^id}, &1)) == 2
+      assert Enum.count(messages, &match?({:memory_tracker_comment_update, ^id, _, _}, &1)) == 1
+      assert Enum.count(messages, &match?({:wait_target_query, ^id}, &1)) == if(case_name == :no_foreign, do: 0, else: 2)
+
+      if case_name == :no_foreign do
+        Process.put(:wait_report_now, 305_000)
+        changed = %{waiting | description: "Wartet auf: PRI-998"}
+
+        assert {:error, {:wait_marker_unresolved, "PRI-998", :wait_target_unresolved}, changed_cache} =
+                 Yolo.Dependencies.refresh_background([changed], after_interval, opts)
+
+        ambiguous =
+          Keyword.merge(opts,
+            contexts: [source, foreign],
+            query: fn _, _ -> response.([%{"id" => "one"}, %{"id" => "two"}]) end
+          )
+
+        assert {:error, {:wait_marker_unresolved, "PRI-998", :wait_target_ambiguous}, ambiguous_cache} =
+                 Yolo.Dependencies.refresh_background([changed], changed_cache, ambiguous)
+
+        messages = elem(Process.info(self(), :messages), 1)
+        assert Enum.count(messages, &match?({:memory_tracker_comment_update, ^id, _, _}, &1)) == 3
+        assert Enum.count(messages, &match?({:memory_tracker_fetch_issue_comments, ^id}, &1)) == 4
+        [%{body: updated_body}] = Application.get_env(:symphony_elixir, :memory_tracker_comments)[id]
+        assert updated_body =~ "Wartemarker-Fehler PRI-998: :wait_target_unresolved"
+        assert updated_body =~ "Wartemarker-Fehler PRI-998: :wait_target_ambiguous"
+
+        corrected = %{waiting | description: "Wartet auf: PRI-892"}
+        target = %{"id" => "resolved", "identifier" => "PRI-892", "project" => %{"slugId" => "project"}, "team" => %{"key" => "PRI"}, "state" => %{"name" => "Review"}}
+        resolved = Keyword.put(ambiguous, :query, fn _, _ -> response.([target]) end)
+
+        assert {:ok, [%{blocked_by: [%{id: "resolved"}]}], corrected_cache} =
+                 Yolo.Dependencies.refresh_background([corrected], ambiguous_cache, resolved)
+
+        refute Map.has_key?(corrected_cache, {:wait_report, id, "PRI-998"})
+        refute Map.has_key?(corrected_cache, {:wait_report, id, "PRI-999"})
+        assert {:ok, [], empty_cache} = Yolo.Dependencies.refresh_background([], corrected_cache, resolved)
+        refute Enum.any?(Map.keys(empty_cache), &match?({:wait_report, ^id, _}, &1))
+      end
+    end
+  end
+
+  test "failed background reports are throttled and marker changes clear their report", %{issues: [issue | _], context: source} do
+    ProjectContext.bind(put_in(source.settings.tracker.kind, "memory"))
+    previous_comments = Application.get_env(:symphony_elixir, :memory_tracker_comments)
+    previous_recipient = Application.get_env(:symphony_elixir, :memory_tracker_recipient)
+
+    on_exit(fn ->
+      Application.put_env(:symphony_elixir, :memory_tracker_comments, previous_comments)
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, previous_recipient)
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    waiting = %{issue | description: "Wartet auf: PRI-999"}
+
+    opts = [
+      contexts: [source],
+      background_now: fn -> Process.get(:wait_report_now) end,
+      report_comments: fn _ ->
+        send(self(), :report_read)
+        {:error, :offline}
+      end
+    ]
+
+    cache =
+      Enum.reduce(0..11, %{}, fn tick, cache ->
+        Process.put(:wait_report_now, tick * 5_000)
+
+        assert {:error, {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :offline}, updated} =
+                 WaitMarker.resolve_targets_background(waiting, [], cache, opts)
+
+        updated
+      end)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 1
+    Process.put(:wait_report_now, 300_000)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :offline}, cache} =
+             WaitMarker.resolve_targets_background(waiting, [], cache, opts)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 2
+
+    Process.put(:wait_report_now, 305_000)
+    assert {:ok, [], cleared} = WaitMarker.resolve_targets_background(%{waiting | description: ""}, [], cache, opts)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :offline}, restored} =
+             WaitMarker.resolve_targets_background(waiting, [], cleared, opts)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 3
+
+    changed = %{waiting | description: "Wartet auf: PRI-998"}
+
+    assert {:error, {:wait_marker_unresolved, "PRI-998", :wait_target_unresolved, :offline}, changed_cache} =
+             WaitMarker.resolve_targets_background(changed, [], restored, opts)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 4
+
+    foreign = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign") |> Map.put(:id, "foreign")
+
+    ambiguous =
+      Keyword.merge(opts,
+        contexts: [source, foreign],
+        query: fn _, _ ->
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [%{"id" => "one"}, %{"id" => "two"}],
+                 "pageInfo" => %{"hasNextPage" => false}
+               }
+             }
+           }}
+        end
+      )
+
+    assert {:error, {:wait_marker_unresolved, "PRI-998", :wait_target_ambiguous, :offline}, _} =
+             WaitMarker.resolve_targets_background(changed, [], changed_cache, ambiguous)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 5
+
+    assert {:error, {:wait_marker_unresolved, "PRI-998", :wait_target_unresolved, :offline}, _} =
+             WaitMarker.resolve_targets_background(changed, [], %{}, opts)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 6
+  end
+
+  test "failed Workpad write is reported once per background interval", %{issues: [issue | _], context: source} do
+    ProjectContext.bind(put_in(source.settings.tracker.kind, "memory"))
+    waiting = %{issue | description: "Wartet auf: PRI-999"}
+    body = "## Symphony Workpad\n\n### Plan\n\n- [ ] Ziel prüfen.\n\n### Validierung\n\n- [ ] Zielbeleg.\n\n### Verlauf\n"
+
+    opts = [
+      contexts: [source],
+      background_now: fn -> Process.get(:wait_report_now) end,
+      report_comments: fn _ ->
+        send(self(), :report_read)
+        {:ok, [%{id: "missing", body: body}]}
+      end
+    ]
+
+    cache =
+      Enum.reduce(0..11, %{}, fn tick, cache ->
+        Process.put(:wait_report_now, tick * 5_000)
+
+        assert {:error, {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :comment_not_found}, updated} =
+                 WaitMarker.resolve_targets_background(waiting, [], cache, opts)
+
+        updated
+      end)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 1
+    Process.put(:wait_report_now, 300_000)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :comment_not_found}, _} =
+             WaitMarker.resolve_targets_background(waiting, [], cache, opts)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 2
   end
 
   test "first transient target failure is throttled without a Workpad error", %{issues: [issue | _], context: source} do

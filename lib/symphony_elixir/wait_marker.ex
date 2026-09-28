@@ -1,11 +1,12 @@
 defmodule SymphonyElixir.WaitMarker do
   @moduledoc "Cross-workspace issue waits with fresh target state and visible failures."
   require Logger
-  alias SymphonyElixir.{Config, ProjectContext, Projects, Tracker, Workpad}
+  alias SymphonyElixir.{Config, ProjectContext, ProjectPoller, Projects, Tracker, Workpad}
   alias SymphonyElixir.Linear.{Budget, Client}
 
   @marker ~r/^\s*(?:[-*]\s+(?:\[[ xX]\]\s+)?)?Wartet auf:\s*([A-Z][A-Z0-9]*-[0-9]+)\s*$/mu
   @merged ["Yolo Review", "Review", "Fertig"]
+  @target_safety_ms 300_000
 
   @spec targets(map(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def targets(issue, opts \\ []) do
@@ -27,6 +28,32 @@ defmodule SymphonyElixir.WaitMarker do
     resolve_markers(issue, Enum.uniq(parse(issue.description || "") ++ workpad_markers), opts)
   end
 
+  @spec resolve_targets_background(map(), [String.t()], map(), keyword()) ::
+          {:ok, [map()], map()} | {:error, term(), map()}
+  def resolve_targets_background(issue, workpad_markers, cache, opts) do
+    if opts[:resolve] do
+      case resolve_targets(issue, workpad_markers, opts) do
+        {:ok, targets} -> {:ok, targets, cache}
+        {:error, reason} -> {:error, reason, cache}
+      end
+    else
+      markers = Enum.uniq(parse(issue.description || "") ++ workpad_markers)
+
+      Enum.reduce_while(markers, {:ok, [], cache}, &background_marker(&1, &2, issue, opts))
+      |> case do
+        {:ok, targets, updated} -> {:ok, Enum.reverse(targets), updated}
+        error -> error
+      end
+    end
+  end
+
+  defp background_marker(identifier, {:ok, found, entries}, issue, opts) do
+    case resolve_cached(identifier, entries, opts) do
+      {:ok, target, updated} -> {:cont, {:ok, [target | found], updated}}
+      {:error, reason, updated} -> {:halt, {:error, marker_error(issue, identifier, reason, opts), updated}}
+    end
+  end
+
   defp comment_body(%{body: body}), do: body
   defp comment_body(%{"body" => body}), do: body
   defp comment_body(body) when is_binary(body), do: body
@@ -38,8 +65,7 @@ defmodule SymphonyElixir.WaitMarker do
     Enum.reduce_while(markers, {:ok, []}, fn identifier, {:ok, acc} ->
       case resolve.(identifier, opts) do
         {:ok, target} -> {:cont, {:ok, [target | acc]}}
-        {:error, :linear_budget_reserved} = deferred -> {:halt, deferred}
-        {:error, reason} -> {:halt, report(issue, identifier, reason, opts)}
+        {:error, reason} -> {:halt, {:error, marker_error(issue, identifier, reason, opts)}}
       end
     end)
     |> case do
@@ -47,6 +73,13 @@ defmodule SymphonyElixir.WaitMarker do
       error -> error
     end
   end
+
+  defp marker_error(issue, identifier, reason, opts) when reason in [:wait_target_unresolved, :wait_target_ambiguous] do
+    {:error, reported} = report(issue, identifier, reason, opts)
+    reported
+  end
+
+  defp marker_error(_issue, _identifier, reason, _opts), do: reason
 
   @spec open?(map(), keyword()) :: {:ok, boolean()} | {:error, term()}
   def open?(issue, opts \\ []) do
@@ -109,12 +142,8 @@ defmodule SymphonyElixir.WaitMarker do
   end
 
   defp resolve(identifier, opts) do
-    source = ProjectContext.current()
-    contexts = Keyword.get(opts, :contexts, Projects.configured())
-    candidates = Enum.reject(contexts, &(&1.settings.tracker.app["workspace_id"] == source.settings.tracker.app["workspace_id"]))
-
-    Enum.reduce_while(candidates, {:ok, []}, fn context, {:ok, found} ->
-      case lookup(context, identifier, opts) do
+    Enum.reduce_while(foreign_workspaces(opts), {:ok, []}, fn {_workspace, contexts}, {:ok, found} ->
+      case lookup(contexts, identifier, opts) do
         {:ok, nil} -> {:cont, {:ok, found}}
         {:ok, target} -> {:cont, {:ok, [target | found]}}
         error -> {:halt, error}
@@ -133,7 +162,93 @@ defmodule SymphonyElixir.WaitMarker do
     end
   end
 
-  defp lookup(context, identifier, opts) do
+  defp resolve_cached(identifier, cache, opts) do
+    now = Keyword.get(opts, :background_now, fn -> System.monotonic_time(:millisecond) end).()
+
+    Enum.reduce_while(foreign_workspaces(opts), {:ok, [], cache}, &cached_workspace(&1, &2, identifier, now, opts))
+    |> case do
+      {:ok, found, entries} ->
+        case Enum.uniq_by(found, & &1.id) do
+          [target] -> {:ok, target, entries}
+          [] -> {:error, :wait_target_unresolved, entries}
+          _ -> {:error, :wait_target_ambiguous, entries}
+        end
+
+      error ->
+        error
+    end
+  end
+
+  defp cached_workspace({workspace, contexts}, {:ok, found, entries}, identifier, now, opts) do
+    key = {:wait_target, workspace, identifier}
+
+    case cached_workspace_target(contexts, identifier, entries[key], now, opts) do
+      {:ok, nil, entry} -> {:cont, {:ok, found, Map.put(entries, key, entry)}}
+      {:ok, target, entry} -> {:cont, {:ok, [target | found], Map.put(entries, key, entry)}}
+      {:error, reason, entry} -> {:halt, {:error, reason, Map.put(entries, key, entry)}}
+    end
+  end
+
+  defp cached_workspace_target(contexts, identifier, %{target: target} = entry, now, opts) when not is_nil(target) do
+    case relay_target(contexts, target, opts) do
+      {:ok, fresh} -> {:ok, fresh, entry |> Map.put(:target, fresh) |> Map.delete(:lookup_error)}
+      :unavailable -> cached_or_lookup(contexts, identifier, entry, now, opts)
+    end
+  end
+
+  defp cached_workspace_target(contexts, identifier, entry, now, opts), do: cached_or_lookup(contexts, identifier, entry, now, opts)
+
+  defp cached_or_lookup(_contexts, _identifier, %{checked_at: checked_at, lookup_error: reason} = entry, now, _opts)
+       when now - checked_at < @target_safety_ms,
+       do: {:error, reason, entry}
+
+  defp cached_or_lookup(_contexts, _identifier, %{checked_at: checked_at} = entry, now, _opts)
+       when now - checked_at < @target_safety_ms,
+       do: {:ok, entry.target, entry}
+
+  defp cached_or_lookup(contexts, identifier, entry, now, opts) do
+    case lookup(contexts, identifier, opts) do
+      {:ok, target} ->
+        {:ok, target, %{target: target, checked_at: now}}
+
+      {:error, reason} when reason in [:wait_target_ambiguous, :wait_target_unresolved] ->
+        {:error, reason, %{target: nil, checked_at: now, lookup_error: reason}}
+
+      {:error, _reason} when is_map(entry) and not is_nil(entry.target) ->
+        {:ok, entry.target, entry |> Map.put(:checked_at, now) |> Map.delete(:lookup_error)}
+
+      {:error, reason} ->
+        {:error, reason, %{target: nil, checked_at: now, lookup_error: reason}}
+    end
+  end
+
+  defp relay_target(contexts, target, opts) do
+    context = Enum.find(contexts, &(&1.id == target.context_id))
+    relay_read = Keyword.get(opts, :target_relay, &ProjectPoller.read_issues/2)
+
+    if context do
+      case relay_read.(context, [target.id]) do
+        {:ok, [{_epoch, %{id: id, state: state, in_project_scope: true}}]} when id == target.id and is_binary(state) ->
+          {:ok, %{target | state: state}}
+
+        _ ->
+          :unavailable
+      end
+    else
+      :unavailable
+    end
+  end
+
+  defp foreign_workspaces(opts) do
+    source_workspace = ProjectContext.current().settings.tracker.app["workspace_id"]
+
+    Keyword.get(opts, :contexts, Projects.configured())
+    |> Enum.reject(&(&1.settings.tracker.app["workspace_id"] == source_workspace))
+    |> Enum.group_by(& &1.settings.tracker.app["workspace_id"])
+    |> Enum.sort_by(&elem(&1, 0))
+  end
+
+  defp lookup([context | _] = contexts, identifier, opts) do
     [_, team_key, number] = Regex.run(~r/\A([A-Z][A-Z0-9]*)-([0-9]+)\z/, identifier)
 
     query =
@@ -145,29 +260,29 @@ defmodule SymphonyElixir.WaitMarker do
       {:error, :linear_budget_reserved}
     else
       ProjectContext.with_context(context, fn ->
-        lookup_in_context(context, identifier, team_key, number, query, graphql)
+        lookup_in_context(contexts, identifier, team_key, number, query, graphql)
       end)
     end
   end
 
-  defp lookup_in_context(context, identifier, team_key, number, query, graphql) do
+  defp lookup_in_context(contexts, identifier, team_key, number, query, graphql) do
     with {:ok, response} <- graphql.(query, %{team: team_key, number: String.to_integer(number)}),
          true <- response["errors"] in [nil, []],
          %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}} <- get_in(response, ["data", "issues"]),
-         true <- is_list(nodes) and length(nodes) <= 1 do
-      decode_target(context, identifier, nodes)
+         true <- is_list(nodes) do
+      decode_target(contexts, identifier, nodes)
     else
       {:error, _} = error -> error
+      %{"pageInfo" => %{"hasNextPage" => true}} -> {:error, :wait_target_ambiguous}
       _ -> {:error, :wait_target_lookup_incomplete}
     end
   end
 
-  defp decode_target(context, identifier, [%{"id" => id, "identifier" => target_identifier, "state" => %{"name" => state}} = target])
+  defp decode_target(contexts, identifier, [%{"id" => id, "identifier" => target_identifier, "state" => %{"name" => state}} = target])
        when target_identifier == identifier do
-    if bound_target?(context, target) do
-      {:ok, %{id: id, identifier: identifier, state: state, marker: true}}
-    else
-      {:ok, nil}
+    case Enum.find(contexts, &bound_target?(&1, target)) do
+      nil -> {:ok, nil}
+      context -> {:ok, %{id: id, identifier: identifier, state: state, marker: true, workspace_id: context.settings.tracker.app["workspace_id"], context_id: context.id}}
     end
   end
 

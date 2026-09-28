@@ -119,8 +119,16 @@ defmodule SymphonyElixir.RelayBudgetTest do
       {:ok, operations} = Agent.start_link(fn -> %{} end)
       {:ok, clock} = Agent.start_link(fn -> 0 end)
       {:ok, recovery_attempts} = Agent.start_link(fn -> 0 end)
-      [context] = contexts(root, ["one"])
+      [context | target_contexts] = contexts(root, ["one", "two", "two", "two"])
       context = put_in(context.settings.polling.interval_ms, 5_000)
+      contexts = [context | target_contexts]
+      target_context = hd(target_contexts)
+
+      target_node =
+        issue_node(target_context)
+        |> Map.put("identifier", "PRI-892")
+        |> Map.put("team", %{"key" => "PRI"})
+        |> Map.put("state", %{"name" => "Yolo Review"})
 
       active_nodes =
         for index <- 0..(active - 1)//1, active > 0 do
@@ -135,19 +143,21 @@ defmodule SymphonyElixir.RelayBudgetTest do
           |> Map.put("id", "yolo-#{index}")
           |> Map.put("identifier", "PRO-#{100 + index}")
           |> Map.put("state", %{"name" => "Yolo Review"})
+          |> Map.put("description", if(index == 1, do: "Wartet auf: PRI-892", else: ""))
           |> Map.put("delegate", %{"id" => "pai"})
           |> Map.put("labels", %{"nodes" => Enum.map([~s(Skip "Freigabe Implementierung"), ~s(Skip "Freigabe Review")], &%{"name" => &1})})
         end
 
-      nodes = active_nodes ++ delegated_nodes
+      nodes = active_nodes ++ delegated_nodes ++ [target_node]
 
       bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
-      configure_http(server, [context], nodes, bump)
-      start_supervised!({WorkerCapacity, contexts: [context]})
+      configure_http(server, contexts, nodes, bump)
+      start_supervised!({WorkerCapacity, contexts: contexts})
       start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
-      start_supervised!({ProjectPoller, contexts: [context]})
+      start_supervised!({ProjectPoller, contexts: contexts})
       context = ProjectPoller.context(context)
       assert {:ok, _} = ProjectPoller.candidates(context)
+      assert length(target_contexts) == 3
 
       :sys.replace_state(ProjectPoller, fn state ->
         session = state.relays["one"]
@@ -235,6 +245,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
               Coordinator.tick(yolo_state, delegated,
                 background_now: fn -> seconds * 1_000 end,
+                contexts: contexts,
                 recovery_now: fn -> seconds * 1_000 end,
                 lease: fn _, callback -> callback.() end,
                 invoke: fn _, _ ->
@@ -256,7 +267,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
           {yolo_state, marker_state}
         end)
 
-      assert map_size(yolo_state.yolo_marker_cache) == 4
+      assert map_size(yolo_state.yolo_marker_cache) == 5
       assert marker_state.completed_states["invisible-merge"] == "merge (ai)"
       assert Agent.get(recovery_attempts, & &1) == 4
 
@@ -266,6 +277,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
       IO.puts("thirty-minute relay budget active=#{active} requests=#{total} operations=#{inspect(by_operation)}")
       assert total == Enum.sum(Map.values(requests))
       assert total <= if(active == 0, do: 50, else: 375)
+      assert Map.get(by_operation, "WaitTarget", 0) <= 6
       refute Map.has_key?(by_operation, "SymphonyCommentScanSignal")
     end
   end
@@ -523,12 +535,23 @@ defmodule SymphonyElixir.RelayBudgetTest do
       query =~ "SymphonyWorkspacePoll" ->
         {:read, budget_workspace_issues(projects, nodes)}
 
+      query =~ "WaitTarget" ->
+        {:wait_target, budget_wait_target(payload, projects, nodes)}
+
       query =~ "comments(" ->
         {:comments, %{"issue" => %{"comments" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
 
       true ->
         {:read, budget_workspace_issues(projects, nodes)}
     end
+  end
+
+  defp budget_wait_target(payload, projects, nodes) do
+    variables = payload[:variables] || payload["variables"] || %{}
+    number = variables[:number] || variables["number"]
+    team = variables[:team] || variables["team"]
+    matches = Enum.filter(nodes, fn node -> node["identifier"] == "#{team}-#{number}" and node["project"]["slugId"] in projects end)
+    %{"issues" => %{"nodes" => matches, "pageInfo" => %{"hasNextPage" => false}}}
   end
 
   defp budget_issues_by_id(payload, projects, nodes) do

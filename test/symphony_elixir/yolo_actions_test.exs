@@ -986,10 +986,17 @@ defmodule SymphonyElixir.YoloActionsTest do
           else
             waiting = %{source | blocked_by: [%{id: created["id"], state: "Backlog"}]}
             change(&%{&1 | issues: Map.put(&1.issues, source.id, waiting)})
+            prior_entries = length(String.split(db().workpads[source.id] || "", "### YOLO-Übergabe")) - 1
+            assert :ok = Handoff.invoke(Map.put(request, "kind", "wait"), opts())
             assert :ok = Handoff.invoke(Map.put(request, "kind", "wait"), opts())
             assert db().issues[source.id].delegate_id == "pai"
             assert db().issues[source.id].state == "Yolo Review"
             assert Enum.any?(db().relations, &(&1["type"] == "blocks" and &1["issue"]["id"] == created["id"] and &1["relatedIssue"]["id"] == source.id))
+            assert db().workpads[source.id] =~ "Wartet auf blockierende Abhängigkeit; Agentdelegation und Status bleiben bestehen."
+            refute db().workpads[source.id] =~ "Betreiberpflicht offen"
+            refute db().workpads[source.id] =~ "Menschliche Zuständigkeit"
+            refute db().workpads[source.id] =~ "Auftrags-Digest:"
+            assert length(String.split(db().workpads[source.id], "### YOLO-Übergabe")) - 1 == prior_entries + 1
           end
 
           assert db().workpads[source.id] =~ finding["action"]
@@ -1071,15 +1078,77 @@ defmodule SymphonyElixir.YoloActionsTest do
 
       assert :ok =
                Handoff.invoke(
-                 %{"kind" => "wait", "issue_id" => source.id, "report" => "Betreiberpflicht offen", "review" => ReviewFixture.evidence()},
+                 %{"kind" => "wait", "issue_id" => source.id, "report" => "Prüfung abgeschlossen", "review" => ReviewFixture.evidence()},
+                 Keyword.put(opts(), :scan, fn _ -> {:ok, snapshot} end)
+               )
+
+      assert :ok =
+               Handoff.invoke(
+                 %{"kind" => "wait", "issue_id" => source.id, "report" => "Prüfung abgeschlossen", "review" => ReviewFixture.evidence()},
                  Keyword.put(opts(), :scan, fn _ -> {:ok, snapshot} end)
                )
     end)
 
     assert db().issues[source.id].state == "Yolo Review"
     assert db().issues[source.id].delegate_id == "pai"
-    assert db().workpads[source.id] =~ "Auftrags-Digest:"
+    digest = SymphonyElixir.Relay.Store.digest(duty)
+    assert db().workpads[source.id] =~ "Betreiberpflicht offen; Agentdelegation und Status bleiben bestehen. Auftrags-Digest: `#{digest}`."
+    refute db().workpads[source.id] =~ "Wartet auf blockierende Abhängigkeit"
     refute db().workpads[source.id] =~ "Menschliche Zuständigkeit"
+    assert length(String.split(db().workpads[source.id], "### YOLO-Übergabe")) == 2
+  end
+
+  test "a blocking follow-up wait reports the dependency even with an operator duty", %{issues: [issue | _]} do
+    source = %{issue | state: "Yolo Review"}
+    change(&%{&1 | issues: %{source.id => source}})
+    finding = hd(ReviewFixture.findings())
+
+    group([source], fn ->
+      {:ok, record} = Store.read("incoming")
+      :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
+
+      followup =
+        Map.merge(args([source], "followup"), %{
+          "operation_key" => finding["followup_operation_key"],
+          "blocks_origins" => true,
+          "title" => finding["action"],
+          "description" => Jason.encode!(finding),
+          "validation" => finding["expected"]
+        })
+
+      assert {:ok, created} = Followup.invoke(followup, opts())
+      assert Enum.any?(db().relations, &(&1["type"] == "blocks" and &1["issue"]["id"] == created["id"] and &1["relatedIssue"]["id"] == source.id))
+
+      waiting = %{source | blocked_by: [%{id: created["id"], state: "Backlog"}]}
+      change(&%{&1 | issues: Map.put(&1.issues, source.id, waiting)})
+
+      duty = %{
+        "version" => 1,
+        "action" => "Hauptinstanz neu starten",
+        "head_sha" => String.duplicate("a", 40),
+        "source_sha256" => String.duplicate("b", 64),
+        "expected" => "Start und Messung belegen",
+        "resume_state" => "Yolo Review"
+      }
+
+      body = "## Symphony Workpad\n\n### Betreiberauftrag\n\n```symphony-operator-handoff\n#{Jason.encode!(duty)}\n```\n"
+      change(&%{&1 | workpads: Map.put(&1.workpads, source.id, body)})
+      evidence = Map.put(ReviewFixture.evidence(), "findings", [finding])
+      request = %{"kind" => "wait", "issue_id" => source.id, "report" => "Folgefix angelegt", "review" => evidence}
+      options = Keyword.put(opts(), :scan, fn _ -> flunk("dependency wait must not read an operator confirmation") end)
+
+      assert :ok = Handoff.invoke(request, options)
+      assert :ok = Handoff.invoke(request, options)
+    end)
+
+    workpad = db().workpads[source.id]
+    assert workpad =~ "Wartet auf blockierende Abhängigkeit; Agentdelegation und Status bleiben bestehen."
+    refute workpad =~ "Betreiberpflicht offen"
+    refute workpad =~ "Menschliche Zuständigkeit"
+    refute workpad =~ "Auftrags-Digest:"
+    assert length(String.split(workpad, "### YOLO-Übergabe")) == 2
+    assert db().issues[source.id].state == "Yolo Review"
+    assert db().issues[source.id].delegate_id == "pai"
   end
 
   test "escalation requires a fresh human-only readback before completion", %{issues: [issue | _]} do

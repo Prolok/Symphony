@@ -152,6 +152,8 @@ als quellengebundenen Betreiberauftrag mit `resume_state: Yolo Review` im Workpa
 festhalten und mit `kind=wait` abschließen, auch ohne offene Abhängigkeit.
 Der Auftrags-Digest im Wartebericht bindet die strukturierte Pai-Bestätigung;
 erst sie weckt den nächsten Reviewlauf. Unveränderte Aufträge allein tun das nicht.
+Bei blockierender Abhängigkeit nennt `kind=wait` stattdessen die Abhängigkeit
+als Wartegrund, auch wenn ein Auftrag im Workpad steht; ein Digest entfällt.
 `kind=escalate` ist ausschließlich für strategische Produktentscheidungen oder
 Zugang/Rechte zulässig, die weder Agent noch Betreiber erhalten können. Eine echte
 Eskalation belässt den Status, entfernt die Agentdelegation, weist den konfigurierten

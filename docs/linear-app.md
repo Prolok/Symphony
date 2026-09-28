@@ -601,6 +601,16 @@ relevanter offener Änderungen. Aktion und erwarteter Nachweis sind konkrete,
 stabile Beschreibungen der Pflicht. `resume_state` nennt eine Phase von
 Planung (AI) bis Merge (AI) oder `Yolo Review`, ausgenommen Todo und Abbruch. Rolle, Fälligkeitsquelle,
 lokale Prüfungen und Ergebnisse stehen weiterhin im normalen Übergabetext.
+Für einen ausgestellten Betreiberauftrag gilt im aktuellen Workpad genau ein
+gültiger Block. Ein historischer
+Block muss vor einem neuen Auftrag ersetzt werden; der letzte von mehreren
+Blöcken gilt nicht automatisch. Ein mehrfacher oder ungültiger Block sperrt in
+`BLOCKER` und `Yolo Review` nur dieses Ticket für neue PO-Läufe. Der Fehler wird
+im betroffenen Workpad vermerkt; gültige Mitglieder derselben Gruppe bleiben
+beobachtbar und startbar. Bei unverändertem Signal werden fehlgeschlagene
+Berichte frühestens nach fünf Minuten erneut versucht; ein neues Signal erlaubt
+einen sofortigen Versuch. Warnlogs erscheinen je Ticket und Grund höchstens
+einmal in fünf Minuten. Nach Korrektur wird das Ticket erneut beobachtet.
 In der finalen Abnahme beendet
 `kind=wait` einen offenen Betreiberauftrag selbst ohne Abhängigkeit bei unverändertem
 Status und Agentdelegation. Der Wartebericht nennt den Digest des normalisierten

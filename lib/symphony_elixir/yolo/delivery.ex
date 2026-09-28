@@ -248,7 +248,8 @@ defmodule SymphonyElixir.Yolo.Delivery do
     end
   end
 
-  defp unresolved_delivery?(members, record) do
+  @spec unresolved_delivery?([map()], map()) :: boolean()
+  def unresolved_delivery?(members, record) do
     Enum.any?(members, fn issue ->
       case get_in(record, ["deliveries", issue.id]) do
         %{"run_id" => run_id} -> not ended?(record, run_id)

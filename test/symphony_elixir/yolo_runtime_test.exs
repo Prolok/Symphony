@@ -786,6 +786,249 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Agent.get(reads, & &1) == 1
   end
 
+  test "foreign target is queried once across contexts and relay state releases the wait", %{issues: [issue | _], context: source} do
+    foreign = put_in(source.settings.tracker.app["workspace_id"], "foreign")
+    foreign = put_in(foreign.settings.tracker.project_slug, "target-project")
+
+    contexts =
+      for index <- 1..3 do
+        context = put_in(foreign.settings.tracker.project_slug, if(index == 2, do: "target-project", else: "other-#{index}"))
+        %{context | id: "foreign-#{index}"}
+      end
+
+    issue = %{
+      issue
+      | state: "Yolo Review",
+        description: "Wartet auf: PRI-892",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "source"}
+    }
+
+    another = %{issue | id: "second-waiting-issue", identifier: "PRO-998"}
+
+    {:ok, lookups} = Agent.start_link(fn -> 0 end)
+    {:ok, target_state} = Agent.start_link(fn -> "Merge (AI)" end)
+    {:ok, relay_state} = Agent.start_link(fn -> :unavailable end)
+    target = %{"id" => "foreign-target", "identifier" => "PRI-892", "project" => %{"slugId" => "target-project"}, "team" => %{"key" => "PRI"}}
+    response = fn state -> %{"data" => %{"issues" => %{"nodes" => [Map.put(target, "state", %{"name" => state})], "pageInfo" => %{"hasNextPage" => false}}}} end
+
+    opts = [
+      contexts: [source | contexts],
+      budget_background: false,
+      relay_background: true,
+      relay_ready: fn _ -> true end,
+      background_now: fn -> Process.get(:target_now, 0) end,
+      wait_comments: fn _ -> {:ok, []} end,
+      query: fn _, _ ->
+        Agent.update(lookups, &(&1 + 1))
+        {:ok, response.(Agent.get(target_state, & &1))}
+      end,
+      target_relay: fn context, ["foreign-target"] ->
+        assert context.id == "foreign-2"
+
+        case Agent.get(relay_state, & &1) do
+          :unavailable -> {:error, :relay_unavailable}
+          {:out_of_scope, state} -> {:ok, [{{"generation", 1}, %{id: "foreign-target", identifier: "PRI-892", state: state, in_project_scope: false}}]}
+          state -> {:ok, [{{"generation", 1}, %{id: "foreign-target", identifier: "PRI-892", state: state, in_project_scope: true}}]}
+        end
+      end,
+      report_error: fn _, _, _ -> flunk("temporary target failure must not write a Workpad error") end
+    ]
+
+    {cache, _} =
+      Enum.reduce(0..11, {%{}, nil}, fn tick, {cache, _} ->
+        Process.put(:target_now, tick * 5_000)
+        assert {:ok, updated, cache} = Yolo.Dependencies.refresh_background([issue, another], cache, opts)
+        assert Enum.all?(updated, &match?([%{state: "Merge (AI)"}], &1.blocked_by))
+        {cache, updated}
+      end)
+
+    assert Agent.get(lookups, & &1) == 1
+    Agent.update(relay_state, fn _ -> {:out_of_scope, "Fertig"} end)
+    Process.put(:target_now, 60_000)
+    assert {:ok, [unchanged], cache} = Yolo.Dependencies.refresh_background([issue], cache, opts)
+    assert [%{state: "Merge (AI)"}] = unchanged.blocked_by
+    Agent.update(relay_state, fn _ -> "Yolo Review" end)
+    Process.put(:target_now, 65_000)
+    assert {:ok, [released], cache} = Yolo.Dependencies.refresh_background([issue], cache, opts)
+    assert [%{state: "Yolo Review"}] = released.blocked_by
+    assert Agent.get(lookups, & &1) == 1
+
+    Agent.update(relay_state, fn _ -> :unavailable end)
+    Agent.update(target_state, fn _ -> "Review" end)
+    Process.put(:target_now, 299_999)
+    assert {:ok, [still_known], cache} = Yolo.Dependencies.refresh_background([issue], cache, opts)
+    assert [%{state: "Yolo Review"}] = still_known.blocked_by
+    Process.put(:target_now, 300_000)
+    assert {:ok, [fallback], cache} = Yolo.Dependencies.refresh_background([issue], cache, opts)
+    assert [%{state: "Review"}] = fallback.blocked_by
+    assert Agent.get(lookups, & &1) == 2
+
+    failure = Keyword.put(opts, :query, fn _, _ -> {:error, :linear_app_request_unavailable} end)
+    Process.put(:target_now, 600_000)
+    assert {:ok, [last_known], cache} = Yolo.Dependencies.refresh_background([issue], cache, failure)
+    assert [%{state: "Review"}] = last_known.blocked_by
+
+    reserved = Keyword.put(opts, :query, fn _, _ -> {:error, :linear_budget_reserved} end)
+    Process.put(:target_now, 900_000)
+    assert {:ok, [last_known], cache} = Yolo.Dependencies.refresh_background([issue], cache, reserved)
+    assert [%{state: "Review"}] = last_known.blocked_by
+
+    assert Map.has_key?(cache, {:wait_target, "foreign", "PRI-892"})
+    cleared = %{issue | description: ""}
+    assert {:ok, [%{blocked_by: []}], cleared_cache} = Yolo.Dependencies.refresh_background([cleared], cache, opts)
+    refute Map.has_key?(cleared_cache, {:wait_target, "foreign", "PRI-892"})
+  end
+
+  test "changed relay identifier invalidates the old marker binding immediately", %{issues: [issue | _], context: source} do
+    foreign = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign")
+    foreign = put_in(foreign.settings.tracker.project_slug, "target-project")
+    waiting = %{issue | description: "Wartet auf: PRI-892"}
+    target = %{"id" => "foreign-target", "identifier" => "PRI-892", "project" => %{"slugId" => "target-project"}, "team" => %{"key" => "PRI"}, "state" => %{"name" => "Merge (AI)"}}
+    {:ok, lookups} = Agent.start_link(fn -> 0 end)
+
+    opts = [
+      contexts: [source, foreign],
+      background_now: fn -> 0 end,
+      query: fn _, _ ->
+        Agent.get_and_update(lookups, fn count ->
+          nodes = if count == 0, do: [target], else: []
+          response = %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}}
+          {{:ok, response}, count + 1}
+        end)
+      end,
+      target_relay: fn _, ["foreign-target"] ->
+        {:ok, [{{"generation", 1}, %{id: "foreign-target", identifier: "PRI-999", state: "Yolo Review", in_project_scope: true}}]}
+      end,
+      report_error: fn _, identifier, reason ->
+        send(self(), {:wait_error, identifier, reason})
+        :ok
+      end
+    ]
+
+    assert {:ok, [%{state: "Merge (AI)"}], cache} = WaitMarker.resolve_targets_background(waiting, [], %{}, opts)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_unresolved}, _} =
+             WaitMarker.resolve_targets_background(waiting, [], cache, opts)
+
+    assert_receive {:wait_error, "PRI-892", :wait_target_unresolved}
+    assert Agent.get(lookups, & &1) == 2
+  end
+
+  test "background lookup keeps ambiguous foreign targets visible and caches the error", %{issues: [issue | _], context: source} do
+    first = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign-a") |> Map.put(:id, "foreign-a")
+    second = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign-b") |> Map.put(:id, "foreign-b")
+    waiting = %{issue | description: "Wartet auf: PRI-892"}
+    target = %{"identifier" => "PRI-892", "project" => %{"slugId" => "project"}, "team" => %{"key" => "PRI"}, "state" => %{"name" => "Merge (AI)"}}
+    response = fn nodes -> %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}} end
+
+    report = fn _, identifier, reason ->
+      send(self(), {:wait_error, identifier, reason})
+      :ok
+    end
+
+    across_workspaces = [
+      contexts: [source, first, second],
+      background_now: fn -> 0 end,
+      report_error: report,
+      query: fn _, _ ->
+        workspace = ProjectContext.current().settings.tracker.app["workspace_id"]
+        {:ok, response.([Map.put(target, "id", "target-#{workspace}")])}
+      end
+    ]
+
+    assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_ambiguous}, cache} =
+             WaitMarker.resolve_targets_background(waiting, [], %{}, across_workspaces)
+
+    assert map_size(cache) == 2
+    assert_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
+
+    Process.put(:ambiguous_target_lookups, 0)
+
+    within_workspace = [
+      contexts: [source, first],
+      background_now: fn -> Process.get(:target_now, 0) end,
+      report_error: report,
+      query: fn _, _ ->
+        Process.put(:ambiguous_target_lookups, Process.get(:ambiguous_target_lookups) + 1)
+        foreign = Map.put(target, "id", "foreign-target")
+        {:ok, response.([foreign, foreign])}
+      end
+    ]
+
+    assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_ambiguous}, cache} =
+             WaitMarker.resolve_targets_background(waiting, [], %{}, within_workspace)
+
+    assert_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
+    Process.put(:target_now, 60_000)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_ambiguous}, _} =
+             WaitMarker.resolve_targets_background(waiting, [], cache, within_workspace)
+
+    assert Process.get(:ambiguous_target_lookups) == 1
+    assert_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
+  end
+
+  test "first transient target failure is throttled without a Workpad error", %{issues: [issue | _], context: source} do
+    foreign = put_in(source.settings.tracker.app["workspace_id"], "foreign")
+
+    waiting = %{
+      issue
+      | state: "Yolo Review",
+        description: "Wartet auf: PRI-892",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "source"}
+    }
+
+    {:ok, lookups} = Agent.start_link(fn -> 0 end)
+    {:ok, availability} = Agent.start_link(fn -> :error end)
+
+    target = %{
+      "id" => "foreign-target",
+      "identifier" => "PRI-892",
+      "project" => %{"slugId" => "project"},
+      "team" => %{"key" => "PRI"},
+      "state" => %{"name" => "Yolo Review"}
+    }
+
+    opts = [
+      contexts: [source, foreign],
+      budget_background: false,
+      relay_background: true,
+      relay_ready: fn _ -> true end,
+      background_now: fn -> Process.get(:target_now, 0) end,
+      wait_comments: fn _ -> {:ok, []} end,
+      query: fn _, _ ->
+        Agent.update(lookups, &(&1 + 1))
+
+        case Agent.get(availability, & &1) do
+          :error -> {:error, :linear_app_request_unavailable}
+          :ok -> {:ok, %{"data" => %{"issues" => %{"nodes" => [target], "pageInfo" => %{"hasNextPage" => false}}}}}
+        end
+      end,
+      report_error: fn _, _, _ -> flunk("transient failure must not write a Workpad error") end
+    ]
+
+    cache =
+      Enum.reduce(0..11, %{}, fn tick, cache ->
+        Process.put(:target_now, tick * 5_000)
+
+        assert {:error, :linear_app_request_unavailable, updated} =
+                 Yolo.Dependencies.refresh_background([waiting], cache, opts)
+
+        updated
+      end)
+
+    assert Agent.get(lookups, & &1) == 1
+    Agent.update(availability, fn _ -> :ok end)
+    Process.put(:target_now, 300_000)
+    assert {:ok, [recovered], _} = Yolo.Dependencies.refresh_background([waiting], cache, opts)
+    assert [%{state: "Yolo Review"}] = recovered.blocked_by
+    assert Agent.get(lookups, & &1) == 2
+  end
+
   test "permanent operation recovery backs off and changed source wakes it", %{issues: [issue | _]} do
     intent = %{"key" => "followup:test", "request" => %{"kind" => "followup", "origin_ids" => [issue.id]}, "issue_id" => Ecto.UUID.generate(), "done" => false}
     assert :ok = Operations.save(intent)
@@ -1201,10 +1444,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, {:wait_marker_unresolved, "PRI-173", :wait_target_unresolved}} =
              WaitMarker.targets(waiting, base ++ [query: fn _, _ -> {:ok, absent} end])
 
-    assert {:error, {:wait_marker_unresolved, "PRI-173", :offline}} =
+    assert {:error, :offline} =
              WaitMarker.targets(waiting, base ++ [query: fn _, _ -> {:error, :offline} end])
 
-    assert {:error, {:wait_marker_unresolved, "PRI-173", :wait_target_lookup_incomplete}} =
+    assert {:error, :wait_target_lookup_incomplete} =
              WaitMarker.targets(waiting, base ++ [query: fn _, _ -> {:ok, %{"data" => %{"issues" => %{"nodes" => []}}}} end])
 
     assert {:error, {:wait_marker_unresolved, "PRI-173", :wait_target_unresolved, :write_failed}} =
@@ -1231,6 +1474,14 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     assert {:error, {:wait_marker_unresolved, "PRI-173", :wait_target_ambiguous}} =
              WaitMarker.targets(waiting, opts ++ [query: fn _, _ -> response.([%{"id" => "incomplete"}]) end])
+
+    assert {:error, {:wait_marker_unresolved, "PRI-173", :wait_target_ambiguous}} =
+             WaitMarker.targets(waiting, opts ++ [query: fn _, _ -> response.([valid, valid]) end])
+
+    paginated = put_in(elem(response.([valid]), 1)["data"]["issues"]["pageInfo"]["hasNextPage"], true)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-173", :wait_target_ambiguous}} =
+             WaitMarker.targets(waiting, opts ++ [query: fn _, _ -> {:ok, paginated} end])
 
     invalid_scope = put_in(target.settings.tracker.team_key, nil)
 

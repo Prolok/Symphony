@@ -33,7 +33,12 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   defp load_background(issues, cache, opts) do
     project_id = ProjectContext.current().id
     current_ids = MapSet.new(issues, & &1.id)
-    cache = Map.reject(cache, fn {{context_id, issue_id}, _} -> context_id == project_id and not MapSet.member?(current_ids, issue_id) end)
+
+    cache =
+      Map.reject(cache, fn
+        {{context_id, issue_id}, _} -> context_id == project_id and not MapSet.member?(current_ids, issue_id)
+        _ -> false
+      end)
 
     issues
     |> Enum.reduce_while({:ok, [], cache}, fn issue, {:ok, acc, entries} ->
@@ -45,7 +50,23 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     |> finish_background()
   end
 
-  defp finish_background({:ok, refreshed, entries}), do: {:ok, Enum.reverse(refreshed), entries}
+  defp finish_background({:ok, refreshed, entries}) do
+    refreshed = Enum.reverse(refreshed)
+
+    active_markers =
+      refreshed
+      |> Enum.flat_map(&Enum.filter(&1.blocked_by, fn blocker -> Map.get(blocker, :marker) == true end))
+      |> MapSet.new(& &1.identifier)
+
+    entries =
+      Map.reject(entries, fn
+        {{:wait_target, _workspace, identifier}, _} -> not MapSet.member?(active_markers, identifier)
+        _ -> false
+      end)
+
+    {:ok, refreshed, entries}
+  end
+
   defp finish_background(error), do: error
 
   defp refresh_background_issue(issue, cache, opts) do
@@ -61,9 +82,9 @@ defmodule SymphonyElixir.Yolo.Dependencies do
 
     with {:ok, blockers} <- background_blockers(issue, opts),
          {:ok, workpad_markers, updated} <- background_markers(issue, cache, opts) do
-      case WaitMarker.resolve_targets(issue, workpad_markers, marker_opts) do
-        {:ok, markers} -> {:ok, %{issue | blocked_by: blockers ++ markers}, updated}
-        {:error, reason} -> {:error, reason, updated}
+      case WaitMarker.resolve_targets_background(issue, workpad_markers, updated, marker_opts) do
+        {:ok, markers, resolved} -> {:ok, %{issue | blocked_by: blockers ++ markers}, resolved}
+        {:error, reason, resolved} -> {:error, reason, resolved}
       end
     else
       {:error, reason} -> {:error, reason, cache}

@@ -490,7 +490,7 @@ defmodule SymphonyElixir.CommentJournalTest do
   end
 
   @tag timeout: 120_000
-  test "two thousand closed receipts keep a scan snapshot and local write below one second", %{binding: binding} do
+  test "two thousand closed receipts keep a scan lock hold and local write below one second", %{binding: binding} do
     directory = Path.join(binding["state_root"], "comments")
     File.mkdir_p!(directory)
     written_at = DateTime.utc_now() |> DateTime.add(-15, :day) |> DateTime.to_iso8601()
@@ -515,12 +515,17 @@ defmodule SymphonyElixir.CommentJournalTest do
       File.write!(Path.join(directory, id <> ".confirmed.json"), Jason.encode!(%{"comment" => remote}))
     end
 
-    started = System.monotonic_time(:millisecond)
-    assert {:ok, view} = CommentJournal.snapshot(binding)
-    scan_ms = System.monotonic_time(:millisecond) - started
+    owner = self()
+
+    assert {:ok, view} =
+             CommentJournal.snapshot(binding,
+               lock_observer: fn purpose, ms -> send(owner, {:lock_hold, purpose, ms}) end
+             )
+
     assert map_size(view) == 2_000
     assert length(Path.wildcard(Path.join([directory, "archive", "*.intent.json"]))) == 16
-    assert scan_ms < 1_000, "scan snapshot held lock for #{scan_ms} ms"
+    assert_receive {:lock_hold, "scan-snapshot", scan_hold}, 30_000
+    assert scan_hold < 1_000, "scan snapshot held lock for #{scan_hold} ms"
 
     started = System.monotonic_time(:millisecond)
 

@@ -975,6 +975,45 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     refute Yolo.Dependencies.dispatchable?(blocked)
   end
 
+  test "a failed marker report still isolates its issue during background refresh", %{issues: [first, second | _], context: context} do
+    waiting = %{
+      first
+      | state: "Yolo Review",
+        description: "Wartet auf: PRI-999",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    ready = %{
+      second
+      | state: "Yolo Review",
+        description: "",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    assert {:ok, [blocked, ^ready], _cache} =
+             Yolo.Dependencies.refresh_background([waiting, ready], %{},
+               contexts: [context],
+               relay_background: true,
+               relay_ready: fn _ -> true end,
+               wait_comments: fn _ -> {:ok, []} end,
+               report_error: fn issue, identifier, reason ->
+                 send(self(), {:report_attempt, issue.id, identifier, reason})
+                 {:error, :offline}
+               end
+             )
+
+    assert_receive {:report_attempt, first_id, "PRI-999", :wait_target_unresolved}
+    assert first_id == first.id
+    assert [%{error: {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :offline}}] = blocked.blocked_by
+    assert Yolo.Dependencies.marker_error?(blocked)
+    refute Yolo.Dependencies.dispatchable?(blocked)
+    assert Yolo.Dependencies.dispatchable?(ready)
+  end
+
   test "an ambiguous marker leaves an independent issue available", %{issues: [first, second | _], context: source} do
     foreign = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign") |> Map.put(:id, "foreign")
 

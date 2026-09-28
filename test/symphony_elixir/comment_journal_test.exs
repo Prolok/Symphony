@@ -346,6 +346,59 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert Enum.all?(results, &(&1["state"] == "pending"))
   end
 
+  test "repeated stale reads stop with a bounded busy result", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("stale", "Text"), fn _ -> {:error, :offline} end)
+
+    assert {:error, :comment_journal_busy} =
+             CommentJournal.snapshot(binding, journal_reader: fn _ -> {:error, :comment_journal_stale_index} end)
+  end
+
+  test "a receipt changed during cold index construction is retried", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("changing", "Text"), fn _ -> {:error, :offline} end)
+    [intent] = journal_files(binding, "intent")
+    index = Path.join([binding["state_root"], "comments", "active-index.json"])
+    File.rm!(index)
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    reader = fn id, fallback ->
+      if Agent.get_and_update(calls, fn n -> {n, n + 1} end) == 0 do
+        File.write!(intent, File.read!(intent) <> " ")
+        {:error, :comment_journal_corrupt}
+      else
+        fallback.(id)
+      end
+    end
+
+    assert {:ok, %{"changing" => [%{confirmed: nil}]}} = CommentJournal.snapshot(Map.put(binding, :index_entry_reader, reader))
+    assert Agent.get(calls, & &1) >= 2
+  end
+
+  test "an index removed during preload is rebuilt from receipts", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("retained", "Text"), fn _ -> {:error, :offline} end)
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    index = Path.join([binding["state_root"], "comments", "active-index.json"])
+    assert File.exists?(index)
+
+    reader = fn _ ->
+      File.rm(index)
+      {:ok, nil}
+    end
+
+    assert {:ok, %{"retained" => [%{confirmed: nil}]}} = CommentJournal.snapshot(Map.put(binding, :active_index_reader, reader))
+    assert File.exists?(index)
+  end
+
+  test "failed index persistence preserves original receipts", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("durable", "Text"), fn _ -> {:error, :offline} end)
+    index = Path.join([binding["state_root"], "comments", "active-index.json"])
+    File.rm(index)
+    failing = Map.put(binding, :active_index_writer, fn _path, _data -> {:error, :unavailable} end)
+
+    assert {:error, :comment_journal_persist_failed} = CommentJournal.snapshot(failing)
+    assert length(journal_files(binding, "intent")) == 1
+    assert {:ok, %{"durable" => [%{confirmed: nil}]}} = CommentJournal.snapshot(binding)
+  end
+
   @tag timeout: 90_000
   test "four scans and two writers share the journal for thirty seconds without busy errors", %{binding: binding} do
     deadline = System.monotonic_time(:millisecond) + 30_000

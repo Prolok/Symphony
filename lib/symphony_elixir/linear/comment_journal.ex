@@ -386,11 +386,9 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp finish_archive_moves(binding) do
     with {:ok, files} <- active_files(binding),
-         {:ok, catalog} <- archive_catalog(binding) do
-      case finish_archive_moves(binding, files, catalog) do
-        {:ok, _moved?} -> :ok
-        error -> error
-      end
+         {:ok, catalog} <- archive_catalog(binding),
+         {:ok, _moved?} <- finish_archive_moves(binding, files, catalog) do
+      :ok
     end
   end
 
@@ -502,15 +500,8 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     record["_confirmed"] == true and relay_version_matches?(action, version, record["updated_at"])
   end
 
-  defp relay_receipt_matches?(binding, record, action, version) do
-    case confirmed_receipt(binding, record) do
-      {:ok, %{"comment" => comment}} ->
-        matches?(record, comment, binding) and relay_version_matches?(action, version, comment["updatedAt"])
-
-      _ ->
-        false
-    end
-  end
+  # Raw entries in the indexed view are open; valid closed receipts are projected to summaries.
+  defp relay_receipt_matches?(_binding, _record, _action, _version), do: false
 
   defp relay_version_matches?("create", _version, _confirmed), do: true
   defp relay_version_matches?(_action, version, confirmed), do: not is_nil(version) and same_timestamp?(version, confirmed)
@@ -657,18 +648,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     match?({:ok, %{"state" => "rejected"}}, DurableState.read(path(binding, record, "rejected")))
   end
 
-  defp confirmed?(binding, record) do
-    if record["_archived"] == true or record["_indexed"] == true do
-      record["_confirmed"] == true
-    else
-      case confirmed_receipt(binding, record) do
-        {:ok, %{"comment" => comment}} -> matches?(record, comment, binding)
-        _ -> false
-      end
-    end
-  end
-
-  defp confirmed_receipt(binding, record), do: DurableState.read(path(binding, record, "confirmed"))
+  defp confirmed?(_binding, record), do: record["_confirmed"] == true
 
   defp persist_intents(binding, receipts, context) do
     reduce_ok(receipts, &persist_intent(binding, &1, context))
@@ -917,9 +897,6 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     candidate = if rebuild? or not File.exists?(active_index(binding)), do: build_index_candidate(binding), else: nil
 
     case candidate do
-      {:error, :comment_journal_stale_index} ->
-        {:error, :comment_journal_stale_index}
-
       {:error, _reason} = error ->
         error
 
@@ -962,7 +939,8 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp preload_active_index(binding) do
     before = File.stat(active_index(binding), time: :native)
-    result = active_index_catalog(binding)
+    reader = Map.get(binding, :active_index_reader, &active_index_catalog/1)
+    result = reader.(binding)
     after_read = File.stat(active_index(binding), time: :native)
     if before == after_read, do: {after_read, result}, else: nil
   end
@@ -1038,7 +1016,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp build_index_candidate(binding) do
     with {:ok, before} <- active_signatures(binding) do
-      case read_many(intent_ids(before), &read_active_entry(binding, &1)) do
+      case read_candidate_entries(binding, before) do
         {:ok, pairs} ->
           # The lock-side signature check re-reads only files changed while this
           # candidate was built; a concurrent short write need not restart it.
@@ -1048,6 +1026,11 @@ defmodule SymphonyElixir.Linear.CommentJournal do
           candidate_read_error(binding, before, error)
       end
     end
+  end
+
+  defp read_candidate_entries(binding, signatures) do
+    reader = Map.get(binding, :index_entry_reader, fn id, fallback -> fallback.(id) end)
+    read_many(intent_ids(signatures), fn id -> reader.(id, &read_active_entry(binding, &1)) end)
   end
 
   defp candidate_entries(signatures, pairs) do
@@ -1152,8 +1135,9 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp maybe_write_active_index(binding, _index, updated) do
     data = %{"workspace_id" => binding["workspace_id"], "installation_id" => binding["installation_id"], "entries" => updated, "digest" => fingerprint(updated)}
+    writer = Map.get(binding, :active_index_writer, &DurableState.write/2)
 
-    case DurableState.write(active_index(binding), data) do
+    case writer.(active_index(binding), data) do
       :ok -> :ok
       _ -> {:error, :comment_journal_persist_failed}
     end

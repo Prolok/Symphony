@@ -395,9 +395,18 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, true} = Escalation.pending(issue.id)
     tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, []} end))
     assert {:ok, true} = Escalation.pending(issue.id)
-    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, [%{issue | delegate_id: nil}]} end))
+    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, [%{issue | state: "Review", delegate_id: nil}]} end))
     assert {:ok, true} = Escalation.pending(issue.id)
     refute_receive :notification_sent
+
+    handed_over = %{issue | state: "Yolo Review", delegate_id: nil}
+    tick(state, [handed_over], Keyword.put(base, :fetch, fn _ -> {:ok, [handed_over]} end))
+    assert_receive :notification_sent
+    assert {:ok, false} = Escalation.pending(issue.id)
+
+    revised = put_in(proposal, ["escalation", "decision"], "Andere Frage")
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, revised, missing)
+    assert {:ok, true} = Escalation.pending(issue.id)
 
     tick(
       state,
@@ -410,7 +419,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     assert {:ok, true} = Escalation.pending(issue.id)
 
-    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, [issue]} end))
+    tick(state, [handed_over], Keyword.put(base, :fetch, fn _ -> {:ok, [handed_over]} end))
     assert_receive :notification_sent
     assert {:ok, false} = Escalation.pending(issue.id)
 
@@ -744,6 +753,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
           {"plain", put_in(answered, ["versions", "answer", "source", "body"], "Pai: Neustart erfolgreich")},
           {"wrong_digest", put_in(answered, ["versions", "answer", "source", "body"], String.replace(body, digest, String.duplicate("b", 64)))},
           {"malformed", put_in(answered, ["versions", "answer", "source", "body"], String.replace(body, "\"evidence\":", "\"missing\":"))},
+          {"edited", put_in(answered, ["versions", "answer", "source", "editedAt"], "2026-09-28T13:00:00Z")},
           {"deleted", put_in(answered, ["versions", "answer", "deleted"], true)}
         ] do
       member = %{issue | last_comment_signal: %{relay_epoch: name}}
@@ -775,6 +785,19 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, next_digest} = Yolo.OperatorHandoff.current(issue, next_snapshot)
     next_confirmation = %{confirmation | "handoff_digest" => next_digest}
     next_body = "```symphony-operator-confirmation\n#{Jason.encode!(next_confirmation)}\n```"
+
+    edited_old_answer =
+      next_snapshot
+      |> put_in(["versions", "answer", "source", "body"], next_body)
+      |> put_in(["versions", "answer", "source", "editedAt"], "2026-09-28T13:00:00Z")
+
+    old_edit_issue = %{issue | last_comment_signal: %{relay_epoch: "old-edit"}}
+
+    assert {:ok, after_old_edit, _} =
+             Observation.capture([old_edit_issue], after_answer, scan: fn _ -> {:ok, edited_old_answer} end)
+
+    assert after_old_edit[issue.id]["source"] == after_answer[issue.id]["source"]
+
     next_comment = %{comment | "key" => "answer2", "source" => %{comment["source"] | "id" => "answer2", "body" => next_body}}
     next_answered = next_snapshot |> put_in(["versions", "answer2"], next_comment) |> put_in(["current", "answer2"], "answer2")
     next_answer_issue = %{issue | last_comment_signal: %{relay_epoch: "answer2"}}

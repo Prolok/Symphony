@@ -170,6 +170,32 @@ defmodule SymphonyElixir.ProjectContractsTest do
     end)
   end
 
+  test "project polling retains a human-owned final escalation for notification retry", %{contexts: [one, _]} do
+    context = %{one | assignee_ids: ["human"], human_handoff_id: "human", yolo_agent_id: "pai"}
+    handed_over = issue_node(context) |> Map.put("id", "escalated") |> put_in(["state", "name"], "Yolo Review") |> Map.put("delegate", nil)
+    foreign = put_in(handed_over, ["assignee", "id"], "other") |> Map.put("id", "foreign")
+    parent = self()
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _headers ->
+      variables = payload["variables"] || payload[:variables]
+      send(parent, {:candidate_filter, variables.filter})
+
+      {:ok, %{status: 200, body: %{"data" => %{"issues" => %{"nodes" => [handed_over, foreign], "pageInfo" => %{"hasNextPage" => false}}}}}}
+    end)
+
+    assert {:ok, candidates} = Client.fetch_project_candidates([context])
+    assert_receive {:candidate_filter, filter}
+
+    assert Enum.any?(get_in(filter, ["or", Access.at(0), "or"]), fn branch ->
+             state = Enum.find(branch["and"], &Map.has_key?(&1, "state"))
+
+             state == %{"state" => %{"name" => %{"in" => ["Yolo Review", "BLOCKER"]}}} and
+               %{"assignee" => %{"id" => %{"eq" => "human"}}} in branch["and"]
+           end)
+
+    assert Enum.map(candidates[context.id], & &1.id) == ["escalated"]
+  end
+
   test "human verification rejects app accounts and checks every page", %{contexts: contexts} do
     parent = self()
 

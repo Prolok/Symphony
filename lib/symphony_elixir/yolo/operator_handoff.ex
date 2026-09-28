@@ -40,7 +40,7 @@ defmodule SymphonyElixir.Yolo.OperatorHandoff do
     version = get_in(inbox, ["versions", key])
     source = if is_map(version), do: version["source"], else: nil
 
-    is_map(source) and source["id"] == id and version["deleted"] == false and
+    is_map(source) and source["id"] == id and is_nil(source["editedAt"]) and version["deleted"] == false and
       version["origin"] == "integration" and version["advisory_suppressed"] != true and
       pai_source?(source) and confirmation_digest(source["body"]) == digest
   end

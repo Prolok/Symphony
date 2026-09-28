@@ -514,7 +514,13 @@ defmodule SymphonyElixir.Linear.Client do
         |> Map.put("delegate", %{"id" => %{"eq" => context.yolo_agent_id}})
         |> restrict_candidate_ids(ProjectContext.with_context(context, &Config.allowed_issue_ids/0))
 
-      %{"or" => [regular, %{"and" => Enum.map(delegated, fn {field, value} -> %{field => value} end)}]}
+      escalated =
+        scope_filter(scope)
+        |> Map.put("state", %{"name" => %{"in" => ["Yolo Review", "BLOCKER"]}})
+        |> Map.put("assignee", %{"id" => %{"eq" => ProjectContext.with_context(context, &Config.human_handoff_id/0)}})
+        |> restrict_candidate_ids(ProjectContext.with_context(context, &Config.allowed_issue_ids/0))
+
+      %{"or" => Enum.map([regular, delegated, escalated], fn branch -> %{"and" => Enum.map(branch, fn {field, value} -> %{field => value} end)} end)}
     else
       regular
     end
@@ -540,7 +546,14 @@ defmodule SymphonyElixir.Linear.Client do
     scope_matches and (not is_list(ids) or node["id"] in ids) and
       (delegated_node?(node, context) or
          (get_in(node, ["state", "name"]) in candidate_state_names(tracker.active_states) and
-            project_assignee_matches?(node, context)))
+            project_assignee_matches?(node, context)) or
+         escalated_candidate?(node, context))
+  end
+
+  defp escalated_candidate?(node, context) do
+    get_in(node, ["state", "name"]) in ["Yolo Review", "BLOCKER"] and
+      get_in(node, ["assignee", "id"]) == ProjectContext.with_context(context, &Config.human_handoff_id/0) and
+      is_nil(get_in(node, ["delegate", "id"]))
   end
 
   defp delegated_node?(node, context) do

@@ -1,8 +1,9 @@
 defmodule SymphonyElixir.Yolo.Handoff do
   @moduledoc "Evidenced acceptance or durable waiting without leaving Yolo Review prematurely."
+  require Logger
   alias SymphonyElixir.{Config, RoutineTest, TestRun, Tracker, Workpad, Workspace}
   alias SymphonyElixir.Yolo.{ActionScope, API, Completion, Dependencies, Escalation, Operations}
-  alias SymphonyElixir.Yolo.{MergeReadiness, ReviewContract, Scope, Store}
+  alias SymphonyElixir.Yolo.{MergeReadiness, OperatorHandoff, ReviewContract, Scope, Store}
 
   @authorization {__MODULE__, :issue}
 
@@ -41,9 +42,14 @@ defmodule SymphonyElixir.Yolo.Handoff do
 
   defp decide(%{state: "Yolo Review"} = issue, %{"kind" => kind} = args, report, opts) when kind in ["wait", "escalate"] do
     with {:ok, [fresh]} <- Dependencies.refresh([issue], opts),
-         true <- kind == "escalate" or not Dependencies.unblocked?(fresh),
-         :ok <- report(issue, report, opts),
-         :ok <- Completion.invoke(%{"issue_id" => issue.id, "result" => report}, Keyword.merge(opts, review_waiting: true, unresolved_escalation: kind == "escalate")) do
+         {:ok, duty_digest} <- wait_allowed(fresh, kind, opts),
+         :ok <- report(issue, report, kind, opts, duty_digest),
+         :ok <- maybe_handover(issue, args, opts),
+         :ok <-
+           Completion.invoke(
+             %{"issue_id" => issue.id, "result" => report},
+             Keyword.merge(opts, review_waiting: true, handoff_completed: kind == "escalate", unresolved_escalation: kind == "escalate")
+           ) do
       maybe_escalate(issue, args, opts)
     else
       {:error, _} = error -> error
@@ -51,11 +57,19 @@ defmodule SymphonyElixir.Yolo.Handoff do
     end
   end
 
+  defp decide(%{state: "BLOCKER"} = issue, %{"kind" => "escalate"} = args, report, opts) do
+    with :ok <- report(issue, report, "escalate", opts),
+         :ok <- maybe_handover(issue, args, opts),
+         :ok <- Completion.invoke(%{"issue_id" => issue.id, "result" => report}, Keyword.put(opts, :handoff_completed, true)) do
+      maybe_escalate(issue, args, opts)
+    end
+  end
+
   defp decide(issue, args, report, opts) do
     with :ok <- acceptance(issue, args, opts),
          :ok <- attempt_available(issue.id),
          human when is_binary(human) <- Config.human_handoff_id(),
-         :ok <- report(issue, report, opts),
+         :ok <- report(issue, report, args["kind"], opts),
          :ok <- maybe_escalate(issue, args, opts),
          {:ok, [fresh]} <- ActionScope.sources([issue.id], opts),
          true <- fresh.state == issue.state,
@@ -70,6 +84,29 @@ defmodule SymphonyElixir.Yolo.Handoff do
       _ -> {:error, :yolo_handoff_not_ready}
     end
   end
+
+  defp wait_allowed(_issue, "escalate", _opts), do: {:ok, nil}
+
+  defp wait_allowed(issue, "wait", opts) do
+    if Dependencies.unblocked?(issue) do
+      scan = Keyword.get(opts, :scan, &SymphonyElixir.CommentCheckpoint.scan/1)
+
+      with {:ok, inbox} <- scan.(issue),
+           true <- not is_nil(inbox["last_successful_scan"]) and is_nil(inbox["scan_error"]),
+           {:ok, digest} when is_binary(digest) <- OperatorHandoff.current(issue, inbox),
+           {:ok, nil} <- OperatorHandoff.confirmation(issue, inbox, digest) do
+        {:ok, digest}
+      else
+        {:error, _} = error -> error
+        _ -> {:error, :yolo_wait_requires_dependency}
+      end
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp maybe_handover(issue, %{"kind" => "escalate"} = args, opts), do: Escalation.handover(issue, args, opts, &update/3)
+  defp maybe_handover(_issue, _args, _opts), do: :ok
 
   defp cleanup(issue) do
     if issue.state == "Yolo Review" and not RoutineTest.manages_project?(),
@@ -117,7 +154,7 @@ defmodule SymphonyElixir.Yolo.Handoff do
     previous = Process.put(@authorization, issue.id)
 
     try do
-      expected = if issue.state == "Yolo Review", do: "Review", else: "BLOCKER"
+      expected = if Map.has_key?(input, :stateId), do: "Review", else: issue.state
       result = API.update(issue.id, input, opts)
       fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
@@ -134,11 +171,19 @@ defmodule SymphonyElixir.Yolo.Handoff do
     end
   end
 
-  defp maybe_escalate(issue, args, opts) do
-    if args["kind"] == "escalate" or issue.state == "BLOCKER",
-      do: Escalation.notify(issue, args, opts),
-      else: :ok
+  defp maybe_escalate(issue, %{"kind" => "escalate"} = args, opts) do
+    case Escalation.notify(issue, args, opts) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("YOLO escalation channel unavailable issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}; Linear handover confirmed")
+        :ok
+    end
   end
+
+  defp maybe_escalate(%{state: "BLOCKER"} = issue, args, opts), do: Escalation.notify(issue, args, opts)
+  defp maybe_escalate(_issue, _args, _opts), do: :ok
 
   defp escalation_report(%{"escalation" => details}) when is_map(details),
     do: "\n\nEskalation:\n```json\n" <> Jason.encode!(Map.take(details, ~w(cause attempts proposal decision)), pretty: true) <> "\n```"
@@ -152,10 +197,19 @@ defmodule SymphonyElixir.Yolo.Handoff do
       Enum.map_join(pending, "\n", &"- Operation #{&1["key"]}; reservierte Ticket-ID #{&1["issue_id"]}. Anlage/Links/Ursprungabschluss anhand des Journals abgleichen; keine Ersatzanlage.")
   end
 
-  defp report(issue, report, opts) do
+  defp report(issue, report, kind, opts, duty_digest \\ nil) do
     fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1)
     write = Keyword.get(opts, :workpad, &Workpad.update_tracker_workpad/2)
-    entry = "\n\n### YOLO-Übergabe\n\n" <> report <> "\n\nMenschliche Zuständigkeit: @" <> Config.human_handoff_id() <> "."
+
+    owner =
+      if kind == "wait" do
+        suffix = if is_binary(duty_digest), do: " Auftrags-Digest: `#{duty_digest}`.", else: ""
+        "\n\nBetreiberpflicht offen; Agentdelegation und Status bleiben bestehen." <> suffix
+      else
+        "\n\nMenschliche Zuständigkeit: @" <> Config.human_handoff_id() <> "."
+      end
+
+    entry = "\n\n### YOLO-Übergabe\n\n" <> report <> owner
 
     with {:ok, comments} <- fetch.(issue.id), {:ok, workpad} <- Workpad.find_comment(comments) do
       if String.contains?(workpad.body, entry), do: :ok, else: write.(issue.id, workpad.body <> entry)

@@ -142,8 +142,14 @@ mit stabilen Operationsschlüsseln erfassen. Abnahmesperrende Fixes mit
 `blocks_origins=true` verknüpfen und `kind=wait` mit lesbarem Bericht und
 strukturiertem Prüf-/Lernbeleg abschließen; Ursprung bleibt in `Yolo Review`.
 Nach Merge sämtlicher Folgefixes gemeinsam prüfen und Vorgänger zuerst nach
-`Review` übergeben. Nur bestandene Abnahme entfernt die Delegation. Externe
-Hindernisse über `kind=escalate` melden, ohne die Schlussphase zu verlassen.
+`Review` übergeben. Fällige Betreiberaktionen (Main-Update/-Neustart,
+Live-Aktivierung, Live-/Host-Messung, isoliertes Deployment) als quellengebundenen
+Auftrag mit `resume_state: Yolo Review` festhalten und mit `kind=wait` abschließen,
+auch ohne Abhängigkeit; Pai bestätigt mit aktuellem Auftrags-Digest, Ergebnis und
+Beleg. `kind=escalate` nur für strategische Produktentscheidungen oder Zugang/Rechte,
+die weder Agent noch Betreiber erhalten können. Die Eskalation belässt den Status,
+entfernt die Delegation und übergibt Frage und Empfehlung sichtbar an den Menschen.
+Menschliche Neudelegation ist dessen Entscheidung.
 `review_contract.binding` unverändert übernehmen. Neue Anforderungen außerhalb
 des Abnahmescopes begründet getrennt führen. Außerhalb des Sammellaufs den
 autorisierten Berichts-/Korrekturweg nutzen.

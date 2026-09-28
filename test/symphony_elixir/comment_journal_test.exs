@@ -3,7 +3,8 @@ defmodule SymphonyElixir.CommentJournalTest do
 
   alias Absinthe.Language, as: L
   alias Absinthe.Phase.Parse
-  alias SymphonyElixir.Linear.{CommentJournal, CommentMutations, DurableState, IssueLease, WorkpadTransfer}
+  alias SymphonyElixir.Linear.{CommentInbox, CommentJournal, CommentMutations}
+  alias SymphonyElixir.Linear.{DurableState, IssueLease, WorkpadTransfer}
 
   setup do
     root = Path.join([File.cwd!(), "_build", "journal-test-#{System.unique_integer([:positive])}"])
@@ -140,8 +141,8 @@ defmodule SymphonyElixir.CommentJournalTest do
 
     lookup = fn _ -> response(%{"comment" => comment(record)}) end
     assert :observed = CommentJournal.observe(binding, lookup, fn -> :observed end)
-    assert {:ok, %{"pending" => [%{confirmed: confirmed}]}} = CommentJournal.observation_snapshot(binding, nil)
-    assert confirmed["id"] == "pending"
+    assert {:ok, %{"pending" => [%{confirmed: true}]} = view} = CommentJournal.observation_snapshot(binding, nil)
+    assert CommentJournal.classify_snapshot(view, binding, comment(record)) == :own
 
     assert {:error, :offline} = CommentJournal.execute(binding, variable_create("another", "Offen"), fn _ -> {:error, :offline} end)
     owner = self()
@@ -287,6 +288,151 @@ defmodule SymphonyElixir.CommentJournalTest do
     refute CommentJournal.confirmed_comment_id?(binding, "pending")
   end
 
+  test "active index detects an in-place receipt edit and rejects corruption", %{binding: binding} do
+    payload = variable_create("indexed", "Text")
+    remote = %{"id" => "indexed", "body" => "Text", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
+    assert {:ok, _} = CommentJournal.execute(binding, payload, fn _ -> response(%{"commentCreate" => %{"symphonyReceipt" => remote}}) end)
+    assert {:ok, view} = CommentJournal.snapshot(binding)
+    assert CommentJournal.classify_snapshot(view, binding, remote) == :own
+
+    directory = Path.join(binding["state_root"], "comments")
+    [confirmation] = Path.wildcard(Path.join(directory, "*.confirmed.json"))
+    File.write!(confirmation, Jason.encode!(%{"comment" => %{remote | "body" => "Fext"}}))
+    assert {:ok, view} = CommentJournal.snapshot(binding)
+    assert CommentJournal.classify_snapshot(view, binding, remote) == :pending
+
+    index = Path.join(directory, "active-index.json")
+    File.rm!(index)
+    [intent] = Path.wildcard(Path.join(directory, "*.intent.json"))
+    original_intent = File.read!(intent)
+    File.write!(intent, "{}")
+    assert {:error, :comment_journal_corrupt} = CommentJournal.snapshot(binding)
+    File.write!(intent, original_intent)
+    assert {:ok, view} = CommentJournal.snapshot(binding)
+    assert CommentJournal.classify_snapshot(view, binding, remote) == :pending
+
+    File.write!(confirmation, Jason.encode!(%{"comment" => remote}))
+    assert {:ok, view} = CommentJournal.snapshot(binding)
+    assert CommentJournal.classify_snapshot(view, binding, remote) == :own
+
+    File.rm!(intent)
+    assert {:error, :comment_journal_corrupt} = CommentJournal.snapshot(binding)
+    File.write!(intent, original_intent)
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+
+    File.write!(index, "{}")
+    assert {:error, :comment_journal_corrupt} = CommentJournal.snapshot(binding)
+  end
+
+  test "more than 32 open intents remain readable and reconcilable", %{binding: binding} do
+    fields =
+      Enum.map_join(1..33, " ", fn number ->
+        "item#{number}: commentCreate(input:{issueId:\"issue\",body:\"#{number}\"}) {success}"
+      end)
+
+    assert {:error, :offline} =
+             CommentJournal.execute(binding, %{"query" => "mutation { #{fields} }"}, fn _ -> {:error, :offline} end)
+
+    assert {:ok, view} = CommentJournal.snapshot(binding)
+    assert map_size(view) == 33
+
+    assert Enum.all?(view, fn
+             {_id, [%{confirmed: nil}]} -> true
+             _ -> false
+           end)
+
+    assert {:ok, results} = CommentJournal.reconcile(binding, fn _ -> {:error, :offline} end)
+    assert length(results) == 33
+    assert Enum.all?(results, &(&1["state"] == "pending"))
+  end
+
+  test "repeated stale reads stop with a bounded busy result", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("stale", "Text"), fn _ -> {:error, :offline} end)
+
+    assert {:error, :comment_journal_busy} =
+             CommentJournal.snapshot(binding, journal_reader: fn _ -> {:error, :comment_journal_stale_index} end)
+  end
+
+  test "a receipt changed during cold index construction is retried", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("changing", "Text"), fn _ -> {:error, :offline} end)
+    [intent] = journal_files(binding, "intent")
+    index = Path.join([binding["state_root"], "comments", "active-index.json"])
+    File.rm!(index)
+    {:ok, calls} = Agent.start_link(fn -> 0 end)
+
+    reader = fn id, fallback ->
+      if Agent.get_and_update(calls, fn n -> {n, n + 1} end) == 0 do
+        File.write!(intent, File.read!(intent) <> " ")
+        {:error, :comment_journal_corrupt}
+      else
+        fallback.(id)
+      end
+    end
+
+    assert {:ok, %{"changing" => [%{confirmed: nil}]}} = CommentJournal.snapshot(Map.put(binding, :index_entry_reader, reader))
+    assert Agent.get(calls, & &1) >= 2
+  end
+
+  test "an index removed during preload is rebuilt from receipts", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("retained", "Text"), fn _ -> {:error, :offline} end)
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    index = Path.join([binding["state_root"], "comments", "active-index.json"])
+    assert File.exists?(index)
+
+    reader = fn _ ->
+      File.rm(index)
+      {:ok, nil}
+    end
+
+    assert {:ok, %{"retained" => [%{confirmed: nil}]}} = CommentJournal.snapshot(Map.put(binding, :active_index_reader, reader))
+    assert File.exists?(index)
+  end
+
+  test "failed index persistence preserves original receipts", %{binding: binding} do
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("durable", "Text"), fn _ -> {:error, :offline} end)
+    index = Path.join([binding["state_root"], "comments", "active-index.json"])
+    File.rm(index)
+    failing = Map.put(binding, :active_index_writer, fn _path, _data -> {:error, :unavailable} end)
+
+    assert {:error, :comment_journal_persist_failed} = CommentJournal.snapshot(failing)
+    assert length(journal_files(binding, "intent")) == 1
+    assert {:ok, %{"durable" => [%{confirmed: nil}]}} = CommentJournal.snapshot(binding)
+  end
+
+  @tag timeout: 90_000
+  test "four scans and two writers share the journal for thirty seconds without busy errors", %{binding: binding} do
+    deadline = System.monotonic_time(:millisecond) + 30_000
+
+    scans =
+      for number <- 1..4 do
+        Task.async(fn ->
+          repeat_until(deadline, fn _ ->
+            CommentInbox.scan(binding, %{id: "parallel-#{number}"}, fn -> {:ok, []} end,
+              force_full: true,
+              confirm_absence: fn _ -> :deleted end
+            )
+          end)
+        end)
+      end
+
+    writes =
+      for number <- 1..2 do
+        Task.async(fn ->
+          repeat_until(deadline, fn iteration ->
+            id = "parallel-write-#{number}-#{iteration}"
+
+            CommentJournal.execute(binding, variable_create(id, "Body"), fn _ ->
+              remote = %{"id" => id, "body" => "Body", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
+              response(%{"commentCreate" => %{"symphonyReceipt" => remote}})
+            end)
+          end)
+        end)
+      end
+
+    counts = Enum.map(scans ++ writes, &Task.await(&1, 60_000))
+    assert Enum.all?(counts, &match?({:ok, n} when n > 0, &1)), inspect(counts)
+  end
+
   test "an old receipt with an unverified outcome stays active", %{binding: binding} do
     assert {:error, :offline} = CommentJournal.execute(binding, variable_create("unclear", "Erwartet"), fn _ -> {:error, :offline} end)
     [intent] = journal_files(binding, "intent")
@@ -344,7 +490,7 @@ defmodule SymphonyElixir.CommentJournalTest do
   end
 
   @tag timeout: 120_000
-  test "two thousand closed receipts keep a scan snapshot and local write below one second", %{binding: binding} do
+  test "two thousand closed receipts keep a scan lock hold and local write below one second", %{binding: binding} do
     directory = Path.join(binding["state_root"], "comments")
     File.mkdir_p!(directory)
     written_at = DateTime.utc_now() |> DateTime.add(-15, :day) |> DateTime.to_iso8601()
@@ -369,12 +515,17 @@ defmodule SymphonyElixir.CommentJournalTest do
       File.write!(Path.join(directory, id <> ".confirmed.json"), Jason.encode!(%{"comment" => remote}))
     end
 
-    started = System.monotonic_time(:millisecond)
-    assert {:ok, view} = CommentJournal.snapshot(binding)
-    scan_ms = System.monotonic_time(:millisecond) - started
+    owner = self()
+
+    assert {:ok, view} =
+             CommentJournal.snapshot(binding,
+               lock_observer: fn purpose, ms -> send(owner, {:lock_hold, purpose, ms}) end
+             )
+
     assert map_size(view) == 2_000
     assert length(Path.wildcard(Path.join([directory, "archive", "*.intent.json"]))) == 16
-    assert scan_ms < 1_000, "scan snapshot held lock for #{scan_ms} ms"
+    assert_receive {:lock_hold, "scan-snapshot", scan_hold}, 30_000
+    assert scan_hold < 1_000, "scan snapshot held lock for #{scan_hold} ms"
 
     started = System.monotonic_time(:millisecond)
 
@@ -386,6 +537,93 @@ defmodule SymphonyElixir.CommentJournalTest do
 
     write_ms = System.monotonic_time(:millisecond) - started
     assert write_ms < 1_000, "local write with 2,000 receipts took #{write_ms} ms"
+  end
+
+  @tag timeout: 180_000
+  test "large active journal keeps snapshot lock holds below one second", %{binding: binding} do
+    directory = Path.join(binding["state_root"], "comments")
+    File.mkdir_p!(directory)
+    body = String.duplicate("B", 36_000)
+    written_at = DateTime.utc_now() |> DateTime.to_iso8601()
+
+    for number <- 1..2_400 do
+      id = "large-#{number}"
+
+      record = %{
+        "operation_id" => id,
+        "comment_id" => id,
+        "workspace_id" => binding["workspace_id"],
+        "installation_id" => binding["installation_id"],
+        "operation" => "commentCreate",
+        "issue_id" => "issue",
+        "author_id" => "app",
+        "written_at" => written_at,
+        "input" => %{"body" => body}
+      }
+
+      remote = %{"id" => id, "body" => body, "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
+      File.write!(Path.join(directory, id <> ".intent.json"), Jason.encode!(record))
+      File.write!(Path.join(directory, id <> ".confirmed.json"), Jason.encode!(%{"comment" => remote}))
+    end
+
+    owner = self()
+    opts = [scan_lock_timeout: 30_000, lock_observer: fn purpose, ms -> send(owner, {:lock_hold, purpose, ms}) end]
+    assert {:ok, warm_view} = CommentJournal.snapshot(binding, opts)
+    assert map_size(warm_view) == 2_400
+    assert_receive {:lock_hold, "scan-snapshot", cold_hold}, 30_000
+    assert cold_hold < 1_000, "cold snapshot held lock for #{cold_hold} ms"
+
+    observed_binding = Map.put(binding, :lock_observer, opts[:lock_observer])
+    assert CommentJournal.confirmed_comment_id?(observed_binding, "large-1")
+    assert CommentJournal.confirmed_relay_event?(observed_binding, %{"commentId" => "large-1", "action" => "create"})
+    refute CommentJournal.confirmed_reply_after?(observed_binding, "absent", 0)
+
+    for purpose <- ["confirmed-comment-lookup", "relay-echo-lookup", "confirmed-reply-lookup"] do
+      assert_receive {:lock_hold, ^purpose, hold}, 30_000
+      assert hold < 1_000, "#{purpose} held lock for #{hold} ms"
+    end
+
+    previous_schedulers = System.schedulers_online()
+    loaded_schedulers = min(previous_schedulers, 4)
+    on_exit(fn -> :erlang.system_flag(:schedulers_online, previous_schedulers) end)
+    :erlang.system_flag(:schedulers_online, loaded_schedulers)
+    load = for _ <- 1..loaded_schedulers, do: Task.async(&burn_until_stopped/0)
+
+    durations =
+      for _ <- 1..3 do
+        Task.async(fn ->
+          started = System.monotonic_time(:millisecond)
+          assert {:ok, view} = CommentJournal.snapshot(binding, opts)
+          assert map_size(view) >= 2_400
+          System.monotonic_time(:millisecond) - started
+        end)
+      end
+
+    writer =
+      Task.async(fn ->
+        observed_binding = Map.put(binding, :lock_observer, opts[:lock_observer])
+        id = "large-new"
+        remote = %{"id" => id, "body" => "Neu", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
+
+        CommentJournal.execute(observed_binding, variable_create(id, "Neu"), fn _ ->
+          response(%{"commentCreate" => %{"symphonyReceipt" => remote}})
+        end)
+      end)
+
+    durations = Enum.map(durations, &Task.await(&1, 30_000))
+    assert {:ok, _} = Task.await(writer, 30_000)
+    Enum.each(load, &send(&1.pid, :stop))
+    Enum.each(load, &Task.await(&1, 30_000))
+
+    holds =
+      for _ <- 1..3 do
+        assert_receive {:lock_hold, "scan-snapshot", hold}, 30_000
+        hold
+      end
+
+    assert Enum.max(holds) < 1_000, "large snapshots held lock for #{inspect(holds)} ms; total #{inspect(durations)} ms"
+    assert_receive {:lock_hold, "write-recovery-snapshot", recovery_hold}, 30_000
+    assert recovery_hold < 1_000, "write recovery snapshot held lock for #{recovery_hold} ms"
   end
 
   test "parallel clients cannot enter the same journal transaction during HTTP", %{binding: binding} do
@@ -1547,6 +1785,28 @@ defmodule SymphonyElixir.CommentJournalTest do
   defp expected_target(record), do: record["source"]["body"] <> "\n\nVorgänger: old (Übergabe " <> record["transfer_id"] <> ")\n"
 
   defp create_payload, do: %{"query" => "mutation { commentCreate(input: {issueId: \"issue\", body: \"created\"}) { success } }", "variables" => %{}}
+
+  defp repeat_until(deadline, action, iteration \\ 0) do
+    if System.monotonic_time(:millisecond) >= deadline do
+      {:ok, iteration}
+    else
+      case action.(iteration) do
+        {:ok, _} -> repeat_until(deadline, action, iteration + 1)
+        error -> {:error, error}
+      end
+    end
+  end
+
+  defp burn_until_stopped do
+    _work = Enum.reduce(1..10_000, 0, fn number, total -> rem(total + number * number, 1_000_003) end)
+
+    receive do
+      :stop -> :ok
+    after
+      0 -> burn_until_stopped()
+    end
+  end
+
   defp comment(record), do: %{"id" => record["comment_id"], "body" => record["input"]["body"], "updatedAt" => "2026-09-10T00:00:00Z", "user" => %{"id" => "app"}, "issue" => %{"id" => "issue"}}
   defp response(data), do: {:ok, %{status: 200, body: %{"data" => data}}}
 end

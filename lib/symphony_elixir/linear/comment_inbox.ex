@@ -56,7 +56,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
       # All Linear callbacks run before either local lock is acquired. A changed
       # inbox snapshot is retried so an old absence cannot erase a new version.
       result = scan_result(scan_due(state, binding, fetch, opts), state)
-      scan_opts = Keyword.put_new(opts, :inbox_lock_timeout, 750)
+      scan_opts = Keyword.put_new(opts, :inbox_lock_timeout, 10_000)
       committed = transaction(binding, issue, scan_opts, &commit_if_current(&1, state, result))
       retry_changed(committed, binding, issue, fetch, opts, remaining)
     end

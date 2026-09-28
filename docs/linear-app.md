@@ -1475,11 +1475,24 @@ in kleinen Chargen den aktiven Suchpfad. Ihre Dateien liegen unverändert unter
 Suchindex erhält die Klassifikation alter eigener Kommentare sowie Relay-,
 Antwort- und Recovery-Abfragen. Offene oder unklare Intents bleiben aktiv.
 Bei einem unterbrochenen Verschieben gilt der Index bereits als maßgeblich.
+Für aktive geschlossene Belege hält `comments/active-index.json` kompakte,
+inhaltlich gebundene Summaries. Der Index ist an Workspace und Installation
+gebunden und durch einen Digest geschützt. Dateiliste sowie Inode, Größe und
+Nanosekunden-Zeitstempel der Originaldateien werden bei jedem Snapshot geprüft;
+neue, offene oder geänderte Belege werden aus den Originaldateien gelesen.
+Offene Belege behalten im Index nur Dateisignaturen und lösen ohne Änderung
+keinen wiederholten vollständigen Indexaufbau aus.
+Bestätigungs-, Relay- und Antwortabfragen nutzen dieselbe validierte Sicht.
+Ein fehlender oder umfangreich veralteter Index wird außerhalb des gemeinsamen
+Journal-Locks aufgebaut und vor der Übernahme unter dem Lock erneut geprüft.
+Der Beleg bleibt maßgeblich: Bestätigung und Intent werden vor der
+Indexaktualisierung dauerhaft geschrieben. Beschädigte Indizes sperren den
+Abgleich, statt einen ungesicherten Kommentar als menschlich einzuordnen.
 
 Konkurrierende Journalzugriffe warten regulär bis zu 10 Sekunden auf den Lock
 (`comment_journal_busy` bei Zeitüberschreitung, `comment_journal_unavailable`
-bei Helfer-/Backendfehlern). Scans verwenden für den lokalen Journalabgleich
-eine kürzere Wartezeit und wiederholen `comment_journal_busy` begrenzt; die
+bei Helfer-/Backendfehlern). Auch Scans und scan-seitige Reconciliation warten
+bis zu 10 Sekunden und wiederholen `comment_journal_busy` begrenzt; die
 Startprüfung wiederholt diesen Fehler ebenfalls, bevor ein Workerfehler zählt.
 Schreibvorgänge behalten eine begrenzte Wartezeit. Eine Journal-Haltezeit über
 zwei Sekunden wird mit Dauer, Zweck und verfügbarem Issue-/Session-Kontext auf

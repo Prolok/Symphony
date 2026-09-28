@@ -347,7 +347,7 @@ defmodule SymphonyElixir.RootEnvTest do
     File.cp!(Path.expand("../../WORKFLOW.md", __DIR__), Path.join(ctx.source, "WORKFLOW.md"))
     File.mkdir_p!(Path.join(ctx.source, "priv/linear_app"))
 
-    for helper <- ["issue_lease.py", "state_lock.py"] do
+    for helper <- ["issue_lease.py", "state_lock.py", "journal_signatures.py"] do
       File.cp!(Path.expand("../../priv/linear_app/#{helper}", __DIR__), Path.join(ctx.source, "priv/linear_app/#{helper}"))
     end
 

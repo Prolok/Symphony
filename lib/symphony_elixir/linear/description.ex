@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Linear.Description do
 
   @inline_link ~r/(?<!!)\[([^\[\]\\`<>\r\n]+)\]\((<?)(https:\/\/linear\.app\/[a-zA-Z0-9_-]+\/issue\/[A-Z][A-Z0-9]*-\d+(?:\/[a-zA-Z0-9_-]+)?)(>?)\)/
   @issue_link ~r/(\A|[ \n])\[([A-Z][A-Z0-9]*-\d+)\]\((https:\/\/linear\.app\/[a-zA-Z0-9_-]+\/issue\/([A-Z][A-Z0-9]*-\d+)(?:\/[a-zA-Z0-9_-]+)?)\)(?=\z|[ \n])/
-  @domain_autolink ~r/(?<![A-Za-z0-9.!-])\[([A-Za-z0-9.-]+)\]\((<?)(https?:\/\/[A-Za-z0-9.-]+\/?)(>?)\)(?![A-Za-z0-9-]|\.[A-Za-z0-9-])/
+  @domain_autolink ~r/(?<![A-Za-z0-9._!@\/-])\[([A-Za-z0-9.-]+)\]\((<?)(https?:\/\/[A-Za-z0-9.-]+\/?)(>?)\)(?![A-Za-z0-9-]|\.[A-Za-z0-9-])/
   @domain ~r/\A[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*\.[A-Za-z]{2,}\z/
   @nested_fence ~r/^[ \t]*(?:(?:[-*+]|\d+[.)]) +|> ?)+(?:`{3,}|~{3,})/m
 
@@ -16,7 +16,8 @@ defmodule SymphonyElixir.Linear.Description do
     text = expected <> "\n" <> actual
 
     not Regex.match?(~r/^(?: {4}|\t| {0,3}<)/m, text) and
-      not Regex.match?(@nested_fence, text) and canonical(expected) == canonical(actual)
+      not Regex.match?(@nested_fence, text) and canonical(expected) == canonical(actual) and
+      unchanged_explicit_domain_links?(expected, actual)
   end
 
   def equivalent?(_, _), do: false
@@ -52,7 +53,7 @@ defmodule SymphonyElixir.Linear.Description do
 
   defp fragment(value, offset), do: value |> binary_part(offset, min(48, byte_size(value) - offset)) |> inspect()
 
-  defp canonical(text) do
+  defp canonical(text, domain_mode \\ :normalize) do
     source_lines = String.split(text, "\n")
     plain = plain_document?(source_lines)
     {lines, _} = Enum.map_reduce(source_lines, nil, &line/2)
@@ -61,7 +62,7 @@ defmodule SymphonyElixir.Linear.Description do
     |> heading_gaps()
     |> list_continuation()
     |> Enum.chunk_by(fn {kind, _} -> kind in [:blank, :literal, :heading] end)
-    |> Enum.flat_map(fn lines -> lines |> domain_links() |> inline_links() end)
+    |> Enum.flat_map(fn lines -> lines |> domain_links(domain_mode) |> inline_links() end)
     |> Enum.map(&plain_backslashes(&1, plain))
     |> Enum.reduce([], fn
       {:blank, ""}, [{:blank, ""} | _] = acc ->
@@ -99,26 +100,26 @@ defmodule SymphonyElixir.Linear.Description do
   defp list_continuation([line | rest]), do: [line | list_continuation(rest)]
   defp list_continuation([]), do: []
 
-  defp domain_links([{kind, _} | _] = lines) when kind in [:blank, :literal], do: lines
+  defp domain_links([{kind, _} | _] = lines, _mode) when kind in [:blank, :literal], do: lines
 
-  defp domain_links(lines) do
+  defp domain_links(lines, mode) do
     text = Enum.map_join(lines, "\n", &elem(&1, 1))
     runs = Regex.scan(~r/`+/, text, return: :index) |> Enum.map(&hd/1)
 
     case code_chunks(text, runs) do
       {:ok, chunks} ->
-        normalize_domain_lines(chunks, lines)
+        normalize_domain_lines(chunks, lines, mode)
 
       :error ->
         lines
     end
   end
 
-  defp normalize_domain_lines(chunks, lines) do
+  defp normalize_domain_lines(chunks, lines, mode) do
     if ambiguous_domain_links?(chunks, lines) do
       lines
     else
-      normalized = Enum.map_join(chunks, &normalize_domain_chunk/1)
+      normalized = Enum.map_join(chunks, &normalize_domain_chunk(&1, mode))
       Enum.zip_with(lines, String.split(normalized, "\n"), fn {kind, _}, line -> {kind, line} end)
     end
   end
@@ -146,17 +147,49 @@ defmodule SymphonyElixir.Linear.Description do
     Regex.replace(@issue_link, without_domains, &link/5)
   end
 
-  defp normalize_domain_chunk({:code, part}), do: part
-  defp normalize_domain_chunk({:prose, part}), do: Regex.replace(@domain_autolink, part, &domain_link(&1, &2, &3, &4, &5, :normalize))
+  defp normalize_domain_chunk({:code, part}, _mode), do: part
+  defp normalize_domain_chunk({:prose, part}, mode), do: Regex.replace(@domain_autolink, part, &domain_link(&1, &2, &3, &4, &5, mode))
 
   defp domain_link(all, label, open, url, close, mode) do
     targets = for scheme <- ["http://", "https://"], suffix <- ["", "/"], do: scheme <> label <> suffix
 
     if {open, close} in [{"", ""}, {"<", ">"}] and Regex.match?(@domain, label) and url in targets do
-      if mode == :remove, do: "", else: label
+      case mode do
+        :remove -> ""
+        :tag -> label <> <<0>> <> Base.encode64(all) <> <<0>>
+        :normalize -> label
+      end
     else
       all
     end
+  end
+
+  defp unchanged_explicit_domain_links?(expected, actual) do
+    expected_links = explicit_domain_links(expected)
+    actual_links = explicit_domain_links(actual)
+
+    Enum.all?(expected_links, fn {position, link} ->
+      not Map.has_key?(actual_links, position) or Map.fetch!(actual_links, position) == link
+    end)
+  end
+
+  defp explicit_domain_links(text) do
+    text
+    |> canonical(:tag)
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {{_kind, line}, line_index} ->
+      {links, _removed} =
+        ~r/\x00([A-Za-z0-9+\/=]+)\x00/
+        |> Regex.scan(line, return: :index)
+        |> Enum.reduce({[], 0}, fn [{start, length}, {encoded_start, encoded_length}], {links, removed} ->
+          encoded = binary_part(line, encoded_start, encoded_length)
+          link = Base.decode64!(encoded)
+          {[{{line_index, start - removed}, link} | links], removed + length}
+        end)
+
+      links
+    end)
+    |> Map.new()
   end
 
   defp inline_links([{kind, _} | _] = lines) when kind in [:blank, :literal, :heading], do: lines

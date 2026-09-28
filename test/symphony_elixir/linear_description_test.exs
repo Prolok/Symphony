@@ -123,6 +123,9 @@ defmodule SymphonyElixir.LinearDescriptionTest do
     refute Description.equivalent?("vorOpenClaw.app", "vor[OpenClaw.app](https://OpenClaw.app)")
     refute Description.equivalent?("OpenClaw.appdanach", "[OpenClaw.app](https://OpenClaw.app)danach")
     refute Description.equivalent?("OpenClaw.app.suffix", "[OpenClaw.app](https://OpenClaw.app).suffix")
+    refute Description.equivalent?("support@OpenClaw.app", "support@[OpenClaw.app](https://OpenClaw.app)")
+    refute Description.equivalent?("https://OpenClaw.app", "https://[OpenClaw.app](https://OpenClaw.app)")
+    refute Description.equivalent?("foo_OpenClaw.app", "foo_[OpenClaw.app](https://OpenClaw.app)")
 
     for {before, returned} <- [
           {"`OpenClaw.app`", "`[OpenClaw.app](https://OpenClaw.app)`"},
@@ -133,6 +136,14 @@ defmodule SymphonyElixir.LinearDescriptionTest do
         ] do
       refute Description.equivalent?(before, returned), inspect({before, returned})
     end
+  end
+
+  test "an existing domain link keeps its exact destination while other plain domains may autolink" do
+    expected = "[OpenClaw.app](http://OpenClaw.app) und api.example.org"
+    actual = "[OpenClaw.app](https://OpenClaw.app) und [api.example.org](https://api.example.org)"
+
+    refute Description.equivalent?(expected, actual)
+    assert Description.equivalent?(expected, "[OpenClaw.app](http://OpenClaw.app) und [api.example.org](https://api.example.org)")
   end
 
   test "terminal issue links in unchanged checkbox lists retain the existing comparison" do

@@ -916,6 +916,60 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Agent.get(lookups, & &1) == 2
   end
 
+  test "background lookup keeps ambiguous foreign targets visible and caches the error", %{issues: [issue | _], context: source} do
+    first = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign-a") |> Map.put(:id, "foreign-a")
+    second = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign-b") |> Map.put(:id, "foreign-b")
+    waiting = %{issue | description: "Wartet auf: PRI-892"}
+    target = %{"identifier" => "PRI-892", "project" => %{"slugId" => "project"}, "team" => %{"key" => "PRI"}, "state" => %{"name" => "Merge (AI)"}}
+    response = fn nodes -> %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}} end
+
+    report = fn _, identifier, reason ->
+      send(self(), {:wait_error, identifier, reason})
+      :ok
+    end
+
+    across_workspaces = [
+      contexts: [source, first, second],
+      background_now: fn -> 0 end,
+      report_error: report,
+      query: fn _, _ ->
+        workspace = ProjectContext.current().settings.tracker.app["workspace_id"]
+        {:ok, response.([Map.put(target, "id", "target-#{workspace}")])}
+      end
+    ]
+
+    assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_ambiguous}, cache} =
+             WaitMarker.resolve_targets_background(waiting, [], %{}, across_workspaces)
+
+    assert map_size(cache) == 2
+    assert_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
+
+    Process.put(:ambiguous_target_lookups, 0)
+
+    within_workspace = [
+      contexts: [source, first],
+      background_now: fn -> Process.get(:target_now, 0) end,
+      report_error: report,
+      query: fn _, _ ->
+        Process.put(:ambiguous_target_lookups, Process.get(:ambiguous_target_lookups) + 1)
+        foreign = Map.put(target, "id", "foreign-target")
+        {:ok, response.([foreign, foreign])}
+      end
+    ]
+
+    assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_ambiguous}, cache} =
+             WaitMarker.resolve_targets_background(waiting, [], %{}, within_workspace)
+
+    assert_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
+    Process.put(:target_now, 60_000)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_ambiguous}, _} =
+             WaitMarker.resolve_targets_background(waiting, [], cache, within_workspace)
+
+    assert Process.get(:ambiguous_target_lookups) == 1
+    assert_receive {:wait_error, "PRI-892", :wait_target_ambiguous}
+  end
+
   test "first transient target failure is throttled without a Workpad error", %{issues: [issue | _], context: source} do
     foreign = put_in(source.settings.tracker.app["workspace_id"], "foreign")
 

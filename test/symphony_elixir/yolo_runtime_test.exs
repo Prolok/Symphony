@@ -574,12 +574,19 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     changed = %{issue | last_comment_signal: %{relay_epoch: "new"}}
 
-    for response <- [{:error, :offline}, {:error, :rate_limited}, {:ok, %{snapshot | "scan_error" => "partial"}}, {:ok, Map.delete(snapshot, "current")}] do
+    for response <- [{:error, :offline}, {:error, :rate_limited}, {:ok, %{snapshot | "scan_error" => "partial"}}] do
       assert tick(state, [changed], Keyword.put(opts, :scan, fn _ -> response end)).yolo_runs == %{}
       assert {:ok, waiting} = Store.read("blocker")
       assert Map.delete(waiting, "waiting_reason") == Map.delete(after_poll, "waiting_reason")
       assert is_binary(waiting["waiting_reason"])
     end
+
+    malformed = Keyword.merge(opts, scan: fn _ -> {:ok, Map.delete(snapshot, "current")} end, handoff_report: fn _, _ -> :ok end)
+    assert tick(state, [changed], malformed).yolo_runs == %{}
+    assert {:ok, waiting} = Store.read("blocker")
+    assert waiting["operator_errors"][issue.id] == "yolo_operator_handoff_incomplete"
+    assert waiting["deliveries"] == before["deliveries"]
+    assert waiting["waiting_reason"] == "delivery_end_unconfirmed"
   end
 
   test "operator runner confirms only delivered duty and leaves new input open", %{issues: [issue | _], root: root} do
@@ -728,6 +735,304 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     formatted = String.replace(body, "Isolierten Unterbrechungstest", " Isolierten  Unterbrechungstest")
     formatted = put_in(snapshot, ["versions", "duty", "source", "body"], formatted)
     assert Yolo.OperatorHandoff.evidence(issue, formatted) == Yolo.OperatorHandoff.evidence(issue, snapshot)
+  end
+
+  for state_name <- ["Yolo Review", "BLOCKER"] do
+    test "a broken operator duty isolates one #{state_name} member while another starts", %{issues: [first, second | _]} do
+      broken = %{first | state: unquote(state_name), last_comment_signal: %{relay_epoch: "broken"}}
+      ready = %{second | state: unquote(state_name), last_comment_signal: %{relay_epoch: "human-input"}}
+      duty = operator_workpad("duty", "a")
+      invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+      invalid_scan = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+      valid_scan = inbox(%{"human" => %{"key" => "human", "origin" => "human", "deleted" => false}}) |> Map.put("current", %{})
+      parent = self()
+      state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+      opts = [
+        scan: fn issue -> {:ok, if(issue.id == broken.id, do: invalid_scan, else: valid_scan)} end,
+        handoff_report: fn issue, reason ->
+          send(parent, {:handoff_report, issue.id, reason})
+          :ok
+        end,
+        workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: "## Symphony Workpad\n\n### Validierung\n\n- [ ] Betreiber prüft den Hostzugang.\n"}]} end,
+        start: fn group, _ ->
+          send(parent, {:start, group})
+          {:ok, spawn(fn -> receive do: (:stop -> :ok) end)}
+        end
+      ]
+
+      running = tick(state, [broken, ready], opts)
+      assert_receive {:handoff_report, id, :yolo_operator_handoff_incomplete} when id == broken.id
+      assert_receive {:start, _}
+      assert running.yolo_runs[Group.name(ready)].ids == [ready.id]
+      assert Map.has_key?(Store.read(Group.name(ready)) |> elem(1) |> Map.get("operator_errors"), broken.id)
+    end
+  end
+
+  test "an invalid operator duty is reported once, retried after a write failure, and clears after repair", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "broken"}}
+    duty = operator_workpad("duty", "a")
+    broken_body = duty["source"]["body"] <> duty["source"]["body"]
+    broken = duty |> put_in(["source", "body"], broken_body) |> then(&Map.put(inbox(%{"duty" => &1}), "current", %{"workpad" => "duty"}))
+    Process.put(:handoff_body, broken_body)
+    Process.put(:handoff_writes, 0)
+    Process.put(:handoff_starts, 0)
+    Process.put(:handoff_scan, broken)
+    Process.put(:handoff_now, 1_000)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      handoff_now: fn -> Process.get(:handoff_now) end,
+      scan: fn _ -> {:ok, Process.get(:handoff_scan)} end,
+      workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: Process.get(:handoff_body)}]} end,
+      workpad_write: fn _, body ->
+        count = Process.get(:handoff_writes) + 1
+        Process.put(:handoff_writes, count)
+
+        if count <= 2 do
+          {:error, :offline}
+        else
+          Process.put(:handoff_body, body)
+          :ok
+        end
+      end,
+      start: fn _, _ ->
+        Process.put(:handoff_starts, Process.get(:handoff_starts) + 1)
+        {:error, :capacity}
+      end
+    ]
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        tick(state, [issue], opts)
+        assert Process.get(:handoff_writes) == 1
+        assert {:ok, %{"operator_errors" => errors, "operator_error_reports" => reports}} = Store.read("review")
+        assert errors[issue.id] == "yolo_operator_handoff_incomplete"
+        assert reports[issue.id]["reported"] == false
+        tick(state, [issue], opts)
+        assert Process.get(:handoff_writes) == 1
+        Process.put(:handoff_now, 301_000)
+        tick(state, [issue], opts)
+        assert Process.get(:handoff_writes) == 2
+        assert {:ok, %{"operator_error_reports" => reports}} = Store.read("review")
+        assert reports[issue.id]["checked_at"] == 301_000
+        assert reports[issue.id]["reported"] == false
+        tick(state, [issue], opts)
+        assert Process.get(:handoff_writes) == 2
+        Process.put(:handoff_now, 601_000)
+        tick(state, [issue], opts)
+        assert Process.get(:handoff_writes) == 3
+        assert Process.get(:handoff_body) =~ "Betreiberauftrag ungültig"
+        assert {:ok, %{"operator_error_reports" => reports}} = Store.read("review")
+        assert reports[issue.id]["checked_at"] == 601_000
+        assert reports[issue.id]["reported"] == true
+        tick(state, [issue], opts)
+        assert Process.get(:handoff_writes) == 3
+        tick(state, [%{issue | state: "BLOCKER"}], opts)
+      end)
+
+    assert length(Regex.scan(~r/YOLO operator handoff invalid/, log)) == 3
+    Process.put(:handoff_body, broken_body)
+    tick(state, [%{issue | last_comment_signal: %{relay_epoch: "edited-broken"}}], opts)
+    assert Process.get(:handoff_writes) == 4
+    assert Process.get(:handoff_body) =~ "Betreiberauftrag ungültig"
+    repaired = %{issue | last_comment_signal: %{relay_epoch: "repaired"}}
+    Process.put(:handoff_scan, Map.put(inbox(), "current", %{}))
+    tick(state, [repaired], opts)
+    assert {:ok, %{"operator_errors" => %{}}} = Store.read("review")
+    assert Process.get(:handoff_starts) == 1
+  end
+
+  test "an invalid single operator block cannot block another review member", %{issues: [first, second | _]} do
+    broken = %{first | state: "Yolo Review"}
+    ready = %{second | state: "Yolo Review"}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], String.replace(duty["source"]["body"], "\"version\":1", "\"version\":2"))
+    invalid_scan = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn issue -> {:ok, if(issue.id == broken.id, do: invalid_scan, else: Map.put(inbox(), "current", %{}))} end,
+      handoff_report: fn _, _ -> :ok end,
+      start: fn _, _ -> {:ok, spawn(fn -> receive do: (:stop -> :ok) end)} end
+    ]
+
+    running = tick(state, [broken, ready], opts)
+    assert running.yolo_runs["review"].ids == [ready.id]
+    assert {:ok, %{"operator_errors" => errors}} = Store.read("review")
+    assert errors[broken.id] == "yolo_operator_handoff_incomplete"
+  end
+
+  test "a missing workpad keeps the operator error report pending", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review"}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    snapshot = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, snapshot} end,
+      workpad_comments: fn _ -> {:ok, []} end,
+      start: fn _, _ -> flunk("an invalid duty must not start") end
+    ]
+
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert {:ok, %{"operator_error_reports" => reports}} = Store.read("review")
+    assert reports[issue.id]["reported"] == false
+  end
+
+  test "an operator error note is inserted under an existing Verlauf heading", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review"}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    snapshot = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, snapshot} end,
+      workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: "## Symphony Workpad\n\n### Verlauf\n\n- ältere Notiz\n"}]} end,
+      workpad_write: fn _, body ->
+        send(self(), {:operator_note, body})
+        :ok
+      end,
+      start: fn _, _ -> flunk("an invalid duty must not start") end
+    ]
+
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert_receive {:operator_note, body}
+    assert body =~ "### Verlauf\n\n- "
+    assert body =~ "Betreiberauftrag ungültig"
+    assert body =~ "- ältere Notiz"
+    assert {:ok, %{"operator_error_reports" => reports}} = Store.read("review")
+    assert reports[issue.id]["reported"] == true
+  end
+
+  test "an unreadable warning record does not start an invalid operator duty", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review"}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    snapshot = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+    File.mkdir_p!(Path.dirname(Store.path("operator-handoff-warnings")))
+    File.write!(Store.path("operator-handoff-warnings"), "invalid state")
+    assert {:error, :yolo_state_corrupt} = Store.read("operator-handoff-warnings")
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, snapshot} end,
+      handoff_report: fn _, _ -> :ok end,
+      start: fn _, _ -> flunk("an invalid duty must not start") end
+    ]
+
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert {:ok, %{"operator_errors" => errors}} = Store.read("review")
+    assert errors[issue.id] == "yolo_operator_handoff_incomplete"
+  end
+
+  test "review runner reaches execution with a broken peer", %{issues: [first, second | _]} do
+    broken = %{first | state: "Yolo Review", last_comment_signal: %{relay_epoch: "broken"}}
+    ready = %{second | state: "Yolo Review", last_comment_signal: %{relay_epoch: "ready"}}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    invalid_scan = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+    valid_scan = Map.put(inbox(), "current", %{})
+
+    opts = [
+      fetch: fn _ -> {:ok, [ready]} end,
+      lease: fn _, callback -> callback.() end,
+      project: fn -> {:ok, [broken, ready]} end,
+      scan: fn issue -> {:ok, if(issue.id == broken.id, do: invalid_scan, else: valid_scan)} end,
+      workspace: fn _, _ ->
+        send(self(), :runner_reached_workspace)
+        {:error, :synthetic_create_failure}
+      end
+    ]
+
+    assert {:error, :synthetic_create_failure} = run_group("review", [ready], [broken, ready], opts)
+    assert_receive :runner_reached_workspace
+  end
+
+  test "review runner rejects a newly broken selected member", %{issues: [issue | _]} do
+    selected = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "broken"}}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    invalid_scan = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+
+    opts = [
+      fetch: fn _ -> {:ok, [selected]} end,
+      lease: fn _, callback -> callback.() end,
+      project: fn -> {:ok, [selected]} end,
+      scan: fn _ -> {:ok, invalid_scan} end,
+      workspace: fn _, _ -> flunk("newly broken selected member must not reach execution") end
+    ]
+
+    assert {:error, :yolo_group_changed} = run_group("review", [selected], [selected], opts)
+  end
+
+  test "duplicate workpads receive the operator error in one existing comment", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review"}
+    first = operator_workpad("a", "a") |> put_in(["source", "id"], "a")
+    second = operator_workpad("b", "b") |> put_in(["source", "id"], "b")
+    snapshot = inbox(%{"a" => first, "b" => second}) |> Map.put("current", %{"a" => "a", "b" => "b"})
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, snapshot} end,
+      workpad_comments: fn _ -> {:ok, [%{id: "b", body: second["source"]["body"]}, %{id: "a", body: first["source"]["body"]}]} end,
+      handoff_comment_write: fn id, body ->
+        send(self(), {:workpad_note, id, body})
+        :ok
+      end,
+      start: fn _, _ -> flunk("invalid workpad must not start") end
+    ]
+
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert_receive {:workpad_note, "a", body}
+    assert body =~ "Betreiberauftrag ungültig"
+  end
+
+  test "a malformed review duty preserves the prior confirmation until repair", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "confirmed"}}
+    duty = operator_workpad("duty", "a")
+    duty = put_in(duty, ["source", "body"], String.replace(duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    snapshot = inbox(%{"duty" => duty}) |> Map.put("current", %{"workpad" => "duty"})
+    assert {:ok, digest} = Yolo.OperatorHandoff.current(issue, snapshot)
+    confirmation = %{"version" => 1, "handoff_digest" => digest, "result" => "Bestätigt", "evidence" => "Messung bestanden"}
+    body = "```symphony-operator-confirmation\n#{Jason.encode!(confirmation)}\n```"
+    answer = %{"key" => "answer", "origin" => "integration", "deleted" => false, "source" => %{"id" => "answer", "body" => body, "user" => %{"id" => "pai", "app" => true}}}
+    answered = snapshot |> put_in(["versions", "answer"], answer) |> put_in(["current", "answer"], "answer")
+    assert {:ok, observed, _} = Observation.capture([issue], %{}, scan: fn _ -> {:ok, answered} end)
+    assert observed[issue.id]["operator_confirmation"] == digest
+    assert {:ok, record} = Store.read("review")
+
+    record =
+      record
+      |> Map.put("observations", observed)
+      |> Map.put("processed", Observation.fingerprint(observed))
+      |> Map.put("decisions", %{issue.id => observed[issue.id]["semantic"]})
+
+    assert :ok = Store.write("review", record)
+    invalid = put_in(answered, ["versions", "duty", "source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    Process.put(:review_scan, invalid)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, Process.get(:review_scan)} end,
+      handoff_report: fn _, _ -> :ok end,
+      start: fn _, _ -> flunk("a repaired follow-up duty needs a new confirmation") end
+    ]
+
+    tick(state, [%{issue | last_comment_signal: %{relay_epoch: "invalid"}}], opts)
+    assert {:ok, after_invalid} = Store.read("review")
+    assert after_invalid["observations"][issue.id] == observed[issue.id]
+    tick(state, [%{issue | last_comment_signal: %{relay_epoch: "invalid"}}], Keyword.put(opts, :retrying_groups, %{"review" => true}))
+
+    next_duty = operator_workpad("next", "b")
+    next_duty = put_in(next_duty, ["source", "body"], String.replace(next_duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    Process.put(:review_scan, answered |> put_in(["versions", "next"], next_duty) |> put_in(["current", "workpad"], "next"))
+    tick(state, [%{issue | last_comment_signal: %{relay_epoch: "repaired"}}], opts)
+    assert {:ok, after_repair} = Store.read("review")
+    assert after_repair["observations"][issue.id]["operator_confirmation"] == digest
+    assert after_repair["observations"][issue.id]["source"] == observed[issue.id]["source"]
   end
 
   test "only the current Pai confirmation wakes a waiting review once", %{issues: [issue | _]} do

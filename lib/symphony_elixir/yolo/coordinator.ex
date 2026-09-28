@@ -1,13 +1,16 @@
 defmodule SymphonyElixir.Yolo.Coordinator do
   @moduledoc "PO scheduling inside the existing project orchestrator and shared capacity."
   require Logger
-  alias SymphonyElixir.{Config, ProjectContext, Tracker}
+  alias SymphonyElixir.{Config, ProjectContext, Tracker, Workpad}
   alias SymphonyElixir.Linear.YoloAgent
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
   alias SymphonyElixir.Yolo.{Escalation, Group, Impulse, Observation, Operations}
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{Recovery, ReviewReadiness, Runner, Store}
+
+  @operator_warning_interval_ms 300_000
+  @operator_report_interval_ms 300_000
 
   @spec tick(map(), [map()], keyword()) :: map()
   def tick(state, issues, opts \\ []) do
@@ -344,19 +347,22 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   defp observe_group(group, members, opts) do
     with :ok <- Journal.available(group),
          :ok <- Delivery.reconcile(group),
-         {:ok, record} <- Store.read(group),
-         {:ok, record} <- Impulse.observe(members, record, opts),
-         {:ok, observations, _fingerprint} <-
+         {:ok, stored} <- Store.read(group),
+         {:ok, record} <- Impulse.observe(members, stored, opts),
+         {:ok, valid_observations, _fingerprint, operator_errors} <-
            capture_group(group, members, record, Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
+         observations = retain_error_observations(valid_observations, record["observations"], operator_errors),
          record = Delivery.migrate(record, observations),
+         record = record_operator_errors(group, members, record, operator_errors, opts),
+         available = Enum.filter(members, &Map.has_key?(valid_observations, &1.id)),
          signals = get_in(opts[:relay_signals] || %{}, [group]),
          record = reset_changed_retry(record, signals),
-         :ok <- persist_observations(group, record, observations, signals, members),
+         :ok <- persist_observations(group, stored, record, observations, signals, members),
          record = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}, "dependency_snapshot" => dependency_snapshot(members)}),
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          effective = if(operations == [], do: record, else: Map.put(record, "processed", nil)),
-         pending = Delivery.pending(members, observations, effective),
-         waiting = if(pending == [], do: Delivery.waiting_reason(members, observations, effective), else: nil),
+         pending = pending_members(members, available, observations, effective),
+         waiting = pending_waiting_reason(pending, members, available, observations, effective, operator_errors),
          record = if(waiting == "delivery_end_unconfirmed", do: record, else: reset_changed_nonstart(record, pending, observations)),
          updated = record |> Map.put("observations", observations) |> Map.put("waiting_reason", waiting),
          :ok <- if(updated == record, do: :ok, else: Store.write(group, updated)),
@@ -376,11 +382,152 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp capture_group(group, members, record, opts) do
     if Map.has_key?(opts[:retrying_groups] || %{}, group) and
+         map_size(record["operator_errors"] || %{}) == 0 and
          Enum.all?(members, &is_map(get_in(record, ["observations", &1.id]))) do
       observations = Map.take(record["observations"], Enum.map(members, & &1.id))
-      {:ok, observations, Observation.fingerprint(observations)}
+      {:ok, observations, Observation.fingerprint(observations), %{}}
     else
-      Observation.capture(members, record["observations"], opts)
+      Observation.capture_isolated(members, record["observations"], opts)
+    end
+  end
+
+  defp retain_error_observations(current, previous, errors) do
+    (previous || %{})
+    |> Map.take(Map.keys(errors))
+    |> Map.merge(current)
+  end
+
+  defp waiting_reason(members, available, observations, record, errors) do
+    cond do
+      Delivery.unresolved_delivery?(members, record) -> "delivery_end_unconfirmed"
+      map_size(errors) > 0 -> "operator_handoff_incomplete"
+      true -> Delivery.waiting_reason(available, observations, record)
+    end
+  end
+
+  defp pending_members(members, available, observations, record) do
+    if Delivery.unresolved_delivery?(members, record), do: [], else: Delivery.pending(available, observations, record)
+  end
+
+  defp pending_waiting_reason([], members, available, observations, record, errors),
+    do: waiting_reason(members, available, observations, record, errors)
+
+  defp pending_waiting_reason(_pending, _members, _available, _observations, _record, _errors), do: nil
+
+  defp record_operator_errors(group, members, record, errors, opts) do
+    now = Keyword.get(opts, :handoff_now, fn -> System.system_time(:millisecond) end).()
+    reports = Map.take(record["operator_error_reports"] || %{}, Map.keys(errors))
+
+    reports =
+      Enum.reduce(errors, reports, fn {id, reason}, reported ->
+        issue = Enum.find(members, &(&1.id == id))
+        signal = Observation.relay_signal(issue)
+        {result, entry} = attempt_operator_report(issue, reason, signal, now, reported[id], opts)
+        warn_operator_error(group, issue, reason, result, now)
+        Map.put(reported, id, entry)
+      end)
+
+    record
+    |> Map.put("operator_errors", Map.new(errors, fn {id, reason} -> {id, Atom.to_string(reason)} end))
+    |> Map.put("operator_error_reports", reports)
+  end
+
+  defp attempt_operator_report(issue, reason, signal, now, previous, opts) do
+    if operator_report_due?(previous, Atom.to_string(reason), signal, now) do
+      report = Keyword.get(opts, :handoff_report, fn issue, reason -> report_operator_error(issue, reason, opts) end)
+      result = report.(issue, reason)
+      {result, %{"reason" => Atom.to_string(reason), "signal" => signal, "checked_at" => now, "reported" => result == :ok}}
+    else
+      {if(previous["reported"], do: :ok, else: :deferred), previous}
+    end
+  end
+
+  defp operator_report_due?(%{"reason" => reason, "signal" => signal, "checked_at" => checked_at, "reported" => reported?}, reason, signal, now)
+       when is_integer(checked_at) and is_boolean(reported?) do
+    not reported? and now - checked_at >= @operator_report_interval_ms
+  end
+
+  defp operator_report_due?(_, _, _, _), do: true
+
+  defp warn_operator_error(group, issue, reason, result, now) do
+    Store.lock("operator-handoff-warnings", fn ->
+      case Store.read("operator-handoff-warnings") do
+        {:ok, record} -> persist_operator_warning(group, issue, reason, result, now, record)
+        _ -> :ok
+      end
+    end)
+  end
+
+  defp persist_operator_warning(group, issue, reason, result, now, record) do
+    key = issue.id <> ":" <> Atom.to_string(reason)
+    warnings = record["warnings"] || %{}
+    last = warnings[key]
+
+    if not is_integer(last) or now - last >= @operator_warning_interval_ms do
+      updated = Map.put(record, "warnings", Map.put(warnings, key, now))
+
+      if Store.write("operator-handoff-warnings", updated) == :ok do
+        Logger.warning("YOLO operator handoff invalid group=#{group} issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)} report=#{inspect(result)}")
+      end
+    end
+  end
+
+  defp report_operator_error(issue, :yolo_operator_handoff_incomplete, opts) do
+    note = "Betreiberauftrag ungültig: mehrere oder nicht auswertbare Blöcke im aktuellen Workpad; Auftrag dort korrigieren. Dieses Ticket bleibt bis dahin für den YOLO-Lauf gesperrt."
+    comments = Keyword.get(opts, :workpad_comments, &Tracker.fetch_issue_comments/1)
+    write = Keyword.get(opts, :workpad_write, &Workpad.update_tracker_workpad/2)
+
+    with {:ok, found} <- comments.(issue.id) do
+      case Workpad.find_comment(found) do
+        {:ok, workpad} -> maybe_write_operator_note(issue.id, workpad.body, note, write)
+        {:error, {:multiple_workpad_comments, _}} -> report_duplicate_workpads(found, note, opts)
+        error -> error
+      end
+    end
+  end
+
+  defp report_duplicate_workpads(comments, note, opts) do
+    workpad =
+      comments
+      |> Enum.filter(&reportable_workpad?/1)
+      |> Enum.sort_by(&(Map.get(&1, :id) || Map.get(&1, "id")))
+      |> List.first()
+
+    if is_map(workpad) do
+      id = Map.get(workpad, :id) || Map.get(workpad, "id")
+      body = Map.get(workpad, :body) || Map.get(workpad, "body")
+      direct_write = Keyword.get(opts, :handoff_comment_write, &Tracker.update_comment/2)
+      write = fn comment_id, updated -> write_duplicate_workpad(comment_id, updated, direct_write) end
+      maybe_write_operator_note(id, body, note, write)
+    else
+      {:error, :workpad_comment_missing_id}
+    end
+  end
+
+  defp reportable_workpad?(comment) do
+    is_binary(Map.get(comment, :id) || Map.get(comment, "id")) and
+      Workpad.comment_matches?(Map.get(comment, :body) || Map.get(comment, "body"))
+  end
+
+  defp write_duplicate_workpad(id, body, write) do
+    with :ok <- Workpad.validate_update_body(body), do: write.(id, body)
+  end
+
+  defp maybe_write_operator_note(issue_id, body, note, write) do
+    if String.contains?(body, note) do
+      :ok
+    else
+      stamp = NaiveDateTime.local_now() |> Calendar.strftime("%Y-%m-%d %H:%M:%S")
+      entry = "- #{stamp} - #{note}\n"
+      write.(issue_id, insert_operator_note(body, entry))
+    end
+  end
+
+  defp insert_operator_note(body, entry) do
+    if String.contains?(body, "### Verlauf\n") do
+      String.replace(body, "### Verlauf\n", "### Verlauf\n\n" <> entry, global: false)
+    else
+      body <> "\n### Verlauf\n\n" <> entry
     end
   end
 
@@ -393,9 +540,9 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp dependency_snapshot(members), do: Map.new(members, &{&1.id, &1.blocked_by})
 
-  defp persist_observations(group, record, observations, signals, members) do
+  defp persist_observations(group, stored, record, observations, signals, members) do
     updated = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}, "dependency_snapshot" => dependency_snapshot(members)})
-    if updated == record, do: :ok, else: Store.write(group, updated)
+    if updated == stored, do: :ok, else: Store.write(group, updated)
   end
 
   defp reset_changed_nonstart(%{"nonstart" => %{"fingerprint" => fingerprint, "members" => ids}} = record, pending, observations) do

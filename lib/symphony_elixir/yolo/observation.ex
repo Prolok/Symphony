@@ -7,23 +7,34 @@ defmodule SymphonyElixir.Yolo.Observation do
   @spec capture([map()], map(), keyword()) :: {:ok, map(), String.t()} | {:error, term()}
   def capture(issues, previous, opts \\ []) do
     with {:ok, generations} <- ReviewReadiness.generations(issues) do
-      capture_members(issues, previous, generations, opts)
+      capture_members(issues, previous, generations, opts, false)
     end
   end
 
-  defp capture_members(issues, previous, generations, opts) do
+  @doc "Keeps a malformed operator duty out of the observation while preserving other members."
+  @spec capture_isolated([map()], map(), keyword()) :: {:ok, map(), String.t(), map()} | {:error, term()}
+  def capture_isolated(issues, previous, opts) do
+    with {:ok, generations} <- ReviewReadiness.generations(issues) do
+      capture_members(issues, previous, generations, opts, true)
+    end
+  end
+
+  defp capture_members(issues, previous, generations, opts, isolate?) do
     issues
     |> Enum.sort_by(& &1.id)
-    |> Enum.reduce_while({:ok, %{}}, fn issue, {:ok, acc} ->
+    |> Enum.reduce_while({:ok, %{}, %{}}, fn issue, {:ok, acc, errors} ->
       case observe(issue, previous[issue.id], generations[issue.id], opts) do
-        {:ok, observation} -> {:cont, {:ok, Map.put(acc, issue.id, observation)}}
+        {:ok, observation} -> {:cont, {:ok, Map.put(acc, issue.id, observation), errors}}
+        {:error, :yolo_operator_handoff_incomplete} when isolate? -> {:cont, {:ok, acc, Map.put(errors, issue.id, :yolo_operator_handoff_incomplete)}}
         error -> {:halt, error}
       end
     end)
     |> case do
-      {:ok, observations} ->
-        observations = bind_chains(issues, observations)
-        {:ok, observations, fingerprint(observations)}
+      {:ok, observations, errors} ->
+        valid = Enum.filter(issues, &Map.has_key?(observations, &1.id))
+        observations = bind_chains(valid, observations)
+        digest = fingerprint(observations)
+        if isolate?, do: {:ok, observations, digest, errors}, else: {:ok, observations, digest}
 
       error ->
         error

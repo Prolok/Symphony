@@ -143,8 +143,9 @@ defmodule SymphonyElixir.Yolo.Runner do
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))),
          {:ok, project_issues} <- tentative_project(group, fresh, project_issues, opts, retry?),
          observation_issues = if(group == "review" and not retry?, do: Group.groups(project_issues)["review"] || [], else: fresh),
-         {:ok, all_observations, fingerprint} <-
-           Observation.capture(observation_issues, pending_observations(record), Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
+         {:ok, all_observations, fingerprint, _operator_errors} <-
+           Observation.capture_isolated(observation_issues, pending_observations(record), Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
+         true <- Enum.all?(fresh, &Map.has_key?(all_observations, &1.id)),
          observations = Map.take(all_observations, Enum.map(fresh, & &1.id)),
          record = Delivery.migrate(record, observations),
          {:ok, operations} <- Operations.pending(Enum.map(fresh, & &1.id)),

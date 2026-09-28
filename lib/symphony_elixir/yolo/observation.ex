@@ -13,7 +13,7 @@ defmodule SymphonyElixir.Yolo.Observation do
 
   @doc "Keeps a malformed operator duty out of the observation while preserving other members."
   @spec capture_isolated([map()], map(), keyword()) :: {:ok, map(), String.t(), map()} | {:error, term()}
-  def capture_isolated(issues, previous, opts \\ []) do
+  def capture_isolated(issues, previous, opts) do
     with {:ok, generations} <- ReviewReadiness.generations(issues) do
       capture_members(issues, previous, generations, opts, true)
     end

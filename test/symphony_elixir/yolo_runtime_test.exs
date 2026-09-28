@@ -863,6 +863,71 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert errors[broken.id] == "yolo_operator_handoff_incomplete"
   end
 
+  test "a missing workpad keeps the operator error report pending", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review"}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    snapshot = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, snapshot} end,
+      workpad_comments: fn _ -> {:ok, []} end,
+      start: fn _, _ -> flunk("an invalid duty must not start") end
+    ]
+
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert {:ok, %{"operator_error_reports" => reports}} = Store.read("review")
+    assert reports[issue.id]["reported"] == false
+  end
+
+  test "an operator error note is inserted under an existing Verlauf heading", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review"}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    snapshot = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, snapshot} end,
+      workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: "## Symphony Workpad\n\n### Verlauf\n\n- ältere Notiz\n"}]} end,
+      workpad_write: fn _, body ->
+        send(self(), {:operator_note, body})
+        :ok
+      end,
+      start: fn _, _ -> flunk("an invalid duty must not start") end
+    ]
+
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert_receive {:operator_note, body}
+    assert body =~ "### Verlauf\n\n- "
+    assert body =~ "Betreiberauftrag ungültig"
+    assert body =~ "- ältere Notiz"
+    assert {:ok, %{"operator_error_reports" => reports}} = Store.read("review")
+    assert reports[issue.id]["reported"] == true
+  end
+
+  test "an unreadable warning record does not start an invalid operator duty", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review"}
+    duty = operator_workpad("duty", "a")
+    invalid = put_in(duty, ["source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    snapshot = inbox(%{"duty" => invalid}) |> Map.put("current", %{"workpad" => "duty"})
+    File.mkdir_p!(Path.dirname(Store.path("operator-handoff-warnings")))
+    File.write!(Store.path("operator-handoff-warnings"), "invalid state")
+    assert {:error, :yolo_state_corrupt} = Store.read("operator-handoff-warnings")
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, snapshot} end,
+      handoff_report: fn _, _ -> :ok end,
+      start: fn _, _ -> flunk("an invalid duty must not start") end
+    ]
+
+    assert tick(state, [issue], opts).yolo_runs == %{}
+    assert {:ok, %{"operator_errors" => errors}} = Store.read("review")
+    assert errors[issue.id] == "yolo_operator_handoff_incomplete"
+  end
+
   test "review runner reaches execution with a broken peer", %{issues: [first, second | _]} do
     broken = %{first | state: "Yolo Review", last_comment_signal: %{relay_epoch: "broken"}}
     ready = %{second | state: "Yolo Review", last_comment_signal: %{relay_epoch: "ready"}}

@@ -26,7 +26,7 @@ def load(path):
 class TestExecutor(unittest.TestCase):
     def setUp(self):
         (REPO / 'tmp').mkdir(exist_ok=True)
-        self.temp = tempfile.TemporaryDirectory(dir=REPO / 'tmp')
+        self.temp = tempfile.TemporaryDirectory(prefix='sym-exec-', dir=Path('/tmp').resolve())
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.checkout = self.root / 'PRO-756'
@@ -190,7 +190,7 @@ while True:time.sleep(.02)
 
 class ManagedExecutorTest(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(dir=REPO / 'tmp')
+        self.temp = tempfile.TemporaryDirectory(prefix='sym-exec-', dir=Path('/tmp').resolve())
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.project = self.root / 'project'

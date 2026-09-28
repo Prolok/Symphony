@@ -226,7 +226,8 @@ Version. Relay-Ereignispositionen und Resync-Snapshots stoßen einen paginierten
 Abgleich der Linear-Issue-Historie und archivierter Agent-Sessions an. Eine neue,
 an Issue, konfigurierten Agenten und künstlichen Root gebundene Session ohne
 `sourceComment` belegt die Neudelegation auch bei zusammengefasster History ohne
-Delegationsfelder. Session-ID und History-Head liegen im Gruppenstore; der erste
+Delegationsfelder. Die jüngste Session-ID, die IDs mit demselben Zeitstempel und
+der History-Head liegen im Gruppenstore; der erste
 Session-Lesezugriff ohne gespeicherten Wasserstand bildet eine Baseline.
 Nur belegte Impulse erhöhen die Generation. Vollständig paginierte Relationsabfragen beobachten
 Vorgängerzustände auch ohne Änderung am Ursprung. Geblocktes Backlog bleibt

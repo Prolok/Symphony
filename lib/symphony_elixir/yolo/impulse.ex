@@ -56,6 +56,7 @@ defmodule SymphonyElixir.Yolo.Impulse do
          "relay" => event,
          "history_head" => if(nodes == [], do: nil, else: hd(nodes)["id"]),
          "session_head" => if(agent_sessions == [], do: nil, else: hd(agent_sessions)["id"]),
+         "session_head_ids" => head_session_ids(agent_sessions),
          "generation" => generation + if(reasons == [], do: 0, else: 1),
          "reason" => if(reasons == [], do: "no_relevant_history", else: Enum.join(reasons, ","))
        }}
@@ -72,10 +73,26 @@ defmodule SymphonyElixir.Yolo.Impulse do
   defp recent_sessions(_sessions, prior) when not is_map_key(prior, "session_head"), do: {:ok, []}
   defp recent_sessions(sessions, %{"session_head" => nil}), do: {:ok, sessions}
 
-  defp recent_sessions(sessions, %{"session_head" => head}) do
-    {recent, rest} = Enum.split_while(sessions, &(&1["id"] != head))
-    if rest == [], do: {:error, :yolo_session_gap}, else: {:ok, recent}
+  defp recent_sessions(sessions, %{"session_head" => head} = prior) do
+    case Enum.find(sessions, &(&1["id"] == head)) do
+      nil ->
+        {:error, :yolo_session_gap}
+
+      previous ->
+        case prior["session_head_ids"] do
+          ids when is_list(ids) ->
+            seen = MapSet.new(ids)
+            at = previous["createdAt"]
+            {:ok, Enum.filter(sessions, &(&1["createdAt"] > at or (&1["createdAt"] == at and not MapSet.member?(seen, &1["id"]))))}
+
+          _ ->
+            {:ok, []}
+        end
+    end
   end
+
+  defp head_session_ids([]), do: []
+  defp head_session_ids([head | _] = sessions), do: sessions |> Enum.filter(&(&1["createdAt"] == head["createdAt"])) |> Enum.map(& &1["id"])
 
   defp valid_session?(%{
          "id" => id,

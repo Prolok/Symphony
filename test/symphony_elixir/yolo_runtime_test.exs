@@ -144,6 +144,27 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert get_in(combined, ["impulses", issue.id, "reason"]) == "delegated_again"
   end
 
+  test "a new session with the same timestamp and a smaller id is observed once", %{issues: [issue | _]} do
+    at = "2026-09-28T06:27:58Z"
+    first = agent_session(issue, "z-session", at)
+    second = agent_session(issue, "a-session", at)
+    history = fn _ -> {:ok, [%{"id" => "merged", "createdAt" => at, "updatedAt" => at, "fromDelegate" => nil, "toDelegate" => nil}]} end
+    event = fn n -> %{"generation" => "relay", "position" => n, "event_id" => "event-#{n}"} end
+    issue = %{issue | relay_event: event.(1)}
+
+    assert {:ok, baseline} = Impulse.observe([issue], %{}, history: history, sessions: fn _ -> {:ok, [first]} end)
+    assert Impulse.generations(baseline)[issue.id] == 0
+
+    issue = %{issue | relay_event: event.(2)}
+    opts = [history: history, sessions: fn _ -> {:ok, [second, first]} end]
+    assert {:ok, observed} = Impulse.observe([issue], baseline, opts)
+    assert Impulse.generations(observed)[issue.id] == 1
+    assert get_in(observed, ["impulses", issue.id, "reason"]) == "delegated_again"
+
+    assert {:ok, replayed} = Impulse.observe([%{issue | relay_event: event.(3)}], observed, opts)
+    assert Impulse.generations(replayed)[issue.id] == 1
+  end
+
   test "a visible withdrawal waits for redelegation and an unchanged issue stays quiet", %{issues: [issue | _]} do
     base = %{"id" => "base", "createdAt" => "2026-09-28T06:00:00Z", "fromDelegate" => nil, "toDelegate" => nil}
     withdrawn = %{base | "id" => "withdrawn", "createdAt" => "2026-09-28T06:23:55Z", "fromDelegate" => %{"id" => "pai"}}

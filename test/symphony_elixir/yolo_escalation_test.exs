@@ -96,4 +96,30 @@ defmodule SymphonyElixir.YoloEscalationTest do
     assert {:error, :yolo_escalation_journal_corrupt} = Escalation.pending(issue.id)
     assert {:error, :yolo_escalation_journal_corrupt} = Escalation.retry_pending(issue)
   end
+
+  test "handover requires a configured human and confirms the visible question", %{issue: issue, context: context} do
+    no_update = fn _, _, _ -> flunk("unconfirmed note must not change assignment") end
+    ProjectContext.bind(%{context | human_handoff_id: nil})
+    assert {:error, :yolo_escalation_handoff_unconfirmed} = Escalation.handover(issue, request(), [], no_update)
+    ProjectContext.bind(context)
+
+    for {create_result, expected} <- [
+          {:ok, :yolo_escalation_comment_unconfirmed},
+          {{:error, :write_failed}, :write_failed}
+        ] do
+      opts = [comments: fn _ -> {:ok, []} end, escalation_comment: fn _, _ -> create_result end]
+      assert {:error, ^expected} = Escalation.handover(issue, request(), opts, no_update)
+    end
+
+    Process.put(:comment_reads, 0)
+
+    fetch = fn _ ->
+      reads = Process.get(:comment_reads) + 1
+      Process.put(:comment_reads, reads)
+      if reads == 1, do: {:ok, []}, else: {:error, :read_failed}
+    end
+
+    assert {:error, :read_failed} =
+             Escalation.handover(issue, request(), [comments: fetch, escalation_comment: fn _, _ -> :ok end], no_update)
+  end
 end

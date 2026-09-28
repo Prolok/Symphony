@@ -52,8 +52,7 @@ defmodule SymphonyElixir.Yolo.OperatorHandoff do
   defp current_digest(version) do
     case parse(version["source"]["body"]) do
       {:ok, %{"resume_state" => "Yolo Review"} = duty} -> {:ok, if(version["deleted"] == false, do: Digest.digest(duty))}
-      {:ok, _} -> {:ok, nil}
-      _ -> {:error, :yolo_operator_handoff_incomplete}
+      _ -> {:ok, nil}
     end
   end
 

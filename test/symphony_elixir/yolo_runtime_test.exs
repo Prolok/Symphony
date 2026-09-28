@@ -739,6 +739,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert is_binary(digest)
     assert {:ok, nil} = Yolo.OperatorHandoff.confirmation(issue, snapshot, digest)
 
+    other_phase = operator_workpad("other-phase", "a")
+    other_phase_snapshot = inbox(%{"other-phase" => other_phase}) |> Map.put("current", %{"workpad" => "other-phase"})
+    assert {:ok, nil} = Yolo.OperatorHandoff.current(issue, other_phase_snapshot)
+
     capture = fn member, seen -> Observation.capture([member], seen, scan: fn _ -> {:ok, snapshot} end) end
     assert {:ok, before, _} = capture.(issue, %{})
     source = before[issue.id]["source"]
@@ -751,6 +755,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     for {name, altered} <- [
           {"other_app", put_in(answered, ["versions", "answer", "source", "user", "id"], "other")},
           {"plain", put_in(answered, ["versions", "answer", "source", "body"], "Pai: Neustart erfolgreich")},
+          {"non_string", put_in(answered, ["versions", "answer", "source", "body"], nil)},
           {"wrong_digest", put_in(answered, ["versions", "answer", "source", "body"], String.replace(body, digest, String.duplicate("b", 64)))},
           {"malformed", put_in(answered, ["versions", "answer", "source", "body"], String.replace(body, "\"evidence\":", "\"missing\":"))},
           {"edited", put_in(answered, ["versions", "answer", "source", "editedAt"], "2026-09-28T13:00:00Z")},

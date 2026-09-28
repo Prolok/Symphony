@@ -241,6 +241,22 @@ defmodule SymphonyElixir.YoloReviewContractTest do
 
         assert {:error, :offline} = Handoff.invoke(request, Keyword.put(ctx.opts, :dependencies, changed_between_checks))
         assert Process.get(:dependency_reads) == 2
+
+        unexpected_dependency = fn issues ->
+          reads = Process.get(:dependency_reads) + 1
+          Process.put(:dependency_reads, reads)
+          if reads == 3, do: {:ok, issues}, else: :unexpected
+        end
+
+        assert {:error, :yolo_wait_requires_dependency} =
+                 Handoff.invoke(request, Keyword.put(ctx.opts, :dependencies, unexpected_dependency))
+
+        assert {:error, :yolo_wait_requires_dependency} =
+                 Handoff.invoke(request, Keyword.put(ctx.opts, :scan, fn _ -> :unexpected end))
+
+        assert {:error, :scan_failed} =
+                 Handoff.invoke(request, Keyword.put(ctx.opts, :scan, fn _ -> {:error, :scan_failed} end))
+
         assert Agent.get(ctx.db, & &1.updates) == 0
         refute Completion.ready?("review", [ctx.issue])
       end,

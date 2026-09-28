@@ -56,6 +56,16 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     refute Workspace.unchanged?(workspace)
   end
 
+  test "review compatibility helpers retain safe removal and explicit unknown results" do
+    run = Ecto.UUID.generate()
+    assert {:ok, workspace} = Workspace.create("review", run)
+    assert {:ok, true} = Workspace.review_checkout_present?(run)
+    assert {:error, :yolo_review_checkout_unknown} = Workspace.review_checkout_present?("invalid")
+    assert {:error, :yolo_checkout_unknown} = Workspace.checkout_present?("foreign", run)
+    assert :ok = Workspace.remove_review(workspace, run)
+    assert {:ok, false} = Workspace.review_checkout_present?(run)
+  end
+
   test "inventory dry run and apply preserve dirty, active, reserved, journaled and unknown review checkouts", %{root: root, context: context} do
     context = %{context | yolo_agent_id: "pai"}
     context = put_in(context.settings.tracker.app["state_root"], Path.join(root, "state"))
@@ -148,6 +158,8 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
 
     assert {:error, :review_checkout_inventory_invalid} = ReviewCheckouts.sweep(%{})
     assert {:error, :review_checkout_inventory_invalid} = ReviewCheckouts.sweep(%{inventory | "checkouts" => [%{"path" => workspace.path}]})
+    invalid_path = Path.join([root, "worktrees", "yolo", "review", "invalid"])
+    assert {:ok, %{"entries" => [%{"status" => "protected"}]}} = ReviewCheckouts.sweep(%{inventory | "checkouts" => [%{"path" => invalid_path, "sha" => workspace.sha}]})
     assert {:ok, record} = Store.read("review")
 
     for fields <- [
@@ -160,6 +172,9 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
       assert File.dir?(workspace.path)
     end
 
+    assert :ok = Store.write("review", record)
+    File.write!(Store.path("review"), "corrupt")
+    assert {:error, :yolo_state_corrupt} = ReviewCheckouts.sweep(inventory)
     assert :ok = Store.write("review", record)
     non_repo = Path.join(root, "not-a-repository")
     File.mkdir_p!(non_repo)

@@ -101,7 +101,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp checkout_available(group, %{"attempt" => %{"cleanup_contract" => 1} = attempt} = record) when group in @groups do
     delivered? = Enum.any?(Map.values(record["deliveries"] || %{}), &(&1["run_id"] == attempt["id"]))
 
-    if attempt["checkout_cleanup"] in ["none", "removed"] or is_binary(attempt["session_id"]) or delivered? or retired_attempt?(group, attempt),
+    if attempt["checkout_cleanup"] in ["none", "removed"] or is_binary(attempt["session_id"]) or delivered? or resolved_external_attempt?(group, attempt),
       do: :ok,
       else: {:error, cleanup_unconfirmed(group)}
   end
@@ -111,10 +111,13 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp cleanup_unconfirmed("review"), do: :yolo_review_checkout_cleanup_unconfirmed
   defp cleanup_unconfirmed(_), do: :yolo_checkout_cleanup_unconfirmed
 
-  defp retired_attempt?(group, attempt) do
+  defp resolved_external_attempt?(group, attempt) do
     case Journal.read(group) do
       {:ok, %{"id" => id, "state" => "retired", "writable" => false, "retirement" => %{"kind" => "fenced_interruption", "attempt" => proof}}} ->
         id == attempt["id"] and proof == attempt
+
+      {:ok, %{"id" => id, "state" => "rejected", "writable" => false, "rejection" => proof} = order} when is_map(proof) ->
+        id == attempt["id"] and not Journal.pending?(order)
 
       _ ->
         false
@@ -222,7 +225,7 @@ defmodule SymphonyElixir.Yolo.Runner do
     state = {record, observations, fingerprint}
 
     with :ok <- reserve_attempt(group, record, observations, attempt),
-         creation <- run_scoped(group, fn -> create.(group, run_id) end) do
+         creation <- run_scoped(group, run_id, fn -> create.(group, run_id) end) do
       case creation do
         {:ok, workspace} ->
           record_created(group, issues, project_issues, run_id, state, opts, attempt, workspace)
@@ -261,7 +264,7 @@ defmodule SymphonyElixir.Yolo.Runner do
 
   defp run_created(group, issues, project_issues, run_id, workspace, {record, observations, fingerprint}, opts) do
     result =
-      run_scoped(group, fn ->
+      run_scoped(group, run_id, fn ->
         Scope.with_scope(
           group,
           issues,
@@ -276,12 +279,18 @@ defmodule SymphonyElixir.Yolo.Runner do
     cleanup_failed_start(group, run_id, issues, workspace, result)
   end
 
-  defp run_scoped(group, callback) when group in @groups do
+  defp run_scoped(group, run_id, callback) when group in @groups do
     callback.()
   rescue
-    error -> {:error, {start_exception(group), error.__struct__}}
+    error ->
+      if no_external_start(group, run_id) == :ok,
+        do: {:error, {start_exception(group), error.__struct__}},
+        else: reraise(error, __STACKTRACE__)
   catch
-    kind, reason -> {:error, {start_caught(group), kind, inspect(reason)}}
+    kind, reason ->
+      if no_external_start(group, run_id) == :ok,
+        do: {:error, {start_caught(group), kind, inspect(reason)}},
+        else: :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
   defp start_exception("review"), do: :yolo_review_start_exception

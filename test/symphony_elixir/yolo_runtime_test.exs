@@ -2018,6 +2018,26 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     refute next == completed["processed"]
   end
 
+  test "a failed final input check keeps a completed member unprocessed", %{issues: [issue | _], root: root} do
+    opts = [
+      fetch: fn _ -> {:ok, [issue]} end,
+      lease: fn _, callback -> callback.() end,
+      scan: &scan/1,
+      workspace: fn _, _ -> {:ok, %{path: root, sha: "merged-sha"}} end,
+      unchanged: fn _ -> true end,
+      checkpoint: fn _ -> {:ok, %{inputs: []}} end,
+      before_action: fn _ -> {:error, :new_input} end,
+      session: fn _, _, _, session_opts ->
+        session_opts[:on_message].(%{session_id: "checked-session", event: :session_started})
+        assert :ok = Completion.invoke(%{"issue_id" => issue.id, "result" => "Entscheidung belegt"}, fetch: fn _ -> {:ok, [issue]} end, before_action: fn _ -> :ok end)
+        {:ok, %{session_id: "checked-session"}}
+      end
+    ]
+
+    assert {:error, :new_input} = run_group("incoming", [issue], [issue], opts)
+    assert {:ok, %{"processed" => nil}} = Store.read("incoming")
+  end
+
   test "changes during checkout and checkpoints prevent launch while member leases remain held", %{issues: issues, root: root} do
     for change <- [:revoked, :missing, :duplicate, :edited, :offline, :workspace] do
       key = {__MODULE__, :launch_change}
@@ -3248,6 +3268,29 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert record["attempt"]["checkout_cleanup"] == "removed"
     assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
     assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+  end
+
+  test "incoming caught failures after checkout creation are cleaned", %{issues: [issue | _], root: root, context: context} do
+    init_review_git(root, context)
+
+    for {failure, expected} <- [
+          {fn -> throw(:synthetic_start_failure) end, {:yolo_start_caught, :throw, ":synthetic_start_failure"}},
+          {fn -> raise "synthetic start failure" end, {:yolo_start_exception, RuntimeError}}
+        ] do
+      opts = [
+        fetch: fn _ -> {:ok, [issue]} end,
+        lease: fn _, fun -> fun.() end,
+        scan: &scan/1,
+        unchanged: fn _ -> failure.() end,
+        checkpoint: fn _ -> {:ok, %{}} end,
+        session: fn _, _, _, _ -> flunk("failure must precede delivery") end
+      ]
+
+      assert {:error, ^expected} = run_group("incoming", [issue], [issue], opts)
+      assert {:ok, %{"attempt" => %{"checkout_cleanup" => "removed"}}} = Store.read("incoming")
+      assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+      assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+    end
   end
 
   test "withdrawal retains other members but cannot mark the withdrawn observation processed", %{issues: issues, root: root} do

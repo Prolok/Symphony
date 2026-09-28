@@ -206,6 +206,17 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     history = fn _ -> {:ok, [base]} end
     assert {:ok, baseline} = Impulse.observe([issue], %{}, history: history, sessions: fn _ -> {:ok, [first]} end)
 
+    changed = %{issue | relay_event: event.(2)}
+    assert {:error, :yolo_session_gap} = Impulse.observe([changed], baseline, history: history, sessions: fn _ -> {:ok, [second]} end)
+
+    legacy_ids = update_in(baseline, ["impulses", issue.id], &Map.delete(&1, "session_head_ids"))
+    assert {:ok, migrated_ids} = Impulse.observe([changed], legacy_ids, history: history, sessions: fn _ -> {:ok, [second, first]} end)
+    assert Impulse.generations(migrated_ids)[issue.id] == 0
+    assert get_in(migrated_ids, ["impulses", issue.id, "session_head_ids"]) == ["session-2"]
+
+    assert {:error, :yolo_history_incomplete} =
+             Impulse.observe([changed], baseline, history: history, sessions: fn _ -> {:ok, [%{second | "id" => nil}, first]} end)
+
     assert {:ok, unrelated} =
              Impulse.observe([%{issue | relay_event: event.(2)}], baseline,
                history: fn _ -> {:ok, [base]} end,

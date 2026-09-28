@@ -269,7 +269,11 @@ oder Quelle wird abgewiesen. Beim Rücklesen eines bereits angelegten Tickets
 dürfen nur spätere menschliche Feldänderungen mit passender, vollständig gelesener
 Linear-Historie vom Anlageauftrag abweichen; die Zielzuweisung wird nicht
 wiederhergestellt. Fehlende oder unpassende Belege bleiben Anlagenfehler,
-Lesefehler behalten ihre ursprüngliche Fehlerklasse. Vollständig gelesene
+Lesefehler behalten ihre ursprüngliche Fehlerklasse. Domainartige Klartextwörter
+wie `OpenClaw.app` darf Linear als HTTP(S)-Link auf genau dasselbe Wort mit
+optionalem abschließendem Slash speichern; das gilt beim Rücklesen als
+unveränderter Beschreibungstext. Der journalisierte Auftrag bleibt unverändert,
+andere Linkziele bleiben Abweichungen. Vollständig gelesene
 Abhängigkeiten werden in beide Richtungen übertragen; erkannte Zyklen verhindern Relationsschreiben und
 Ursprungabschluss. Ursprünge schließen erst nach bestätigten Links. Unfertige
 Anlagen sperren die menschliche Schlussübergabe. Bleibt nach dem letzten

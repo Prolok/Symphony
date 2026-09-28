@@ -421,6 +421,49 @@ defmodule SymphonyElixir.YoloActionsTest do
     end)
   end
 
+  for lost <- [false, true] do
+    test "domain autolink confirms a blocking follow-up with lost create reply=#{lost}", %{issues: [source | _]} do
+      original = "## Ziel\nOpenClaw.app mit `mix test` prüfen.\n- api.example.org dokumentieren."
+      returned = "## Ziel\n[OpenClaw.app](<http://OpenClaw.app>) mit `mix test` prüfen.\n- [api.example.org](https://api.example.org/) dokumentieren."
+
+      request =
+        args([source], "followup")
+        |> Map.put("description", original)
+        |> Map.put("blocks_origins", true)
+
+      query = fn document, variables ->
+        result = query(document, variables)
+
+        if String.contains?(document, "mutation YoloCreate(") do
+          change(fn db ->
+            created = Map.new(db.created, fn {id, ticket} -> {id, Map.update!(ticket, "description", &String.replace(&1, original, returned))} end)
+            %{db | created: created}
+          end)
+        end
+
+        result
+      end
+
+      group([source], fn ->
+        options = Keyword.put(opts(), :query, query)
+
+        if unquote(lost) do
+          change(&%{&1 | fail: "YoloCreate"})
+          assert {:error, :response_lost} = Followup.invoke(request, options)
+          change(&%{&1 | fail: nil})
+        end
+
+        assert {:ok, created} = Followup.invoke(request, options)
+        assert {:ok, ^created} = Followup.invoke(request, options)
+        assert db().created[created["id"]]["description"] =~ "[OpenClaw.app](<http://OpenClaw.app>)"
+        assert Enum.any?(db().relations, &(&1["type"] == "blocks" and &1["issue"]["id"] == created["id"] and &1["relatedIssue"]["id"] == source.id))
+        assert {:ok, [intent]} = Operations.related([source.id])
+        assert intent["done"] == true
+        assert length(writes("YoloCreate")) == 1
+      end)
+    end
+  end
+
   for prefix <- ["backslash-", "inline-link-"] do
     test "changed #{prefix}requirements refuse creation confirmation, probe, handoff and cleanup", ctx do
       alias SymphonyElixir.TestRun.Derived

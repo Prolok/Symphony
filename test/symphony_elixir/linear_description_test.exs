@@ -80,6 +80,72 @@ defmodule SymphonyElixir.LinearDescriptionTest do
     end
   end
 
+  test "Linear domain autolinks preserve the visible token in prose, lists and headings" do
+    for {expected, actual} <- [
+          {"OpenClaw.app prüft den Auftrag.", "[OpenClaw.app](<http://OpenClaw.app>) prüft den Auftrag."},
+          {"OpenClaw.app.", "[OpenClaw.app](https://OpenClaw.app)."},
+          {"- Beispiel.net prüfen", "* [Beispiel.net](https://Beispiel.net/) prüfen"},
+          {"## api.example.org bereitstellen", "## [api.example.org](<https://api.example.org/>) bereitstellen"},
+          {"`mix test` prüft OpenClaw.app und api.example.org", "`mix test` prüft [OpenClaw.app](http://OpenClaw.app) und [api.example.org](<https://api.example.org>)"},
+          {"- [ ] OpenClaw.app prüfen", "* [ ] [OpenClaw.app](https://OpenClaw.app) prüfen"}
+        ] do
+      assert Description.equivalent?(expected, actual), inspect({expected, actual})
+      assert Description.equivalent?(actual, expected), inspect({actual, expected})
+    end
+  end
+
+  test "domain and issue autolinks remain compatible in the same paragraph" do
+    url = "https://linear.app/prolok/issue/PRO-854/yolo-review"
+    expected = "`Prüfung` OpenClaw.app und #{url}"
+    actual = "`Prüfung` [OpenClaw.app](https://OpenClaw.app) und [PRO-854](#{url})"
+
+    assert Description.equivalent?(expected, actual)
+    assert Description.equivalent?(actual, expected)
+    refute Description.equivalent?(expected, String.replace(actual, "/PRO-854/", "/PRO-855/"))
+  end
+
+  test "domain autolinks reject changed targets, syntax and surrounding text" do
+    expected = "`Prüfung` OpenClaw.app bleibt offen."
+
+    for actual <- [
+          "`Prüfung` [OpenClaw.app](<https://other.app>) bleibt offen.",
+          "`Prüfung` [OpenClaw.app](ftp://OpenClaw.app) bleibt offen.",
+          "`Prüfung` [OpenClaw.app](https://openclaw.app) bleibt offen.",
+          "`Prüfung` [OpenClaw.app](https://OpenClaw.app/path) bleibt offen.",
+          "`Prüfung` [OpenClaw.app](<https://OpenClaw.app) bleibt offen.",
+          "`Prüfung` [OpenClaw.app](https://OpenClaw.app) ist erledigt.",
+          "`Prüfung` ![OpenClaw.app](https://OpenClaw.app) bleibt offen.",
+          "`Prüfung` [OpenClaw.app](https://OpenClaw.app)bleibt offen."
+        ] do
+      refute Description.equivalent?(expected, actual), actual
+    end
+
+    refute Description.equivalent?("vorOpenClaw.app", "vor[OpenClaw.app](https://OpenClaw.app)")
+    refute Description.equivalent?("OpenClaw.appdanach", "[OpenClaw.app](https://OpenClaw.app)danach")
+    refute Description.equivalent?("OpenClaw.app.suffix", "[OpenClaw.app](https://OpenClaw.app).suffix")
+    refute Description.equivalent?("support@OpenClaw.app", "support@[OpenClaw.app](https://OpenClaw.app)")
+    refute Description.equivalent?("https://OpenClaw.app", "https://[OpenClaw.app](https://OpenClaw.app)")
+    refute Description.equivalent?("foo_OpenClaw.app", "foo_[OpenClaw.app](https://OpenClaw.app)")
+
+    for {before, returned} <- [
+          {"`OpenClaw.app`", "`[OpenClaw.app](https://OpenClaw.app)`"},
+          {"```\nOpenClaw.app\n```", "```\n[OpenClaw.app](https://OpenClaw.app)\n```"},
+          {"- ~~~\n  OpenClaw.app\n  ~~~", "- ~~~\n  [OpenClaw.app](https://OpenClaw.app)\n  ~~~"},
+          {"\\OpenClaw.app", "\\[OpenClaw.app](https://OpenClaw.app)"},
+          {"[outer OpenClaw.app]", "[outer [OpenClaw.app](https://OpenClaw.app)]"}
+        ] do
+      refute Description.equivalent?(before, returned), inspect({before, returned})
+    end
+  end
+
+  test "an existing domain link keeps its exact destination while other plain domains may autolink" do
+    expected = "[OpenClaw.app](http://OpenClaw.app) und api.example.org"
+    actual = "[OpenClaw.app](https://OpenClaw.app) und [api.example.org](https://api.example.org)"
+
+    refute Description.equivalent?(expected, actual)
+    assert Description.equivalent?(expected, "[OpenClaw.app](http://OpenClaw.app) und [api.example.org](https://api.example.org)")
+  end
+
   test "terminal issue links in unchanged checkbox lists retain the existing comparison" do
     url = "https://linear.app/prolok/issue/PRO-854/yolo-review"
 

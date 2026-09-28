@@ -789,7 +789,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         count = Process.get(:handoff_writes) + 1
         Process.put(:handoff_writes, count)
 
-        if count == 1 do
+        if count <= 2 do
           {:error, :offline}
         else
           Process.put(:handoff_body, body)
@@ -814,16 +814,27 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         Process.put(:handoff_now, 301_000)
         tick(state, [issue], opts)
         assert Process.get(:handoff_writes) == 2
-        assert Process.get(:handoff_body) =~ "Betreiberauftrag ungültig"
+        assert {:ok, %{"operator_error_reports" => reports}} = Store.read("review")
+        assert reports[issue.id]["checked_at"] == 301_000
+        assert reports[issue.id]["reported"] == false
         tick(state, [issue], opts)
         assert Process.get(:handoff_writes) == 2
+        Process.put(:handoff_now, 601_000)
+        tick(state, [issue], opts)
+        assert Process.get(:handoff_writes) == 3
+        assert Process.get(:handoff_body) =~ "Betreiberauftrag ungültig"
+        assert {:ok, %{"operator_error_reports" => reports}} = Store.read("review")
+        assert reports[issue.id]["checked_at"] == 601_000
+        assert reports[issue.id]["reported"] == true
+        tick(state, [issue], opts)
+        assert Process.get(:handoff_writes) == 3
         tick(state, [%{issue | state: "BLOCKER"}], opts)
       end)
 
-    assert length(Regex.scan(~r/YOLO operator handoff invalid/, log)) == 2
+    assert length(Regex.scan(~r/YOLO operator handoff invalid/, log)) == 3
     Process.put(:handoff_body, broken_body)
     tick(state, [%{issue | last_comment_signal: %{relay_epoch: "edited-broken"}}], opts)
-    assert Process.get(:handoff_writes) == 3
+    assert Process.get(:handoff_writes) == 4
     assert Process.get(:handoff_body) =~ "Betreiberauftrag ungültig"
     repaired = %{issue | last_comment_signal: %{relay_epoch: "repaired"}}
     Process.put(:handoff_scan, Map.put(inbox(), "current", %{}))
@@ -912,6 +923,51 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert tick(state, [issue], opts).yolo_runs == %{}
     assert_receive {:workpad_note, "a", body}
     assert body =~ "Betreiberauftrag ungültig"
+  end
+
+  test "a malformed review duty preserves the prior confirmation until repair", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "confirmed"}}
+    duty = operator_workpad("duty", "a")
+    duty = put_in(duty, ["source", "body"], String.replace(duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    snapshot = inbox(%{"duty" => duty}) |> Map.put("current", %{"workpad" => "duty"})
+    assert {:ok, digest} = Yolo.OperatorHandoff.current(issue, snapshot)
+    confirmation = %{"version" => 1, "handoff_digest" => digest, "result" => "Bestätigt", "evidence" => "Messung bestanden"}
+    body = "```symphony-operator-confirmation\n#{Jason.encode!(confirmation)}\n```"
+    answer = %{"key" => "answer", "origin" => "integration", "deleted" => false, "source" => %{"id" => "answer", "body" => body, "user" => %{"id" => "pai", "app" => true}}}
+    answered = snapshot |> put_in(["versions", "answer"], answer) |> put_in(["current", "answer"], "answer")
+    assert {:ok, observed, _} = Observation.capture([issue], %{}, scan: fn _ -> {:ok, answered} end)
+    assert observed[issue.id]["operator_confirmation"] == digest
+    assert {:ok, record} = Store.read("review")
+
+    record =
+      record
+      |> Map.put("observations", observed)
+      |> Map.put("processed", Observation.fingerprint(observed))
+      |> Map.put("decisions", %{issue.id => observed[issue.id]["semantic"]})
+
+    assert :ok = Store.write("review", record)
+    invalid = put_in(answered, ["versions", "duty", "source", "body"], duty["source"]["body"] <> duty["source"]["body"])
+    Process.put(:review_scan, invalid)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, Process.get(:review_scan)} end,
+      handoff_report: fn _, _ -> :ok end,
+      start: fn _, _ -> flunk("a repaired follow-up duty needs a new confirmation") end
+    ]
+
+    tick(state, [%{issue | last_comment_signal: %{relay_epoch: "invalid"}}], opts)
+    assert {:ok, after_invalid} = Store.read("review")
+    assert after_invalid["observations"][issue.id] == observed[issue.id]
+    tick(state, [%{issue | last_comment_signal: %{relay_epoch: "invalid"}}], Keyword.put(opts, :retrying_groups, %{"review" => true}))
+
+    next_duty = operator_workpad("next", "b")
+    next_duty = put_in(next_duty, ["source", "body"], String.replace(next_duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    Process.put(:review_scan, answered |> put_in(["versions", "next"], next_duty) |> put_in(["current", "workpad"], "next"))
+    tick(state, [%{issue | last_comment_signal: %{relay_epoch: "repaired"}}], opts)
+    assert {:ok, after_repair} = Store.read("review")
+    assert after_repair["observations"][issue.id]["operator_confirmation"] == digest
+    assert after_repair["observations"][issue.id]["source"] == observed[issue.id]["source"]
   end
 
   test "only the current Pai confirmation wakes a waiting review once", %{issues: [issue | _]} do

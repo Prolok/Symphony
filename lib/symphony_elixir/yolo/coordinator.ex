@@ -347,16 +347,17 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   defp observe_group(group, members, opts) do
     with :ok <- Journal.available(group),
          :ok <- Delivery.reconcile(group),
-         {:ok, record} <- Store.read(group),
-         {:ok, record} <- Impulse.observe(members, record, opts),
-         {:ok, observations, _fingerprint, operator_errors} <-
+         {:ok, stored} <- Store.read(group),
+         {:ok, record} <- Impulse.observe(members, stored, opts),
+         {:ok, valid_observations, _fingerprint, operator_errors} <-
            capture_group(group, members, record, Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
+         observations = retain_error_observations(valid_observations, record["observations"], operator_errors),
          record = Delivery.migrate(record, observations),
          record = record_operator_errors(group, members, record, operator_errors, opts),
-         available = Enum.filter(members, &Map.has_key?(observations, &1.id)),
+         available = Enum.filter(members, &Map.has_key?(valid_observations, &1.id)),
          signals = get_in(opts[:relay_signals] || %{}, [group]),
          record = reset_changed_retry(record, signals),
-         :ok <- persist_observations(group, record, observations, signals, members),
+         :ok <- persist_observations(group, stored, record, observations, signals, members),
          record = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}, "dependency_snapshot" => dependency_snapshot(members)}),
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          effective = if(operations == [], do: record, else: Map.put(record, "processed", nil)),
@@ -381,12 +382,19 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp capture_group(group, members, record, opts) do
     if Map.has_key?(opts[:retrying_groups] || %{}, group) and
+         map_size(record["operator_errors"] || %{}) == 0 and
          Enum.all?(members, &is_map(get_in(record, ["observations", &1.id]))) do
       observations = Map.take(record["observations"], Enum.map(members, & &1.id))
       {:ok, observations, Observation.fingerprint(observations), %{}}
     else
       Observation.capture_isolated(members, record["observations"], opts)
     end
+  end
+
+  defp retain_error_observations(current, previous, errors) do
+    (previous || %{})
+    |> Map.take(Map.keys(errors))
+    |> Map.merge(current)
   end
 
   defp waiting_reason(members, available, observations, record, errors) do
@@ -532,9 +540,9 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp dependency_snapshot(members), do: Map.new(members, &{&1.id, &1.blocked_by})
 
-  defp persist_observations(group, record, observations, signals, members) do
+  defp persist_observations(group, stored, record, observations, signals, members) do
     updated = Map.merge(record, %{"observations" => observations, "relay_signals" => signals || %{}, "dependency_snapshot" => dependency_snapshot(members)})
-    if updated == record, do: :ok, else: Store.write(group, updated)
+    if updated == stored, do: :ok, else: Store.write(group, updated)
   end
 
   defp reset_changed_nonstart(%{"nonstart" => %{"fingerprint" => fingerprint, "members" => ids}} = record, pending, observations) do

@@ -42,8 +42,8 @@ defmodule SymphonyElixir.Yolo.Handoff do
 
   defp decide(%{state: "Yolo Review"} = issue, %{"kind" => kind} = args, report, opts) when kind in ["wait", "escalate"] do
     with {:ok, [fresh]} <- Dependencies.refresh([issue], opts),
-         {:ok, duty_digest} <- wait_allowed(fresh, kind, opts),
-         :ok <- report(issue, report, kind, opts, duty_digest),
+         {:ok, wait_reason} <- wait_allowed(fresh, kind, opts),
+         :ok <- report(issue, report, kind, opts, wait_reason),
          :ok <- maybe_handover(issue, args, opts),
          :ok <-
            Completion.invoke(
@@ -95,13 +95,13 @@ defmodule SymphonyElixir.Yolo.Handoff do
            true <- not is_nil(inbox["last_successful_scan"]) and is_nil(inbox["scan_error"]),
            {:ok, digest} when is_binary(digest) <- OperatorHandoff.current(issue, inbox),
            {:ok, nil} <- OperatorHandoff.confirmation(issue, inbox, digest) do
-        {:ok, digest}
+        {:ok, {:operator_duty, digest}}
       else
         {:error, _} = error -> error
         _ -> {:error, :yolo_wait_requires_dependency}
       end
     else
-      {:ok, nil}
+      {:ok, :dependency}
     end
   end
 
@@ -197,16 +197,20 @@ defmodule SymphonyElixir.Yolo.Handoff do
       Enum.map_join(pending, "\n", &"- Operation #{&1["key"]}; reservierte Ticket-ID #{&1["issue_id"]}. Anlage/Links/Ursprungabschluss anhand des Journals abgleichen; keine Ersatzanlage.")
   end
 
-  defp report(issue, report, kind, opts, duty_digest \\ nil) do
+  defp report(issue, report, kind, opts, wait_reason \\ nil) do
     fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1)
     write = Keyword.get(opts, :workpad, &Workpad.update_tracker_workpad/2)
 
     owner =
-      if kind == "wait" do
-        suffix = if is_binary(duty_digest), do: " Auftrags-Digest: `#{duty_digest}`.", else: ""
-        "\n\nBetreiberpflicht offen; Agentdelegation und Status bleiben bestehen." <> suffix
-      else
-        "\n\nMenschliche Zuständigkeit: @" <> Config.human_handoff_id() <> "."
+      case {kind, wait_reason} do
+        {"wait", :dependency} ->
+          "\n\nWartet auf blockierende Abhängigkeit; Agentdelegation und Status bleiben bestehen."
+
+        {"wait", {:operator_duty, digest}} ->
+          "\n\nBetreiberpflicht offen; Agentdelegation und Status bleiben bestehen. Auftrags-Digest: `#{digest}`."
+
+        _ ->
+          "\n\nMenschliche Zuständigkeit: @" <> Config.human_handoff_id() <> "."
       end
 
     entry = "\n\n### YOLO-Übergabe\n\n" <> report <> owner

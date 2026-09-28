@@ -324,6 +324,28 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert {:error, :comment_journal_corrupt} = CommentJournal.snapshot(binding)
   end
 
+  test "more than 32 open intents remain readable and reconcilable", %{binding: binding} do
+    fields =
+      Enum.map_join(1..33, " ", fn number ->
+        "item#{number}: commentCreate(input:{issueId:\"issue\",body:\"#{number}\"}) {success}"
+      end)
+
+    assert {:error, :offline} =
+             CommentJournal.execute(binding, %{"query" => "mutation { #{fields} }"}, fn _ -> {:error, :offline} end)
+
+    assert {:ok, view} = CommentJournal.snapshot(binding)
+    assert map_size(view) == 33
+
+    assert Enum.all?(view, fn
+             {_id, [%{confirmed: nil}]} -> true
+             _ -> false
+           end)
+
+    assert {:ok, results} = CommentJournal.reconcile(binding, fn _ -> {:error, :offline} end)
+    assert length(results) == 33
+    assert Enum.all?(results, &(&1["state"] == "pending"))
+  end
+
   @tag timeout: 90_000
   test "four scans and two writers share the journal for thirty seconds without busy errors", %{binding: binding} do
     deadline = System.monotonic_time(:millisecond) + 30_000
@@ -503,7 +525,11 @@ defmodule SymphonyElixir.CommentJournalTest do
       assert hold < 1_000, "#{purpose} held lock for #{hold} ms"
     end
 
-    load = for _ <- 1..min(System.schedulers_online(), 16), do: Task.async(&burn_until_stopped/0)
+    previous_schedulers = System.schedulers_online()
+    loaded_schedulers = min(previous_schedulers, 4)
+    on_exit(fn -> :erlang.system_flag(:schedulers_online, previous_schedulers) end)
+    :erlang.system_flag(:schedulers_online, loaded_schedulers)
+    load = for _ <- 1..loaded_schedulers, do: Task.async(&burn_until_stopped/0)
 
     durations =
       for _ <- 1..3 do

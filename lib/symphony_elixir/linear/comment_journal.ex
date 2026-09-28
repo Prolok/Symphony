@@ -387,13 +387,25 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp finish_archive_moves(binding) do
     with {:ok, files} <- active_files(binding),
          {:ok, catalog} <- archive_catalog(binding) do
+      case finish_archive_moves(binding, files, catalog) do
+        {:ok, _moved?} -> :ok
+        error -> error
+      end
+    end
+  end
+
+  defp finish_archive_moves(binding, files, catalog) do
+    due =
       files
       |> Enum.filter(&String.match?(&1, ~r/\.(intent|confirmed|rejected)\.json\z/))
       |> Enum.map(&String.replace(&1, ~r/\.(intent|confirmed|rejected)\.json\z/, ""))
       |> Enum.uniq()
       |> Enum.flat_map(&List.wrap(catalog[&1]))
       |> Enum.take(@archive_batch)
-      |> then(&move_archive_batch(binding, &1))
+
+    case move_archive_batch(binding, due) do
+      :ok -> {:ok, due != []}
+      error -> error
     end
   end
 
@@ -912,23 +924,26 @@ defmodule SymphonyElixir.Linear.CommentJournal do
         error
 
       _ ->
+        preloaded_index = preload_active_index(binding)
+
         IssueLease.with_journal_lock(
           binding["state_root"],
-          fn -> timed_index_read(binding, purpose, opts, candidate, callback) end,
+          fn -> timed_index_read(binding, purpose, opts, candidate, preloaded_index, callback) end,
           timeout,
           purpose
         )
     end
   end
 
-  defp timed_index_read(binding, purpose, opts, candidate, callback) do
+  defp timed_index_read(binding, purpose, opts, candidate, preloaded_index, callback) do
     started = System.monotonic_time(:microsecond)
 
     try do
-      with :ok <- finish_archive_moves(binding),
-           {:ok, signatures} <- active_signatures(binding),
+      with {:ok, initial_signatures} <- active_signatures(binding),
            {:ok, catalog} <- archive_catalog(binding),
-           {:ok, index} <- active_index_catalog(binding),
+           {:ok, moved?} <- finish_archive_moves(binding, Map.keys(initial_signatures), catalog),
+           {:ok, signatures} <- if(moved?, do: active_signatures(binding), else: {:ok, initial_signatures}),
+           {:ok, index} <- current_active_index(binding, preloaded_index),
            {:ok, active, updated} <- current_active_entries(binding, signatures, index, candidate, catalog),
            :ok <- maybe_write_active_index(binding, index, updated),
            {:ok, archived} <- collect(Map.values(catalog), &snapshot_entry(binding, &1)) do
@@ -944,6 +959,21 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp active_index(binding), do: Path.join(directory(binding), "active-index.json")
+
+  defp preload_active_index(binding) do
+    before = File.stat(active_index(binding), time: :native)
+    result = active_index_catalog(binding)
+    after_read = File.stat(active_index(binding), time: :native)
+    if before == after_read, do: {after_read, result}, else: nil
+  end
+
+  defp current_active_index(binding, {signature, result}) do
+    if File.stat(active_index(binding), time: :native) == signature,
+      do: result,
+      else: active_index_catalog(binding)
+  end
+
+  defp current_active_index(binding, nil), do: active_index_catalog(binding)
 
   defp active_index_catalog(binding) do
     case DurableState.read(active_index(binding)) do
@@ -1012,8 +1042,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp candidate_entries(signatures, pairs) do
     pairs
-    |> Enum.filter(fn {_id, entry} -> entry.record["_indexed"] == true end)
-    |> Map.new(fn {id, entry} -> {id, %{"signatures" => receipt_signatures(signatures, id), "record" => entry.record}} end)
+    |> Map.new(fn {id, entry} -> {id, index_entry(signatures, id, entry)} end)
   end
 
   defp candidate_read_error(binding, before, error) do
@@ -1031,13 +1060,14 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
   defp current_active_entries(binding, signatures, index, candidate, catalog) do
     present = intent_ids(signatures)
-    missing = Map.keys(index) -- (present ++ Map.keys(catalog))
+    known_ids = MapSet.new(present ++ Map.keys(catalog))
+    missing = Enum.reject(Map.keys(index), &MapSet.member?(known_ids, &1))
 
     if missing != [] do
       {:error, :comment_journal_corrupt}
     else
       ids = Enum.reject(present, &Map.has_key?(catalog, &1))
-      changed = Enum.count(ids, fn id -> not cached_current?(index[id], signatures, id) end)
+      changed = Enum.count(ids, fn id -> not index_current?(index[id], signatures, id) end)
 
       cond do
         changed > @index_rebuild_threshold and match?({:ok, {_before, _rebuilt}}, candidate) ->
@@ -1053,15 +1083,14 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   end
 
   defp use_rebuilt_candidate(binding, signatures, index, catalog, ids, {:ok, {_before, rebuilt}}) do
-    if Enum.count(ids, fn id -> not cached_current?(rebuilt[id], signatures, id) end) <= @index_rebuild_threshold,
+    if Enum.count(ids, fn id -> not index_current?(rebuilt[id], signatures, id) end) <= @index_rebuild_threshold,
       do: active_from_cache(binding, signatures, rebuilt, index, catalog),
       else: {:error, :comment_journal_stale_index}
   end
 
   defp active_from_cache(binding, signatures, cache, original, catalog) do
     ids = intent_ids(signatures) |> Enum.reject(&Map.has_key?(catalog, &1))
-    current = Enum.filter(ids, &cached_current?(cache[&1], signatures, &1))
-    changed = ids -- current
+    {current, changed} = Enum.split_with(ids, &cached_current?(cache[&1], signatures, &1))
 
     with {:ok, fresh} <- read_many(changed, &read_active_entry(binding, &1)) do
       cached = Enum.map(current, fn id -> {id, elem(snapshot_entry(binding, cache[id]["record"]), 1)} end)
@@ -1069,8 +1098,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
 
       updated =
         entries
-        |> Enum.filter(fn {_id, entry} -> entry.record["_indexed"] == true end)
-        |> Map.new(fn {id, entry} -> {id, %{"signatures" => receipt_signatures(signatures, id), "record" => entry.record}} end)
+        |> Map.new(fn {id, entry} -> {id, index_entry(signatures, id, entry)} end)
 
       {:ok, Enum.map(entries, &elem(&1, 1)), if(updated == original, do: original, else: updated)}
     end
@@ -1080,6 +1108,16 @@ defmodule SymphonyElixir.Linear.CommentJournal do
     do: expected == receipt_signatures(signatures, id)
 
   defp cached_current?(_cache, _signatures, _id), do: false
+
+  defp index_current?(%{"signatures" => expected, "open" => true}, signatures, id),
+    do: expected == receipt_signatures(signatures, id)
+
+  defp index_current?(entry, signatures, id), do: cached_current?(entry, signatures, id)
+
+  defp index_entry(signatures, id, entry) do
+    value = if entry.record["_indexed"] == true, do: %{"record" => entry.record}, else: %{"open" => true}
+    Map.put(value, "signatures", receipt_signatures(signatures, id))
+  end
 
   defp read_active_entry(binding, id) do
     with {:ok, record} <- read_intent(binding, id <> ".intent.json"),

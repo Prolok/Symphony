@@ -1457,6 +1457,8 @@ inhaltlich gebundene Summaries. Der Index ist an Workspace und Installation
 gebunden und durch einen Digest geschützt. Dateiliste sowie Inode, Größe und
 Nanosekunden-Zeitstempel der Originaldateien werden bei jedem Snapshot geprüft;
 neue, offene oder geänderte Belege werden aus den Originaldateien gelesen.
+Offene Belege behalten im Index nur Dateisignaturen und lösen ohne Änderung
+keinen wiederholten vollständigen Indexaufbau aus.
 Bestätigungs-, Relay- und Antwortabfragen nutzen dieselbe validierte Sicht.
 Ein fehlender oder umfangreich veralteter Index wird außerhalb des gemeinsamen
 Journal-Locks aufgebaut und vor der Übernahme unter dem Lock erneut geprüft.

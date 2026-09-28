@@ -4,12 +4,13 @@ defmodule SymphonyElixir.Yolo.Workspace do
   alias SymphonyElixir.TestRun.PoIncoming, as: PoIncoming
 
   alias SymphonyElixir.{Config, PathSafety, ProjectContext}
+  @groups ~w(incoming planning in_progress blocker review)
 
   @spec create(String.t(), String.t()) :: {:ok, map()} | {:error, term()}
   def create(group, run_id) do
     context = ProjectContext.current()
 
-    with true <- group in ~w(incoming planning in_progress blocker review),
+    with true <- group in @groups,
          {:ok, _} <- Ecto.UUID.cast(run_id),
          {:ok, root} <- PathSafety.canonicalize(Config.settings!().workspace.root),
          path = Path.join([root, "yolo", group, run_id]),
@@ -33,13 +34,11 @@ defmodule SymphonyElixir.Yolo.Workspace do
     end
   end
 
-  defp cleanup_receipt_failure("review", run_id, workspace, error) do
-    cleanup = remove_review(workspace, run_id)
-    Logger.warning("YOLO review checkout receipt failed group=review run_id=#{run_id} reason=#{inspect(error)} checkout_cleanup=#{inspect(cleanup)}")
+  defp cleanup_receipt_failure(group, run_id, workspace, error) do
+    cleanup = remove(group, workspace, run_id)
+    Logger.warning("YOLO checkout receipt failed group=#{group} run_id=#{run_id} reason=#{inspect(error)} checkout_cleanup=#{inspect(cleanup)}")
     {:error, :yolo_workspace_unavailable}
   end
-
-  defp cleanup_receipt_failure(_, _, _, _), do: {:error, :yolo_workspace_unavailable}
 
   @spec unchanged?(map()) :: boolean()
   def unchanged?(workspace) do
@@ -51,17 +50,17 @@ defmodule SymphonyElixir.Yolo.Workspace do
     end
   end
 
-  @doc "Remove only the registered, clean review checkout owned by this run."
-  @spec remove_review(map(), String.t()) :: :ok | {:error, atom()}
-  def remove_review(workspace, run_id), do: remove_review(workspace, run_id, true)
+  @doc "Remove only the registered, clean PO checkout owned by this run."
+  @spec remove(String.t(), map(), String.t()) :: :ok | {:error, atom()}
+  def remove(group, workspace, run_id), do: remove(group, workspace, run_id, true)
 
-  @spec remove_review(map(), String.t(), boolean()) :: :ok | {:error, atom()}
-  def remove_review(%{path: path, sha: sha}, run_id, apply?) do
+  @spec remove(String.t(), map(), String.t(), boolean()) :: :ok | {:error, atom()}
+  def remove(group, %{path: path, sha: sha}, run_id, apply?) when group in @groups and is_boolean(apply?) do
     context = ProjectContext.current()
 
     with {:ok, _} <- Ecto.UUID.cast(run_id),
          {:ok, root} <- PathSafety.canonicalize(Config.settings!().workspace.root),
-         ^path <- Path.join([root, "yolo", "review", run_id]),
+         ^path <- Path.join([root, "yolo", group, run_id]),
          {:ok, ^path} <- PathSafety.canonicalize(path),
          true <- File.dir?(path),
          {top, 0} <- git(path, ["rev-parse", "--show-toplevel"]),
@@ -75,37 +74,61 @@ defmodule SymphonyElixir.Yolo.Workspace do
          {_, 0} <- if(apply?, do: git(context.root, ["worktree", "remove", path]), else: {"", 0}) do
       :ok
     else
-      _ -> {:error, :yolo_review_checkout_unsafe}
+      _ -> {:error, :yolo_checkout_unsafe}
     end
   end
 
-  def remove_review(_, _, _), do: {:error, :yolo_review_checkout_unsafe}
+  def remove(_, _, _, _), do: {:error, :yolo_checkout_unsafe}
 
-  @spec owned_review?(map(), String.t()) :: boolean()
-  def owned_review?(%{path: path}, run_id) do
+  @spec remove_review(map(), String.t()) :: :ok | {:error, atom()}
+  def remove_review(workspace, run_id), do: remove_review(workspace, run_id, true)
+
+  @spec remove_review(map(), String.t(), boolean()) :: :ok | {:error, atom()}
+  def remove_review(workspace, run_id, apply?) do
+    case remove("review", workspace, run_id, apply?) do
+      {:error, :yolo_checkout_unsafe} -> {:error, :yolo_review_checkout_unsafe}
+      result -> result
+    end
+  end
+
+  @spec owned?(String.t(), map(), String.t()) :: boolean()
+  def owned?(group, %{path: path}, run_id) when group in @groups do
     with {:ok, _} <- Ecto.UUID.cast(run_id),
          {:ok, root} <- PathSafety.canonicalize(Config.settings!().workspace.root) do
-      path == Path.join([root, "yolo", "review", run_id])
+      path == Path.join([root, "yolo", group, run_id])
     else
       _ -> false
     end
   end
 
-  def owned_review?(_, _), do: false
+  def owned?(_, _, _), do: false
 
-  @spec review_checkout_present?(String.t()) :: {:ok, boolean()} | {:error, atom()}
-  def review_checkout_present?(run_id) do
+  @spec owned_review?(map(), String.t()) :: boolean()
+  def owned_review?(workspace, run_id), do: owned?("review", workspace, run_id)
+
+  @spec checkout_present?(String.t(), String.t()) :: {:ok, boolean()} | {:error, atom()}
+  def checkout_present?(group, run_id) when group in @groups do
     context = ProjectContext.current()
 
     with {:ok, _} <- Ecto.UUID.cast(run_id),
          {:ok, root} <- PathSafety.canonicalize(Config.settings!().workspace.root),
-         path = Path.join([root, "yolo", "review", run_id]),
+         path = Path.join([root, "yolo", group, run_id]),
          {:ok, ^path} <- PathSafety.canonicalize(path),
          {listing, 0} <- git(context.root, ["worktree", "list", "--porcelain"]) do
       registered? = String.contains?(listing, "worktree " <> path <> "\n")
       {:ok, File.exists?(path) or registered?}
     else
-      _ -> {:error, :yolo_review_checkout_unknown}
+      _ -> {:error, :yolo_checkout_unknown}
+    end
+  end
+
+  def checkout_present?(_, _), do: {:error, :yolo_checkout_unknown}
+
+  @spec review_checkout_present?(String.t()) :: {:ok, boolean()} | {:error, atom()}
+  def review_checkout_present?(run_id) do
+    case checkout_present?("review", run_id) do
+      {:error, :yolo_checkout_unknown} -> {:error, :yolo_review_checkout_unknown}
+      result -> result
     end
   end
 

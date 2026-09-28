@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   alias SymphonyElixir.Yolo.{Group, Impulse, Observation, OpenClaw, Operations}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{ReviewContract, ReviewReadiness, Scope, Store, Workspace}
+  @groups ~w(incoming planning in_progress blocker review)
 
   @spec run(String.t(), [map()], [map()], keyword()) :: term()
   def run(group, issues, project_issues, opts \\ []) do
@@ -65,7 +66,7 @@ defmodule SymphonyElixir.Yolo.Runner do
       reason_text = inspect(reason)
       same_reason? = current["last_failure_reason"] == reason_text
       failure_count = if same_reason?, do: (current["failure_count"] || 0) + 1, else: 1
-      nonstart_count = nonstart_count(group, current["nonstart"], attempt, same_reason?)
+      nonstart_count = nonstart_count(group, current["nonstart"], attempt)
       delay = min(30_000 * Integer.pow(2, min(max(failure_count, nonstart_count) - 1, 5)), 900_000)
 
       update = %{
@@ -87,30 +88,36 @@ defmodule SymphonyElixir.Yolo.Runner do
     result
   end
 
-  defp nonstart_count("review", previous, %{"checkout_cleanup" => "removed"} = attempt, same_reason?) do
+  defp nonstart_count(group, previous, %{"checkout_cleanup" => "removed"} = attempt) when group in @groups do
     previous = previous || %{}
-    same? = same_reason? and previous["fingerprint"] == attempt["fingerprint"] and previous["members"] == attempt["members"]
+    same? = previous["fingerprint"] == attempt["fingerprint"] and previous["members"] == attempt["members"]
     if same?, do: previous["count"] + 1, else: 1
   end
 
-  defp nonstart_count(_, _, _, _), do: 0
+  defp nonstart_count(_, _, _), do: 0
 
-  defp checkout_available("review", %{"checkout_cleanup_blocked" => true}), do: {:error, :yolo_review_checkout_cleanup_unconfirmed}
+  defp checkout_available(group, %{"checkout_cleanup_blocked" => true}) when group in @groups, do: {:error, cleanup_unconfirmed(group)}
 
-  defp checkout_available("review", %{"attempt" => %{"cleanup_contract" => 1} = attempt} = record) do
+  defp checkout_available(group, %{"attempt" => %{"cleanup_contract" => 1} = attempt} = record) when group in @groups do
     delivered? = Enum.any?(Map.values(record["deliveries"] || %{}), &(&1["run_id"] == attempt["id"]))
 
-    if attempt["checkout_cleanup"] in ["none", "removed"] or is_binary(attempt["session_id"]) or delivered? or retired_attempt?(attempt),
+    if attempt["checkout_cleanup"] in ["none", "removed"] or is_binary(attempt["session_id"]) or delivered? or resolved_external_attempt?(group, attempt),
       do: :ok,
-      else: {:error, :yolo_review_checkout_cleanup_unconfirmed}
+      else: {:error, cleanup_unconfirmed(group)}
   end
 
   defp checkout_available(_, _), do: :ok
 
-  defp retired_attempt?(attempt) do
-    case Journal.read("review") do
+  defp cleanup_unconfirmed("review"), do: :yolo_review_checkout_cleanup_unconfirmed
+  defp cleanup_unconfirmed(_), do: :yolo_checkout_cleanup_unconfirmed
+
+  defp resolved_external_attempt?(group, attempt) do
+    case Journal.read(group) do
       {:ok, %{"id" => id, "state" => "retired", "writable" => false, "retirement" => %{"kind" => "fenced_interruption", "attempt" => proof}}} ->
         id == attempt["id"] and proof == attempt
+
+      {:ok, %{"id" => id, "state" => "rejected", "writable" => false, "rejection" => proof} = order} when is_map(proof) ->
+        id == attempt["id"] and not Journal.pending?(order)
 
       _ ->
         false
@@ -213,15 +220,12 @@ defmodule SymphonyElixir.Yolo.Runner do
     record = Map.merge(record, %{"previous_error" => resume_context["previous_error"], "resume_reason" => reasons})
     opts = Keyword.put(opts, :resume_context, resume_context)
 
-    attempt =
-      if group == "review",
-        do: Map.merge(attempt, %{"cleanup_contract" => 1, "checkout_cleanup" => "creating"}),
-        else: attempt
+    attempt = Map.merge(attempt, %{"cleanup_contract" => 1, "checkout_cleanup" => "creating"})
 
     state = {record, observations, fingerprint}
 
     with :ok <- reserve_attempt(group, record, observations, attempt),
-         creation <- run_scoped(group, fn -> create.(group, run_id) end) do
+         creation <- run_scoped(group, run_id, fn -> create.(group, run_id) end) do
       case creation do
         {:ok, workspace} ->
           record_created(group, issues, project_issues, run_id, state, opts, attempt, workspace)
@@ -232,11 +236,8 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
   end
 
-  defp reserve_attempt("review", record, observations, attempt) do
-    Store.write("review", Map.merge(record, %{"observations" => observations, "attempt" => attempt, "error" => nil}))
-  end
-
-  defp reserve_attempt(_, _, _, _), do: :ok
+  defp reserve_attempt(group, record, observations, attempt),
+    do: Store.write(group, Map.merge(record, %{"observations" => observations, "attempt" => attempt, "error" => nil}))
 
   defp record_created(group, issues, project_issues, run_id, {record, observations, fingerprint}, opts, attempt, workspace) do
     attempt = Map.merge(attempt, %{"workspace" => workspace.path, "sha" => workspace.sha})
@@ -247,25 +248,23 @@ defmodule SymphonyElixir.Yolo.Runner do
     end
   end
 
-  defp handle_create_error("review", run_id, {:error, reason} = error) do
+  defp handle_create_error(group, run_id, {:error, reason} = error) do
     {status, blocked?} =
-      if Workspace.review_checkout_present?(run_id) == {:ok, false},
+      if Workspace.checkout_present?(group, run_id) == {:ok, false},
         do: {"none", false},
         else: {"blocked", true}
 
-    with {:ok, %{"attempt" => %{"id" => ^run_id} = attempt} = record} <- Store.read("review") do
-      Store.write("review", Map.merge(record, %{"attempt" => Map.put(attempt, "checkout_cleanup", status), "checkout_cleanup_blocked" => blocked?}))
+    with {:ok, %{"attempt" => %{"id" => ^run_id} = attempt} = record} <- Store.read(group) do
+      Store.write(group, Map.merge(record, %{"attempt" => Map.put(attempt, "checkout_cleanup", status), "checkout_cleanup_blocked" => blocked?}))
     end
 
-    Logger.warning("YOLO review checkout creation failed group=review run_id=#{run_id} reason=#{inspect(reason)} checkout_cleanup=#{status}")
+    Logger.warning("YOLO checkout creation failed group=#{group} run_id=#{run_id} reason=#{inspect(reason)} checkout_cleanup=#{status}")
     error
   end
 
-  defp handle_create_error(_, _, error), do: error
-
   defp run_created(group, issues, project_issues, run_id, workspace, {record, observations, fingerprint}, opts) do
     result =
-      run_scoped(group, fn ->
+      run_scoped(group, run_id, fn ->
         Scope.with_scope(
           group,
           issues,
@@ -280,49 +279,56 @@ defmodule SymphonyElixir.Yolo.Runner do
     cleanup_failed_start(group, run_id, issues, workspace, result)
   end
 
-  defp run_scoped("review", callback) do
+  defp run_scoped(group, run_id, callback) when group in @groups do
     callback.()
   rescue
-    error -> {:error, {:yolo_review_start_exception, error.__struct__}}
+    error ->
+      if no_external_start(group, run_id) == :ok,
+        do: {:error, {start_exception(group), error.__struct__}},
+        else: reraise(error, __STACKTRACE__)
   catch
-    kind, reason -> {:error, {:yolo_review_start_caught, kind, inspect(reason)}}
+    kind, reason ->
+      if no_external_start(group, run_id) == :ok,
+        do: {:error, {start_caught(group), kind, inspect(reason)}},
+        else: :erlang.raise(kind, reason, __STACKTRACE__)
   end
 
-  defp run_scoped(_, callback), do: callback.()
+  defp start_exception("review"), do: :yolo_review_start_exception
+  defp start_exception(_), do: :yolo_start_exception
+  defp start_caught("review"), do: :yolo_review_start_caught
+  defp start_caught(_), do: :yolo_start_caught
 
-  defp cleanup_unrecorded("review", run_id, workspace, error) do
+  defp cleanup_unrecorded(group, run_id, workspace, error) do
     cleanup =
-      if Workspace.owned_review?(workspace, run_id),
-        do: Workspace.remove_review(workspace, run_id),
-        else: {:error, :yolo_review_checkout_unsafe}
+      if Workspace.owned?(group, workspace, run_id),
+        do: Workspace.remove(group, workspace, run_id),
+        else: {:error, :yolo_checkout_unsafe}
 
     status = if(cleanup == :ok, do: "removed", else: "blocked")
 
-    with {:ok, %{"attempt" => %{"id" => ^run_id} = attempt} = record} <- Store.read("review") do
+    with {:ok, %{"attempt" => %{"id" => ^run_id} = attempt} = record} <- Store.read(group) do
       attempt = Map.merge(attempt, %{"workspace" => workspace.path, "sha" => workspace.sha, "checkout_cleanup" => status})
-      Store.write("review", Map.merge(record, %{"attempt" => attempt, "checkout_cleanup_blocked" => status == "blocked"}))
+      Store.write(group, Map.merge(record, %{"attempt" => attempt, "checkout_cleanup_blocked" => status == "blocked"}))
     end
 
-    Logger.warning("YOLO review start journal failed group=review run_id=#{run_id} reason=#{inspect(error)} checkout_cleanup=#{status}")
+    Logger.warning("YOLO start journal failed group=#{group} run_id=#{run_id} reason=#{inspect(error)} checkout_cleanup=#{status}")
     error
   end
 
-  defp cleanup_unrecorded(_, _, _, error), do: error
-
-  defp cleanup_failed_start("review", run_id, issues, workspace, {:error, reason} = result) do
-    with true <- Workspace.owned_review?(workspace, run_id),
-         {:ok, %{"attempt" => %{"id" => ^run_id} = attempt} = record} <- Store.read("review"),
+  defp cleanup_failed_start(group, run_id, issues, workspace, {:error, reason} = result) do
+    with true <- Workspace.owned?(group, workspace, run_id),
+         {:ok, %{"attempt" => %{"id" => ^run_id} = attempt} = record} <- Store.read(group),
          true <- is_nil(attempt["session_id"]) and (attempt["completed"] || %{}) == %{},
          false <- Enum.any?(Map.values(record["deliveries"] || %{}), &(&1["run_id"] == run_id)),
-         :ok <- no_external_start(run_id),
-         :ok <- Store.write("review", Map.merge(record, %{"attempt" => Map.put(attempt, "checkout_cleanup", "pending"), "checkout_cleanup_blocked" => true})),
-         cleanup <- Workspace.remove_review(workspace, run_id) do
+         :ok <- no_external_start(group, run_id),
+         :ok <- Store.write(group, Map.merge(record, %{"attempt" => Map.put(attempt, "checkout_cleanup", "pending"), "checkout_cleanup_blocked" => true})),
+         cleanup <- Workspace.remove(group, workspace, run_id) do
       status = if(cleanup == :ok, do: "removed", else: "blocked")
       member_context = Enum.map_join(issues, " ", &"issue_id=#{&1.id} issue_identifier=#{&1.identifier}")
-      Logger.warning("YOLO review nonstart group=review run_id=#{run_id} #{member_context} reason=#{inspect(reason)} checkout_cleanup=#{status} workspace=#{workspace.path}")
+      Logger.warning("YOLO nonstart group=#{group} run_id=#{run_id} #{member_context} reason=#{inspect(reason)} checkout_cleanup=#{status} workspace=#{workspace.path}")
 
       Store.write(
-        "review",
+        group,
         Map.merge(record, %{
           "attempt" => Map.put(attempt, "checkout_cleanup", status),
           "checkout_cleanup_blocked" => status == "blocked"
@@ -337,8 +343,8 @@ defmodule SymphonyElixir.Yolo.Runner do
 
   defp cleanup_failed_start(_, _, _, _, result), do: result
 
-  defp no_external_start(run_id) do
-    case Journal.read("review") do
+  defp no_external_start(group, run_id) do
+    case Journal.read(group) do
       {:ok, nil} ->
         :ok
 

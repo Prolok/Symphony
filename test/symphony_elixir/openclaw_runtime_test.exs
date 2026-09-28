@@ -1171,6 +1171,17 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     order
   end
 
+  test "an exception after uncertain OpenClaw acceptance remains visible to recovery", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", _ -> {:error, :connection_lost}
+      "agent.wait", _ -> %{"status" => "timeout"}
+    end
+
+    opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> raise "accepted run interrupted" end)
+    assert_raise RuntimeError, "accepted run interrupted", fn -> run_group("incoming", issues, issues, opts) end
+    assert {:ok, %{"state" => "unknown"}} = Journal.read("incoming")
+  end
+
   defp rejection_evidence(order) do
     %{
       "version" => 1,

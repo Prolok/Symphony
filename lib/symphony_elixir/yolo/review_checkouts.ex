@@ -1,8 +1,9 @@
 defmodule SymphonyElixir.Yolo.ReviewCheckouts do
-  @moduledoc "Operator inventory check for unjournaled, inactive review checkouts."
+  @moduledoc "Operator inventory check for unjournaled, inactive PO checkouts."
   alias SymphonyElixir.{Config, PathSafety, ProjectContext}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{Store, Workspace}
+  @groups ~w(incoming planning in_progress blocker review)
 
   @spec sweep(map()) :: {:ok, map()} | {:error, term()}
   def sweep(inventory), do: sweep(inventory, false)
@@ -12,7 +13,8 @@ defmodule SymphonyElixir.Yolo.ReviewCheckouts do
     with true <- is_binary(Config.yolo_agent_id()),
          :ok <- validate(entries),
          {:ok, root} <- PathSafety.canonicalize(Config.settings!().workspace.root) do
-      Store.lock("review", fn -> sweep_locked(entries, apply?, root) end)
+      groups = Enum.filter(@groups, fn group -> Enum.any?(entries, &(group_for(&1["path"], root) == group)) end)
+      with_group_locks(groups, fn -> sweep_locked(entries, apply?, root) end)
     else
       _ -> {:error, :review_checkout_inventory_invalid}
     end
@@ -32,38 +34,71 @@ defmodule SymphonyElixir.Yolo.ReviewCheckouts do
   end
 
   defp sweep_locked(entries, apply?, root) do
-    with {:ok, record} <- Store.read("review"),
-         {:ok, journal} <- Journal.read("review"),
-         {:ok, before_count} <- count(root) do
-      results = Enum.map(entries, &inspect_entry(&1, record, journal, apply?, root))
+    grouped = Enum.group_by(entries, &group_for(&1["path"], root))
 
-      with {:ok, after_count} <- count(root) do
-        {:ok,
-         %{
-           "mode" => if(apply?, do: "apply", else: "dry_run"),
-           "before" => before_count,
-           "after" => after_count,
-           "removable" => Enum.count(results, &(&1["status"] in ["removable", "removed"])),
-           "removed" => Enum.count(results, &(&1["status"] == "removed")),
-           "entries" => results
-         }}
-      end
+    with {:ok, before_count} <- count(root),
+         {:ok, checked} <- inspect_groups(grouped, apply?, root),
+         {:ok, after_count} <- count(root) do
+      results =
+        Enum.map(entries, fn entry ->
+          Map.get(checked, entry["path"], %{"path" => entry["path"], "sha" => entry["sha"], "status" => "protected"})
+        end)
+
+      {:ok,
+       %{
+         "mode" => if(apply?, do: "apply", else: "dry_run"),
+         "before" => before_count,
+         "after" => after_count,
+         "removable" => Enum.count(results, &(&1["status"] in ["removable", "removed"])),
+         "removed" => Enum.count(results, &(&1["status"] == "removed")),
+         "entries" => results
+       }}
     end
   end
 
-  defp inspect_entry(%{"path" => path, "sha" => sha}, record, journal, apply?, root) do
+  defp inspect_groups(grouped, apply?, root) do
+    Enum.reduce_while(@groups, {:ok, %{}}, fn group, {:ok, all} ->
+      case inspect_group(group, Map.get(grouped, group, []), apply?, root) do
+        {:ok, results} -> {:cont, {:ok, Map.merge(all, results)}}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp inspect_group(_, [], _, _), do: {:ok, %{}}
+
+  defp inspect_group(group, entries, apply?, root) do
+    with {:ok, record} <- Store.read(group),
+         {:ok, journal} <- Journal.read(group) do
+      {:ok, Map.new(entries, fn entry -> {entry["path"], inspect_entry(entry, group, record, journal, apply?, root)} end)}
+    end
+  end
+
+  defp with_group_locks([], callback), do: callback.()
+  defp with_group_locks([group | rest], callback), do: Store.lock(group, fn -> with_group_locks(rest, callback) end)
+
+  defp group_for(path, root) do
+    Enum.find(@groups, fn group ->
+      case Ecto.UUID.cast(Path.basename(path)) do
+        {:ok, _} -> path == Path.join([root, "yolo", group, Path.basename(path)])
+        _ -> false
+      end
+    end)
+  end
+
+  defp inspect_entry(%{"path" => path, "sha" => sha}, group, record, journal, apply?, root) do
     id = Path.basename(path)
     workspace = %{path: path, sha: sha}
 
     status =
       with {:ok, _} <- Ecto.UUID.cast(id),
-           true <- path == Path.join([root, "yolo", "review", id]),
+           true <- path == Path.join([root, "yolo", group, id]),
            true <- inactive_attempt?(record["attempt"], id),
            true <- no_delivery?(record["deliveries"], id),
            true <- journal == nil or journal["id"] != id,
-           {:error, :enoent} <- Journal.history("review", id),
+           {:error, :enoent} <- Journal.history(group, id),
            false <- File.exists?(Path.join([root, "yolo-runs", id])),
-           :ok <- Workspace.remove_review(workspace, id, apply?) do
+           :ok <- Workspace.remove(group, workspace, id, apply?) do
         if(apply?, do: "removed", else: "removable")
       else
         _ -> "protected"
@@ -92,8 +127,8 @@ defmodule SymphonyElixir.Yolo.ReviewCheckouts do
 
     case System.cmd("git", ["worktree", "list", "--porcelain"], cd: context.root, stderr_to_stdout: true, env: Config.without_linear_secret([])) do
       {listing, 0} ->
-        prefix = Path.join([root, "yolo", "review"]) <> "/"
-        {:ok, listing |> String.split("\n") |> Enum.count(&String.starts_with?(&1, "worktree " <> prefix))}
+        prefixes = Enum.map(@groups, &("worktree " <> Path.join([root, "yolo", &1]) <> "/"))
+        {:ok, listing |> String.split("\n") |> Enum.count(fn line -> Enum.any?(prefixes, &String.starts_with?(line, &1)) end)}
 
       _ ->
         {:error, :review_checkout_listing_unavailable}

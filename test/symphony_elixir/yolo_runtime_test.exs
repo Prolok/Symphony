@@ -1044,7 +1044,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
       if case_name == :no_foreign do
         terminal = %{waiting | state: "Review"}
-        assert {:ok, [^terminal], released_cache} = Yolo.Dependencies.refresh_background([terminal], after_interval, opts)
+
+        assert {:ok, [^terminal], released_cache} =
+                 Yolo.Dependencies.refresh_background([terminal], after_interval, opts)
+
         refute Map.has_key?(released_cache, {:wait_report, id, "PRI-999"})
 
         Process.put(:wait_report_now, 305_000)

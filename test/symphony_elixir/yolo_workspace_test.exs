@@ -83,6 +83,63 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     assert Enum.all?([dirty, active, reserved, journaled, unknown, unlisted], &File.dir?(&1.path))
   end
 
+  test "inventory checks every other PO group with its own store and journal", %{root: root, context: context} do
+    context = %{context | yolo_agent_id: "pai"}
+    context = put_in(context.settings.tracker.app["state_root"], Path.join(root, "state"))
+    ProjectContext.bind(context)
+
+    groups = ~w(incoming planning in_progress blocker)
+
+    fixtures =
+      Map.new(groups, fn group ->
+        [orphan, dirty, active, reserved, journaled, unknown] =
+          for _ <- 1..6, do: elem(Workspace.create(group, Ecto.UUID.generate()), 1)
+
+        File.write!(Path.join(dirty.path, "tracked"), "changed")
+        {:ok, record} = Store.read(group)
+
+        record =
+          record
+          |> Map.put("attempt", %{"id" => Path.basename(active.path)})
+          |> Map.put("deliveries", %{"member" => %{"run_id" => Path.basename(reserved.path)}})
+
+        assert :ok = Store.write(group, record)
+        assert :ok = Journal.write(%{"id" => Path.basename(journaled.path), "group" => group, "members" => [], "state" => "completed", "workspace" => journaled.path})
+
+        {group,
+         %{
+           orphan: orphan,
+           dirty: dirty,
+           active: active,
+           reserved: reserved,
+           journaled: journaled,
+           unknown: unknown
+         }}
+      end)
+
+    entries =
+      Enum.flat_map(groups, fn group ->
+        fixture = fixtures[group]
+
+        Enum.map([fixture.orphan, fixture.dirty, fixture.active, fixture.reserved, fixture.journaled], &%{"path" => &1.path, "sha" => &1.sha}) ++
+          [%{"path" => fixture.unknown.path, "sha" => String.duplicate("0", 40)}]
+      end)
+
+    inventory = %{"version" => 1, "checkouts" => entries}
+    assert {:ok, dry} = ReviewCheckouts.sweep(inventory)
+    assert dry["before"] == 24 and dry["after"] == 24
+    assert dry["removable"] == 4 and dry["removed"] == 0
+    assert {:ok, applied} = ReviewCheckouts.sweep(inventory, true)
+    assert applied["before"] == 24 and applied["after"] == 20
+    assert applied["removed"] == 4
+
+    for group <- groups do
+      fixture = fixtures[group]
+      refute File.exists?(fixture.orphan.path)
+      assert Enum.all?([fixture.dirty, fixture.active, fixture.reserved, fixture.journaled, fixture.unknown], &File.dir?(&1.path))
+    end
+  end
+
   test "inventory refuses malformed inputs, ambiguous reservations and unavailable Git inventory", %{root: root, context: context} do
     context = %{context | yolo_agent_id: "pai"}
     ProjectContext.bind(context)
@@ -111,7 +168,7 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     assert {:error, :review_checkout_listing_unavailable} = ReviewCheckouts.sweep(inventory)
   end
 
-  test "failed receipt removes only its review checkout", %{root: root, context: context} do
+  test "failed receipt removes its checkout for each PO group", %{root: root, context: context} do
     ProjectContext.bind(%{context | test_instance: %{"name" => "proof"}})
     System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
     System.put_env("SYMPHONY_TEST_RUN_PLAN", Path.join(root, "missing-plan.json"))
@@ -121,8 +178,9 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     assert length(Regex.scan(~r/^worktree /m, listing)) == 1
 
     assert {:error, :yolo_workspace_unavailable} = Workspace.create("incoming", Ecto.UUID.generate())
+    assert {:error, :yolo_workspace_unavailable} = Workspace.create("blocker", Ecto.UUID.generate())
     assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
-    assert length(Regex.scan(~r/^worktree /m, listing)) == 2
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 1
   end
 
   test "operator command verifies the project binding before dry run and apply", %{root: root} do
@@ -130,9 +188,15 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     assert {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
     context = %{context | yolo_agent_id: "pai"}
     ProjectContext.bind(context)
-    assert {:ok, workspace} = Workspace.create("review", Ecto.UUID.generate())
+
+    workspaces =
+      for group <- ~w(incoming planning in_progress blocker review) do
+        assert {:ok, workspace} = Workspace.create(group, Ecto.UUID.generate())
+        workspace
+      end
+
     inventory_path = Path.join(root, "inventory.json")
-    File.write!(inventory_path, Jason.encode!(%{"version" => 1, "checkouts" => [%{"path" => workspace.path, "sha" => workspace.sha}]}))
+    File.write!(inventory_path, Jason.encode!(%{"version" => 1, "checkouts" => Enum.map(workspaces, &%{"path" => &1.path, "sha" => &1.sha})}))
 
     SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
       query = payload[:query] || payload["query"]
@@ -151,7 +215,7 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     isolated = %{context | env: Map.put(context.env, "SYMPHONY_ROOT_DIR", root)}
 
     ProjectContext.with_context(isolated, fn ->
-      for {extra, mode, before_count, after_count} <- [{[], "dry_run", 1, 1}, {["--apply"], "apply", 1, 0}] do
+      for {extra, mode, before_count, after_count} <- [{[], "dry_run", 5, 5}, {["--apply"], "apply", 5, 0}] do
         output = ExUnit.CaptureIO.capture_io(fn -> Mix.Tasks.Yolo.ReviewCheckouts.run(["--project", root, "--inventory", inventory_path] ++ extra) end)
         summary = Jason.decode!(String.trim(output))
         assert summary["mode"] == mode
@@ -159,12 +223,12 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
         assert summary["after"] == after_count
       end
 
-      assert_raise Mix.Error, ~r/Review checkout cleanup refused/, fn ->
+      assert_raise Mix.Error, ~r/PO checkout cleanup refused/, fn ->
         Mix.Tasks.Yolo.ReviewCheckouts.run(["--project", root, "--inventory", Path.join(root, "missing.json")])
       end
     end)
 
-    refute File.exists?(workspace.path)
+    assert Enum.all?(workspaces, &(not File.exists?(&1.path)))
   end
 
   test "AppServer launches the real shell and profile helper in its bound group checkout", %{root: root, context: context} do

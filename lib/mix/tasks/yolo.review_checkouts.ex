@@ -1,10 +1,10 @@
 defmodule Mix.Tasks.Yolo.ReviewCheckouts do
   use Mix.Task
-  @moduledoc "Inspect an explicit review checkout inventory; removal requires --apply."
+  @moduledoc "Inspect an explicit PO checkout inventory; removal requires --apply."
   alias SymphonyElixir.{EnvFile, ProjectContext, RuntimePaths}
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Yolo.ReviewCheckouts
-  @shortdoc "Dry run or remove safe orphaned YOLO review checkouts"
+  @shortdoc "Dry run or remove safe orphaned YOLO group checkouts"
 
   @impl Mix.Task
   def run(args) do
@@ -27,7 +27,7 @@ defmodule Mix.Tasks.Yolo.ReviewCheckouts do
 
     case result do
       {:ok, summary} -> Mix.shell().info(Jason.encode!(summary, pretty: true))
-      {:error, reason} -> Mix.raise("Review checkout cleanup refused: #{inspect(reason)}")
+      {:error, reason} -> Mix.raise("PO checkout cleanup refused: #{inspect(reason)}")
     end
   end
 end

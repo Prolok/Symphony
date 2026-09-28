@@ -332,10 +332,11 @@ Die Einstufung verwendet bekannte Fehlerkennungen und strukturierte Client-Fehle
 Freitext aus Fehlerdetails, etwa Titel- oder Beschreibungsfragmente, zählt nicht.
 Unbekannte Gründe erhalten den Backoff für dauerhafte Fehler.
 
-### Verwaiste PO-Reviewcheckouts
+### Verwaiste PO-Checkouts
 
 Ein technischer Nichtstart vor bestätigter Zustellung entfernt seinen eigenen
-unveränderten Reviewcheckout. Der Gruppen-Store hält Grund, Lauf-ID,
+unveränderten Checkout der Gruppe `incoming`, `planning`, `in_progress`, `blocker`
+oder `review`. Der Gruppen-Store hält Grund, Lauf-ID,
 Bereinigungsergebnis und ein auf 15 Minuten begrenztes wachsendes `retry_at` für
 dieselbe Gruppenbeobachtung. Ist die sichere Entfernung nicht bestätigt, bleibt
 der Gruppenstart gesperrt. Eine aktive oder unklare Zustellung bleibt erhalten.
@@ -344,7 +345,7 @@ Für Altbestände erstellt der Betreiber nach Prüfung ein JSON-Inventar mit
 expliziten Pfaden und dem jeweils dokumentierten vollständigen Commit-SHA:
 
 ```json
-{"version":1,"checkouts":[{"path":"/ABS/WORKSPACE-ROOT/yolo/review/UUID","sha":"0123456789abcdef0123456789abcdef01234567"}]}
+{"version":1,"checkouts":[{"path":"/ABS/WORKSPACE-ROOT/yolo/GROUP/UUID","sha":"0123456789abcdef0123456789abcdef01234567"}]}
 ```
 
 Aus dem Symphony-Checkout mit dem gebundenen Projektroot und funktionsfähigem
@@ -355,11 +356,12 @@ mix yolo.review_checkouts --project /ABS/PROJECT-ROOT --inventory /ABS/inventory
 mix yolo.review_checkouts --project /ABS/PROJECT-ROOT --inventory /ABS/inventory.json --apply
 ```
 
-Der erste Aufruf ist ein Trockenlauf. Beide Aufrufe geben die Anzahl registrierter
-Reviewcheckouts vor und nach der Prüfung sowie jeden Kandidatenstatus aus.
+`GROUP` ist einer der fünf oben genannten Gruppennamen. Der erste Aufruf ist
+ein Trockenlauf. Beide Aufrufe geben die Anzahl registrierter PO-Checkouts vor
+und nach der Prüfung sowie jeden Kandidatenstatus aus.
 `--apply` entfernt ausschließlich registrierte, saubere, unveränderte und nicht
-journalierte Reviewcheckouts des gebundenen Projekts per `git worktree remove`.
-Der Gruppen-Lock muss frei sein; aktuelle Gruppenversuche, Zustellreservierungen,
+journalierte Checkouts des gebundenen Projekts per `git worktree remove`.
+Der jeweilige Gruppen-Lock muss frei sein; aktuelle Gruppenversuche, Zustellreservierungen,
 OpenClaw-Journale, Laufartefakte, falsche SHAs, veränderte oder nicht im Inventar genannte Pfade
 bleiben erhalten. `protected` verlangt Einzelprüfung und ist keine
 Löschfreigabe. Vor und nach der einmaligen Altbereinigung `git worktree list`

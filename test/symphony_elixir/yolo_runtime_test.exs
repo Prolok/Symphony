@@ -395,6 +395,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     blocked = Keyword.put(opts, :checkpoint, fn _ -> {:error, :new_input_requires_processing} end)
     assert {:error, :new_input_requires_processing} = run_group("blocker", [issue], [issue], blocked)
     refute_receive :operator_decision
+    {:ok, blocked_record} = Store.read("blocker")
+    assert :ok = Store.write("blocker", Map.merge(blocked_record, %{"checkout_cleanup_blocked" => false, "attempt" => Map.put(blocked_record["attempt"], "checkout_cleanup", "removed")}))
     assert :ok = run_group("blocker", [issue], [issue], opts)
     assert_receive :operator_decision
     assert {:error, :yolo_group_changed} = run_group("blocker", [issue], [issue], opts)
@@ -2062,6 +2064,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       assert reason == if(change == :offline, do: :offline, else: :yolo_launch_changed)
       assert {:ok, %{"processed" => nil}} = Store.read("incoming")
       refute Enum.any?(issues, &Process.get({:leased, &1.id}))
+      {:ok, record} = Store.read("incoming")
+      assert :ok = Store.write("incoming", Map.merge(record, %{"checkout_cleanup_blocked" => false, "attempt" => Map.put(record["attempt"], "checkout_cleanup", "removed")}))
     end
   end
 
@@ -2699,7 +2703,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Process.get(:review_scans) == 1
   end
 
-  test "runner reuses the coordinator observation after a local startup failure", %{issues: [issue | _]} do
+  test "runner reuses the coordinator observation after a local startup failure", %{issues: [issue | _], root: root, context: context} do
+    init_review_git(root, context)
     relay_issue = %{issue | last_comment_signal: %{relay_epoch: "current"}}
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
     Process.put(:po_scans, 0)
@@ -2817,6 +2822,103 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert_receive {:started, "review"}
     assert {:ok, reset} = Store.read("review")
     assert reset["nonstart"] == nil
+  end
+
+  test "incoming and blocker nonstarts remove their checkout and increase retry delay", %{issues: [issue | _], root: root, context: context} do
+    init_review_git(root, context)
+    duty = operator_workpad("duty", "a")
+    snapshot = Map.put(inbox(%{"duty" => duty}), "current", %{"workpad" => "duty"})
+
+    for {group, state} <- [{"incoming", "Backlog"}, {"blocker", "BLOCKER"}] do
+      member = %{issue | state: state}
+      Process.put({:nonstart_count, group}, 0)
+
+      opts = [
+        fetch: fn _ -> {:ok, [member]} end,
+        lease: fn _, fun -> fun.() end,
+        scan: fn _ -> {:ok, snapshot} end,
+        workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: duty["source"]["body"]}]} end,
+        checkpoint: fn _ ->
+          count = Process.get({:nonstart_count, group}) + 1
+          Process.put({:nonstart_count, group}, count)
+          {:error, if(count == 1, do: :synthetic_nonstart, else: :synthetic_retry)}
+        end,
+        session: fn _, _, _, _ -> flunk("checkout must fail before session") end
+      ]
+
+      for expected_count <- 1..2 do
+        assert {:error, reason} = run_group(group, [member], [member], opts)
+        assert reason == if(expected_count == 1, do: :synthetic_nonstart, else: :synthetic_retry)
+        assert {:ok, record} = Store.read(group)
+        assert record["attempt"]["checkout_cleanup"] == "removed"
+        assert record["nonstart"]["count"] == expected_count
+        assert record["retry_at"] > System.system_time(:millisecond) + if(expected_count == 1, do: 20_000, else: 50_000)
+        assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+        assert length(Regex.scan(~r/^worktree /m, listing)) == 1
+
+        coordinator = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+        tick(coordinator, [member], scan: fn _ -> {:ok, snapshot} end, start: fn _, _ -> flunk("unchanged group must wait") end)
+        assert {:ok, %{"retry_at" => retry_at}} = Store.read(group)
+        assert retry_at == record["retry_at"]
+
+        if expected_count == 1 do
+          assert :ok = Store.write(group, %{record | "retry_at" => nil})
+        else
+          changed = %{member | title: "new group signal", last_comment_signal: %{relay_epoch: "new"}}
+          next_duty = operator_workpad("next", "b")
+          next_snapshot = Map.put(inbox(%{"duty" => duty, "next" => next_duty}), "current", %{"workpad" => "next"})
+          group_snapshot = if(group == "blocker", do: next_snapshot, else: snapshot)
+
+          tick(coordinator, [changed],
+            scan: fn _ -> {:ok, group_snapshot} end,
+            start: fn started_group, _ ->
+              send(self(), {:started, started_group})
+              {:error, :capacity}
+            end
+          )
+
+          if group == "incoming", do: assert_receive({:started, ^group})
+          assert {:ok, %{"nonstart" => nil, "retry_at" => nil}} = Store.read(group)
+        end
+      end
+    end
+  end
+
+  test "dirty incoming and blocker nonstarts retain their checkout and block another start", %{issues: [issue | _], root: root, context: context} do
+    init_review_git(root, context)
+    duty = operator_workpad("duty", "a")
+    snapshot = Map.put(inbox(%{"duty" => duty}), "current", %{"workpad" => "duty"})
+
+    for {group, state} <- [{"incoming", "Backlog"}, {"blocker", "BLOCKER"}] do
+      member = %{issue | state: state}
+
+      opts = [
+        fetch: fn _ -> {:ok, [member]} end,
+        lease: fn _, fun -> fun.() end,
+        scan: fn _ -> {:ok, snapshot} end,
+        workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: duty["source"]["body"]}]} end,
+        workspace: fn _, run_id ->
+          {:ok, workspace} = Yolo.Workspace.create(group, run_id)
+          Process.put({:dirty_workspace, group}, workspace)
+          {:ok, workspace}
+        end,
+        checkpoint: fn _ ->
+          File.write!(Path.join(Process.get({:dirty_workspace, group}).path, "tracked"), "changed")
+          {:error, :synthetic_nonstart}
+        end,
+        session: fn _, _, _, _ -> flunk("dirty checkout must not start") end
+      ]
+
+      assert {:error, :synthetic_nonstart} = run_group(group, [member], [member], opts)
+      assert {:ok, record} = Store.read(group)
+      assert record["checkout_cleanup_blocked"] == true
+      assert record["attempt"]["checkout_cleanup"] == "blocked"
+      assert File.dir?(Process.get({:dirty_workspace, group}).path)
+      assert {:error, :yolo_checkout_cleanup_unconfirmed} = run_group(group, [member], [member], opts)
+    end
+
+    assert {listing, 0} = System.cmd("git", ["worktree", "list", "--porcelain"], cd: root)
+    assert length(Regex.scan(~r/^worktree /m, listing)) == 3
   end
 
   test "rejected review delivery releases its checkout", %{issues: [issue | _], root: root, context: context} do
@@ -3050,7 +3152,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, :synthetic_journal_failure} =
              run_group("incoming", [incoming], [incoming], Keyword.put(incoming_opts, :workspace, fn _, _ -> {:ok, %{path: root, sha: "fixture"}} end))
 
-    assert {:error, :synthetic_creation_failure} =
+    assert {:error, :yolo_checkout_cleanup_unconfirmed} =
              run_group("incoming", [incoming], [incoming], Keyword.put(incoming_opts, :workspace, fn _, _ -> {:error, :synthetic_creation_failure} end))
   end
 
@@ -3262,6 +3364,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, {:invalid_workspace_cwd, _, _, _}} = run_group("incoming", issues, issues, opts)
     assert {:ok, record} = Store.read("incoming")
     assert (record["deliveries"] || %{}) == %{}
+
+    # The synthetic root is deliberately outside yolo/incoming; reset only this
+    # fixture before exercising the separate uncertain-delivery case.
+    assert :ok = Store.write("incoming", Map.merge(record, %{"checkout_cleanup_blocked" => false, "attempt" => Map.put(record["attempt"], "checkout_cleanup", "removed")}))
 
     opts = Keyword.put(opts, :session, fn _, _, _, _ -> {:error, :response_lost_after_submission} end)
     assert {:error, :response_lost_after_submission} = run_group("incoming", issues, issues, opts)

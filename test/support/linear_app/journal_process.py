@@ -18,6 +18,7 @@ with tempfile.TemporaryDirectory(prefix='journal-process-') as directory:
     helpers.mkdir(parents=True)
     (release / '.symphony-release.json').write_text('{}')
     shutil.copyfile(repo / 'priv/linear_app/issue_lease.py', helpers / 'issue_lease.py')
+    shutil.copyfile(repo / 'priv/linear_app/journal_signatures.py', helpers / 'journal_signatures.py')
     source = (repo / 'priv/linear_app/state_lock.py').read_text()
     # Only relocate the fixture's lock directory; use the actual flock backend.
     source += '\noriginal_lock = state_lock\ndef state_lock(a, b, timeout=10):\n    return original_lock(a, b, timeout=timeout, root=' + repr(directory) + ')\n'

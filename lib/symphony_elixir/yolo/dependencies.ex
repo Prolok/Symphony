@@ -48,16 +48,16 @@ defmodule SymphonyElixir.Yolo.Dependencies do
         {:error, reason, updated} -> {:halt, {:error, reason, updated}}
       end
     end)
-    |> finish_background()
+    |> finish_background(project_id)
   end
 
-  defp finish_background({:ok, refreshed, entries}) do
+  defp finish_background({:ok, refreshed, entries}, project_id) do
     refreshed = Enum.reverse(refreshed)
 
     active_markers =
       refreshed
-      |> Enum.flat_map(&Enum.filter(&1.blocked_by, fn blocker -> Map.get(blocker, :marker) == true end))
-      |> MapSet.new(& &1.identifier)
+      |> Enum.flat_map(&active_marker_identifiers(&1, entries, project_id))
+      |> MapSet.new()
 
     entries =
       Map.reject(entries, fn
@@ -68,7 +68,17 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     {:ok, refreshed, entries}
   end
 
-  defp finish_background(error), do: error
+  defp finish_background(error, _project_id), do: error
+
+  defp active_marker_identifiers(issue, entries, project_id) do
+    if YoloAgent.delegated?(issue) and issue.state in @waiting_states do
+      blockers = for %{marker: true, identifier: identifier} <- issue.blocked_by, do: identifier
+      cached = get_in(entries, [{project_id, issue.id}, :markers]) || []
+      blockers ++ cached ++ WaitMarker.parse(issue.description || "")
+    else
+      []
+    end
+  end
 
   defp refresh_background_issue(issue, cache, opts) do
     if YoloAgent.delegated?(issue) and issue.state in @waiting_states do
@@ -90,12 +100,27 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     with {:ok, blockers} <- background_blockers(issue, opts),
          {:ok, workpad_markers, updated} <- background_markers(issue, cache, opts) do
       case WaitMarker.resolve_targets_background(issue, workpad_markers, updated, marker_opts) do
-        {:ok, markers, resolved} -> {:ok, %{issue | blocked_by: blockers ++ markers}, resolved}
-        {:error, reason, resolved} -> {:error, reason, resolved}
+        {:ok, markers, resolved} ->
+          {:ok, %{issue | blocked_by: blockers ++ markers}, resolved}
+
+        {:error, {:wait_marker_unresolved, identifier, reason} = error, resolved}
+        when reason in [:wait_target_unresolved, :wait_target_ambiguous] ->
+          {:ok, %{issue | blocked_by: blockers ++ [marker_error_blocker(issue, identifier, error)]}, resolved}
+
+        {:error, {:wait_marker_unresolved, identifier, reason, _write_reason} = error, resolved}
+        when reason in [:wait_target_unresolved, :wait_target_ambiguous] ->
+          {:ok, %{issue | blocked_by: blockers ++ [marker_error_blocker(issue, identifier, error)]}, resolved}
+
+        {:error, reason, resolved} ->
+          {:error, reason, resolved}
       end
     else
       {:error, reason} -> {:error, reason, cache}
     end
+  end
+
+  defp marker_error_blocker(issue, identifier, error) do
+    %{id: "wait-marker-error:#{issue.id}:#{identifier}", identifier: identifier, marker: true, state: "Unauflösbar", error: error}
   end
 
   defp background_markers(issue, cache, opts) do
@@ -220,6 +245,13 @@ defmodule SymphonyElixir.Yolo.Dependencies do
       (issue.state != "Backlog" or unblocked?(issue)) and
       Enum.all?(issue.blocked_by, fn blocker -> not Map.get(blocker, :marker, false) or terminal?(blocker) end)
   end
+
+  @spec marker_error?(map()) :: boolean()
+  def marker_error?(issue), do: is_list(issue.blocked_by) and Enum.any?(issue.blocked_by, &marker_error_blocker?/1)
+
+  defp marker_error_blocker?(%{marker: true, error: {:wait_marker_unresolved, _, _}}), do: true
+  defp marker_error_blocker?(%{marker: true, error: {:wait_marker_unresolved, _, _, _}}), do: true
+  defp marker_error_blocker?(_), do: false
 
   @doc "Recheck Backlog blocking at the action boundary, including predecessor-only changes."
   @spec actionable([map()], keyword()) :: :ok | {:error, term()}

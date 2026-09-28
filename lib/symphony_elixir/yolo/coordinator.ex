@@ -105,8 +105,9 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   defp schedule_refreshed(state, original, refreshed, opts) do
     case complete_refresh(original, refreshed) do
       {:ok, issues} ->
-        retry_notifications(state, issues, opts)
-        state = Recovery.resume_with_state(state, issues, opts)
+        available = Enum.reject(issues, &Dependencies.marker_error?/1)
+        retry_notifications(state, available, opts)
+        state = Recovery.resume_with_state(state, available, opts)
         {issues, state} = admit(issues, state, opts)
         schedule_groups(state, issues, opts)
 

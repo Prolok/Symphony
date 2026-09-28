@@ -38,6 +38,7 @@ defmodule SymphonyElixir.WaitMarker do
       end
     else
       markers = Enum.uniq(parse(issue.description || "") ++ workpad_markers)
+      cache = prune_reports(cache, issue.id, markers)
 
       Enum.reduce_while(markers, {:ok, [], cache}, &background_marker(&1, &2, issue, opts))
       |> case do
@@ -49,9 +50,39 @@ defmodule SymphonyElixir.WaitMarker do
 
   defp background_marker(identifier, {:ok, found, entries}, issue, opts) do
     case resolve_cached(identifier, entries, opts) do
-      {:ok, target, updated} -> {:cont, {:ok, [target | found], updated}}
-      {:error, reason, updated} -> {:halt, {:error, marker_error(issue, identifier, reason, opts), updated}}
+      {:ok, target, updated} ->
+        {:cont, {:ok, [target | found], Map.delete(updated, report_key(issue.id, identifier))}}
+
+      {:error, reason, updated} ->
+        {reported, updated} = background_error(issue, identifier, reason, updated, opts)
+        {:halt, {:error, reported, updated}}
     end
+  end
+
+  defp background_error(issue, identifier, reason, entries, opts) when reason in [:wait_target_unresolved, :wait_target_ambiguous] do
+    key = report_key(issue.id, identifier)
+    now = Keyword.get(opts, :background_now, fn -> System.monotonic_time(:millisecond) end).()
+
+    case entries[key] do
+      %{reason: ^reason, checked_at: checked_at, error: error} when now - checked_at < @target_safety_ms ->
+        {error, entries}
+
+      _ ->
+        error = marker_error(issue, identifier, reason, opts)
+        {error, Map.put(entries, key, %{reason: reason, checked_at: now, error: error})}
+    end
+  end
+
+  defp background_error(issue, identifier, reason, entries, _opts),
+    do: {reason, Map.delete(entries, report_key(issue.id, identifier))}
+
+  defp report_key(issue_id, identifier), do: {:wait_report, issue_id, identifier}
+
+  defp prune_reports(entries, issue_id, markers) do
+    Map.reject(entries, fn
+      {{:wait_report, ^issue_id, identifier}, _} -> identifier not in markers
+      _ -> false
+    end)
   end
 
   defp comment_body(%{body: body}), do: body
@@ -303,7 +334,7 @@ defmodule SymphonyElixir.WaitMarker do
 
   defp report(issue, identifier, reason, opts) do
     Logger.error("Wartemarker nicht auflösbar issue_id=#{issue.id} issue_identifier=#{issue.identifier} marker=#{identifier} reason=#{inspect(reason)}")
-    reporter = Keyword.get(opts, :report_error, &report_workpad/3)
+    reporter = Keyword.get(opts, :report_error, fn issue, identifier, reason -> report_workpad(issue, identifier, reason, opts) end)
 
     case reporter.(issue, identifier, reason) do
       :ok -> {:error, {:wait_marker_unresolved, identifier, reason}}
@@ -311,15 +342,27 @@ defmodule SymphonyElixir.WaitMarker do
     end
   end
 
-  defp report_workpad(issue, identifier, reason) do
+  defp report_workpad(issue, identifier, reason, opts) do
     note = "Wartemarker-Fehler #{identifier}: #{inspect(reason)}; gebundene Zielkennung prüfen."
+    comments = Keyword.get(opts, :report_comments, &Tracker.fetch_issue_comments/1)
 
-    with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id) do
-      write_error_workpad(issue, note, Workpad.find_comment(comments))
+    with {:ok, found} <- comments.(issue.id) do
+      write_error_workpad(issue, note, Workpad.find_comment(found))
     end
   end
 
-  defp write_error_workpad(issue, note, {:ok, workpad}), do: write_wait_note(issue, workpad.body, note)
+  defp write_error_workpad(_issue, note, {:ok, %{id: id, body: body}}) when is_binary(id) and id != "" do
+    if String.contains?(body, note) do
+      :ok
+    else
+      stamp = NaiveDateTime.local_now() |> Calendar.strftime("%Y-%m-%d %H:%M:%S")
+      updated = insert_note(body, "- #{stamp} - #{note}\n")
+
+      with :ok <- Workpad.validate_update_body(updated), do: Tracker.update_comment(id, updated)
+    end
+  end
+
+  defp write_error_workpad(_issue, _note, {:ok, _workpad}), do: {:error, :workpad_comment_missing_id}
 
   defp write_error_workpad(issue, note, {:error, :workpad_comment_not_found}) do
     stamp = NaiveDateTime.local_now() |> Calendar.strftime("%Y-%m-%d %H:%M:%S")

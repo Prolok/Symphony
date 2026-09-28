@@ -110,9 +110,10 @@ defmodule SymphonyElixir.RelayBudgetTest do
     refute incomplete.relations_complete
   end
 
-  for active <- [0, 5] do
-    test "thirty-minute virtual relay load with #{active} running tickets stays within instance budget" do
+  for {active, unresolved} <- [{0, false}, {5, false}, {0, true}] do
+    test "thirty-minute virtual relay load with #{active} running tickets and unresolved marker #{unresolved} stays within instance budget" do
       active = unquote(active)
+      unresolved = unquote(unresolved)
       root = Path.dirname(Workflow.workflow_file_path())
       server = start_supervised!(Server)
       counts = start_supervised!({Agent, fn -> %{} end})
@@ -138,12 +139,12 @@ defmodule SymphonyElixir.RelayBudgetTest do
         end
 
       delegated_nodes =
-        for index <- 1..4 do
+        for index <- 1..if(unresolved, do: 1, else: 4) do
           issue_node(context)
           |> Map.put("id", "yolo-#{index}")
           |> Map.put("identifier", "PRO-#{100 + index}")
           |> Map.put("state", %{"name" => "Yolo Review"})
-          |> Map.put("description", if(index == 1, do: "Wartet auf: PRI-892", else: ""))
+          |> Map.put("description", if(index == 1, do: "Wartet auf: #{if(unresolved, do: "PRI-999", else: "PRI-892")}", else: ""))
           |> Map.put("delegate", %{"id" => "pai"})
           |> Map.put("labels", %{"nodes" => Enum.map([~s(Skip "Freigabe Implementierung"), ~s(Skip "Freigabe Review")], &%{"name" => &1})})
         end
@@ -151,7 +152,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
       nodes = active_nodes ++ delegated_nodes ++ [target_node]
 
       bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
-      configure_http(server, contexts, nodes, bump)
+      configure_http(server, contexts, nodes, bump, unresolved)
       start_supervised!({WorkerCapacity, contexts: contexts})
       start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
       start_supervised!({ProjectPoller, contexts: contexts})
@@ -246,6 +247,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
               Coordinator.tick(yolo_state, delegated,
                 background_now: fn -> seconds * 1_000 end,
                 contexts: contexts,
+                relay_ready: fn _ -> true end,
                 recovery_now: fn -> seconds * 1_000 end,
                 lease: fn _, callback -> callback.() end,
                 invoke: fn _, _ ->
@@ -267,9 +269,15 @@ defmodule SymphonyElixir.RelayBudgetTest do
           {yolo_state, marker_state}
         end)
 
-      assert map_size(yolo_state.yolo_marker_cache) == 5
+      assert map_size(yolo_state.yolo_marker_cache) == if(unresolved, do: 3, else: 5)
+
+      if unresolved do
+        assert %{reason: :wait_target_unresolved, error: {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved}} =
+                 yolo_state.yolo_marker_cache[{:wait_report, "yolo-1", "PRI-999"}]
+      end
+
       assert marker_state.completed_states["invisible-merge"] == "merge (ai)"
-      assert Agent.get(recovery_attempts, & &1) == 4
+      assert Agent.get(recovery_attempts, & &1) == if(unresolved, do: 0, else: 4)
 
       requests = Agent.get(counts, & &1)
       by_operation = Agent.get(operations, & &1)
@@ -278,6 +286,8 @@ defmodule SymphonyElixir.RelayBudgetTest do
       assert total == Enum.sum(Map.values(requests))
       assert total <= if(active == 0, do: 50, else: 375)
       assert Map.get(by_operation, "WaitTarget", 0) <= 6
+      if unresolved, do: assert(Map.get(by_operation, "SymphonyLinearIssueComments", 0) <= 8)
+      if unresolved, do: refute(Map.has_key?(by_operation, "SymphonyLinearCommentUpdate"))
       refute Map.has_key?(by_operation, "SymphonyCommentScanSignal")
     end
   end
@@ -489,7 +499,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     end
   end
 
-  defp configure_http(server, contexts, nodes, bump) do
+  defp configure_http(server, contexts, nodes, bump, unresolved \\ false) do
     keys =
       Map.new(contexts, fn c ->
         w = c.settings.tracker.app["workspace_id"]
@@ -512,7 +522,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
       app = Config.settings!().tracker.app
       projects = contexts |> Enum.filter(&(&1.settings.tracker.app["workspace_id"] == app["workspace_id"])) |> Enum.map(& &1.settings.tracker.project_slug)
 
-      {kind, data} = budget_response(query, payload, app, projects, nodes)
+      {kind, data} = budget_response(query, payload, app, projects, nodes, unresolved)
 
       bump.(kind)
       {:ok, %{status: 200, body: %{"data" => data}}}
@@ -521,7 +531,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
   end
 
-  defp budget_response(query, payload, app, projects, nodes) do
+  defp budget_response(query, payload, app, projects, nodes, unresolved) do
     cond do
       query =~ "SymphonyAppIdentity" ->
         {:identity, %{"viewer" => %{"id" => app["user_id"], "app" => true, "organization" => %{"id" => app["workspace_id"]}}}}
@@ -539,11 +549,23 @@ defmodule SymphonyElixir.RelayBudgetTest do
         {:wait_target, budget_wait_target(payload, projects, nodes)}
 
       query =~ "comments(" ->
-        {:comments, %{"issue" => %{"comments" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}}
+        {:comments, budget_comments(payload, unresolved)}
 
       true ->
         {:read, budget_workspace_issues(projects, nodes)}
     end
+  end
+
+  defp budget_comments(payload, unresolved) do
+    variables = payload[:variables] || payload["variables"] || %{}
+    id = variables[:id] || variables["id"]
+
+    nodes =
+      if unresolved and id == "yolo-1",
+        do: [%{"id" => "workpad-yolo-1", "body" => "## Symphony Workpad\n\nWartemarker-Fehler PRI-999: :wait_target_unresolved; gebundene Zielkennung prüfen."}],
+        else: []
+
+    %{"issue" => %{"comments" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}}
   end
 
   defp budget_wait_target(payload, projects, nodes) do

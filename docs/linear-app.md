@@ -332,6 +332,14 @@ wird bis zum nächsten Sicherheitsintervall gedrosselt. `planning_action` läuft
 beim Dispatch von
 `Planung (AI)` und gehört nicht zum periodischen YOLO-Takt.
 
+Unauflösbare und mehrdeutige Wartemarker bleiben als Fehler sichtbar. Der
+Coordinator merkt den Workpad-Bericht je Ticket, Kennung und Grund im laufenden
+Prozess und prüft ihn frühestens nach fünf Minuten erneut, auch wenn Lesen oder
+Schreiben fehlgeschlagen ist. Entfernte, korrigierte oder geänderte Marker
+verwerfen den alten Berichtsstand; nach Neustart ist ein erneuter Abgleich
+zulässig. Frische Prüfungen vor Handoff, Admission und Runner bleiben davon
+unberührt.
+
 Die Recovery offener Anlageoperationen hält je Operationsschlüssel Grund,
 Ursprungssignal und nächsten Versuch im Gruppen-Store. Gleiche dauerhafte
 Fehler warten nach dem ersten 30-Sekunden-Versuch 5, 10 und höchstens 15 Minuten;

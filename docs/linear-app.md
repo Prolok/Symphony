@@ -320,7 +320,9 @@ geänderter Kommentar-Epoche oder nach mindestens 15 Minuten erneut; unter
 Budgetdruck verlängert sich der Sicherheitsabstand. Die Beschreibung wird pro
 Takt ausgewertet. Fremde Ziele werden je Kennung und Workspace einmal über
 Linear gelesen und gegen alle lokalen Projekt- und Teambindungen geprüft. Der
-laufende Coordinator teilt diesen Stand für alle Markerquellen und Tickets.
+laufende Coordinator teilt diesen Stand für alle Markerquellen und Tickets und
+verwirft ihn, sobald kein zugehöriger Marker mehr aktiv ist. Eine im Relay
+geänderte Zielkennung löst die Zielauflösung sofort erneut aus.
 Ist das Ziel im bereiten Relay sichtbar, übernimmt der nächste Takt dessen
 Status ohne Linear-Abfrage. Ohne sichtbaren Relay-Stand oder bei `degraded`
 erfolgt eine budgetgedrosselte Sicherheitsabfrage frühestens alle fünf Minuten;

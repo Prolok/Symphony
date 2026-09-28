@@ -829,8 +829,8 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
         case Agent.get(relay_state, & &1) do
           :unavailable -> {:error, :relay_unavailable}
-          {:out_of_scope, state} -> {:ok, [{{"generation", 1}, %{id: "foreign-target", state: state, in_project_scope: false}}]}
-          state -> {:ok, [{{"generation", 1}, %{id: "foreign-target", state: state, in_project_scope: true}}]}
+          {:out_of_scope, state} -> {:ok, [{{"generation", 1}, %{id: "foreign-target", identifier: "PRI-892", state: state, in_project_scope: false}}]}
+          state -> {:ok, [{{"generation", 1}, %{id: "foreign-target", identifier: "PRI-892", state: state, in_project_scope: true}}]}
         end
       end,
       report_error: fn _, _, _ -> flunk("temporary target failure must not write a Workpad error") end
@@ -872,8 +872,48 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     reserved = Keyword.put(opts, :query, fn _, _ -> {:error, :linear_budget_reserved} end)
     Process.put(:target_now, 900_000)
-    assert {:ok, [last_known], _cache} = Yolo.Dependencies.refresh_background([issue], cache, reserved)
+    assert {:ok, [last_known], cache} = Yolo.Dependencies.refresh_background([issue], cache, reserved)
     assert [%{state: "Review"}] = last_known.blocked_by
+
+    assert Map.has_key?(cache, {:wait_target, "foreign", "PRI-892"})
+    cleared = %{issue | description: ""}
+    assert {:ok, [%{blocked_by: []}], cleared_cache} = Yolo.Dependencies.refresh_background([cleared], cache, opts)
+    refute Map.has_key?(cleared_cache, {:wait_target, "foreign", "PRI-892"})
+  end
+
+  test "changed relay identifier invalidates the old marker binding immediately", %{issues: [issue | _], context: source} do
+    foreign = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign")
+    foreign = put_in(foreign.settings.tracker.project_slug, "target-project")
+    waiting = %{issue | description: "Wartet auf: PRI-892"}
+    target = %{"id" => "foreign-target", "identifier" => "PRI-892", "project" => %{"slugId" => "target-project"}, "team" => %{"key" => "PRI"}, "state" => %{"name" => "Merge (AI)"}}
+    {:ok, lookups} = Agent.start_link(fn -> 0 end)
+
+    opts = [
+      contexts: [source, foreign],
+      background_now: fn -> 0 end,
+      query: fn _, _ ->
+        Agent.get_and_update(lookups, fn count ->
+          nodes = if count == 0, do: [target], else: []
+          response = %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}}
+          {{:ok, response}, count + 1}
+        end)
+      end,
+      target_relay: fn _, ["foreign-target"] ->
+        {:ok, [{{"generation", 1}, %{id: "foreign-target", identifier: "PRI-999", state: "Yolo Review", in_project_scope: true}}]}
+      end,
+      report_error: fn _, identifier, reason ->
+        send(self(), {:wait_error, identifier, reason})
+        :ok
+      end
+    ]
+
+    assert {:ok, [%{state: "Merge (AI)"}], cache} = WaitMarker.resolve_targets_background(waiting, [], %{}, opts)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-892", :wait_target_unresolved}, _} =
+             WaitMarker.resolve_targets_background(waiting, [], cache, opts)
+
+    assert_receive {:wait_error, "PRI-892", :wait_target_unresolved}
+    assert Agent.get(lookups, & &1) == 2
   end
 
   test "first transient target failure is throttled without a Workpad error", %{issues: [issue | _], context: source} do

@@ -50,7 +50,23 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     |> finish_background()
   end
 
-  defp finish_background({:ok, refreshed, entries}), do: {:ok, Enum.reverse(refreshed), entries}
+  defp finish_background({:ok, refreshed, entries}) do
+    refreshed = Enum.reverse(refreshed)
+
+    active_markers =
+      refreshed
+      |> Enum.flat_map(&Enum.filter(&1.blocked_by, fn blocker -> Map.get(blocker, :marker) == true end))
+      |> MapSet.new(& &1.identifier)
+
+    entries =
+      Map.reject(entries, fn
+        {{:wait_target, _workspace, identifier}, _} -> not MapSet.member?(active_markers, identifier)
+        _ -> false
+      end)
+
+    {:ok, refreshed, entries}
+  end
+
   defp finish_background(error), do: error
 
   defp refresh_background_issue(issue, cache, opts) do

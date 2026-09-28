@@ -190,8 +190,9 @@ defmodule SymphonyElixir.WaitMarker do
   end
 
   defp cached_workspace_target(contexts, identifier, %{target: target} = entry, now, opts) when not is_nil(target) do
-    case relay_target(contexts, target, opts) do
+    case relay_target(contexts, target, identifier, opts) do
       {:ok, fresh} -> {:ok, fresh, entry |> Map.put(:target, fresh) |> Map.delete(:lookup_error)}
+      :identifier_changed -> cached_or_lookup(contexts, identifier, nil, now, opts)
       :unavailable -> cached_or_lookup(contexts, identifier, entry, now, opts)
     end
   end
@@ -222,14 +223,17 @@ defmodule SymphonyElixir.WaitMarker do
     end
   end
 
-  defp relay_target(contexts, target, opts) do
+  defp relay_target(contexts, target, identifier, opts) do
     context = Enum.find(contexts, &(&1.id == target.context_id))
     relay_read = Keyword.get(opts, :target_relay, &ProjectPoller.read_issues/2)
 
     if context do
       case relay_read.(context, [target.id]) do
-        {:ok, [{_epoch, %{id: id, state: state, in_project_scope: true}}]} when id == target.id and is_binary(state) ->
+        {:ok, [{_epoch, %{id: id, identifier: ^identifier, state: state, in_project_scope: true}}]} when id == target.id and is_binary(state) ->
           {:ok, %{target | state: state}}
+
+        {:ok, [{_epoch, %{id: id, identifier: changed, in_project_scope: true}}]} when id == target.id and is_binary(changed) ->
+          :identifier_changed
 
         _ ->
           :unavailable

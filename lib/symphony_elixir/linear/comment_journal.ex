@@ -938,20 +938,27 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   defp active_index(binding), do: Path.join(directory(binding), "active-index.json")
 
   defp preload_active_index(binding) do
-    before = File.stat(active_index(binding), time: :native)
+    before = index_file_fingerprint(binding)
     reader = Map.get(binding, :active_index_reader, &active_index_catalog/1)
     result = reader.(binding)
-    after_read = File.stat(active_index(binding), time: :native)
+    after_read = index_file_fingerprint(binding)
     if before == after_read, do: {after_read, result}, else: nil
   end
 
   defp current_active_index(binding, {signature, result}) do
-    if File.stat(active_index(binding), time: :native) == signature,
+    if index_file_fingerprint(binding) == signature,
       do: result,
       else: active_index_catalog(binding)
   end
 
   defp current_active_index(binding, nil), do: active_index_catalog(binding)
+
+  defp index_file_fingerprint(binding) do
+    case File.read(active_index(binding)) do
+      {:ok, bytes} -> {:ok, :crypto.hash(:sha256, bytes)}
+      error -> error
+    end
+  end
 
   defp active_index_catalog(binding) do
     case DurableState.read(active_index(binding)) do

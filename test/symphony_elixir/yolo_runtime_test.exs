@@ -61,6 +61,21 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     Store.write(group, Map.put(record, "delivery_ends", Map.put(record["delivery_ends"] || %{}, run_id, true)))
   end
 
+  defp agent_session(issue, id, time) do
+    %{
+      "id" => id,
+      "createdAt" => time,
+      "appUser" => %{"id" => "pai"},
+      "issue" => %{"id" => issue.id},
+      "sourceComment" => nil,
+      "comment" => %{"id" => "root-#{id}", "issue" => %{"id" => issue.id}, "isArtificialAgentSessionRoot" => true}
+    }
+  end
+
+  defp history_observe(issues, record, opts) do
+    Impulse.observe(issues, record, Keyword.put_new(opts, :sessions, fn _ -> {:ok, []} end))
+  end
+
   test "a short withdrawal and redelegation becomes one durable review impulse", %{issues: [issue | _]} do
     history = fn id, fields ->
       Map.merge(
@@ -74,20 +89,150 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     restored = history.("restored", %{"toDelegate" => %{"id" => "pai"}})
     event = fn position -> %{"generation" => "relay-generation", "position" => position, "event_id" => "event-#{position}"} end
     issue = %{issue | relay_event: event.(1)}
-    assert {:ok, record} = Impulse.observe([issue], %{}, history: fn _ -> {:ok, [baseline]} end)
+    assert {:ok, record} = history_observe([issue], %{}, history: fn _ -> {:ok, [baseline]} end)
     assert Impulse.generations(record)[issue.id] == 0
 
     issue = %{issue | relay_event: event.(3)}
     history_page = fn _ -> {:ok, [restored, withdrawn, baseline]} end
-    assert {:ok, resumed} = Impulse.observe([issue], record, history: history_page)
+    assert {:ok, resumed} = history_observe([issue], record, history: history_page)
     assert Impulse.generations(resumed)[issue.id] == 1
     assert get_in(resumed, ["impulses", issue.id, "reason"]) == "delegated_again"
 
     assert {:ok, ^resumed} =
-             Impulse.observe([issue], resumed, history: fn _ -> flunk("replayed event must not query history") end)
+             history_observe([issue], resumed, history: fn _ -> flunk("replayed event must not query history") end)
 
     assert {:error, :yolo_history_gap} =
-             Impulse.observe([%{issue | relay_event: event.(4)}], resumed, history: fn _ -> {:ok, [withdrawn]} end)
+             history_observe([%{issue | relay_event: event.(4)}], resumed, history: fn _ -> {:ok, [withdrawn]} end)
+  end
+
+  test "a coalesced withdrawal and redelegation uses the new agent session once", %{issues: [issue | _]} do
+    event = fn position -> %{"generation" => "relay", "position" => position, "event_id" => "event-#{position}"} end
+
+    root = fn id ->
+      %{
+        "id" => id,
+        "createdAt" => "2026-09-28T06:23:55Z",
+        "updatedAt" => "2026-09-28T06:27:58Z",
+        "fromDelegate" => nil,
+        "toDelegate" => nil,
+        "actor" => %{"id" => "human", "app" => false},
+        "botActor" => nil
+      }
+    end
+
+    first = agent_session(issue, "session-1", "2026-09-28T06:00:00Z")
+    second = agent_session(issue, "session-2", "2026-09-28T06:27:58Z")
+    issue = %{issue | relay_event: event.(1)}
+    history = fn _ -> {:ok, [root.("merged")]} end
+    assert {:ok, baseline} = Impulse.observe([issue], %{}, history: history, sessions: fn _ -> {:ok, [first]} end)
+    assert Impulse.generations(baseline)[issue.id] == 0
+
+    issue = %{issue | relay_event: event.(2)}
+    opts = [history: history, sessions: fn _ -> {:ok, [second, first]} end]
+    assert {:ok, resumed} = Impulse.observe([issue], baseline, opts)
+    assert get_in(resumed, ["impulses", issue.id, "reason"]) == "delegated_again"
+    assert Impulse.generations(resumed)[issue.id] == 1
+    replay_opts = [history: fn _ -> flunk("unchanged relay must not read history") end, sessions: fn _ -> flunk("unchanged relay must not read sessions") end]
+    for _ <- 1..10, do: assert({:ok, ^resumed} = Impulse.observe([issue], resumed, replay_opts))
+    assert {:ok, replayed} = Impulse.observe([%{issue | relay_event: event.(3)}], resumed, opts)
+    assert Impulse.generations(replayed)[issue.id] == 1
+
+    explicit = root.("explicit") |> Map.put("toDelegate", %{"id" => "pai"})
+    together = Keyword.put(opts, :history, fn _ -> {:ok, [explicit, root.("merged")]} end)
+    assert {:ok, combined} = Impulse.observe([issue], baseline, together)
+    assert Impulse.generations(combined)[issue.id] == 1
+    assert get_in(combined, ["impulses", issue.id, "reason"]) == "delegated_again"
+  end
+
+  test "a visible withdrawal waits for redelegation and an unchanged issue stays quiet", %{issues: [issue | _]} do
+    base = %{"id" => "base", "createdAt" => "2026-09-28T06:00:00Z", "fromDelegate" => nil, "toDelegate" => nil}
+    withdrawn = %{base | "id" => "withdrawn", "createdAt" => "2026-09-28T06:23:55Z", "fromDelegate" => %{"id" => "pai"}}
+    first = agent_session(issue, "session-1", "2026-09-28T06:00:00Z")
+    second = agent_session(issue, "session-2", "2026-09-28T06:27:58Z")
+    event = fn n -> %{"generation" => "relay", "position" => n, "event_id" => "event-#{n}"} end
+    issue = %{issue | relay_event: event.(1)}
+    base_history = fn _ -> {:ok, [base]} end
+    withdrawn_history = fn _ -> {:ok, [withdrawn, base]} end
+    first_session = fn _ -> {:ok, [first]} end
+    two_sessions = fn _ -> {:ok, [second, first]} end
+    base_opts = [history: base_history, sessions: first_session]
+    withdrawn_opts = [history: withdrawn_history, sessions: first_session]
+    restored_opts = [history: withdrawn_history, sessions: two_sessions]
+    assert {:ok, baseline} = Impulse.observe([issue], %{}, base_opts)
+
+    issue = %{issue | delegate_id: nil, relay_event: event.(2)}
+    assert {:ok, withdrawn_record} = Impulse.observe([issue], baseline, withdrawn_opts)
+    assert Impulse.generations(withdrawn_record)[issue.id] == 0
+
+    issue = %{issue | delegate_id: "pai", relay_event: event.(3)}
+    assert {:ok, restored} = Impulse.observe([issue], withdrawn_record, restored_opts)
+    assert Impulse.generations(restored)[issue.id] == 1
+    assert get_in(restored, ["impulses", issue.id, "reason"]) == "delegated_again"
+
+    assert {:ok, unchanged} = Impulse.observe([%{issue | relay_event: event.(4)}], restored, restored_opts)
+    assert Impulse.generations(unchanged)[issue.id] == 1
+    assert get_in(unchanged, ["impulses", issue.id, "reason"]) == "no_relevant_history"
+  end
+
+  test "agent sessions require complete pages and a bound delegation root", %{issues: [issue | _]} do
+    base = %{"id" => "base", "createdAt" => "2026-09-28T06:00:00Z"}
+    first = agent_session(issue, "session-1", "2026-09-28T06:00:00Z")
+    mention = agent_session(issue, "mention", "2026-09-28T06:20:00Z") |> Map.put("sourceComment", %{"id" => "trigger"})
+    foreign = agent_session(issue, "foreign", "2026-09-28T06:21:00Z") |> put_in(["issue", "id"], "other")
+    second = agent_session(issue, "session-2", "2026-09-28T06:27:58Z")
+    event = fn n -> %{"generation" => "relay", "position" => n, "event_id" => "event-#{n}"} end
+    issue = %{issue | relay_event: event.(1)}
+    history = fn _ -> {:ok, [base]} end
+    assert {:ok, baseline} = Impulse.observe([issue], %{}, history: history, sessions: fn _ -> {:ok, [first]} end)
+
+    assert {:ok, unrelated} =
+             Impulse.observe([%{issue | relay_event: event.(2)}], baseline,
+               history: fn _ -> {:ok, [base]} end,
+               sessions: fn _ -> {:ok, [foreign, mention, first]} end
+             )
+
+    assert Impulse.generations(unrelated)[issue.id] == 0
+
+    query = fn document, variables ->
+      if String.contains?(document, "YoloIssueHistory") do
+        {:ok, %{"data" => %{"issue" => %{"history" => %{"nodes" => [base], "pageInfo" => %{"hasNextPage" => false}}}}}}
+      else
+        {nodes, page} =
+          if variables[:after] == nil,
+            do: {[second, mention], %{"hasNextPage" => true, "endCursor" => "page-1"}},
+            else: {[foreign, first], %{"hasNextPage" => false, "endCursor" => nil}}
+
+        {:ok, %{"data" => %{"issue" => %{"agentSessions" => %{"nodes" => nodes, "pageInfo" => page}}}}}
+      end
+    end
+
+    assert {:ok, resumed} = Impulse.observe([%{issue | relay_event: event.(2)}], baseline, query: query)
+    assert Impulse.generations(resumed)[issue.id] == 1
+    assert get_in(resumed, ["impulses", issue.id, "session_head"]) == "session-2"
+
+    legacy = update_in(baseline, ["impulses", issue.id], &Map.delete(&1, "session_head"))
+    assert {:ok, migrated} = Impulse.observe([%{issue | relay_event: event.(2)}], legacy, query: query)
+    assert Impulse.generations(migrated)[issue.id] == 0
+    assert get_in(migrated, ["impulses", issue.id, "session_head"]) == "session-2"
+
+    incomplete = fn document, _ ->
+      relation =
+        if String.contains?(document, "YoloIssueHistory"),
+          do: {"history", [base], false},
+          else: {"agentSessions", [second], true}
+
+      {field, nodes, more} = relation
+      {:ok, %{"data" => %{"issue" => %{field => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => more}}}}}}
+    end
+
+    changed = %{issue | relay_event: event.(2)}
+    assert {:error, :yolo_page_incomplete} = Impulse.observe([changed], baseline, query: incomplete)
+
+    assert {:error, :yolo_history_incomplete} =
+             Impulse.observe([changed], baseline,
+               history: history,
+               sessions: fn _ -> {:ok, [%{second | "comment" => nil}]} end
+             )
   end
 
   test "relay snapshot establishes history baseline before the first event", %{issues: [issue | _], context: context} do
@@ -105,11 +250,11 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     }
 
     reassigned = %{baseline | "id" => "reassigned", "toDelegate" => %{"id" => "pai"}}
-    assert {:ok, record} = Impulse.observe([issue], %{}, history: fn _ -> {:ok, [baseline]} end)
+    assert {:ok, record} = history_observe([issue], %{}, history: fn _ -> {:ok, [baseline]} end)
     assert get_in(record, ["impulses", issue.id, "history_head"]) == "baseline"
     event = %{"generation" => "relay", "position" => 1, "event_id" => "event-1"}
     history_page = fn _ -> {:ok, [reassigned, baseline]} end
-    assert {:ok, resumed} = Impulse.observe([%{issue | relay_event: event}], record, history: history_page)
+    assert {:ok, resumed} = history_observe([%{issue | relay_event: event}], record, history: history_page)
     assert Impulse.generations(resumed)[issue.id] == 1
   end
 
@@ -122,19 +267,27 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     node = %{"id" => "assigned", "createdAt" => "2026-09-24T12:00:00Z", "toDelegate" => %{"id" => "pai"}}
 
     query = fn _, _ ->
-      {:ok, %{"data" => %{"issue" => %{"history" => %{"nodes" => [node], "pageInfo" => %{"hasNextPage" => false}}}}}}
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "history" => %{"nodes" => [node], "pageInfo" => %{"hasNextPage" => false}},
+             "agentSessions" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}
+           }
+         }
+       }}
     end
 
     assert {:ok, baseline} = Impulse.observe([issue], %{}, query: query)
     assert Impulse.generations(baseline)[issue.id] == 0
-    assert {:error, :yolo_history_incomplete} = Impulse.observe([issue], %{}, history: fn _ -> {:ok, [%{"id" => "invalid"}]} end)
+    assert {:error, :yolo_history_incomplete} = history_observe([issue], %{}, history: fn _ -> {:ok, [%{"id" => "invalid"}]} end)
 
     prior = %{"impulses" => %{issue.id => %{"history_head" => nil, "generation" => 0, "relay" => event.(0)}}}
-    assert {:ok, resumed} = Impulse.observe([issue], prior, history: fn _ -> {:ok, [node]} end)
+    assert {:ok, resumed} = history_observe([issue], prior, history: fn _ -> {:ok, [node]} end)
     assert Impulse.generations(resumed)[issue.id] == 1
 
     prior = %{"impulses" => %{issue.id => %{"reason" => "no_relay_event", "generation" => 0, "relay" => event.(0)}}}
-    assert {:ok, ignored} = Impulse.observe([issue], prior, history: fn _ -> {:ok, [node]} end)
+    assert {:ok, ignored} = history_observe([issue], prior, history: fn _ -> {:ok, [node]} end)
     assert Impulse.generations(ignored)[issue.id] == 0
   end
 
@@ -152,7 +305,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     event = fn position -> %{"generation" => "relay-generation", "position" => position, "event_id" => "event-#{position}"} end
     issue = %{issue | relay_event: event.(1)}
-    {:ok, baseline} = Impulse.observe([issue], %{}, history: fn _ -> {:ok, [base]} end)
+    {:ok, baseline} = history_observe([issue], %{}, history: fn _ -> {:ok, [base]} end)
 
     cases = [
       {0, 2, %{"id" => "human", "app" => false}, nil, 1},
@@ -167,7 +320,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       change = %{base | "id" => "change", "fromPriority" => from, "toPriority" => to, "actor" => actor, "botActor" => bot}
 
       history_page = fn _ -> {:ok, [change, base]} end
-      assert {:ok, record} = Impulse.observe([%{issue | relay_event: event.(2)}], baseline, history: history_page)
+      assert {:ok, record} = history_observe([%{issue | relay_event: event.(2)}], baseline, history: history_page)
 
       assert Impulse.generations(record)[issue.id] == expected
     end
@@ -221,18 +374,32 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert tick(state, [issue], base).yolo_runs == %{}
   end
 
-  test "history-backed redelegation restarts an ended, open delivery once across orchestrator restart", %{issues: [issue | _]} do
+  test "session-backed redelegation restarts an ended delivery once after restart", %{issues: [issue | _]} do
     alias SymphonyElixir.Yolo.Delivery
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
-    baseline = %{"id" => "before", "createdAt" => "2026-09-24T12:00:00Z", "fromDelegate" => nil, "toDelegate" => nil, "fromPriority" => nil, "toPriority" => nil, "actor" => nil, "botActor" => nil}
-    withdrawn = %{baseline | "id" => "withdrawn", "fromDelegate" => %{"id" => "pai"}}
-    restored = %{baseline | "id" => "restored", "toDelegate" => %{"id" => "pai"}}
+
+    baseline = %{
+      "id" => "before",
+      "createdAt" => "2026-09-24T12:00:00Z",
+      "fromDelegate" => nil,
+      "toDelegate" => nil,
+      "fromPriority" => nil,
+      "toPriority" => nil,
+      "actor" => nil,
+      "botActor" => nil
+    }
+
+    merged = Map.put(baseline, "updatedAt", "2026-09-24T12:04:00Z")
+    first = agent_session(issue, "session-1", "2026-09-24T12:00:00Z")
+    second = agent_session(issue, "session-2", "2026-09-24T12:04:00Z")
     event = fn position -> %{"generation" => "relay", "position" => position, "event_id" => "event-#{position}"} end
     Process.put(:history_nodes, [baseline])
+    Process.put(:session_nodes, [first])
 
     opts = [
       scan: &scan/1,
       history: fn _ -> {:ok, Process.get(:history_nodes)} end,
+      sessions: fn _ -> {:ok, Process.get(:session_nodes)} end,
       start: fn group, _ ->
         {:ok, record} = Store.read(group)
         :ok = Delivery.reserve(group, "ended-run", record["observations"])
@@ -248,8 +415,11 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     tick(state, [issue], opts)
     refute_receive :review_started
 
-    Process.put(:history_nodes, [restored, withdrawn, baseline])
+    Process.put(:history_nodes, [merged])
+    Process.put(:session_nodes, [second, first])
     issue = %{issue | relay_event: event.(3)}
+    tick(%{state | running: %{issue.id => %{}}}, [issue], opts)
+    refute_receive :review_started
     tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [issue], opts)
     assert_receive :review_started
     for _ <- 1..3, do: tick(state, [issue], opts)

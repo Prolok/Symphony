@@ -325,7 +325,8 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   authentifiziert an LinearBridge; dessen optionaler `gateway_port` wählt nur
   das lokale Bridgeziel und bleibt auftragsgebunden (Standard `18789`);
   [Einrichtung und Vertrag](docs/linearbridge-lifecycle.md).
-  Fachlich offene, bereits zugestellte Mitglieder werden nach belegter Neudelegation,
+  Fachlich offene, bereits zugestellte Mitglieder werden nach belegter Neudelegation
+  (auch über eine neue, issue-gebundene Linear-Agent-Session bei zusammengefasster History),
   menschlicher Prioritätserhöhung oder relevanter Auftrags-/Blockadeänderung erneut
   geprüft. Ungeklärte Ausführungen bleiben reserviert; eine fehlgeschlagene reine
   Benachrichtigung wird über ihr Journal ohne neuen Review erneut versucht.

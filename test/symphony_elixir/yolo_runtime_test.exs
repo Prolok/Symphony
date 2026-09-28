@@ -1043,6 +1043,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       assert Enum.count(messages, &match?({:wait_target_query, ^id}, &1)) == if(case_name == :no_foreign, do: 0, else: 2)
 
       if case_name == :no_foreign do
+        terminal = %{waiting | state: "Review"}
+        assert {:ok, [^terminal], released_cache} = Yolo.Dependencies.refresh_background([terminal], after_interval, opts)
+        refute Map.has_key?(released_cache, {:wait_report, id, "PRI-999"})
+
         Process.put(:wait_report_now, 305_000)
         changed = %{waiting | description: "Wartet auf: PRI-998"}
 
@@ -1192,6 +1196,37 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     Process.put(:wait_report_now, 300_000)
 
     assert {:error, {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :comment_not_found}, _} =
+             WaitMarker.resolve_targets_background(waiting, [], cache, opts)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 2
+  end
+
+  test "Workpad without a comment ID keeps the marker unresolved and throttles report reads", %{issues: [issue | _], context: source} do
+    waiting = %{issue | description: "Wartet auf: PRI-999"}
+
+    opts = [
+      contexts: [source],
+      background_now: fn -> Process.get(:wait_report_now) end,
+      report_comments: fn _ ->
+        send(self(), :report_read)
+        {:ok, [%{body: "## Symphony Workpad\n"}]}
+      end
+    ]
+
+    cache =
+      Enum.reduce(0..11, %{}, fn tick, cache ->
+        Process.put(:wait_report_now, tick * 5_000)
+
+        assert {:error, {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :workpad_comment_missing_id}, updated} =
+                 WaitMarker.resolve_targets_background(waiting, [], cache, opts)
+
+        updated
+      end)
+
+    assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 1
+    Process.put(:wait_report_now, 300_000)
+
+    assert {:error, {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :workpad_comment_missing_id}, _} =
              WaitMarker.resolve_targets_background(waiting, [], cache, opts)
 
     assert Enum.count(elem(Process.info(self(), :messages), 1), &(&1 == :report_read)) == 2

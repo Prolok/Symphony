@@ -344,12 +344,16 @@ beim Dispatch von
 `Planung (AI)` und gehört nicht zum periodischen YOLO-Takt.
 
 Unauflösbare und mehrdeutige Wartemarker bleiben als Fehler sichtbar. Der
-Coordinator merkt den Workpad-Bericht je Ticket, Kennung und Grund im laufenden
-Prozess und prüft ihn frühestens nach fünf Minuten erneut, auch wenn Lesen oder
-Schreiben fehlgeschlagen ist. Entfernte, korrigierte oder geänderte Marker
-verwerfen den alten Berichtsstand; nach Neustart ist ein erneuter Abgleich
-zulässig. Frische Prüfungen vor Handoff, Admission und Runner bleiben davon
-unberührt.
+Coordinator hält nur das betroffene Ticket mit einem nichtterminalen
+Fehlerblocker zurück. Andere Tickets desselben Projekts durchlaufen im selben
+Takt Benachrichtigungen, Recovery, Admission und PO-Gruppen. Der Coordinator
+merkt Log und Workpad-Bericht je Ticket, Kennung und Grund im laufenden Prozess
+und prüft sie frühestens nach fünf Minuten erneut, auch wenn Lesen oder Schreiben
+fehlgeschlagen ist. Entfernte, korrigierte oder geänderte Marker verwerfen den
+alten Berichtsstand; nach Neustart ist ein erneuter Abgleich zulässig.
+Transport-, Timeout-, Budgetreserve- und unvollständige Abhängigkeitsstände
+bleiben projektweit gesperrt. Frische Prüfungen vor Handoff, Admission und Runner
+bleiben davon unberührt.
 
 Die Recovery offener Anlageoperationen hält je Operationsschlüssel Grund,
 Ursprungssignal und nächsten Versuch im Gruppen-Store. Gleiche dauerhafte

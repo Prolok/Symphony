@@ -871,6 +871,284 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, :yolo_dependencies_incomplete} = Yolo.Dependencies.actionable([issue], query: query)
   end
 
+  test "an unresolved background marker blocks only its own delegated issue for twelve ticks", %{issues: [first, second | _], context: context} do
+    real_blocker = %{id: "real-blocker", identifier: "PRO-321", state: "In Arbeit", state_type: "started"}
+
+    waiting = %{
+      first
+      | state: "Yolo Review",
+        description: "Wartet auf: PRI-999",
+        blocked_by: [real_blocker],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    ready = %{
+      second
+      | state: "Yolo Review",
+        description: "",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    for issue <- [waiting, ready] do
+      assert :ok =
+               Operations.save(%{
+                 "key" => "followup:#{issue.id}",
+                 "request" => %{"kind" => "followup", "origin_ids" => [issue.id]},
+                 "issue_id" => Ecto.UUID.generate(),
+                 "done" => false
+               })
+    end
+
+    opts = [
+      contexts: [context],
+      relay_background: true,
+      relay_ready: fn _ -> true end,
+      background_now: fn -> Process.get(:marker_now) end,
+      wait_comments: fn _ -> {:ok, []} end,
+      scan: &scan/1,
+      recovery_now: fn -> Process.get(:marker_now) end,
+      lease: fn _, callback -> callback.() end,
+      invoke: fn request, _ ->
+        assert request["origin_ids"] == [ready.id]
+        send(self(), :recovery_attempt)
+        {:error, :yolo_created_issue_changed}
+      end,
+      start: fn group, _ ->
+        send(self(), {:group_start, group})
+        {:error, :capacity}
+      end,
+      report_error: fn issue, identifier, reason ->
+        send(self(), {:marker_report, issue.id, identifier, reason})
+        :ok
+      end
+    ]
+
+    {{_cache, _state}, log} =
+      ExUnit.CaptureLog.with_log(fn ->
+        Enum.reduce(0..11, {%{}, %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}}, fn tick, {cache, state} ->
+          Process.put(:marker_now, tick * 5_000)
+          assert {:ok, [blocked, ^ready], updated} = Yolo.Dependencies.refresh_background([waiting, ready], cache, opts)
+          refute Yolo.Dependencies.dispatchable?(blocked)
+          assert hd(blocked.blocked_by) == real_blocker
+          assert blocked.blocked_by |> Enum.any?(&(&1.identifier == "PRI-999" and &1.marker == true))
+          state = Coordinator.tick(%{state | yolo_marker_cache: updated}, [waiting, ready], opts)
+          {state.yolo_marker_cache, state}
+        end)
+      end)
+
+    assert_receive {:group_start, "review"}
+    assert_receive :recovery_attempt
+    assert_receive {:marker_report, first_id, "PRI-999", :wait_target_unresolved}
+    assert first_id == first.id
+    refute_receive {:marker_report, _, _, _}
+    assert length(Regex.scan(~r/Wartemarker nicht auflösbar issue_id=#{first.id} /, log)) == 1
+    refute log =~ "YOLO dependencies unavailable"
+  end
+
+  test "a marker pointing into the source workspace blocks only its origin", %{issues: [first, second | _], context: context} do
+    waiting = %{
+      first
+      | state: "Yolo Review",
+        description: "Wartet auf: PRI-892",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    own_target = %{second | identifier: "PRI-892", state: "Review"}
+    assert own_target.workspace_id == waiting.workspace_id
+
+    assert {:ok, [blocked, ^own_target], _cache} =
+             Yolo.Dependencies.refresh_background([waiting, own_target], %{},
+               contexts: [context],
+               relay_background: true,
+               relay_ready: fn _ -> true end,
+               wait_comments: fn _ -> {:ok, []} end,
+               query: fn _, _ -> flunk("source workspace must not resolve its own marker") end,
+               report_error: fn _, _, _ -> :ok end
+             )
+
+    assert [%{error: {:wait_marker_unresolved, "PRI-892", :wait_target_unresolved}}] = blocked.blocked_by
+    refute Yolo.Dependencies.dispatchable?(blocked)
+  end
+
+  test "a failed marker report still isolates its issue during background refresh", %{issues: [first, second | _], context: context} do
+    waiting = %{
+      first
+      | state: "Yolo Review",
+        description: "Wartet auf: PRI-999",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    ready = %{
+      second
+      | state: "Yolo Review",
+        description: "",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    assert {:ok, [blocked, ^ready], _cache} =
+             Yolo.Dependencies.refresh_background([waiting, ready], %{},
+               contexts: [context],
+               relay_background: true,
+               relay_ready: fn _ -> true end,
+               wait_comments: fn _ -> {:ok, []} end,
+               report_error: fn issue, identifier, reason ->
+                 send(self(), {:report_attempt, issue.id, identifier, reason})
+                 {:error, :offline}
+               end
+             )
+
+    assert_receive {:report_attempt, first_id, "PRI-999", :wait_target_unresolved}
+    assert first_id == first.id
+    assert [%{error: {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved, :offline}}] = blocked.blocked_by
+    assert Yolo.Dependencies.marker_error?(blocked)
+    refute Yolo.Dependencies.dispatchable?(blocked)
+    assert Yolo.Dependencies.dispatchable?(ready)
+  end
+
+  test "an ambiguous marker leaves an independent issue available", %{issues: [first, second | _], context: source} do
+    foreign = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign") |> Map.put(:id, "foreign")
+
+    waiting = %{
+      first
+      | state: "Yolo Review",
+        description: "Wartet auf: PRI-892",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    ready = %{second | state: "Yolo Review", blocked_by: [], relations_complete: true, last_comment_signal: %{relay_epoch: "stable"}}
+
+    query = fn _, _ ->
+      {:ok, %{"data" => %{"issues" => %{"nodes" => [%{"id" => "one"}, %{"id" => "two"}], "pageInfo" => %{"hasNextPage" => false}}}}}
+    end
+
+    assert {:ok, [blocked, ^ready], _cache} =
+             Yolo.Dependencies.refresh_background([waiting, ready], %{},
+               contexts: [source, foreign],
+               relay_background: true,
+               relay_ready: fn _ -> true end,
+               query: query,
+               wait_comments: fn _ -> {:ok, []} end,
+               report_error: fn _, _, _ -> :ok end
+             )
+
+    assert [%{error: {:wait_marker_unresolved, "PRI-892", :wait_target_ambiguous}}] = blocked.blocked_by
+    assert Yolo.Dependencies.dispatchable?(ready)
+  end
+
+  test "a failed second marker keeps the first target cached until the marker is corrected", %{issues: [issue | _], context: source} do
+    foreign = source |> put_in([Access.key(:settings), Access.key(:tracker), Access.key(:app), "workspace_id"], "foreign") |> Map.put(:id, "foreign")
+
+    waiting = %{
+      issue
+      | state: "Yolo Review",
+        description: "Wartet auf: PRI-892\nWartet auf: PRI-999",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"}
+    }
+
+    target = %{"id" => "foreign-target", "identifier" => "PRI-892", "project" => %{"slugId" => "project"}, "team" => %{"key" => "PRI"}, "state" => %{"name" => "Yolo Review"}}
+
+    opts = [
+      contexts: [source, foreign],
+      relay_background: true,
+      relay_ready: fn _ -> true end,
+      background_now: fn -> Process.get(:marker_now) end,
+      wait_comments: fn _ -> {:ok, []} end,
+      target_relay: fn _, _ -> {:error, :offline} end,
+      report_error: fn _, _, _ -> :ok end,
+      query: fn _, %{number: number} ->
+        send(self(), {:lookup, number})
+        nodes = if number == 892, do: [target], else: []
+        {:ok, %{"data" => %{"issues" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false}}}}}
+      end
+    ]
+
+    cache =
+      Enum.reduce(0..11, %{}, fn tick, cache ->
+        Process.put(:marker_now, tick * 5_000)
+        assert {:ok, [blocked], updated} = Yolo.Dependencies.refresh_background([waiting], cache, opts)
+        assert [%{error: {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved}}] = blocked.blocked_by
+        updated
+      end)
+
+    assert_receive {:lookup, 892}
+    assert_receive {:lookup, 999}
+    refute_receive {:lookup, _}
+    assert Map.has_key?(cache, {:wait_target, "foreign", "PRI-892"})
+
+    corrected = %{waiting | description: "Wartet auf: PRI-892"}
+    Process.put(:marker_now, 60_000)
+    assert {:ok, [%{blocked_by: [%{id: "foreign-target"}]}], updated} = Yolo.Dependencies.refresh_background([corrected], cache, opts)
+    refute Map.has_key?(updated, {:wait_report, issue.id, "PRI-999"})
+    refute Map.has_key?(updated, {:wait_target, "foreign", "PRI-999"})
+  end
+
+  test "a marker error leaves independent notification retry and admission active", %{issues: [first, second | _], context: context} do
+    ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, "pai"))
+
+    waiting = %{
+      first
+      | description: "Wartet auf: PRI-999",
+        blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"},
+        labels: [],
+        url: "https://linear.example/PRO-0"
+    }
+
+    ready = %{
+      second
+      | blocked_by: [],
+        relations_complete: true,
+        last_comment_signal: %{relay_epoch: "stable"},
+        labels: [],
+        url: "https://linear.example/PRO-1"
+    }
+
+    proposal = %{"escalation" => %{"cause" => "Route fehlt", "attempts" => "Review abgeschlossen", "proposal" => "Route prüfen", "decision" => "Benachrichtigen"}}
+    missing = [escalation_route: fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end]
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(waiting, proposal, missing)
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(ready, proposal, missing)
+
+    Coordinator.tick(%Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}, [waiting, ready],
+      contexts: [context],
+      relay_ready: fn _ -> true end,
+      wait_comments: fn _ -> {:ok, []} end,
+      report_error: fn _, _, _ -> :ok end,
+      fetch: fn [id] ->
+        assert id == ready.id
+        {:ok, [ready]}
+      end,
+      escalation_route: fn _, _ -> {:ok, %{"channel" => "bound", "to" => "human"}} end,
+      escalation_send: fn _, _, _ ->
+        send(self(), :notification_sent)
+        {:ok, %{"messageId" => "sent"}}
+      end,
+      prepare: fn issue ->
+        send(self(), {:admitted, issue.id})
+        {:ok, issue}
+      end
+    )
+
+    assert_receive :notification_sent
+    assert_receive {:admitted, ready_id}
+    assert ready_id == ready.id
+    assert {:ok, true} = Escalation.pending(waiting.id)
+    assert {:ok, false} = Escalation.pending(ready.id)
+  end
+
   test "foreground refresh loads fresh blockers for a relay-stamped review issue", %{issues: [issue | _]} do
     review = %{
       issue
@@ -1343,7 +1621,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         Enum.reduce(0..11, %{}, fn tick, cache ->
           Process.put(:wait_report_now, tick * 5_000)
 
-          assert {:error, {:wait_marker_unresolved, "PRI-999", ^reason}, updated} =
+          assert {:ok, [%{blocked_by: [%{error: {:wait_marker_unresolved, "PRI-999", ^reason}}]}], updated} =
                    Yolo.Dependencies.refresh_background([waiting], cache, opts)
 
           updated
@@ -1356,7 +1634,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
       Process.put(:wait_report_now, 300_000)
 
-      assert {:error, {:wait_marker_unresolved, "PRI-999", ^reason}, after_interval} =
+      assert {:ok, [%{blocked_by: [%{error: {:wait_marker_unresolved, "PRI-999", ^reason}}]}], after_interval} =
                Yolo.Dependencies.refresh_background([waiting], cache, opts)
 
       messages = elem(Process.info(self(), :messages), 1)
@@ -1375,8 +1653,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         Process.put(:wait_report_now, 305_000)
         changed = %{waiting | description: "Wartet auf: PRI-998"}
 
-        assert {:error, {:wait_marker_unresolved, "PRI-998", :wait_target_unresolved}, changed_cache} =
+        assert {:ok, [changed_issue], changed_cache} =
                  Yolo.Dependencies.refresh_background([changed], after_interval, opts)
+
+        assert [%{error: {:wait_marker_unresolved, "PRI-998", :wait_target_unresolved}}] = changed_issue.blocked_by
 
         ambiguous =
           Keyword.merge(opts,
@@ -1384,8 +1664,10 @@ defmodule SymphonyElixir.YoloRuntimeTest do
             query: fn _, _ -> response.([%{"id" => "one"}, %{"id" => "two"}]) end
           )
 
-        assert {:error, {:wait_marker_unresolved, "PRI-998", :wait_target_ambiguous}, ambiguous_cache} =
+        assert {:ok, [ambiguous_issue], ambiguous_cache} =
                  Yolo.Dependencies.refresh_background([changed], changed_cache, ambiguous)
+
+        assert [%{error: {:wait_marker_unresolved, "PRI-998", :wait_target_ambiguous}}] = ambiguous_issue.blocked_by
 
         messages = elem(Process.info(self(), :messages), 1)
         assert Enum.count(messages, &match?({:memory_tracker_comment_update, ^id, _, _}, &1)) == 3

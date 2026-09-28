@@ -139,7 +139,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
         end
 
       delegated_nodes =
-        for index <- 1..if(unresolved, do: 1, else: 4) do
+        for index <- 1..4 do
           issue_node(context)
           |> Map.put("id", "yolo-#{index}")
           |> Map.put("identifier", "PRO-#{100 + index}")
@@ -199,77 +199,82 @@ defmodule SymphonyElixir.RelayBudgetTest do
       }
 
       ProjectContext.with_context(context, fn ->
-        assert :ok =
-                 Operations.save(%{
-                   "key" => "followup:budget",
-                   "request" => %{"kind" => "followup", "origin_ids" => ["yolo-1"]},
-                   "issue_id" => Ecto.UUID.generate(),
-                   "done" => false
-                 })
+        for id <- if(unresolved, do: ["yolo-1", "yolo-2"], else: ["yolo-1"]) do
+          assert :ok =
+                   Operations.save(%{
+                     "key" => "followup:budget:#{id}",
+                     "request" => %{"kind" => "followup", "origin_ids" => [id]},
+                     "issue_id" => Ecto.UUID.generate(),
+                     "done" => false
+                   })
+        end
       end)
 
-      {yolo_state, marker_state} =
-        Enum.reduce(5..1_800//5, {yolo_state, marker_state}, fn seconds, {yolo_state, marker_state} ->
-          Agent.update(clock, fn _ -> seconds * 1_000 end)
-          before_event = if seconds in [600, 1_200], do: Agent.get(counts, & &1), else: %{}
+      {{yolo_state, marker_state}, log} =
+        ExUnit.CaptureLog.with_log(fn ->
+          Enum.reduce(5..1_800//5, {yolo_state, marker_state}, fn seconds, {yolo_state, marker_state} ->
+            Agent.update(clock, fn _ -> seconds * 1_000 end)
+            before_event = if seconds in [600, 1_200], do: Agent.get(counts, & &1), else: %{}
 
-          if active > 0 and seconds == 600,
-            do: Server.publish(server, "one", %{"type" => "Comment", "issueId" => "issue-0", "commentId" => "human-comment"})
+            if active > 0 and seconds == 600,
+              do: Server.publish(server, "one", %{"type" => "Comment", "issueId" => "issue-0", "commentId" => "human-comment"})
 
-          if active > 0 and seconds == 1_200,
-            do: Server.publish(server, "one", %{"issueId" => "issue-1"})
+            if active > 0 and seconds == 1_200,
+              do: Server.publish(server, "one", %{"issueId" => "issue-1"})
 
-          ProjectPoller.refresh()
-          assert {:ok, _} = ProjectPoller.candidates(context)
+            ProjectPoller.refresh()
+            assert {:ok, _} = ProjectPoller.candidates(context)
 
-          ProjectContext.with_context(context, fn ->
-            for node <- active_nodes do
-              issue = Client.relay_issue(node)
-              assert {:ok, _} = CommentCheckpoint.background_scan(issue, background_now: fn -> seconds * 1_000 end)
-              assert {:ok, [_]} = IssueReadCache.fetch([issue.id], now: seconds * 1_000)
-            end
+            ProjectContext.with_context(context, fn ->
+              for node <- active_nodes do
+                issue = Client.relay_issue(node)
+                assert {:ok, _} = CommentCheckpoint.background_scan(issue, background_now: fn -> seconds * 1_000 end)
+                assert {:ok, [_]} = IssueReadCache.fetch([issue.id], now: seconds * 1_000)
+              end
+            end)
+
+            marker_state =
+              ProjectContext.with_context(context, fn ->
+                {next, []} = SymphonyElixir.Orchestrator.reconcile_completed_states_for_test(marker_state, [])
+                assert next.completed_states["invisible-merge"] == "merge (ai)"
+                next
+              end)
+
+            yolo_state =
+              ProjectContext.with_context(context, fn ->
+                delegated =
+                  Enum.map(delegated_nodes, fn node ->
+                    %{Client.relay_issue(node) | last_comment_signal: %{relay_epoch: "budget-stable"}}
+                  end)
+
+                Coordinator.tick(yolo_state, delegated,
+                  background_now: fn -> seconds * 1_000 end,
+                  contexts: contexts,
+                  relay_ready: fn _ -> true end,
+                  recovery_now: fn -> seconds * 1_000 end,
+                  lease: fn _, callback -> callback.() end,
+                  invoke: fn request, _ ->
+                    assert request["origin_ids"] == [if(unresolved, do: "yolo-2", else: "yolo-1")]
+                    Agent.update(recovery_attempts, &(&1 + 1))
+                    assert {:ok, _} = Tracker.fetch_issue_comment_bodies(if(unresolved, do: "yolo-2", else: "yolo-1"))
+                    {:error, :yolo_created_issue_changed}
+                  end,
+                  scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
+                  start: fn _, _ -> {:error, :capacity} end
+                )
+              end)
+
+            if active > 0 and seconds == 600,
+              do: assert(Map.get(Agent.get(counts, & &1), :comments, 0) > Map.get(before_event, :comments, 0))
+
+            if active > 0 and seconds == 1_200,
+              do: assert(Map.get(Agent.get(counts, & &1), :read, 0) > Map.get(before_event, :read, 0))
+
+            {yolo_state, marker_state}
           end)
-
-          marker_state =
-            ProjectContext.with_context(context, fn ->
-              {next, []} = SymphonyElixir.Orchestrator.reconcile_completed_states_for_test(marker_state, [])
-              assert next.completed_states["invisible-merge"] == "merge (ai)"
-              next
-            end)
-
-          yolo_state =
-            ProjectContext.with_context(context, fn ->
-              delegated =
-                Enum.map(delegated_nodes, fn node ->
-                  %{Client.relay_issue(node) | last_comment_signal: %{relay_epoch: "budget-stable"}}
-                end)
-
-              Coordinator.tick(yolo_state, delegated,
-                background_now: fn -> seconds * 1_000 end,
-                contexts: contexts,
-                relay_ready: fn _ -> true end,
-                recovery_now: fn -> seconds * 1_000 end,
-                lease: fn _, callback -> callback.() end,
-                invoke: fn _, _ ->
-                  Agent.update(recovery_attempts, &(&1 + 1))
-                  assert {:ok, _} = Tracker.fetch_issue_comment_bodies("yolo-1")
-                  {:error, :yolo_created_issue_changed}
-                end,
-                scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
-                start: fn _, _ -> {:error, :capacity} end
-              )
-            end)
-
-          if active > 0 and seconds == 600,
-            do: assert(Map.get(Agent.get(counts, & &1), :comments, 0) > Map.get(before_event, :comments, 0))
-
-          if active > 0 and seconds == 1_200,
-            do: assert(Map.get(Agent.get(counts, & &1), :read, 0) > Map.get(before_event, :read, 0))
-
-          {yolo_state, marker_state}
         end)
 
-      assert map_size(yolo_state.yolo_marker_cache) == if(unresolved, do: 3, else: 5)
+      assert map_size(yolo_state.yolo_marker_cache) == if(unresolved, do: 6, else: 5)
 
       if unresolved do
         assert %{reason: :wait_target_unresolved, error: {:wait_marker_unresolved, "PRI-999", :wait_target_unresolved}} =
@@ -277,7 +282,12 @@ defmodule SymphonyElixir.RelayBudgetTest do
       end
 
       assert marker_state.completed_states["invisible-merge"] == "merge (ai)"
-      assert Agent.get(recovery_attempts, & &1) == if(unresolved, do: 0, else: 4)
+      assert Agent.get(recovery_attempts, & &1) == 4
+
+      if unresolved do
+        assert length(Regex.scan(~r/Wartemarker nicht auflösbar issue_id=yolo-1 /, log)) <= 6
+        refute log =~ "YOLO dependencies unavailable"
+      end
 
       requests = Agent.get(counts, & &1)
       by_operation = Agent.get(operations, & &1)
@@ -286,7 +296,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
       assert total == Enum.sum(Map.values(requests))
       assert total <= if(active == 0, do: 50, else: 375)
       assert Map.get(by_operation, "WaitTarget", 0) <= 6
-      if unresolved, do: assert(Map.get(by_operation, "SymphonyLinearIssueComments", 0) <= 8)
+      if unresolved, do: assert(Map.get(by_operation, "SymphonyLinearIssueComments", 0) <= 20)
       if unresolved, do: refute(Map.has_key?(by_operation, "SymphonyLinearCommentUpdate"))
       refute Map.has_key?(by_operation, "SymphonyCommentScanSignal")
     end

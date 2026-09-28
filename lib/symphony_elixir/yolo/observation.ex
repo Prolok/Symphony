@@ -51,7 +51,11 @@ defmodule SymphonyElixir.Yolo.Observation do
 
       with {:ok, inbox} <- scan.(issue),
            true <- not is_nil(inbox["last_successful_scan"]) and is_nil(inbox["scan_error"]),
-           {:ok, handoffs} <- OperatorHandoff.evidence(issue, inbox) do
+           {:ok, handoffs} <- OperatorHandoff.evidence(issue, inbox),
+           {:ok, duty} <- OperatorHandoff.current(issue, inbox),
+           {:ok, current_confirmation} <- OperatorHandoff.confirmation(issue, inbox, duty) do
+        confirmation = current_confirmation || previous_confirmation(issue, previous)
+
         comments =
           inbox["versions"]
           |> Map.values()
@@ -59,7 +63,7 @@ defmodule SymphonyElixir.Yolo.Observation do
           |> Enum.map(&{&1["key"], &1["deleted"]})
           |> Enum.sort()
 
-        semantic = with_handoffs(semantic, handoffs)
+        semantic = semantic |> with_handoffs(handoffs) |> with_confirmation(confirmation)
         source = Digest.digest({semantic, comments})
         version = impulse_version(source, impulse_generation)
 
@@ -69,7 +73,8 @@ defmodule SymphonyElixir.Yolo.Observation do
            "semantic" => version,
            "member_semantic" => version,
            "source" => source,
-           "legacy_semantic" => legacy_semantic(issue, generation, handoffs, comments)
+           "operator_confirmation" => confirmation,
+           "legacy_semantic" => legacy_semantic(issue, generation, handoffs, confirmation, comments)
          }}
       else
         {:error, _} = error -> error
@@ -81,9 +86,12 @@ defmodule SymphonyElixir.Yolo.Observation do
   defp impulse_version(source, generation) when generation > 0, do: Digest.digest({source, generation})
   defp impulse_version(source, _generation), do: source
 
-  defp legacy_semantic(_issue, generation, handoffs, _comments) when generation != 0 or handoffs != [], do: nil
+  defp previous_confirmation(%{state: "Yolo Review"}, %{"operator_confirmation" => digest}) when is_binary(digest), do: digest
+  defp previous_confirmation(_, _), do: nil
 
-  defp legacy_semantic(issue, _generation, _handoffs, comments) do
+  defp legacy_semantic(_issue, generation, handoffs, confirmation, _comments) when generation != 0 or handoffs != [] or not is_nil(confirmation), do: nil
+
+  defp legacy_semantic(issue, _generation, _handoffs, _confirmation, comments) do
     legacy =
       issue
       |> semantic_issue()
@@ -95,6 +103,8 @@ defmodule SymphonyElixir.Yolo.Observation do
 
   defp with_handoffs(semantic, []), do: semantic
   defp with_handoffs(semantic, handoffs), do: Map.put(semantic, :operator_handoffs, handoffs)
+  defp with_confirmation(semantic, nil), do: semantic
+  defp with_confirmation(semantic, digest), do: Map.put(semantic, :operator_confirmation, digest)
 
   defp bind_chains(issues, observations) do
     issues

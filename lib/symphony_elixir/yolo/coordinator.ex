@@ -56,7 +56,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
     for issue <- issues,
-        YoloAgent.delegated?(issue) and Admission.eligible?(issue) and
+        notification_retry_eligible?(issue) and
           not MapSet.member?(reserved, issue.id) and not MapSet.member?(state.claimed, issue.id) and
           not Map.has_key?(state.running, issue.id) do
       retry_notification_if_pending(issue, fetch, opts)
@@ -74,7 +74,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   defp retry_notification(issue, fetch, opts) do
     case fetch.([issue.id]) do
       {:ok, [fresh]} ->
-        if fresh.id == issue.id and YoloAgent.delegated?(fresh) and Admission.eligible?(fresh) and fresh.assignee_id == issue.assignee_id do
+        if fresh.id == issue.id and notification_retry_eligible?(fresh) and fresh.assignee_id == issue.assignee_id do
           log_notification_retry(issue, Escalation.retry_pending(fresh, opts))
         end
 
@@ -84,6 +84,16 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       _ ->
         :ok
     end
+  end
+
+  defp notification_retry_eligible?(issue) do
+    context = ProjectContext.current()
+
+    Admission.eligible?(issue) or
+      (issue.state in ["Yolo Review", "BLOCKER"] and is_nil(issue.delegate_id) and
+         issue.assignee_id == Config.human_handoff_id() and issue.in_project_scope and
+         issue.project_context_id == context.id and issue.workspace_id == context.settings.tracker.app["workspace_id"] and
+         (is_nil(Config.allowed_issue_ids()) or issue.id in Config.allowed_issue_ids()))
   end
 
   defp log_notification_retry(_issue, :ok), do: :ok

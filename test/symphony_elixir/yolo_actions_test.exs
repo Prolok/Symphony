@@ -46,7 +46,8 @@ defmodule SymphonyElixir.YoloActionsTest do
       labels: [%{"id" => "generated", "name" => "symphony-generated", "team" => %{"id" => "team"}}],
       calls: [],
       fail: nil,
-      workpads: %{}
+      workpads: %{},
+      escalation_comments: %{}
     })
 
     workspace = ReviewFixture.install(root)
@@ -174,7 +175,14 @@ defmodule SymphonyElixir.YoloActionsTest do
                  "## Symphony Workpad\n\n### Validierung\n\n- [x] Synthetic acceptance\n\n### Verlauf\n\nMerge-Evidenz: PR #1 MERGED, Merge-Commit: #{String.duplicate("a", 40)}"
                )
            }
-         ]}
+         ] ++ Map.get(db().escalation_comments, id, [])}
+      end,
+      escalation_comment: fn id, body ->
+        change(fn state ->
+          %{state | escalation_comments: Map.update(state.escalation_comments, id, [%{id: "escalation", body: body}], fn existing -> existing ++ [%{id: "escalation", body: body}] end)}
+        end)
+
+        :ok
       end,
       workpad: fn id, body ->
         change(&%{&1 | workpads: Map.put(&1.workpads, id, body)})
@@ -1017,15 +1025,127 @@ defmodule SymphonyElixir.YoloActionsTest do
                  handoff(%{"kind" => kind, "issue_id" => source.id, "report" => "Tests checked; open fix PRO-99. Finale Installation offen.", "review" => evidence, "escalation" => escalation}, opts())
       end)
 
-      assert db().issues[source.id].delegate_id == if(state == "Yolo Review", do: "pai")
+      assert db().issues[source.id].delegate_id == nil
       assert db().issues[source.id].assignee_id == "human"
       assert db().issues[source.id].state == state
+
+      if state == "Yolo Review" do
+        assert [%{body: note}] = db().escalation_comments[source.id]
+        assert note =~ "Frage: Bereitstellung bestätigen"
+        assert note =~ "Empfehlung: Gemergten Stand bereitstellen"
+      end
+
       assert db().workpads[source.id] =~ "Existing evidence"
       assert db().workpads[source.id] =~ "open fix PRO-99"
       assert db().workpads[source.id] =~ "Gemergten Stand bereitstellen"
       assert db().workpads[source.id] =~ original
       assert SymphonyElixir.Workpad.section_checklist_status(db().workpads[source.id], "Validierung", "Review") == :open
     end
+  end
+
+  test "a current operator duty permits waiting in Yolo Review without a dependency", %{issues: [issue | _]} do
+    source = %{issue | state: "Yolo Review", blocked_by: [], relations_complete: true}
+
+    duty = %{
+      "version" => 1,
+      "action" => "Hauptinstanz neu starten",
+      "head_sha" => String.duplicate("a", 40),
+      "source_sha256" => String.duplicate("b", 64),
+      "expected" => "Start und Messung belegen",
+      "resume_state" => "Yolo Review"
+    }
+
+    body = "## Symphony Workpad\n\n### Betreiberauftrag\n\n```symphony-operator-handoff\n#{Jason.encode!(duty)}\n```\n"
+    change(&%{&1 | issues: %{source.id => source}, workpads: %{source.id => body}})
+
+    snapshot = %{
+      "last_successful_scan" => "now",
+      "scan_error" => nil,
+      "current" => %{"workpad" => "duty"},
+      "versions" => %{"duty" => %{"key" => "duty", "origin" => "own", "deleted" => false, "source" => %{"id" => "workpad", "body" => body}}}
+    }
+
+    group([source], fn ->
+      {:ok, record} = Store.read("incoming")
+      :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
+
+      assert :ok =
+               Handoff.invoke(
+                 %{"kind" => "wait", "issue_id" => source.id, "report" => "Betreiberpflicht offen", "review" => ReviewFixture.evidence()},
+                 Keyword.put(opts(), :scan, fn _ -> {:ok, snapshot} end)
+               )
+    end)
+
+    assert db().issues[source.id].state == "Yolo Review"
+    assert db().issues[source.id].delegate_id == "pai"
+    assert db().workpads[source.id] =~ "Auftrags-Digest:"
+    refute db().workpads[source.id] =~ "Menschliche Zuständigkeit"
+  end
+
+  test "escalation requires a fresh human-only readback before completion", %{issues: [issue | _]} do
+    source = %{issue | state: "Yolo Review", blocked_by: [], relations_complete: true}
+    change(&%{&1 | issues: %{source.id => source}})
+    escalation = %{"cause" => "Strategische Frage", "attempts" => "Varianten geprüft", "proposal" => "Variante A wählen", "decision" => "Welche Variante gilt?"}
+
+    group([source], fn ->
+      {:ok, record} = Store.read("incoming")
+      :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
+      stale = Keyword.put(opts(), :fetch, fn _ -> {:ok, [source]} end)
+
+      assert {:error, :yolo_handoff_unconfirmed} =
+               Handoff.invoke(%{"kind" => "escalate", "issue_id" => source.id, "report" => "Entscheidung offen", "escalation" => escalation, "review" => ReviewFixture.evidence()}, stale)
+
+      {:ok, after_attempt} = Store.read("incoming")
+      refute get_in(after_attempt, ["attempt", "completed", source.id])
+    end)
+
+    assert db().issues[source.id].state == "Yolo Review"
+    assert db().issues[source.id].delegate_id == nil
+    assert db().issues[source.id].assignee_id == "human"
+    assert length(db().escalation_comments[source.id]) == 1
+  end
+
+  test "escalation reconciles uncertain comment and assignment responses", %{issues: [issue | _]} do
+    source = %{issue | state: "Yolo Review", blocked_by: [], relations_complete: true}
+    change(&%{&1 | issues: %{source.id => source}, fail: "YoloUpdate"})
+    escalation = %{"cause" => "Strategische Frage", "attempts" => "Varianten geprüft", "proposal" => "Variante A wählen", "decision" => "Welche Variante gilt?"}
+    options = opts()
+    create = options[:escalation_comment]
+
+    options =
+      Keyword.put(options, :escalation_comment, fn id, body ->
+        create.(id, body)
+        {:error, :response_lost}
+      end)
+
+    group([source], fn ->
+      {:ok, record} = Store.read("incoming")
+      :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
+
+      assert :ok = Handoff.invoke(%{"kind" => "escalate", "issue_id" => source.id, "report" => "Entscheidung offen", "escalation" => escalation, "review" => ReviewFixture.evidence()}, options)
+    end)
+
+    assert length(db().escalation_comments[source.id]) == 1
+    assert db().issues[source.id].assignee_id == "human"
+    assert db().issues[source.id].delegate_id == nil
+  end
+
+  test "explicit BLOCKER escalation also transfers sole ownership to the human", %{issues: [issue | _]} do
+    source = %{issue | state: "BLOCKER"}
+    change(&%{&1 | issues: %{source.id => source}})
+    escalation = %{"cause" => "Zugang fehlt", "attempts" => "Betreiberweg geprüft", "proposal" => "Zugang einrichten", "decision" => "Zugang freigeben?"}
+
+    group([source], fn ->
+      {:ok, record} = Store.read("incoming")
+      :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
+      assert :ok = Handoff.invoke(%{"kind" => "escalate", "issue_id" => source.id, "report" => "Zugang offen", "escalation" => escalation}, opts())
+    end)
+
+    assert db().issues[source.id].state == "BLOCKER"
+    assert db().issues[source.id].assignee_id == "human"
+    assert db().issues[source.id].delegate_id == nil
+    assert [%{body: note}] = db().escalation_comments[source.id]
+    assert note =~ "Frage: Zugang freigeben?"
   end
 
   test "pending creations, new comments and withdrawn ownership block handoff", %{issues: [issue | _]} do

@@ -146,12 +146,17 @@ sperrt sie nicht. Vor Entscheidungen Kette und Mergebelege frisch bestätigen;
 Vorgänger vor den abhängigen Ursprüngen abschließen. Teilübergaben erhalten.
 
 Offene Abnahmen sind hier fällig. Autorisierte Bereitstellung und Betreiberprüfungen
-mit vorhandenen Zugängen selbst ausführen; fehlende Nachweise bleiben bis dahin
-eine offene Pflicht in `Yolo Review`. Nur eine echte strategische Entscheidung
-oder nach Nutzung dieser Wege nicht autonom lösbare Voraussetzung mit Ursache
-und konkretem Lösungsvorschlag über `kind=escalate` übergeben. Das
-beendet diesen Lauf als Warteentscheidung, ohne Erfolg oder Statuswechsel zu
-behaupten. Unveränderte Hindernisse lösen keinen weiteren Auftrag aus.
+mit vorhandenen Zugängen selbst ausführen. Fällige Betreiberaktionen wie Main-Update
+oder -Neustart, Live-Aktivierung, Live-/Host-Messung und isoliertes Deployment
+als quellengebundenen Betreiberauftrag mit `resume_state: Yolo Review` im Workpad
+festhalten und mit `kind=wait` abschließen, auch ohne offene Abhängigkeit.
+Der Auftrags-Digest im Wartebericht bindet die strukturierte Pai-Bestätigung;
+erst sie weckt den nächsten Reviewlauf. Unveränderte Aufträge allein tun das nicht.
+`kind=escalate` ist ausschließlich für strategische Produktentscheidungen oder
+Zugang/Rechte zulässig, die weder Agent noch Betreiber erhalten können. Eine echte
+Eskalation belässt den Status, entfernt die Agentdelegation, weist den konfigurierten
+Menschen allein zu und zeigt Frage und Empfehlung im Ticket. Menschliche
+Neudelegation gilt als Entscheidung und weckt den nächsten Lauf.
 
 Prüfe den dokumentierten gemergten Stand anhand der Anforderungen aller
 Review-Mitglieder und ihres gemeinsamen End-to-End-Verhaltens. Verbindlicher
@@ -193,8 +198,9 @@ abgrenzen. Operationsschlüssel bei Wiederaufnahme erhalten.
 Für `kind=handoff`, `kind=wait` oder `kind=escalate` in `Yolo Review` zusätzlich zum lesbaren `report` den
 strukturierten `review`-Beleg übergeben:
 
-Fehlt der gebundene Prüfvertrag, ist ausschließlich `kind=escalate` mit konkreter
-`escalation` und ehrlichem Bericht ohne erfundenen Prüfbeleg zulässig.
+Fehlt der gebundene Prüfvertrag, sind `handoff` und `wait` gesperrt. Nach
+technischer Diagnose ist `escalate` nur bei der oben genannten Eskalationsschwelle
+mit konkreter `escalation` und ehrlichem Bericht ohne erfundenen Prüfbeleg zulässig.
 
 ```json
 {
@@ -284,7 +290,7 @@ bestätigte Entscheidungen und neuere Zustellungen bleiben erhalten. Voraussetzu
 [kontrollierte Aufgabe](docs/openclaw-yolo.md#kontrollierte-aufgabe-unterbrochener-aufträge).
 Keine Ersatzanlage oder eigene Neuzustellung durch den Agenten.
 
-Für echte externe Hindernisse `kind=escalate` (in `Yolo Review`) bzw. die bestehende
+Für diese echten Eskalationen `kind=escalate` (in `Yolo Review`) bzw. die bestehende
 BLOCKER-Übergabe mit `escalation: {cause, attempts, proposal, decision}` verwenden.
 In `BLOCKER` übernimmt der delegierte Agent die fällige Betreiberarbeit. Enthält
 das Journal bereits einen eigenen Lauf zur selben Ursache, wiederholt er sie nicht,

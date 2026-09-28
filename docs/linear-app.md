@@ -308,7 +308,9 @@ Nach bestätigtem Abschluss bereinigt der PO-Pfad den regulären Issue-Workspace
 der Abnahmecheckout bleibt separat. Reservierte Routine-Testworkspaces bleiben
 ausschließlich dem gebundenen Test-Cleanup vorbehalten.
 Rücksprünge aus `Yolo Review` nach BLOCKER oder Coding sowie direktes Fertig sind
-gesperrt. Externe Voraussetzungen werden mit `kind=escalate` dort übergeben.
+gesperrt. Betreiberpflichten warten dort quellengebunden mit `kind=wait`;
+strategische Entscheidungen und auch für den Betreiber unzugängliche Rechte
+werden mit `kind=escalate` an den Menschen übergeben.
 Ausdrücklich eskalierte offene Anlageoperationen erlauben den Laufabschluss als
 belegtes Warten; ihre Anlage/Links bleiben offen. Der Beleg gilt nur für die
 benannten Operationen dieses Laufs, nicht für später hinzugekommene Anlagen.
@@ -592,9 +594,30 @@ Zufallskennungen oder Zeitstempel zum Wecken. Beispiel mit synthetischen Quellha
 Alle sechs Felder sind erforderlich; keine Zusatzfelder. `head_sha` ist der volle
 Commit, `source_sha256` der tatsächliche Quell-/Paketfingerprint einschließlich
 relevanter offener Änderungen. Aktion und erwarteter Nachweis sind konkrete,
-stabile Beschreibungen der Pflicht. `resume_state` nennt eine reguläre Phase von
-Planung (AI) bis Merge (AI), ausgenommen Todo und Abbruch. Rolle, Fälligkeitsquelle,
+stabile Beschreibungen der Pflicht. `resume_state` nennt eine Phase von
+Planung (AI) bis Merge (AI) oder `Yolo Review`, ausgenommen Todo und Abbruch. Rolle, Fälligkeitsquelle,
 lokale Prüfungen und Ergebnisse stehen weiterhin im normalen Übergabetext.
+In der finalen Abnahme beendet
+`kind=wait` einen offenen Betreiberauftrag selbst ohne Abhängigkeit bei unverändertem
+Status und Agentdelegation. Der Wartebericht nennt den Digest des normalisierten
+Sechs-Felder-Auftrags. Pai bestätigt den aktuellen Auftrag als konfigurierter
+delegierter App-Benutzer mit genau einem Kommentar dieser Form:
+
+````text
+```symphony-operator-confirmation
+{"version":1,"handoff_digest":"<64-stelliger Auftrags-Digest>","result":"Ausführungsergebnis","evidence":"konkreter Nachweis"}
+```
+````
+
+Nur der vollständige, aktuelle Kommentar dieser Identität mit passendem Digest
+weckt eine neue Reviewprüfung. Fremde Apps, Klartext, fehlerhafte und alte Digests,
+gelöschte oder überarbeitete Fassungen tun das nicht. Derselbe Digest bleibt bei
+Duplikaten, Polls und Neustarts dieselbe Entscheidung. Echte Eskalationen entfernen
+die Delegation, behalten den Status, weisen den konfigurierten Menschen allein zu
+und zeigen Frage und Empfehlung aus `decision` und `proposal` im Ticket; Erfolg
+setzt den frischen Zuweisungs-Readback voraus. Menschliche Neudelegation ist der
+Fortsetzungsimpuls.
+
 Ein neuer Kandidat oder fachlich anderer Prüfumfang verlangt einen aktualisierten
 Beleg. Bloße Wartezeit, Statusrundläufe und redaktionelle Pflege tun das nicht.
 Nach Ausführung den letzten Beleg samt Ergebnis erhalten, erst für eine neue

@@ -42,7 +42,8 @@ defmodule SymphonyElixir.YoloReviewContractTest do
         %{
           issue: issue,
           body: "## Symphony Workpad\n\nExisting evidence\n\n### Validierung\n\n- [x] Synthetic acceptance\n\n### Verlauf\n\nMerge-Evidenz: PR #1 MERGED, Merge-Commit: #{String.duplicate("a", 40)}",
-          updates: 0
+          updates: 0,
+          note: nil
         }
       end)
 
@@ -52,8 +53,13 @@ defmodule SymphonyElixir.YoloReviewContractTest do
       dependencies: &{:ok, &1},
       fetch: fn _ -> {:ok, [Agent.get(db, & &1.issue)]} end,
       before_action: fn _ -> :ok end,
-      comments: fn _ -> {:ok, [%{id: "workpad", body: Agent.get(db, & &1.body)}]} end,
+      comments: fn _ ->
+        state = Agent.get(db, & &1)
+        {:ok, [%{id: "workpad", body: state.body}] ++ if(is_binary(state.note), do: [%{id: "escalation", body: state.note}], else: [])}
+      end,
+      escalation_comment: fn _, body -> Agent.update(db, &%{&1 | note: body}) end,
       workpad: fn _, body -> Agent.update(db, &%{&1 | body: body}) end,
+      scan: fn _ -> {:ok, %{"versions" => %{}, "current" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
       query: fn
         document, %{id: "team", after: nil} ->
           assert document =~ "query YoloStates"
@@ -62,7 +68,7 @@ defmodule SymphonyElixir.YoloReviewContractTest do
         document, %{id: id, input: input} ->
           assert document =~ "mutation YoloUpdate"
           assert input in [%{stateId: "review-state", assigneeId: "human", delegateId: nil}, %{assigneeId: "human", delegateId: nil}]
-          Agent.update(db, &%{&1 | issue: %{&1.issue | state: if(input[:stateId], do: "Review", else: &1.issue.state), delegate_id: nil}, updates: &1.updates + 1})
+          Agent.update(db, &%{&1 | issue: %{&1.issue | state: if(input[:stateId], do: "Review", else: &1.issue.state), assignee_id: input[:assigneeId], delegate_id: nil}, updates: &1.updates + 1})
           {:ok, %{"data" => %{"issueUpdate" => %{"success" => true, "issue" => %{"id" => id}}}}}
       end
     ]
@@ -235,6 +241,22 @@ defmodule SymphonyElixir.YoloReviewContractTest do
 
         assert {:error, :offline} = Handoff.invoke(request, Keyword.put(ctx.opts, :dependencies, changed_between_checks))
         assert Process.get(:dependency_reads) == 2
+
+        unexpected_dependency = fn issues ->
+          reads = Process.get(:dependency_reads) + 1
+          Process.put(:dependency_reads, reads)
+          if reads == 3, do: {:ok, issues}, else: :unexpected
+        end
+
+        assert {:error, :yolo_wait_requires_dependency} =
+                 Handoff.invoke(request, Keyword.put(ctx.opts, :dependencies, unexpected_dependency))
+
+        assert {:error, :yolo_wait_requires_dependency} =
+                 Handoff.invoke(request, Keyword.put(ctx.opts, :scan, fn _ -> :unexpected end))
+
+        assert {:error, :scan_failed} =
+                 Handoff.invoke(request, Keyword.put(ctx.opts, :scan, fn _ -> {:error, :scan_failed} end))
+
         assert Agent.get(ctx.db, & &1.updates) == 0
         refute Completion.ready?("review", [ctx.issue])
       end,
@@ -352,7 +374,7 @@ defmodule SymphonyElixir.YoloReviewContractTest do
         assert :ok = Operations.run("unfinished-fix", %{"kind" => "followup", "origin_ids" => [ctx.issue.id]}, fn _ -> :ok end)
         assert :ok = Handoff.invoke(request, ctx.opts)
         assert Completion.ready?("review", [ctx.issue])
-        assert %{issue: %{state: "Yolo Review", delegate_id: "pai"}, updates: 0, body: body} = Agent.get(ctx.db, & &1)
+        assert %{issue: %{state: "Yolo Review", delegate_id: nil, assignee_id: "human"}, updates: 1, body: body} = Agent.get(ctx.db, & &1)
         assert body =~ "unfinished-fix"
         assert {:error, _} = Handoff.invoke(Map.put(request, "kind", "handoff"), ctx.opts)
       end,
@@ -389,7 +411,7 @@ defmodule SymphonyElixir.YoloReviewContractTest do
         }
 
         unavailable = Keyword.put(ctx.opts, :escalation_route, fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end)
-        assert {:error, :openclaw_normal_channel_unavailable} = Handoff.invoke(request, unavailable)
+        assert :ok = Handoff.invoke(request, unavailable)
         assert Completion.ready?("review", [issue])
         assert {:ok, true} = Escalation.pending(issue.id)
         assert {:ok, notification} = Store.read("escalation:" <> issue.id)
@@ -454,7 +476,7 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     assert :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "independent", "members" => ["another-issue"], "completed" => %{}}))
     assert :ok = Recovery.resume(%Orchestrator.State{}, [ctx.issue], lease: fn _, _ -> flunk("another group attempt must not release an escalated operation") end)
     assert :ok = Store.write("review", record)
-    assert %{issue: %{state: "Yolo Review", delegate_id: "pai"}, updates: 0} = Agent.get(ctx.db, & &1)
+    assert %{issue: %{state: "Yolo Review", delegate_id: nil, assignee_id: "human"}, updates: 1} = Agent.get(ctx.db, & &1)
     assert {:error, :yolo_group_changed} = Runner.run("review", [ctx.issue], [ctx.issue], opts)
 
     Scope.with_scope("review", [ctx.issue], "stale-run", fn ->

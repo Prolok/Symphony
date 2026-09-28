@@ -395,9 +395,18 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, true} = Escalation.pending(issue.id)
     tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, []} end))
     assert {:ok, true} = Escalation.pending(issue.id)
-    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, [%{issue | delegate_id: nil}]} end))
+    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, [%{issue | state: "Review", delegate_id: nil}]} end))
     assert {:ok, true} = Escalation.pending(issue.id)
     refute_receive :notification_sent
+
+    handed_over = %{issue | state: "Yolo Review", delegate_id: nil}
+    tick(state, [handed_over], Keyword.put(base, :fetch, fn _ -> {:ok, [handed_over]} end))
+    assert_receive :notification_sent
+    assert {:ok, false} = Escalation.pending(issue.id)
+
+    revised = put_in(proposal, ["escalation", "decision"], "Andere Frage")
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, revised, missing)
+    assert {:ok, true} = Escalation.pending(issue.id)
 
     tick(
       state,
@@ -410,7 +419,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     assert {:ok, true} = Escalation.pending(issue.id)
 
-    tick(state, [issue], Keyword.put(base, :fetch, fn _ -> {:ok, [issue]} end))
+    tick(state, [handed_over], Keyword.put(base, :fetch, fn _ -> {:ok, [handed_over]} end))
     assert_receive :notification_sent
     assert {:ok, false} = Escalation.pending(issue.id)
 
@@ -719,6 +728,103 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     formatted = String.replace(body, "Isolierten Unterbrechungstest", " Isolierten  Unterbrechungstest")
     formatted = put_in(snapshot, ["versions", "duty", "source", "body"], formatted)
     assert Yolo.OperatorHandoff.evidence(issue, formatted) == Yolo.OperatorHandoff.evidence(issue, snapshot)
+  end
+
+  test "only the current Pai confirmation wakes a waiting review once", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "duty"}}
+    duty = operator_workpad("duty", "a")
+    duty = put_in(duty, ["source", "body"], String.replace(duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    snapshot = inbox(%{"duty" => duty}) |> Map.put("current", %{"workpad" => "duty"})
+    assert {:ok, digest} = Yolo.OperatorHandoff.current(issue, snapshot)
+    assert is_binary(digest)
+    assert {:ok, nil} = Yolo.OperatorHandoff.confirmation(issue, snapshot, digest)
+
+    other_phase = operator_workpad("other-phase", "a")
+    other_phase_snapshot = inbox(%{"other-phase" => other_phase}) |> Map.put("current", %{"workpad" => "other-phase"})
+    assert {:ok, nil} = Yolo.OperatorHandoff.current(issue, other_phase_snapshot)
+
+    capture = fn member, seen -> Observation.capture([member], seen, scan: fn _ -> {:ok, snapshot} end) end
+    assert {:ok, before, _} = capture.(issue, %{})
+    source = before[issue.id]["source"]
+
+    confirmation = %{"version" => 1, "handoff_digest" => digest, "result" => "Neustart erfolgreich", "evidence" => "Messung 30 Minuten bestanden"}
+    body = "```symphony-operator-confirmation\n#{Jason.encode!(confirmation)}\n```"
+    comment = %{"key" => "answer", "origin" => "integration", "deleted" => false, "source" => %{"id" => "answer", "body" => body, "user" => %{"id" => "pai", "app" => true}}}
+    answered = snapshot |> put_in(["versions", "answer"], comment) |> put_in(["current", "answer"], "answer")
+
+    for {name, altered} <- [
+          {"other_app", put_in(answered, ["versions", "answer", "source", "user", "id"], "other")},
+          {"plain", put_in(answered, ["versions", "answer", "source", "body"], "Pai: Neustart erfolgreich")},
+          {"non_string", put_in(answered, ["versions", "answer", "source", "body"], nil)},
+          {"wrong_digest", put_in(answered, ["versions", "answer", "source", "body"], String.replace(body, digest, String.duplicate("b", 64)))},
+          {"malformed", put_in(answered, ["versions", "answer", "source", "body"], String.replace(body, "\"evidence\":", "\"missing\":"))},
+          {"edited", put_in(answered, ["versions", "answer", "source", "editedAt"], "2026-09-28T13:00:00Z")},
+          {"deleted", put_in(answered, ["versions", "answer", "deleted"], true)}
+        ] do
+      member = %{issue | last_comment_signal: %{relay_epoch: name}}
+      assert {:ok, observed, _} = Observation.capture([member], before, scan: fn _ -> {:ok, altered} end)
+      assert observed[issue.id]["source"] == source
+    end
+
+    next_duty = operator_workpad("next", "b")
+    next_duty = put_in(next_duty, ["source", "body"], String.replace(next_duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    next_snapshot = answered |> put_in(["versions", "next"], next_duty) |> put_in(["current", "workpad"], "next")
+    next_issue = %{issue | last_comment_signal: %{relay_epoch: "next"}}
+    assert {:ok, still_waiting, _} = Observation.capture([next_issue], before, scan: fn _ -> {:ok, next_snapshot} end)
+    assert still_waiting[issue.id]["source"] == source
+
+    answered_issue = %{issue | last_comment_signal: %{relay_epoch: "answer"}}
+    assert {:ok, after_answer, _} = Observation.capture([answered_issue], before, scan: fn _ -> {:ok, answered} end)
+    refute after_answer[issue.id]["source"] == source
+
+    for {name, altered} <- [
+          {"deleted_after_answer", put_in(answered, ["versions", "answer", "deleted"], true)},
+          {"edited_after_answer", put_in(answered, ["versions", "answer", "source", "body"], "Pai: Neustart erfolgreich")},
+          {"next_duty_after_answer", next_snapshot}
+        ] do
+      member = %{issue | last_comment_signal: %{relay_epoch: name}}
+      assert {:ok, observed, _} = Observation.capture([member], after_answer, scan: fn _ -> {:ok, altered} end)
+      assert observed[issue.id]["source"] == after_answer[issue.id]["source"]
+    end
+
+    assert {:ok, next_digest} = Yolo.OperatorHandoff.current(issue, next_snapshot)
+    next_confirmation = %{confirmation | "handoff_digest" => next_digest}
+    next_body = "```symphony-operator-confirmation\n#{Jason.encode!(next_confirmation)}\n```"
+
+    edited_old_answer =
+      next_snapshot
+      |> put_in(["versions", "answer", "source", "body"], next_body)
+      |> put_in(["versions", "answer", "source", "editedAt"], "2026-09-28T13:00:00Z")
+
+    old_edit_issue = %{issue | last_comment_signal: %{relay_epoch: "old-edit"}}
+
+    assert {:ok, after_old_edit, _} =
+             Observation.capture([old_edit_issue], after_answer, scan: fn _ -> {:ok, edited_old_answer} end)
+
+    assert after_old_edit[issue.id]["source"] == after_answer[issue.id]["source"]
+
+    next_comment = %{comment | "key" => "answer2", "source" => %{comment["source"] | "id" => "answer2", "body" => next_body}}
+    next_answered = next_snapshot |> put_in(["versions", "answer2"], next_comment) |> put_in(["current", "answer2"], "answer2")
+    next_answer_issue = %{issue | last_comment_signal: %{relay_epoch: "answer2"}}
+
+    assert {:ok, after_next_answer, _} =
+             Observation.capture([next_answer_issue], after_answer, scan: fn _ -> {:ok, next_answered} end)
+
+    refute after_next_answer[issue.id]["source"] == after_answer[issue.id]["source"]
+
+    decided_before = %{"processed" => Observation.fingerprint(before), "observations" => before, "decisions" => %{issue.id => before[issue.id]["semantic"]}}
+    assert Yolo.Delivery.pending([answered_issue], before, decided_before) == []
+    assert Yolo.Delivery.pending([answered_issue], after_answer, decided_before) == [answered_issue]
+
+    copy = %{comment | "key" => "copy", "source" => %{comment["source"] | "id" => "copy"}}
+    duplicate = answered |> put_in(["versions", "copy"], copy) |> put_in(["current", "copy"], "copy")
+    repeat_issue = %{issue | last_comment_signal: %{relay_epoch: "copy"}}
+    assert {:ok, repeated, _} = Observation.capture([repeat_issue], after_answer, scan: fn _ -> {:ok, duplicate} end)
+    assert repeated[issue.id]["source"] == after_answer[issue.id]["source"]
+
+    decided_after = %{"processed" => Observation.fingerprint(after_answer), "observations" => after_answer, "decisions" => %{issue.id => after_answer[issue.id]["semantic"]}}
+    assert Yolo.Delivery.pending([repeat_issue], repeated, decided_after) == []
+    assert Yolo.Delivery.pending([next_answer_issue], after_next_answer, decided_after) == [next_answer_issue]
   end
 
   defp operator_workpad(key, source) do

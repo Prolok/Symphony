@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Yolo.Escalation do
   @moduledoc "Once-per-proposal notification on the configured agent's existing human channel."
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, Tracker}
   alias SymphonyElixir.Yolo.{OpenClaw, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
 
@@ -12,6 +12,48 @@ defmodule SymphonyElixir.Yolo.Escalation do
   end
 
   def validate(_), do: {:error, :yolo_escalation_incomplete}
+
+  @spec handover(map(), map(), keyword(), (map(), map(), keyword() -> :ok | {:error, term()})) :: :ok | {:error, term()}
+  def handover(issue, %{"escalation" => details} = args, opts, update) do
+    with :ok <- validate(args),
+         human when is_binary(human) <- Config.human_handoff_id(),
+         :ok <- visible_note(issue, details, opts),
+         :ok <- update.(issue, %{assigneeId: human, delegateId: nil}, opts) do
+      :ok
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :yolo_escalation_handoff_unconfirmed}
+    end
+  end
+
+  defp visible_note(issue, details, opts) do
+    proposal = String.trim(details["proposal"])
+    decision = String.trim(details["decision"])
+    body = "Entscheidung benötigt für #{issue.identifier}\n\nFrage: #{decision}\nEmpfehlung: #{proposal}"
+    fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1)
+    create = Keyword.get(opts, :escalation_comment, &Tracker.create_comment/2)
+
+    with {:ok, comments} <- fetch.(issue.id), do: ensure_note(comments, issue.id, body, fetch, create)
+  end
+
+  defp ensure_note(comments, id, body, fetch, create) do
+    if Enum.any?(comments, &(Map.get(&1, :body) == body)) do
+      :ok
+    else
+      result = create.(id, body)
+      verify_note(fetch.(id), body, result)
+    end
+  end
+
+  defp verify_note({:ok, comments}, body, result) do
+    cond do
+      Enum.any?(comments, &(Map.get(&1, :body) == body)) -> :ok
+      result == :ok -> {:error, :yolo_escalation_comment_unconfirmed}
+      true -> result
+    end
+  end
+
+  defp verify_note({:error, _} = error, _body, _result), do: error
 
   @spec notify(map(), map(), keyword()) :: :ok | {:error, term()}
   def notify(issue, args, opts) do

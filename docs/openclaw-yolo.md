@@ -622,7 +622,10 @@ gehören; die Zustellroute wird weiterhin ausschließlich aus dieser einen
 Gateway-Sitzung gelesen. Es gibt keine automatische Auswahl aus fremden Gruppen
 oder Threads und keinen frei eingegebenen Kanal-/Empfängerersatz.
 Kein frei gewählter Empfänger und kein Ersatzkanal; fehlende/mehrdeutige Route
-bleibt ein konkreter Fehler. Gewöhnliche PO-Aufträge behalten `deliver=false`.
+bleibt ein konkreter Zustellfehler. Die bestätigte Linear-Übergabe an den Menschen
+bleibt bestehen; der bestehende YOLO-Takt versucht nur die gespeicherte
+`route_pending`-Benachrichtigung nach frischem Zuweisungs-Readback erneut.
+Gewöhnliche PO-Aufträge behalten `deliver=false`.
 
 Die Nachricht enthält Ticketlink, Ursache, Versuche, Lösungsvorschlag und
 benötigte Entscheidung. Eine dauerhafte Vorschlags-ID bindet den genauen Inhalt

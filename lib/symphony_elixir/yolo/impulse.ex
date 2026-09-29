@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Yolo.Impulse do
   @moduledoc "Durable history- and session-backed reasons to recheck an already delivered PO member."
   alias SymphonyElixir.{Config, ProjectContext}
+  alias SymphonyElixir.Linear.TrustedAgents
   alias SymphonyElixir.Yolo.API
 
   @history "query YoloIssueHistory($id: String!, $after: String) { issue(id: $id) { history(first: 100, after: $after) { nodes { id createdAt fromDelegate { id } toDelegate { id } fromPriority toPriority actor { id app } botActor { id } } pageInfo { hasNextPage endCursor } } } }"
@@ -47,24 +48,33 @@ defmodule SymphonyElixir.Yolo.Impulse do
          true <- Enum.all?(session_nodes, &valid_session?/1),
          agent_sessions = session_nodes |> Enum.filter(&delegation_session?(&1, issue.id)) |> Enum.sort_by(&{&1["createdAt"], &1["id"]}, :desc),
          {:ok, new_sessions} <- recent_sessions(agent_sessions, prior) do
-      reasons = recent |> Enum.reverse() |> Enum.flat_map(&reasons(&1, issue)) |> Enum.uniq()
-      reasons = if(new_sessions != [] and issue.delegate_id == Config.yolo_agent_id(), do: Enum.uniq(["delegated_again" | reasons]), else: reasons)
-      generation = if(is_map(prior), do: prior["generation"], else: 0) || 0
-
-      {:ok,
-       %{
-         "relay" => event,
-         "history_head" => if(nodes == [], do: nil, else: hd(nodes)["id"]),
-         "session_head" => if(agent_sessions == [], do: nil, else: hd(agent_sessions)["id"]),
-         "session_head_ids" => head_session_ids(agent_sessions),
-         "generation" => generation + if(reasons == [], do: 0, else: 1),
-         "reason" => if(reasons == [], do: "no_relevant_history", else: Enum.join(reasons, ","))
-       }}
+      {:ok, history_record(issue, event, prior, nodes, recent, agent_sessions, new_sessions)}
     else
       {:error, _} = error -> error
       _ -> {:error, :yolo_history_incomplete}
     end
   end
+
+  defp history_record(issue, event, prior, nodes, recent, agent_sessions, new_sessions) do
+    reasons = recent |> Enum.reverse() |> Enum.flat_map(&reasons(&1, issue)) |> Enum.uniq()
+    reasons = if(new_sessions != [] and issue.delegate_id == Config.yolo_agent_id(), do: Enum.uniq(["delegated_again" | reasons]), else: reasons)
+    generation = if(is_map(prior), do: prior["generation"], else: 0) || 0
+
+    %{
+      "relay" => event,
+      "history_head" => head_id(nodes),
+      "session_head" => head_id(agent_sessions),
+      "session_head_ids" => head_session_ids(agent_sessions),
+      "agent_input_ids" => input_ids(recent, &TrustedAgents.trusted?(&1, TrustedAgents.ids())),
+      "human_input_ids" => input_ids(recent, &TrustedAgents.human_or_trusted?(&1, [])),
+      "generation" => generation + if(reasons == [], do: 0, else: 1),
+      "reason" => if(reasons == [], do: "no_relevant_history", else: Enum.join(reasons, ","))
+    }
+  end
+
+  defp head_id([]), do: nil
+  defp head_id([head | _]), do: head["id"]
+  defp input_ids(nodes, actor?), do: nodes |> Enum.filter(actor?) |> Enum.map(& &1["id"])
 
   defp history(id, opts), do: API.pages(@history, %{id: id}, ["issue", "history"], opts)
   defp sessions(id, opts), do: API.pages(@sessions, %{id: id}, ["issue", "agentSessions"], opts)
@@ -129,7 +139,8 @@ defmodule SymphonyElixir.Yolo.Impulse do
   defp reasons(node, issue) do
     delegation =
       if get_in(node, ["toDelegate", "id"]) == Config.yolo_agent_id() and
-           get_in(node, ["fromDelegate", "id"]) != Config.yolo_agent_id(),
+           get_in(node, ["fromDelegate", "id"]) != Config.yolo_agent_id() and
+           TrustedAgents.human_or_trusted?(node, TrustedAgents.ids()),
          do: ["delegated_again"],
          else: []
 
@@ -149,7 +160,8 @@ defmodule SymphonyElixir.Yolo.Impulse do
     actor = node["actor"]
     context = ProjectContext.current()
 
-    is_map(actor) and actor["app"] == false and is_nil(node["botActor"]) and
-      is_binary(actor["id"]) and actor["id"] == issue.assignee_id and actor["id"] in (context.assignee_ids || [])
+    TrustedAgents.trusted?(node, TrustedAgents.ids()) or
+      (is_map(actor) and actor["app"] == false and is_nil(node["botActor"]) and
+         is_binary(actor["id"]) and actor["id"] == issue.assignee_id and actor["id"] in (context.assignee_ids || []))
   end
 end

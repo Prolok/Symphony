@@ -7603,7 +7603,7 @@ defmodule SymphonyElixir.CoreTest do
              "Nutze das Workpad in diesem Status für `### Test`, `### Verlauf`, Pull-Nachweise und die bereits aus früheren Phasen übernommene `### Validierung`."
 
     assert prompt =~ "Die dort festgehaltenen ticketseitigen Validierungsvorgaben bleiben bindend."
-    assert prompt =~ "Spätere belegte menschliche Gateentscheidungen haben Vorrang"
+    assert prompt =~ "Spätere belegte Gateentscheidungen gleichgestellter Linear-Akteure haben Vorrang"
     assert prompt =~ "Zugehörige Skip-Labels erhalten"
     assert prompt =~ "Das Workpad dient in diesem Status primär der Fortschritts- und Merge-Dokumentation."
 

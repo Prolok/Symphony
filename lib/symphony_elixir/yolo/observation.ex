@@ -70,9 +70,12 @@ defmodule SymphonyElixir.Yolo.Observation do
         comments =
           inbox["versions"]
           |> Map.values()
-          |> Enum.reject(&(&1["origin"] in ["own", "integration"]))
+          |> Enum.reject(&(&1["origin"] in ["own", "integration"] or OperatorHandoff.confirmation_source?(&1, current_confirmation)))
           |> Enum.map(&{&1["key"], &1["deleted"]})
           |> Enum.sort()
+
+        agent_sources = source_keys(inbox, "agent")
+        human_sources = source_keys(inbox, "human")
 
         semantic = semantic |> with_handoffs(handoffs) |> with_confirmation(confirmation)
         source = Digest.digest({semantic, comments})
@@ -84,6 +87,8 @@ defmodule SymphonyElixir.Yolo.Observation do
            "semantic" => version,
            "member_semantic" => version,
            "source" => source,
+           "agent_sources" => agent_sources,
+           "human_sources" => human_sources,
            "operator_confirmation" => confirmation,
            "legacy_semantic" => legacy_semantic(issue, generation, handoffs, confirmation, comments)
          }}
@@ -96,6 +101,14 @@ defmodule SymphonyElixir.Yolo.Observation do
 
   defp impulse_version(source, generation) when generation > 0, do: Digest.digest({source, generation})
   defp impulse_version(source, _generation), do: source
+
+  defp source_keys(inbox, origin) do
+    inbox["versions"]
+    |> Map.values()
+    |> Enum.filter(&(&1["origin"] == origin and &1["advisory_suppressed"] != true and &1["status"] != "historical"))
+    |> Enum.map(& &1["key"])
+    |> Enum.sort()
+  end
 
   defp previous_confirmation(%{state: "Yolo Review"}, %{"operator_confirmation" => digest}) when is_binary(digest), do: digest
   defp previous_confirmation(_, _), do: nil

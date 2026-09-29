@@ -71,6 +71,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:assignee, :string)
       field(:yolo_agent, :string)
       field(:advisory_agent_ids, {:array, :string}, default: [])
+      field(:trusted_agent_ids, {:array, :string}, default: [])
+      field(:agent_hop_limit, :integer, default: 10)
       field(:openclaw_yolo_agent, :string)
       field(:openclaw_linear_bridge, :map)
       field(:active_states, {:array, :string}, default: @default_active_states)
@@ -85,11 +87,12 @@ defmodule SymphonyElixir.Config.Schema do
         end)
 
       attrs = Map.put(attrs, "advisory_agent_ids", advisory_ids(Map.get(attrs, "advisory_agent_ids", SymphonyElixir.ProjectContext.env("LINEAR_ADVISORY_AGENT_IDS"))))
+      attrs = Map.put(attrs, "trusted_agent_ids", trusted_ids(Map.get(attrs, "trusted_agent_ids", SymphonyElixir.ProjectContext.env("LINEAR_TRUSTED_AGENT_IDS"))))
 
       schema
       |> cast(
         attrs,
-        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent advisory_agent_ids openclaw_yolo_agent openclaw_linear_bridge active_states terminal_states)a,
+        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent advisory_agent_ids trusted_agent_ids agent_hop_limit openclaw_yolo_agent openclaw_linear_bridge active_states terminal_states)a,
         empty_values: []
       )
       |> validate_inclusion(:auth_mode, ["app"])
@@ -99,6 +102,10 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_change(:advisory_agent_ids, fn field, ids ->
         if length(ids) <= 20 and Enum.all?(ids, &match?({:ok, _}, Ecto.UUID.cast(&1))), do: [], else: [{field, "must contain at most 20 app-user UUIDs"}]
       end)
+      |> validate_change(:trusted_agent_ids, fn field, ids ->
+        if length(ids) <= 20 and Enum.all?(ids, &match?({:ok, _}, Ecto.UUID.cast(&1))), do: [], else: [{field, "must contain at most 20 app-user UUIDs"}]
+      end)
+      |> validate_number(:agent_hop_limit, greater_than: 0)
     end
 
     defp advisory_ids(nil), do: []
@@ -112,6 +119,13 @@ defmodule SymphonyElixir.Config.Schema do
     end
 
     defp advisory_ids(value), do: value
+
+    defp trusted_ids(value) do
+      case advisory_ids(value) do
+        ids when is_list(ids) -> Enum.sort(ids)
+        invalid -> invalid
+      end
+    end
   end
 
   defmodule Polling do

@@ -6,7 +6,7 @@ defmodule SymphonyElixir.Linear.Client do
   require Logger
   alias SymphonyElixir.Yolo.Operations, as: YoloOperations
 
-  alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryResolver, AppAuth}
+  alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryResolver, AppAuth, TrustedAgents}
   alias SymphonyElixir.Linear.CommentActionGuard
   alias SymphonyElixir.Linear.WriteContext
 
@@ -192,13 +192,14 @@ defmodule SymphonyElixir.Linear.Client do
   def resolve_relay_contexts(contexts) do
     cond do
       contexts |> Enum.map(& &1.settings.tracker.app["workspace_id"]) |> Enum.uniq() |> length() > 1 -> {:error, :linear_yolo_agent_workspace_mismatch}
+      not TrustedAgents.consistent?(contexts) -> {:error, :linear_trusted_agents_workspace_mismatch}
       Enum.all?(contexts, &resolved_context?/1) -> {:ok, contexts}
       true -> resolve_unverified_contexts(contexts)
     end
   end
 
   defp resolved_context?(context) do
-    is_list(context.assignee_ids) and AdvisoryAgents.verified?(context) and
+    is_list(context.assignee_ids) and AdvisoryAgents.verified?(context) and TrustedAgents.verified?(context) and
       (context.settings.tracker.yolo_agent == nil or
          (is_binary(context.yolo_agent_id) and context.human_handoff_id in context.assignee_ids))
   end
@@ -217,7 +218,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp resolve_workspace_agents(contexts, users) do
     Enum.reduce_while(contexts, {:ok, []}, fn context, {:ok, resolved} ->
-      case context |> resolve_context_assignees(users) |> YoloAgent.resolve() |> AdvisoryAgents.resolve() do
+      case resolve_agents(context, users) do
         {:ok, next} -> {:cont, {:ok, resolved ++ [next]}}
         error -> {:halt, error}
       end
@@ -228,6 +229,14 @@ defmodule SymphonyElixir.Linear.Client do
     selected = Assignees.parse(context.settings.tracker.assignee)
     ids = Enum.map(selected, fn value -> Enum.find(users, &selected_human?(&1, [value]))["id"] end) |> Enum.uniq()
     %{context | assignee_ids: Enum.sort(ids), human_handoff_id: List.first(ids)}
+  end
+
+  defp resolve_agents(context, users) do
+    context
+    |> resolve_context_assignees(users)
+    |> YoloAgent.resolve()
+    |> AdvisoryAgents.resolve()
+    |> TrustedAgents.resolve()
   end
 
   defp selected_human?(user, selected) do
@@ -347,6 +356,12 @@ defmodule SymphonyElixir.Linear.Client do
   defp complete_relay_relations?(_), do: false
 
   defp verify_workspace_assignees({workspace, [first | _] = contexts}, :ok) do
+    if TrustedAgents.consistent?(contexts),
+      do: verify_consistent_workspace_assignees(workspace, first, contexts),
+      else: {:halt, {:error, :linear_trusted_agents_workspace_mismatch}}
+  end
+
+  defp verify_consistent_workspace_assignees(workspace, first, contexts) do
     configured = contexts |> Enum.flat_map(&Assignees.parse(&1.settings.tracker.assignee)) |> Enum.uniq()
     result = ProjectContext.with_context(first, fn -> fetch_assignees(configured, nil, %{}, []) end)
 
@@ -366,7 +381,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp verify_workspace_agents(contexts, users) do
     result =
       Enum.reduce_while(contexts, :ok, fn context, :ok ->
-        case context |> resolve_context_assignees(users) |> YoloAgent.resolve() |> AdvisoryAgents.resolve() do
+        case resolve_agents(context, users) do
           {:ok, _} -> {:cont, :ok}
           error -> {:halt, error}
         end

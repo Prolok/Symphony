@@ -99,6 +99,72 @@ defmodule SymphonyElixir.CommentInboxTest do
     assert length(CommentInbox.pending(state)) == 2
   end
 
+  test "a listed app is one recognized agent input while own and other app outputs remain context", ctx do
+    ctx = %{ctx | issue: Map.merge(ctx.issue, %{state: "Yolo Review", delegate_id: "pai-app"})}
+    establish(ctx)
+
+    agent =
+      comment("pai", "Bitte fortsetzen")
+      |> Map.put("user", %{"id" => "pai-app", "app" => true, "name" => "Pai"})
+      |> Map.merge(%{"issue" => %{"id" => ctx.issue.id}, "agentSession" => nil, "isArtificialAgentSessionRoot" => false, "bodyData" => nil})
+
+    own = comment("symphony", "Werkzeugausgabe") |> Map.put("user", %{"id" => "app", "app" => true})
+    other = comment("other", "Integration") |> Map.put("user", %{"id" => "other-app", "app" => true})
+    bot = Map.put(agent, "id", "bot") |> Map.put("botActor", %{"id" => "workflow"})
+    external = Map.put(agent, "id", "external") |> Map.put("externalUser", %{"id" => "external"})
+    behalf = Map.put(agent, "id", "behalf") |> Map.put("onBehalfOf", %{"id" => "other"})
+    classify = fn source -> if source["id"] == "symphony", do: :own, else: :foreign end
+    opts = [trusted_agent_ids: ["pai-app"], classify: classify]
+
+    assert {:ok, state} = scan(ctx, [agent, own, other, bot, external, behalf], opts)
+    assert [%{"origin" => "agent", "status" => "recognized", "source" => ^agent}] = CommentInbox.pending(state)
+    assert Enum.count(state["versions"], fn {_key, version} -> version["origin"] == "agent" end) == 1
+
+    assert Enum.sort(Enum.map(state["versions"], fn {_key, version} -> version["origin"] end)) ==
+             ["agent", "integration", "integration", "integration", "integration", "own"]
+
+    assert {:ok, _} = scan(ctx, [agent, own, other, bot, external, behalf], opts)
+    assert {:ok, delivered} = deliver(ctx)
+    assert [%{"origin" => "agent", "status" => "delivered"}] = CommentInbox.pending(delivered)
+
+    empty_ctx = %{ctx | issue: %{id: "empty-list"}}
+    establish(empty_ctx)
+    assert {:ok, empty} = scan(empty_ctx, [agent], classify: fn _ -> :foreign end)
+    assert CommentInbox.pending(empty) == []
+    assert empty["versions"][CommentVersion.key(agent)]["origin"] == "integration"
+  end
+
+  test "a changed trust binding reclassifies open persisted versions without replaying acknowledged input", ctx do
+    establish(ctx)
+
+    agent =
+      comment("pai", "Entscheidung")
+      |> Map.put("user", %{"id" => "pai-app", "app" => true, "name" => "Pai"})
+      |> Map.merge(%{"issue" => %{"id" => ctx.issue.id}, "agentSession" => nil, "isArtificialAgentSessionRoot" => false, "bodyData" => nil})
+
+    classify = fn _ -> :foreign end
+
+    assert {:ok, state} = scan(ctx, [agent], classify: classify)
+    assert CommentInbox.pending(state) == []
+    assert {:ok, state} = scan(ctx, [agent], classify: classify, trusted_agent_ids: ["pai-app"])
+    assert [%{"origin" => "agent", "status" => "recognized"}] = CommentInbox.pending(state)
+    assert {:ok, state} = deliver(ctx)
+    assert [%{"origin" => "agent", "status" => "delivered"}] = CommentInbox.pending(state)
+
+    assert {:ok, state} = scan(ctx, [agent], classify: classify)
+    assert CommentInbox.pending(state) == []
+    assert state["versions"][CommentVersion.key(agent)]["origin"] == "integration"
+    assert {:ok, state} = scan(ctx, [agent], classify: classify, trusted_agent_ids: ["pai-app"])
+    assert [%{"origin" => "agent", "status" => "delivered"}] = CommentInbox.pending(state)
+
+    assert {:ok, state} = ack(ctx, CommentVersion.key(agent))
+    assert CommentInbox.pending(state) == []
+    assert {:ok, _state} = scan(ctx, [agent], classify: classify)
+    assert {:ok, state} = scan(ctx, [agent], classify: classify, trusted_agent_ids: ["pai-app"])
+    assert CommentInbox.pending(state) == []
+    assert state["versions"][CommentVersion.key(agent)]["status"] == "processed"
+  end
+
   test "deletion after acknowledgement has an independent restartable assessment", ctx do
     establish(ctx)
     source = comment("done", "Änderung übernehmen")

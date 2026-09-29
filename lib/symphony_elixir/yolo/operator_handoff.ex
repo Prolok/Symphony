@@ -41,9 +41,18 @@ defmodule SymphonyElixir.Yolo.OperatorHandoff do
     source = if is_map(version), do: version["source"], else: nil
 
     is_map(source) and source["id"] == id and is_nil(source["editedAt"]) and version["deleted"] == false and
-      version["origin"] == "integration" and version["advisory_suppressed"] != true and
+      confirmation_source?(version, digest)
+  end
+
+  @spec confirmation_source?(map(), String.t() | nil) :: boolean()
+  def confirmation_source?(version, digest) when is_binary(digest) do
+    source = version["source"] || %{}
+
+    version["origin"] in ["integration", "agent"] and version["advisory_suppressed"] != true and
       pai_source?(source) and confirmation_digest(source["body"]) == digest
   end
+
+  def confirmation_source?(_, _), do: false
 
   defp pai_source?(source), do: get_in(source, ["user", "id"]) == Config.yolo_agent_id() and get_in(source, ["user", "app"]) == true
 

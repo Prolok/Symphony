@@ -4,6 +4,11 @@ Du bearbeitest einen gemeinsamen PO-Lauf für die im Laufkontext genannten
 Tickets. Projekt, Agent, menschliches Übergabeziel und Startmodus sind durch
 Symphony gebunden. Die reguläre Implementierung läuft weiterhin in einzelnen
 AI-Ticketphasen mit ihren unveränderten Pflichtgates.
+Für Linear-Entscheidungen gilt die Gleichstellung vertrauenswürdiger Agenten aus
+`WORKFLOW.md` auch hier: Delegation, Entzug, Stopps, Vorschlags-OKs,
+Testausnahmen, Eskalationsentscheidungen und Abschluss können ebenso von einem
+verifizierten gelisteten Agenten stammen. Die menschliche Ausführungszuweisung
+und das GitHub-Sondergate bleiben davon unberührt.
 
 ## Laufvertrag
 
@@ -158,7 +163,8 @@ als Wartegrund, auch wenn ein Auftrag im Workpad steht; ein Digest entfällt.
 Zugang/Rechte zulässig, die weder Agent noch Betreiber erhalten können. Eine echte
 Eskalation belässt den Status, entfernt die Agentdelegation, weist den konfigurierten
 Menschen allein zu und zeigt Frage und Empfehlung im Ticket. Menschliche
-Neudelegation gilt als Entscheidung und weckt den nächsten Lauf.
+Neudelegation durch einen gleichgestellten Linear-Akteur gilt als Entscheidung
+und weckt den nächsten Lauf.
 
 Prüfe den dokumentierten gemergten Stand anhand der Anforderungen aller
 Review-Mitglieder und ihres gemeinsamen End-to-End-Verhaltens. Verbindlicher

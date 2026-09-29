@@ -1,13 +1,15 @@
 defmodule SymphonyElixir.Linear.CommentInbox do
   @moduledoc "Project-local, restartable input versions, serialized with the existing host journal lock."
 
-  alias SymphonyElixir.Linear.{AdvisoryThreads, CommentJournal, CommentVersion, DurableState, IssueLease}
+  alias SymphonyElixir.Linear.{AdvisoryThreads, CommentJournal, CommentVersion, DurableState, IssueLease, TrustedAgents}
 
   @open ~w(recognized delivered)
   @outcomes ["übernommen", "Rückfrage", "nicht anwendbar", "ersetzt"]
 
   @spec scan(map(), map(), (-> {:ok, [map()]} | {:error, term()}), keyword()) :: {:ok, map()} | {:error, term()}
   def scan(binding, issue, fetch, opts \\ []) do
+    opts = Keyword.update(opts, :advisory_agent_ids, Keyword.get(opts, :trusted_agent_ids, []), &Enum.uniq(&1 ++ Keyword.get(opts, :trusted_agent_ids, [])))
+
     with {:ok, state} <- read(binding, issue) do
       scan_or_cached(state, binding, issue, fetch, opts)
     end
@@ -378,7 +380,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     now = timestamp()
     classify = Keyword.get(opts, :classify, &CommentJournal.classify(binding, &1))
 
-    with {:ok, observed} <- classify_all(comments, classify, now) do
+    with {:ok, observed} <- classify_all(comments, classify, now, opts) do
       baseline? = is_nil(state["baseline"])
       versions = Enum.reduce(observed, state["versions"], &insert(&1, &2, baseline? and AdvisoryThreads.eligible?(state, &1["source"])))
       versions = suppress(versions, state)
@@ -401,7 +403,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     state = AdvisoryThreads.observe(state, comments, opts)
     classify = Keyword.get(opts, :classify, &CommentJournal.classify(binding, &1))
 
-    with {:ok, observed} <- classify_all(comments, classify, timestamp()) do
+    with {:ok, observed} <- classify_all(comments, classify, timestamp(), opts) do
       save_partial_observations(state, observed, reason)
     end
   end
@@ -415,13 +417,23 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     Map.new(versions, fn {key, version} ->
       suppressed = not AdvisoryThreads.eligible?(state, version["source"])
       version = release_historical(version, state["baseline"], suppressed)
+      version = consultation_context(version, state)
       {key, if(suppressed, do: Map.put(version, "advisory_suppressed", true), else: Map.delete(version, "advisory_suppressed"))}
     end)
   end
 
+  defp consultation_context(%{"origin" => "agent", "status" => status} = version, state)
+       when status in ["recognized", "historical"] do
+    if get_in(state, ["advisory_threads", version["source"]["id"], "decision"]) == "excluded",
+      do: Map.put(version, "status", "context"),
+      else: version
+  end
+
+  defp consultation_context(version, _state), do: version
+
   defp release_historical(%{"advisory_suppressed" => true, "status" => "historical"} = version, baseline, false) do
     represented = baseline["status"] == "recognized" or historically_delivered?(version, baseline)
-    status = if version["origin"] in ["human", "changed_app_output", "unknown"], do: "recognized", else: "context"
+    status = if version["origin"] in ["human", "agent", "changed_app_output", "unknown"], do: "recognized", else: "context"
     if represented, do: version, else: Map.put(version, "status", status)
   end
 
@@ -432,7 +444,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     baseline["status"] in ["delivered", "processed"] and version["source"]["id"] in ids
   end
 
-  defp classify_all(comments, classify, now) do
+  defp classify_all(comments, classify, now, opts) do
     Enum.reduce_while(Enum.uniq_by(comments, &CommentVersion.key/1), {:ok, []}, fn comment, {:ok, acc} ->
       raw = CommentVersion.raw(comment)
 
@@ -441,13 +453,13 @@ defmodule SymphonyElixir.Linear.CommentInbox do
           {:halt, error}
 
         classification ->
-          origin = origin(classification, raw)
+          origin = origin(classification, raw, opts)
 
           version = %{
             "key" => CommentVersion.key(raw),
             "source" => raw,
             "origin" => origin,
-            "status" => if(origin in ["human", "changed_app_output", "unknown"], do: "recognized", else: "context"),
+            "status" => if(origin in ["human", "agent", "changed_app_output", "unknown"], do: "recognized", else: "context"),
             "observed_at" => now,
             "deleted" => false
           }
@@ -457,11 +469,12 @@ defmodule SymphonyElixir.Linear.CommentInbox do
     end)
   end
 
-  defp origin(:own, _raw), do: "own"
-  defp origin(:pending, _raw), do: "changed_app_output"
+  defp origin(:own, _raw, _opts), do: "own"
+  defp origin(:pending, _raw, _opts), do: "changed_app_output"
 
-  defp origin(:foreign, raw) do
+  defp origin(:foreign, raw, opts) do
     cond do
+      TrustedAgents.trusted?(raw, Keyword.get(opts, :trusted_agent_ids, [])) -> "agent"
       get_in(raw, ["user", "app"]) == true or not is_nil(raw["botActor"]) or not is_nil(raw["externalUser"]) or not is_nil(raw["onBehalfOf"]) -> "integration"
       get_in(raw, ["user", "app"]) == false and is_binary(get_in(raw, ["user", "id"])) -> "human"
       true -> "unknown"
@@ -470,8 +483,34 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
   defp insert(version, versions, baseline?) do
     version = if baseline?, do: Map.put(version, "status", "historical"), else: version
-    Map.put_new(versions, version["key"], Map.put(version, "sequence", map_size(versions) + 1))
+
+    Map.update(versions, version["key"], Map.put(version, "sequence", map_size(versions) + 1), fn stored ->
+      refresh_trust_origin(stored, version["origin"])
+    end)
   end
+
+  defp refresh_trust_origin(%{"origin" => "agent"} = stored, "integration") do
+    status = stored["status"]
+
+    stored
+    |> Map.put("origin", "integration")
+    |> Map.put("status", if(status in @open, do: "context", else: status))
+    |> maybe_remember_trust_status(status)
+  end
+
+  defp refresh_trust_origin(%{"origin" => "integration"} = stored, "agent") do
+    status = if stored["status"] == "context", do: stored["trust_pending_status"] || "recognized", else: stored["status"]
+
+    stored
+    |> Map.put("origin", "agent")
+    |> Map.put("status", status)
+    |> Map.delete("trust_pending_status")
+  end
+
+  defp refresh_trust_origin(stored, _origin), do: stored
+
+  defp maybe_remember_trust_status(stored, status) when status in @open, do: Map.put(stored, "trust_pending_status", status)
+  defp maybe_remember_trust_status(stored, _status), do: stored
 
   defp check_absent(versions, ids, baseline, opts) do
     missing = versions |> Map.values() |> Enum.reject(&(&1["deleted"] or MapSet.member?(ids, &1["source"]["id"]))) |> Enum.uniq_by(& &1["source"]["id"])
@@ -502,7 +541,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   defp maybe_insert_deletion(versions, version, baseline) do
     delivered? = version["status"] in ["delivered", "processed"] or (version["status"] == "historical" and historically_delivered?(version, baseline))
 
-    if delivered? and version["origin"] in ["human", "changed_app_output", "unknown"] do
+    if delivered? and version["origin"] in ["human", "agent", "changed_app_output", "unknown"] do
       source = Map.put(version["source"], "deleted", true)
 
       deletion = %{

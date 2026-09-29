@@ -53,6 +53,25 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert_received :status_mutation
   end
 
+  test "trusted agent acknowledgement records the actor identity in the workpad", %{issue: issue} do
+    establish(issue)
+    agent_id = "b57e9f80-53ce-4d96-9180-370f03d60d16"
+    System.put_env("LINEAR_TRUSTED_AGENT_IDS", agent_id)
+    on_exit(fn -> System.delete_env("LINEAR_TRUSTED_AGENT_IDS") end)
+    put_comment("pai-comment", "Freigabe", %{"id" => agent_id, "name" => "Pai", "app" => true})
+
+    Process.put(
+      :comments,
+      Map.update!(Process.get(:comments), "pai-comment", fn comment ->
+        Map.merge(comment, %{"agentSession" => nil, "isArtificialAgentSessionRoot" => false, "bodyData" => nil})
+      end)
+    )
+
+    assert {:ok, %{"inputs" => [%{"key" => key, "origin" => "agent"}]}} = CommentCheckpoint.checkpoint(issue)
+    assert {:ok, _} = CommentCheckpoint.acknowledge(issue, [result(key)])
+    assert workpad_body() =~ "Pai (`#{agent_id}`), vertrauenswürdiger Agent, einer Eingabe des konfigurierten Menschen gleichgestellt"
+  end
+
   test "checkpoint cache survives a new adoption and a persisted-state read", %{issue: issue} do
     establish(issue)
     binding = Config.settings!().tracker.app
@@ -733,6 +752,19 @@ defmodule SymphonyElixir.CommentCheckpointTest do
         nodes = Process.get(:architecture_label_nodes, [%{"id" => "architecture-label", "name" => "Architekturänderung", "team" => nil}])
         data(%{"issueLabels" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}})
     end
+  end
+
+  defp request(%{"query" => "query SymphonyTrustedAgents" <> _, "variables" => vars}, _headers) do
+    ids = vars[:filter]["id"]["in"]
+    workspace = Config.settings!().tracker.app["workspace_id"]
+    users = Enum.map(ids, &%{"id" => &1, "app" => true, "active" => true, "name" => "Pai", "organization" => %{"id" => workspace}})
+    data(%{"users" => %{"nodes" => users, "pageInfo" => %{"hasNextPage" => false}}})
+  end
+
+  defp request(%{"query" => "query SymphonyAdvisoryThread" <> _, "variables" => vars}, _headers) do
+    empty = %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}
+    comment = Process.get(:comments)[vars[:id] || vars["id"]]
+    data(%{"comment" => Map.merge(comment, %{"agentSessions" => empty, "spawnedAgentSessions" => empty})})
   end
 
   defp request(payload, _headers) do

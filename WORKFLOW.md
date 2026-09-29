@@ -202,6 +202,20 @@ Zusätzliche Review-Hinweise:
 
 ### Autonome Entscheidungen und Linear-Texte
 
+Für Linear-Entscheidungen sind der konfigurierte Mensch und ausdrücklich in
+`LINEAR_TRUSTED_AGENT_IDS` gelistete, beim Start verifizierte andere App-Benutzer
+gleichgestellt. Das gilt in diesem Vertrag und den zugehörigen Skills/Docs auch
+für als „menschlich“ bezeichnete Kommentare, Änderungen, Freigaben, Stopps,
+Gate-Entscheidungen, Vorschlags-OKs, Testausnahmen, Statuswechsel, Delegation,
+Neudelegation nach Eskalation und `Review` → `Fertig`. Die eigene Symphony-App
+bleibt Echo; Antworten in einer AgentSession bleiben Beratung. Die Liste ist
+optional (Standard leer), je Workspace einheitlich und nach Änderung neu zu
+verifizieren; `tracker.agent_hop_limit` begrenzt agentenbedingte Weckungen je
+Issue in 24 Stunden (Standard 10), ohne Entscheidungsrechte zu entziehen.
+`LINEAR_ASSIGNEE` bezeichnet weiterhin ausschließlich menschliche
+Ausführungszuständigkeit. Das externe GitHub-Approval bei `Requires Manual
+Review` bleibt ausdrücklich einem menschlichen GitHub-Reviewer vorbehalten.
+
 Kleine, reversible Fach- und Implementierungsentscheidungen im Auftrag selbst
 entscheiden; relevante Annahmen kurz begründen. Nur wesentliche, aus Anforderungen,
 Konventionen und bestätigten Entscheidungen nicht auflösbare Fragen zu Produktziel,
@@ -328,7 +342,7 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   [Einrichtung und Vertrag](docs/linearbridge-lifecycle.md).
   Fachlich offene, bereits zugestellte Mitglieder werden nach belegter Neudelegation
   (auch über eine neue, issue-gebundene Linear-Agent-Session bei zusammengefasster History),
-  menschlicher Prioritätserhöhung oder relevanter Auftrags-/Blockadeänderung erneut
+  Prioritätserhöhung eines gleichgestellten Linear-Akteurs oder relevanter Auftrags-/Blockadeänderung erneut
   geprüft. Ungeklärte Ausführungen bleiben reserviert; eine fehlgeschlagene reine
   Benachrichtigung wird über ihr Journal ohne neuen Review erneut versucht.
   Gleiche dauerhafte Zustellfehler erhalten Abstände von 5 bis 15 Minuten;
@@ -487,7 +501,7 @@ werden dabei weiter in Tabellenreihenfolge aufgelöst.
 
 Ein ausdrücklich angewiesener technischer Review-Skip oder nachvollziehbar
 bewusster manueller Einstieg in `Test (AI)`/`Merge (AI)` ist zulässig.
-Spätere belegte menschliche Gateentscheidungen haben Vorrang vor älteren
+Spätere belegte Gateentscheidungen gleichgestellter Linear-Akteure haben Vorrang vor älteren
 Beschreibungs-/Workpad-Defaults. Zugehörige Skip-Labels erhalten, Quelle und
 Geltungsbereich dokumentieren; keine erneute Zustimmung oder pauschale
 Labelbereinigung. Eine separat übernommene PO-Prüfung darf einen autorisierten
@@ -522,7 +536,7 @@ bleiben wirksam; ein Review-Skip ersetzt keinen Betreiberbeleg.
 | `BLOCKER` | PO-Sonderlauf bei Agentdelegation | Der delegierte Betreiberagent bearbeitet fällige Hindernisse. Gleiche Ursache binnen 24 Stunden führt ohne zweiten Agentenlauf zur menschlichen Eskalation. Ohne Delegation auf Entblockung warten. | Nach belegter Entblockung regulär fortsetzen |
 | `Abbruch (AI)` | Ja | Laufende Arbeit sofort abbrechen und Cleanup ausführen. | `Abgebrochen` |
 | `Yolo Review` | PO-Sonderlauf | Schlussabnahme agentendelegierter gemergter Tickets samt Folgefixkette nach `WORKFLOW_YOLO_AGENT.md`; Betreiberpflichten warten quellengebunden auf Pai-Bestätigung, echte Eskalationen entziehen die Delegation und übergeben an den Menschen; kein regulärer Codingstart, nur geprüfter Abschluss nach `Review`. | Bei Abnahme `Review` mit entfernter Delegation; bei Eskalation weiterhin `Yolo Review` ohne Delegation |
-| `Review` | Nein | Terminaler Übergabestatus nach dem Merge; keine weitere automatische Aktion, manuelles Verschieben nach `Fertig` bleibt beim Benutzer. | - |
+| `Review` | Nein | Terminaler Übergabestatus nach dem Merge; keine weitere automatische Aktion, Verschieben nach `Fertig` durch einen gleichgestellten Linear-Akteur. | - |
 | `Fertig` | Nein | Terminaler Status; keine weitere Aktion erforderlich. | - |
 | `Abgebrochen` | Nein | Terminaler Status nach explizitem Abbruch; keine weitere Aktion erforderlich. | - |
 

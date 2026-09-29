@@ -151,6 +151,22 @@ Lokale Issue-Leases, Service-Mutex und beide PO-Freigaben bleiben erhalten.
 
 ### Agentenbindung
 
+`LINEAR_TRUSTED_AGENT_IDS` ist eine optionale, kommaseparierte Liste von
+Linear-App-User-UUIDs; alternativ gilt `tracker.trusted_agent_ids`. Leer bleibt
+das bisherige Verhalten. Symphony prüft die gelisteten aktiven Apps beim Start
+im gebundenen Workspace, lehnt die eigene App und abweichende Listen von
+Projekten desselben Workspaces ab und verlangt nach Bindungsänderungen einen
+Neustart. Direkte Kommentare und historisch belegte Änderungen dieser Apps
+wirken wie Eingaben des konfigurierten Menschen; Sessionberatung bleibt Kontext,
+Symphony-Ausgaben bleiben Echo.
+Nach einem Bindungswechsel klassifiziert der nächste vollständige Kommentarscan
+bereits gespeicherte offene Versionen neu; bestätigte Ergebnisse bleiben abgeschlossen.
+`tracker.agent_hop_limit` begrenzt diese
+agentenbedingten Weckungen je Issue im rollierenden 24-Stunden-Fenster
+(Standard 10); zurückgehaltene Eingaben bleiben dauerhaft und werden nach
+Fensterende oder einem neuen menschlichen Eingang verarbeitet. Die Befugnisse
+und Ausnahmen stehen im [Workflow-Vertrag](../WORKFLOW.md#autonome-entscheidungen-und-linear-texte).
+
 Die wirksame menschliche Delegation autorisiert PO-Steuerung und Aktivierung im
 Ticketscope gemäß [Laufvertrag](../WORKFLOW_YOLO_AGENT.md#laufvertrag), auch ohne
 CLI-`--yolo`. Dort sind spätere Delegation nach Anlage, aktuelle Stopps/Entzug und
@@ -635,7 +651,8 @@ gelöschte oder überarbeitete Fassungen tun das nicht. Derselbe Digest bleibt b
 Duplikaten, Polls und Neustarts dieselbe Entscheidung. Echte Eskalationen entfernen
 die Delegation, behalten den Status, weisen den konfigurierten Menschen allein zu
 und zeigen Frage und Empfehlung aus `decision` und `proposal` im Ticket; Erfolg
-setzt den frischen Zuweisungs-Readback voraus. Menschliche Neudelegation ist der
+setzt den frischen Zuweisungs-Readback voraus. Neudelegation durch einen
+gleichgestellten Linear-Akteur ist der
 Fortsetzungsimpuls.
 
 Ein neuer Kandidat oder fachlich anderer Prüfumfang verlangt einen aktualisierten

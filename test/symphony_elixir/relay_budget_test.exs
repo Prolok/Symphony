@@ -3,7 +3,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, Tracker, WorkerCapacity}
   alias SymphonyElixir.Linear.IssueReadCache
   alias SymphonyElixir.RelayFixture, as: Server
-  alias SymphonyElixir.Yolo.{Coordinator, Dependencies, Operations}
+  alias SymphonyElixir.Yolo.{Coordinator, Dependencies, Escalation, Operations}
 
   test "the actual five-second timer fetches an available event then stays Linear-free on warm ticks" do
     root = Path.dirname(Workflow.workflow_file_path())
@@ -367,6 +367,61 @@ defmodule SymphonyElixir.RelayBudgetTest do
     assert Server.consumer(server, "one", "one").cursor == 352
     assert {:ok, [_]} = ProjectPoller.candidates(List.last(contexts))
     assert Agent.get(counts, & &1) == %{read: 1}
+  end
+
+  test "thirty-minute idle relay budget includes an undeliverable escalation" do
+    root = Path.dirname(Workflow.workflow_file_path())
+    server = start_supervised!(Server)
+    counts = start_supervised!({Agent, fn -> %{} end})
+    [context] = contexts(root, ["one"])
+    context = put_in(context.settings.polling.interval_ms, 5_000)
+
+    node =
+      context
+      |> issue_node()
+      |> Map.put("url", "https://linear.example/PRO-0")
+      |> Map.put("state", %{"name" => "Yolo Review"})
+
+    bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
+    configure_http(server, [context], [node], bump)
+    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    start_supervised!({ProjectPoller, contexts: [context]})
+    assert {:ok, _} = ProjectPoller.candidates(context)
+    context = ProjectPoller.context(context)
+    context = %{context | yolo_agent_id: "pai", assignee_ids: ["human"], human_handoff_id: "human"}
+    context = put_in(context.settings.tracker.openclaw_yolo_agent, "pai")
+    issue = ProjectContext.with_context(context, fn -> Client.relay_issue(node) end)
+    route = fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end
+    proposal = %{"escalation" => %{"cause" => "Route fehlt", "attempts" => "Übergabe bestätigt", "proposal" => "Route prüfen", "decision" => "Benachrichtigen"}}
+
+    ProjectContext.with_context(context, fn ->
+      assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, proposal, escalation_route: route)
+    end)
+
+    Agent.update(counts, fn _ -> %{} end)
+    state = %SymphonyElixir.Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}
+
+    state =
+      Enum.reduce(0..1_800_000//5_000, state, fn now, acc ->
+        ProjectPoller.refresh()
+        assert {:ok, _} = ProjectPoller.candidates(context)
+
+        ProjectContext.with_context(context, fn ->
+          Coordinator.tick(acc, [issue],
+            notification_now: fn -> now end,
+            escalation_route: route,
+            scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
+            start: fn _, _ -> flunk("notification retry must not start a review") end
+          )
+        end)
+      end)
+
+    requests = Agent.get(counts, & &1)
+    assert map_size(state.yolo_retries.notifications) == 1
+    assert Map.get(requests, :read, 0) >= 1
+    assert Enum.sum(Map.values(requests)) <= 50
+    assert Map.get(requests, :read, 0) <= 6
   end
 
   defp await_cursor(server, expected) do

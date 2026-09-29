@@ -6,8 +6,9 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
   alias SymphonyElixir.Yolo.{Escalation, Group, Impulse, Observation, Operations}
   alias SymphonyElixir.Yolo.OpenClaw
+  alias SymphonyElixir.Yolo.OpenClaw.Gateway
   alias SymphonyElixir.Yolo.OpenClaw.Journal
-  alias SymphonyElixir.Yolo.{Recovery, ReviewReadiness, Runner, Store}
+  alias SymphonyElixir.Yolo.{Recovery, RetryBackoff, ReviewReadiness, Runner, Store}
 
   @operator_warning_interval_ms 300_000
   @operator_report_interval_ms 300_000
@@ -49,44 +50,102 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp retry_notifications(state, issues, opts) do
     case Journal.pending() do
-      {:ok, orders} -> retry_unreserved_notifications(state, issues, orders, opts)
-      {:error, reason} -> Logger.warning("YOLO notification reservation check failed reason=#{inspect(reason)}")
+      {:ok, orders} ->
+        retry_unreserved_notifications(state, issues, orders, opts)
+
+      {:error, reason} ->
+        Logger.warning("YOLO notification reservation check failed reason=#{inspect(reason)}")
+        state
     end
   end
 
   defp retry_unreserved_notifications(state, issues, orders, opts) do
     reserved = MapSet.new(for order <- orders, member <- order["members"], do: member["id"])
-    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
-    for issue <- issues,
-        notification_retry_eligible?(issue) and
-          not MapSet.member?(reserved, issue.id) and not MapSet.member?(state.claimed, issue.id) and
-          not Map.has_key?(state.running, issue.id) do
-      retry_notification_if_pending(issue, fetch, opts)
+    entries =
+      issues
+      |> Enum.filter(fn issue ->
+        notification_retry_eligible?(issue) and not MapSet.member?(reserved, issue.id) and
+          not MapSet.member?(state.claimed, issue.id) and not Map.has_key?(state.running, issue.id)
+      end)
+      |> Enum.flat_map(&pending_notification_entries/1)
+
+    keys = Enum.map(entries, fn {issue, id, _initial_reason} -> {issue.id, id} end)
+    state = put_in(state.yolo_retries.notifications, Map.take(state.yolo_retries.notifications, keys))
+
+    if entries == [] do
+      state
+    else
+      agent = Config.openclaw_yolo_agent()
+      route = Keyword.get(opts, :escalation_route, &Gateway.destination/2)
+      route_result = if is_binary(agent), do: route.(agent, opts), else: {:error, :openclaw_yolo_agent_unavailable}
+      now = Keyword.get(opts, :notification_now, fn -> System.system_time(:millisecond) end).()
+
+      Enum.reduce(entries, state, fn {issue, id, initial_reason}, acc ->
+        retry_notification_if_due(acc, issue, id, initial_reason, route_result, now, opts)
+      end)
     end
   end
 
-  defp retry_notification_if_pending(issue, fetch, opts) do
-    case Escalation.pending(issue.id) do
-      {:ok, true} -> retry_notification(issue, fetch, opts)
-      {:ok, false} -> :ok
-      {:error, reason} -> Logger.warning("YOLO notification journal unavailable issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
-    end
-  end
-
-  defp retry_notification(issue, fetch, opts) do
-    case fetch.([issue.id]) do
-      {:ok, [fresh]} ->
-        if fresh.id == issue.id and notification_retry_eligible?(fresh) and fresh.assignee_id == issue.assignee_id do
-          log_notification_retry(issue, Escalation.retry_pending(fresh, opts))
-        end
+  defp pending_notification_entries(issue) do
+    case Escalation.pending_routes(issue.id) do
+      {:ok, routes} ->
+        Enum.map(routes, fn {id, reason} -> {issue, id, reason} end)
 
       {:error, reason} ->
-        Logger.warning("YOLO notification refresh failed issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+        Logger.warning("YOLO notification journal unavailable issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+        []
+    end
+  end
+
+  defp retry_notification_if_due(state, issue, id, initial_reason, route_result, now, opts) do
+    key = {issue.id, id}
+    previous = state.yolo_retries.notifications[key]
+    signal = Observation.relay_signal(issue)
+    route_reason = inspect(route_result)
+
+    if is_map(previous) and previous["signal"] == signal and previous["route_reason"] == route_reason and previous["retry_at"] > now do
+      state
+    else
+      result = retry_notification(issue, id, route_result, opts)
+      record_notification_retry(state, issue, key, signal, route_reason, initial_reason, result, now)
+    end
+  end
+
+  defp retry_notification(issue, id, route_result, opts) do
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+
+    case fetch.([issue.id]) do
+      {:ok, [fresh]} ->
+        retry_fresh_notification(issue, fresh, id, route_result, opts)
+
+      {:error, reason} ->
+        {:error, {:notification_refresh_failed, reason}}
 
       _ ->
-        :ok
+        {:error, :notification_refresh_incomplete}
     end
+  end
+
+  defp retry_fresh_notification(issue, fresh, id, route_result, opts) do
+    if fresh.id == issue.id and notification_retry_eligible?(fresh) and fresh.assignee_id == issue.assignee_id do
+      route = fn _, _ -> route_result end
+      Escalation.retry_pending(fresh, Keyword.merge(opts, notification_id: id, escalation_route: route))
+    else
+      {:error, :notification_refresh_ineligible}
+    end
+  end
+
+  defp record_notification_retry(state, _issue, key, _signal, _route_reason, _initial_reason, :ok, _now) do
+    put_in(state.yolo_retries.notifications, Map.delete(state.yolo_retries.notifications, key))
+  end
+
+  defp record_notification_retry(state, issue, key, signal, route_reason, initial_reason, {:error, reason}, now) do
+    previous = state.yolo_retries.notifications[key]
+    count = if is_nil(previous) and initial_reason == inspect(reason), do: 2, else: RetryBackoff.count(previous, signal, reason)
+    entry = %{"signal" => signal, "route_reason" => route_reason, "reason" => inspect(reason), "count" => count, "retry_at" => now + RetryBackoff.delay(reason, count)}
+    state = put_in(state.yolo_retries.notifications, Map.put(state.yolo_retries.notifications, key, entry))
+    log_notification_retry(state, issue, reason, now)
   end
 
   defp notification_retry_eligible?(issue) do
@@ -99,17 +158,23 @@ defmodule SymphonyElixir.Yolo.Coordinator do
          (is_nil(Config.allowed_issue_ids()) or issue.id in Config.allowed_issue_ids()))
   end
 
-  defp log_notification_retry(_issue, :ok), do: :ok
+  defp log_notification_retry(state, issue, reason, now) do
+    key = {issue.id, inspect(reason)}
+    last = state.yolo_retries.logs[key]
 
-  defp log_notification_retry(issue, {:error, reason}) do
-    Logger.warning("YOLO notification waiting issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+    if is_nil(last) or now - last >= @operator_warning_interval_ms do
+      Logger.warning("YOLO notification waiting issue_id=#{issue.id} issue_identifier=#{issue.identifier} reason=#{inspect(reason)}")
+      put_in(state.yolo_retries.logs, Map.put(state.yolo_retries.logs, key, now))
+    else
+      state
+    end
   end
 
   defp schedule_refreshed(state, original, refreshed, opts) do
     case complete_refresh(original, refreshed) do
       {:ok, issues} ->
         available = Enum.reject(issues, &Dependencies.marker_error?/1)
-        retry_notifications(state, available, opts)
+        state = retry_notifications(state, available, opts)
         state = Recovery.resume_with_state(state, available, opts)
         {issues, state} = admit(issues, state, opts)
         schedule_groups(state, issues, opts)

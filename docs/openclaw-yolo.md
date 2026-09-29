@@ -625,6 +625,13 @@ Kein frei gewählter Empfänger und kein Ersatzkanal; fehlende/mehrdeutige Route
 bleibt ein konkreter Zustellfehler. Die bestätigte Linear-Übergabe an den Menschen
 bleibt bestehen; der bestehende YOLO-Takt versucht nur die gespeicherte
 `route_pending`-Benachrichtigung nach frischem Zuweisungs-Readback erneut.
+Ein erneut gleicher dauerhafter Fehler führt zu 5, 10 und höchstens
+15 Minuten Abstand; ein neuer Fehlergrund zunächst zu 30 Sekunden.
+Zwischen fälligen Versuchen liest er das
+Ticket nicht erneut aus Linear. Eine neue Relay-Epoche, ein Neustart oder
+eine wieder verfügbare Normalroute erlaubt sofort ein frisches Readback und
+einen Zustellversuch. Gleiche Wartegründe werden je Ticket höchstens alle
+fünf Minuten geloggt.
 Gewöhnliche PO-Aufträge behalten `deliver=false`.
 
 Die Nachricht enthält Ticketlink, Ursache, Versuche, Lösungsvorschlag und

@@ -1005,7 +1005,7 @@ worker:
     project_id: 22222222-2222-4222-8222-222222222222
     slug_id: symphony-test-slug
     teams: [{id: 33333333-3333-4333-8333-333333333333, key: PRO}]
-    scenarios: [bootstrap, workflow, failure-probe, po_handoff, po_followup]
+    scenarios: [bootstrap, workflow, failure-probe, po_handoff, po_followup, arch_green, arch_red, arch_justified, arch_unjustified]
     timeout: 1800
     result_root: /ABS/private-test/results
 ```
@@ -1036,6 +1036,10 @@ nicht automatisch bestätigt oder mit neuen Skip-Labels umgangen. Bereits
 konfigurierte Freigaben bleiben maßgeblich. Der gemergte Dummy-Testbeleg bleibt
 im Testrepository; eigene Tickets und unveränderte Worktrees werden bereinigt.
 `bootstrap` prüft nur Todo→Planung, `failure-probe` den Fehler-/Cleanup-Pfad.
+`arch_green`, `arch_red`, `arch_justified` und `arch_unjustified` erstellen je ein
+gebundenes Workflow-Ticket im Dummy-Projekt. Sie verlangen einen Kandidaten mit
+Architekturvertrag und belegen grüne bzw. rote Prüfung sowie begründete bzw.
+zunächst unbegründete Regeländerung samt Korrektur und Merge im Workpad.
 Diese Teilprüfungen ersetzen keinen geforderten Test-/Merge-Nachweis.
 
 Ein Live-Lauf verlangt identischen HEAD/Quellhash von Kandidat und tatsächlich
@@ -1114,7 +1118,8 @@ bleiben erhalten; der Worker erfindet keine zusätzliche Liveabnahme je Zwischen
 Jeder Aufruf enthält `operation`, `run_id`, `head_sha`, `source_sha256` und
 `scenario`. Die Quellkennung liefert `scripts/test-instance.py source <Workspace>`.
 Feste Operationen: `start`, `result`, `cancel`, `cleanup`; Szenarien: `bootstrap`,
-`workflow`, `failure-probe`, `po_handoff` und `po_followup`. `failure-probe` ist
+`workflow`, `failure-probe`, `po_handoff`, `po_followup`, `arch_green`, `arch_red`,
+`arch_justified` und `arch_unjustified`. `failure-probe` ist
 ein absichtlicher Fehler nach Fixtureanlage mit regulärem Cleanup.
 Keine Shellbefehle, Pfadargumente oder Envwerte. Issue/Workspace ergänzt das Tool
 aus seinem verifizierten Kontext und der Executor vergleicht seine Betreiberbindung.

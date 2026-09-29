@@ -412,7 +412,8 @@ defmodule SymphonyElixir.RoutineTest do
            true <- TestExecutor.active?(directory),
            {:ok, %{"active" => true}} <- DurableState.read(Path.join(directory, "control.json")),
            {:ok, plan} <- DurableState.read(Path.join(directory, "plan.json")) do
-        plan["scenario"] == "workflow" or (plan["scenario"] == "bootstrap" and issue.state == "Todo (AI)")
+        plan["scenario"] in ~w(workflow arch_green arch_red arch_justified arch_unjustified) or
+          (plan["scenario"] == "bootstrap" and issue.state == "Todo (AI)")
       else
         _ -> false
       end

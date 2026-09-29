@@ -6971,6 +6971,22 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "architecture guide is available under the installed global skill root" do
+    source = Path.expand("../..", __DIR__)
+    previous = System.get_env("SYMPHONY_ROOT_DIR")
+
+    on_exit(fn ->
+      if previous, do: System.put_env("SYMPHONY_ROOT_DIR", previous), else: System.delete_env("SYMPHONY_ROOT_DIR")
+    end)
+
+    System.put_env("SYMPHONY_ROOT_DIR", source)
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "{{ runtime.global_skill_roots_text }}")
+
+    issue = %Issue{identifier: "MT-943", title: "Architektur", state: "In Arbeit (AI)", labels: []}
+    assert PromptBuilder.build_prompt(issue) == Path.join(source, ".codex/skills")
+    assert File.read!(Path.join(source, ".codex/skills/symphony-architecture/SKILL.md")) =~ "name: symphony-architecture"
+  end
+
   test "prompt builder resolves skill roots from the environment when prompt opts omit them" do
     original_script_name = Application.get_env(:symphony_elixir, :escript_script_name)
     previous_active_repo_root = System.get_env("SYMPHONY_ACTIVE_REPO_ROOT")

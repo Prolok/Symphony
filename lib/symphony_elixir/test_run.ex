@@ -481,7 +481,7 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp description_matches?(description, fixture, plan) do
-    if routine() && plan["scenario"] == "workflow" do
+    if routine() && workflow_scenario?(plan) do
       case DurableState.read(description_receipt_path(plan, fixture)) do
         {:ok, receipt} ->
           bound_description?(receipt, fixture, plan) and description in [receipt["previous"], receipt["description"]]
@@ -507,7 +507,8 @@ defmodule SymphonyElixir.TestRun do
   @spec record_description_intent(String.t(), String.t(), map()) :: :ok | {:error, term()}
   def record_description_intent(id, description, writer) do
     with true <- routine() != nil and is_binary(description),
-         {:ok, %{"scenario" => "workflow"} = plan} <- plan(),
+         {:ok, plan} <- plan(),
+         true <- workflow_scenario?(plan),
          {:ok, journal} <- journal(plan),
          %{} = fixture <- Enum.find(journal["fixtures"], &(&1["id"] == id and &1["deleted"] == false)),
          {:ok, %{"issue" => issue}} <-
@@ -534,6 +535,27 @@ defmodule SymphonyElixir.TestRun do
     "Freigegebener Symphony-Routinetest #{plan["run_id"]}. Erstelle ausschließlich test-runs/#{plan["run_id"]}.txt mit dem Inhalt #{plan["run_id"]}. Führe den regulären Workflow einschließlich aller konfigurierten Qualitäts-, Freigabe- und Merge-Gates aus. Keine Änderungen an anderen Dateien oder Produktprojekten. Erfolg ist die gemergte PR mit Merge-Evidenz im Workpad und Status Review. Testdatei als nachvollziehbaren Testbeleg erhalten."
   end
 
+  defp fixture_description(%{"scenario" => scenario} = plan) when scenario in ~w(arch_green arch_red arch_justified arch_unjustified) do
+    common =
+      "Gebundener Architekturtest #{plan["run_id"]}: Arbeite ausschließlich im isolierten symphony-test-Repository. Erstelle docs/architecture/contract.json mit einem Prüfbefehl, Zeitlimit und Architekturpfaden sowie test-runs/#{plan["run_id"]}.txt. Durchlaufe den regulären Workflow bis zur gemergten PR mit Merge-Evidenz im Workpad und Status Review. "
+
+    case scenario do
+      "arch_green" ->
+        common <> "Der Prüfbefehl muss grün sein; begründe die neue Vertragsdatei im PR-Abschnitt ## Architekturänderung und belege die Kennzeichnung."
+
+      "arch_red" ->
+        common <>
+          "Führe zuerst einen roten Prüfbefehl bis zum Merge-BLOCKER architecture_check_failed, dokumentiere ihn im Workpad, korrigiere den Prüfbefehl und führe danach bis zum Merge fort. Begründe die Vertragsänderung im PR."
+
+      "arch_justified" ->
+        common <> "Ändere eine Architekturregel und begründe sie mit neuem/geändertem ADR oder vollständig ausgefülltem PR-Abschnitt ## Architekturänderung; belege die Kennzeichnung und den Merge."
+
+      "arch_unjustified" ->
+        common <>
+          "Ändere eine Architekturregel zunächst ohne ADR und ohne PR-Begründung bis zum Merge-BLOCKER architecture_change_unjustified. Dokumentiere den Befund, ergänze die Begründung und führe bis zum Merge fort."
+    end
+  end
+
   defp fixture_description(plan) do
     "Begrenzter Symphony-Infrastrukturtest #{plan["run_id"]}. Der reguläre Todo-Bootstrap mit Workpad und Übergabe nach Planung (AI) ist das Erfolgskriterium."
   end
@@ -548,8 +570,8 @@ defmodule SymphonyElixir.TestRun do
       merge = workflow_merge(plan, issue, workpad)
 
       complete =
-        if plan["scenario"] == "workflow",
-          do: merge != nil,
+        if workflow_scenario?(plan),
+          do: merge != nil and architecture_fixture_evidence?(plan, workpad),
           else: get_in(issue, ["state", "name"]) == fixture_target(fixture) and workpad != nil
 
       with {:ok, fixture} <- Delegation.probe(context, fixture),
@@ -591,12 +613,26 @@ defmodule SymphonyElixir.TestRun do
     if routine(), do: :ok, else: PoIncoming.cleanup(context, plan)
   end
 
-  defp workflow_merge(%{"scenario" => "workflow"}, issue, workpad) do
-    if get_in(issue, ["state", "name"]) in ["Review", "Fertig"] and workpad != nil and String.contains?(workpad.body, "Merge-Evidenz"),
+  defp workflow_merge(plan, issue, workpad) do
+    if workflow_scenario?(plan) and get_in(issue, ["state", "name"]) in ["Review", "Fertig"] and workpad != nil and String.contains?(workpad.body, "Merge-Evidenz"),
       do: SymphonyElixir.RoutineTest.merge_evidence(issue["identifier"])
   end
 
-  defp workflow_merge(_, _, _), do: nil
+  defp workflow_scenario?(%{"scenario" => scenario}), do: scenario in ~w(workflow arch_green arch_red arch_justified arch_unjustified)
+  defp workflow_scenario?(_), do: false
+
+  defp architecture_fixture_evidence?(%{"scenario" => "arch_red"}, workpad),
+    do: architecture_marked?(workpad) and String.contains?(workpad.body, "architecture_check_failed")
+
+  defp architecture_fixture_evidence?(%{"scenario" => "arch_unjustified"}, workpad),
+    do: architecture_marked?(workpad) and String.contains?(workpad.body, "architecture_change_unjustified")
+
+  defp architecture_fixture_evidence?(%{"scenario" => scenario}, workpad) when scenario in ~w(arch_green arch_justified),
+    do: architecture_marked?(workpad)
+
+  defp architecture_fixture_evidence?(_, _), do: true
+  defp architecture_marked?(%{body: body}), do: String.contains?(body, "### Architekturänderung") and String.contains?(body, "\"paths\"")
+  defp architecture_marked?(_), do: false
 
   defp fixture_target(fixture) do
     cond do
@@ -668,7 +704,7 @@ defmodule SymphonyElixir.TestRun do
   defp workspace_receipt_path(plan, fixture), do: Path.join([Path.dirname(journal_path(plan)), "workspaces", fixture["id"] <> ".json"])
 
   defp workspace_head(plan, fixture, path) do
-    if plan["scenario"] == "workflow" and fixture["complete"] == true and is_map(fixture["merge"]) do
+    if workflow_scenario?(plan) and fixture["complete"] == true and is_map(fixture["merge"]) do
       {:ok, fixture["merge"]["head"]}
     else
       recorded_workspace_head(plan, fixture, path)

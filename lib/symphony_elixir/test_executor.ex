@@ -7,7 +7,7 @@ defmodule SymphonyElixir.TestExecutor do
   alias SymphonyElixir.Linear.{Client, ScopeBinding}
 
   @required ~w(workspace_id project_id slug_id teams scenarios timeout result_root)
-  @scenarios ~w(bootstrap workflow failure-probe po_handoff po_followup)
+  @scenarios ~w(bootstrap workflow failure-probe po_handoff po_followup arch_green arch_red arch_justified arch_unjustified)
 
   @spec valid_config?(term()) :: boolean()
   def valid_config?(value) when is_map(value) do

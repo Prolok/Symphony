@@ -465,6 +465,55 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     refute MergeTool.handle_checkpoint(request, issue, [])["ok"]
   end
 
+  test "bound architecture marker updates one workpad and adds an existing team label", %{issue: issue} do
+    issue = %{issue | state: "Merge (AI)"}
+    Process.put(:phase, issue.state)
+    page = data(%{"issue" => %{"labels" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}})
+    Process.put(:label_pages, %{nil => page})
+
+    request = %{
+      "operation" => "architecture",
+      "paths" => ["docs/architecture/contract.json"],
+      "justification" => "PR: ## Architekturänderung",
+      "base" => String.duplicate("a", 40),
+      "head" => String.duplicate("b", 40),
+      "url" => "https://example.invalid/pull/1"
+    }
+
+    opts = [bound_issue: fn _ -> {:ok, issue} end]
+    assert MergeTool.handle_checkpoint({:ok, request}, issue, opts) == %{"ok" => true}
+    assert workpad_body() =~ "\"paths\":[\"docs/architecture/contract.json\"]"
+    assert_received :status_mutation
+    body = workpad_body() <> "\n### Kommentareingang\n\n- Quelle erhalten: übernommene Fassung.\n"
+    assert :ok = Workpad.update_tracker_workpad(issue.id, body)
+    labeled = data(%{"issue" => %{"labels" => %{"nodes" => [%{"name" => "Architekturänderung"}], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}})
+    Process.put(:label_pages, %{nil => labeled})
+    assert MergeTool.handle_checkpoint({:ok, request}, issue, opts) == %{"ok" => true}
+    assert workpad_body() == body
+    refute_received :status_mutation
+    refute MergeTool.handle_checkpoint({:ok, %{request | "paths" => []}}, issue, opts)["ok"]
+  end
+
+  test "missing architecture label does not block the bound merge marker", %{issue: issue} do
+    issue = %{issue | state: "Merge (AI)"}
+    Process.put(:phase, issue.state)
+    Process.put(:architecture_label_nodes, [])
+    Process.put(:label_pages, %{nil => data(%{"issue" => %{"labels" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}}})})
+
+    request = %{
+      "operation" => "architecture",
+      "paths" => ["rules/check.py"],
+      "justification" => "ADR: docs/architecture/adr/0001.md",
+      "base" => String.duplicate("a", 40),
+      "head" => String.duplicate("b", 40),
+      "url" => "https://example.invalid/pull/1"
+    }
+
+    assert MergeTool.handle_checkpoint({:ok, request}, issue, bound_issue: fn _ -> {:ok, issue} end) == %{"ok" => true}
+    assert workpad_body() =~ "rules/check.py"
+    refute_received :status_mutation
+  end
+
   test "bound merge reports missing Python and refuses incomplete remote workspace context", %{issue: issue} do
     Process.put(:phase, "Merge (AI)")
     root = Path.join(Path.dirname(Workflow.workflow_file_path()), "workspaces")
@@ -656,6 +705,11 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     {:ok, put_in(response, [:body, "data", "issues", "pageInfo"], %{"hasNextPage" => false, "endCursor" => nil})}
   end
 
+  defp request(%{"query" => "query SymphonyArchitectureLabel" <> _}, _headers) do
+    nodes = Process.get(:architecture_label_nodes, [%{"id" => "architecture-label", "name" => "Architekturänderung", "team" => nil}])
+    data(%{"issueLabels" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}})
+  end
+
   defp request(payload, _headers) do
     query = payload["query"]
     vars = Map.get(payload, "variables", %{})
@@ -729,7 +783,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
 
     if field.name == "issueUpdate" do
       send(self(), :status_mutation)
-      data(%{(field.alias || field.name) => %{"success" => true}})
+      data(%{(field.alias || field.name) => %{"success" => true, "issue" => %{"id" => "issue"}}})
     else
       input = values["input"]
       id = input["id"] || values["id"]
@@ -739,6 +793,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
   end
 
   defp value(%L.Variable{name: name}, vars), do: vars[name] || vars[String.to_existing_atom(name)]
+  defp value(%L.ListValue{values: values}, vars), do: Enum.map(values, &value(&1, vars))
   defp value(%L.ObjectValue{fields: fields}, vars), do: Map.new(fields, &{&1.name, value(&1.value, vars)})
   defp value(%{value: value}, _vars), do: value
 end

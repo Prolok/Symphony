@@ -24,7 +24,7 @@ defmodule SymphonyElixir.Codex.TestTool do
           "run_id" => %{"type" => "string", "pattern" => "^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$"},
           "head_sha" => %{"type" => "string", "pattern" => "^[0-9a-f]{40}$"},
           "source_sha256" => %{"type" => "string", "pattern" => "^[0-9a-f]{64}$"},
-          "scenario" => %{"type" => "string", "enum" => ~w(bootstrap workflow failure-probe po_handoff po_followup)}
+          "scenario" => %{"type" => "string", "enum" => ~w(bootstrap workflow failure-probe po_handoff po_followup arch_green arch_red arch_justified arch_unjustified)}
         }
       }
     }
@@ -108,7 +108,7 @@ defmodule SymphonyElixir.Codex.TestTool do
 
   defp valid_arguments?(arguments) when is_map(arguments) do
     Enum.sort(Map.keys(arguments)) == Enum.sort(@fields) and
-      arguments["operation"] in @operations and arguments["scenario"] in ~w(bootstrap workflow failure-probe po_handoff po_followup) and
+      arguments["operation"] in @operations and arguments["scenario"] in ~w(bootstrap workflow failure-probe po_handoff po_followup arch_green arch_red arch_justified arch_unjustified) and
       matches?(arguments["run_id"], ~r/\A[A-Za-z0-9][A-Za-z0-9_-]{0,47}\z/) and
       matches?(arguments["head_sha"], ~r/\A[0-9a-f]{40}\z/) and
       matches?(arguments["source_sha256"], ~r/\A[0-9a-f]{64}\z/)

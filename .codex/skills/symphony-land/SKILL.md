@@ -77,6 +77,11 @@ Merge mit Standbezug in die Review-Übergabe übernehmen.
    diesen Pfad; die lokale Test-Evidenz bleibt Pflicht. Erwartete fehlende CI
    und unbekannte/unvollständige Policy bleiben blockierend. API-Details stehen
    in `docs/linear-app.md`; im bestätigten No-CI-Fall keine CI-Einrichtung fordern.
+   Hat das Zielrepository einen Architekturvertrag, prüft der Helper den aktuellen
+   Kandidaten und die Begründung geänderter Architekturpfade gemäß
+   [Architekturvertrag](../../../docs/architecture-contract.md). Rote Prüfungen und
+   fehlende Begründungen als benannten Befund an den Worker zurückgeben; nach
+   Korrektur erneut prüfen. Es gibt keine Architekturfreigabe.
 9. Wenn das Linear-Label `Requires Manual Review` gesetzt ist, nach sauberer
    PR-/Remote-Preflight-Evidenz, erledigtem Review-Feedback und akzeptablen
    GitHub-Checks ein gültiges menschliches GitHub-Approval auf der aktuellen
@@ -133,7 +138,8 @@ Watch-Laufs aktualisiert, `5` Merge-Konflikt, `6` fehlende oder inkonsistente
 PR-/Remote-Preflight-Evidenz, `7` fehlendes gültiges manuelles GitHub-Approval
 bei gesetztem Label `Requires Manual Review` oder nicht verifizierbarer
 aktueller Linear-Labelstand im App-Server-Kontext; `8` App-Übergabe zum noch
-offenen Live-Label-/Approval-Gate über den gebundenen Toolzugriff (Schritt 9).
+offenen Live-Label-/Approval-Gate über den gebundenen Toolzugriff (Schritt 9),
+`10` Architekturvertrag, Architekturprüfung oder Begründung fehlerhaft.
 
 Bei Exit `8` im selben Turn Schritt 9 über die erlaubten Tools vollständig
 ausführen. Der Helper hat dann lediglich seine GitHub-Prüfungen abgeschlossen;

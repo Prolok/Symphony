@@ -24,6 +24,8 @@ if Path(sys.argv[0]).name == "git":
         print(head + "\trefs/heads/symphony/PRO-1")
     elif args and args[0] == "status":
         pass
+    elif args and args[0] == "ls-tree":
+        pass
     elif args == ["remote", "get-url", "origin"]:
         print("https://example.invalid/project.git")
     else:

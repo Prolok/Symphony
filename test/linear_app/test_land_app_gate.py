@@ -83,6 +83,7 @@ class AppLabelGateTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(land, "get_pr_info", mock.AsyncMock(return_value=pr)), \
              mock.patch.object(land, "wait_for_codex", mock.AsyncMock()), \
              mock.patch.object(land, "wait_for_checks", mock.AsyncMock()), \
+             mock.patch.object(land, "architecture_gate", mock.AsyncMock(return_value=None)), \
              mock.patch.object(asyncio, "create_subprocess_exec", mock.AsyncMock(side_effect=AssertionError("forbidden child"))) as refresh:
             with self.assertRaises(SystemExit) as result:
                 await land.watch_pr()

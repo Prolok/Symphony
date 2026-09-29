@@ -10,15 +10,48 @@ defmodule SymphonyElixir.Yolo.AgentHop do
   @doc "Apply the per-issue limit across PO groups with an atomic durable record."
   @spec gate_durable(map(), map(), keyword()) :: {:ok, map(), MapSet.t()} | {:error, term()}
   def gate_durable(record, observations, opts) do
-    Enum.reduce_while(observations, {:ok, record, MapSet.new()}, fn {id, observation}, {:ok, current, blocked} ->
-      path = path(id, opts)
+    case Config.settings!().tracker.trusted_agent_ids do
+      [] -> {:ok, record, MapSet.new()}
+      _ -> Enum.reduce_while(observations, {:ok, record, MapSet.new()}, &gate_observation(&1, &2, opts))
+    end
+  end
 
+  defp gate_observation({id, observation}, {:ok, current, blocked}, opts) do
+    path = path(id, opts)
+
+    if gate_needed?(current, id, observation, path) do
       case gate_one(path, id, observation, current, opts) do
         {:ok, entry, true} -> {:cont, {:ok, put_entry(current, id, entry), MapSet.put(blocked, id)}}
         {:ok, entry, false} -> {:cont, {:ok, put_entry(current, id, entry), blocked}}
         {:error, _} = error -> {:halt, error}
       end
-    end)
+    else
+      {:cont, {:ok, current, blocked}}
+    end
+  end
+
+  defp gate_needed?(record, id, observation, path) do
+    previous = get_in(record, ["agent_hops", id])
+
+    # A new coordinator process checks the shared file once before trusting a group-local cursor.
+    Process.get({__MODULE__, path}, :unknown) in [:unknown, true] or held?(previous) or sources_changed?(record, id, observation, previous)
+  end
+
+  defp held?(%{"held" => held}), do: is_binary(held)
+  defp held?(_), do: false
+
+  defp sources_changed?(record, id, observation, previous) do
+    impulse = get_in(record, ["impulses", id]) || %{}
+    agents = sources(observation, impulse, "agent")
+    humans = sources(observation, impulse, "human")
+
+    case previous do
+      %{"agent_sources" => old_agents, "human_sources" => old_humans} when is_list(old_agents) and is_list(old_humans) ->
+        MapSet.new(agents) != MapSet.new(old_agents) or MapSet.new(humans) != MapSet.new(old_humans)
+
+      _ ->
+        agents != [] or humans != []
+    end
   end
 
   defp gate_one(path, id, observation, current, opts) do
@@ -27,6 +60,7 @@ defmodule SymphonyElixir.Yolo.AgentHop do
            {next, held} <- gate(Map.put(current, "agent_hops", %{id => previous}), %{id => observation}, opts),
            entry = get_in(next, ["agent_hops", id]),
            :ok <- persist_entry(path, previous, entry) do
+        Process.put({__MODULE__, path}, is_binary(entry["held"]))
         {:ok, entry, MapSet.member?(held, id)}
       end
     end)

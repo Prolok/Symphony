@@ -1,5 +1,7 @@
 import asyncio
+from contextlib import redirect_stdout
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -60,6 +62,161 @@ class ArchitectureGateTest(unittest.IsolatedAsyncioTestCase):
         head = self.commit()
         with mock.patch.object(land, "run_gh", mock.AsyncMock(side_effect=AssertionError("no new gate"))):
             self.assertIsNone(await land.architecture_gate(self.pr(base, head)))
+
+    async def test_unfetched_origin_base_is_loaded_before_contract_is_decided(self):
+        self.write("app.txt", "old base")
+        old_base = self.commit()
+        self.git("branch", "-M", "main")
+        origin_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(origin_dir.cleanup)
+        origin = Path(origin_dir.name) / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+        self.git("remote", "add", "origin", str(origin))
+        self.git("push", "-q", "origin", "main")
+        worker = Path(origin_dir.name) / "worker"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(origin), str(worker)], check=True)
+        subprocess.run(["git", "-C", str(worker), "config", "user.name", "Test"], check=True)
+        subprocess.run(["git", "-C", str(worker), "config", "user.email", "test@example.invalid"], check=True)
+        (worker / "app.txt").write_text("worker change")
+        subprocess.run(["git", "-C", str(worker), "add", "app.txt"], check=True)
+        subprocess.run(["git", "-C", str(worker), "commit", "-qm", "worker"], check=True)
+        head = subprocess.check_output(["git", "-C", str(worker), "rev-parse", "HEAD"], text=True).strip()
+
+        self.write("app.txt", "new base")
+        new_base = self.commit()
+        self.git("push", "-q", "origin", "main")
+        os.chdir(worker)
+        try:
+            origin.rename(Path(origin_dir.name) / "offline.git")
+            with self.assertRaises(land.ArchitectureError) as error:
+                await self.gate(self.pr(new_base, head))
+            self.assertEqual(error.exception.reason, "architecture_base_unavailable")
+            (Path(origin_dir.name) / "offline.git").rename(origin)
+            original_run_git = land.run_git
+
+            async def timed_out_fetch(*args, **kwargs):
+                if args[0] == "fetch":
+                    raise TimeoutError("simulated fetch timeout")
+                return await original_run_git(*args, **kwargs)
+
+            with mock.patch.object(land, "run_git", timed_out_fetch):
+                with self.assertRaises(land.ArchitectureError) as error:
+                    await self.gate(self.pr(new_base, head))
+            self.assertEqual(error.exception.reason, "architecture_base_unavailable")
+            self.assertIsNone(await self.gate(self.pr(new_base, head)))
+            self.assertEqual(subprocess.run(["git", "cat-file", "-e", f"{new_base}^{{tree}}"],
+                                            capture_output=True).returncode, 0)
+        finally:
+            os.chdir(self.root)
+
+        self.write(land.ARCHITECTURE_CONTRACT, self.contract())
+        contract_base = self.commit()
+        self.git("push", "-q", "origin", "main")
+        os.chdir(worker)
+        try:
+            with self.assertRaises(land.ArchitectureError) as error:
+                await self.gate(self.pr(contract_base, head))
+            self.assertEqual(error.exception.reason, "architecture_candidate_stale")
+            self.assertEqual(subprocess.run(["git", "cat-file", "-e", f"{contract_base}^{{tree}}"],
+                                            capture_output=True).returncode, 0)
+        finally:
+            os.chdir(self.root)
+
+    async def test_markdown_justification_variants_and_missing_fields(self):
+        self.write(land.ARCHITECTURE_CONTRACT, self.contract())
+        base = self.commit()
+        self.write("rules/check.txt", "new rule")
+        head = self.commit()
+        fields = ("Änderung: neue Regel", "Grund: Ticketvorgabe", "Alternativen: keine")
+        for prefix, suffix in (("- ", ""), ("**", "**"), ("- **", "**")):
+            with self.subTest(prefix=prefix):
+                body = "## Architekturänderung\n" + "\n".join(prefix + field.replace(":", ":" + suffix, 1) for field in fields)
+                self.assertIsNotNone(await self.gate(self.pr(base, head), body))
+        with self.assertRaises(land.ArchitectureError) as error:
+            await self.gate(self.pr(base, head), "## Architekturänderung\n- **Änderung:** neue Regel\n- **Grund:** Ticket")
+        self.assertEqual(error.exception.reason, "architecture_change_unjustified")
+        self.assertIn("Alternativen:", str(error.exception))
+
+    async def test_contract_timeout_ceiling_fits_bound_merge_budget(self):
+        self.write(land.ARCHITECTURE_CONTRACT, self.contract())
+        base = self.commit()
+        contract = json.loads(self.contract())
+        contract["timeout_seconds"] = 121
+        self.write(land.ARCHITECTURE_CONTRACT, json.dumps(contract))
+        head = self.commit()
+        with self.assertRaises(land.ArchitectureError) as error:
+            await self.gate(self.pr(base, head))
+        self.assertEqual(error.exception.reason, "architecture_contract_invalid")
+
+    async def test_fetch_timeout_is_bounded(self):
+        fake_bin = self.root / "fake-bin"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        fake_git.write_text("#!/bin/sh\nsleep 10\n")
+        fake_git.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": f"{fake_bin}:{os.environ['PATH']}"}):
+            with self.assertRaisesRegex(TimeoutError, "timed out"):
+                await land.run_git("fetch", "origin", "main", timeout_seconds=0.05)
+
+    async def test_bound_merge_runs_architecture_command_once_for_unchanged_pr(self):
+        with tempfile.TemporaryDirectory() as counter_dir:
+            counter = Path(counter_dir) / "count"
+            script = ("from pathlib import Path; p=Path(%r); "
+                      "p.write_text(p.read_text()+'x' if p.exists() else 'x')") % str(counter)
+            self.write(land.ARCHITECTURE_CONTRACT, self.contract([sys.executable, "-c", script]))
+            base = self.commit()
+            self.write("app.txt", "candidate")
+            head = self.commit()
+            self.git("branch", "-M", "symphony/PRO-1")
+            origin = Path(counter_dir) / "origin.git"
+            subprocess.run(["git", "init", "--bare", "-q", str(origin)], check=True)
+            self.git("remote", "add", "origin", str(origin))
+            self.git("push", "-q", "origin", "symphony/PRO-1")
+            pr = self.pr(base, head)
+            evidence = land.MergePreflightEvidence("symphony/PRO-1", head, True, pr)
+            summary = land.CheckSummary(False, False, [], {}, no_ci=True)
+
+            async def gh(*args):
+                if args[:2] == ("pr", "view") and "body" in args[-1]:
+                    return json.dumps({"body": ""})
+                if args[:2] == ("pr", "view"):
+                    return json.dumps({"state": "MERGED", "mergeCommit": {"oid": "c" * 40}})
+                return ""
+
+            async def checks(_pr, done):
+                done.set()
+
+            async def merge(candidate, preflight):
+                with mock.patch.dict(os.environ, {"SYMPHONY_ISSUE_IDENTIFIER": "PRO-1"}), \
+                     mock.patch.object(land, "bound_request", None), \
+                     mock.patch.object(land, "require_merge_preflight", mock.AsyncMock(return_value=preflight)), \
+                     mock.patch.object(land, "get_pr_info", mock.AsyncMock(return_value=candidate)), \
+                     mock.patch.object(land, "run_gh", gh), \
+                     mock.patch.object(land, "wait_for_codex", mock.AsyncMock()), \
+                     mock.patch.object(land, "wait_for_checks", checks), \
+                     mock.patch.object(land, "fetch_review_context", mock.AsyncMock(return_value=([], [], [], None))), \
+                     mock.patch.object(land, "collect_ci_summary", mock.AsyncMock(return_value=summary)), \
+                     mock.patch.object(land, "current_issue_labels", mock.AsyncMock(return_value=[])), \
+                     mock.patch.object(land, "request_bound_checkpoint", return_value={"ok": True, "labels": []}):
+                    await land.merge_bound(candidate.head_sha, "PRO-1: Test")
+
+            await merge(pr, evidence)
+            self.assertEqual(counter.read_text(), "x")
+
+            slow = json.loads(self.contract([sys.executable, "-c", "import time;time.sleep(2)"]))
+            slow["timeout_seconds"] = 0.05
+            self.write(land.ARCHITECTURE_CONTRACT, json.dumps(slow))
+            base = self.commit()
+            self.write("app.txt", "next candidate")
+            head = self.commit()
+            self.git("push", "-q", "origin", "symphony/PRO-1")
+            pr = self.pr(base, head)
+            evidence = land.MergePreflightEvidence("symphony/PRO-1", head, True, pr)
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as error:
+                await merge(pr, evidence)
+            self.assertEqual(error.exception.code, land.ARCHITECTURE_BLOCKER_EXIT)
+            self.assertIn("architecture_check_failed: timeout", output.getvalue())
 
     async def test_invalid_contract_and_check_failure_and_timeout_report_distinct_reason(self):
         self.write("app.txt", "base")
@@ -175,6 +332,7 @@ class ArchitectureGateTest(unittest.IsolatedAsyncioTestCase):
         change = land.ArchitectureChange([land.ARCHITECTURE_CONTRACT], "PR: ## Architekturänderung", "reason")
         requests = []
         merges = []
+        body = "## Architekturänderung\nÄnderung: neue Regel\nGrund: Ticketvorgabe\nAlternativen: keine"
 
         async def git(*args):
             if args[0] == "status":
@@ -185,6 +343,8 @@ class ArchitectureGateTest(unittest.IsolatedAsyncioTestCase):
             if args[:2] == ("pr", "merge"):
                 merges.append(args)
                 return ""
+            if args[:2] == ("pr", "view") and args[-1] == "body":
+                return json.dumps({"body": body})
             return json.dumps({"state": "MERGED", "mergeCommit": {"oid": "c" * 40}})
 
         def checkpoint(operation, **details):
@@ -195,10 +355,9 @@ class ArchitectureGateTest(unittest.IsolatedAsyncioTestCase):
         summary = land.CheckSummary(False, False, [], {}, no_ci=True)
         with mock.patch.dict(os.environ, {"SYMPHONY_ISSUE_IDENTIFIER": "PRO-1"}), \
              mock.patch.object(land, "bound_request", None), \
-             mock.patch.object(land, "watch_pr", mock.AsyncMock()), \
+             mock.patch.object(land, "watch_pr", mock.AsyncMock(return_value=(pr, change))), \
              mock.patch.object(land, "require_merge_preflight", mock.AsyncMock(return_value=evidence)), \
              mock.patch.object(land, "run_git", git), mock.patch.object(land, "run_gh", gh), \
-             mock.patch.object(land, "architecture_gate", mock.AsyncMock(return_value=change)), \
              mock.patch.object(land, "mark_architecture_pr", mock.AsyncMock()) as marker, \
              mock.patch.object(land, "request_bound_checkpoint", checkpoint), \
              mock.patch.object(land, "fetch_review_context", mock.AsyncMock(return_value=context)), \
@@ -206,6 +365,7 @@ class ArchitectureGateTest(unittest.IsolatedAsyncioTestCase):
              mock.patch.object(land, "current_issue_labels", mock.AsyncMock(side_effect=[[], ["Architekturänderung"]])):
             await land.merge_bound(head, "PRO-1: Test")
             marker.assert_awaited_once()
+            self.assertEqual(marker.await_args.args[1].body, body)
             self.assertEqual([operation for operation, _ in requests], ["architecture", "merge"])
             self.assertEqual(len(merges), 1)
 
@@ -213,10 +373,9 @@ class ArchitectureGateTest(unittest.IsolatedAsyncioTestCase):
         requests.clear()
         with mock.patch.dict(os.environ, {"SYMPHONY_ISSUE_IDENTIFIER": "PRO-1"}), \
              mock.patch.object(land, "bound_request", None), \
-             mock.patch.object(land, "watch_pr", mock.AsyncMock()), \
+             mock.patch.object(land, "watch_pr", mock.AsyncMock(return_value=(pr, change))), \
              mock.patch.object(land, "require_merge_preflight", mock.AsyncMock(return_value=evidence)), \
              mock.patch.object(land, "run_git", git), mock.patch.object(land, "run_gh", gh), \
-             mock.patch.object(land, "architecture_gate", mock.AsyncMock(return_value=change)), \
              mock.patch.object(land, "mark_architecture_pr", mock.AsyncMock()), \
              mock.patch.object(land, "request_bound_checkpoint", checkpoint), \
              mock.patch.object(land, "fetch_review_context", mock.AsyncMock(return_value=context)), \

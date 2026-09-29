@@ -1,13 +1,14 @@
 defmodule SymphonyElixir.AdvisoryConfigTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Linear.{AdvisoryAgents, AppAuth}
+  alias SymphonyElixir.Linear.{AdvisoryAgents, AppAuth, Client, TrustedAgents}
   alias SymphonyElixir.ProjectContext
 
   @agent "b57e9f80-53ce-4d96-9180-370f03d60d16"
 
   setup do
     on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
+    on_exit(fn -> System.delete_env("LINEAR_TRUSTED_AGENT_IDS") end)
     :ok
   end
 
@@ -57,6 +58,47 @@ defmodule SymphonyElixir.AdvisoryConfigTest do
     partial = {:ok, %{status: 200, body: %{"data" => %{"users" => nil}, "errors" => [%{"message" => "partial"}]}}}
     SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> partial end)
     assert {:error, _} = AdvisoryAgents.verify()
+  end
+
+  test "trusted apps are optional, verified in the same workspace, and never include Symphony itself" do
+    assert Config.settings!().tracker.trusted_agent_ids == []
+    assert Config.settings!().tracker.agent_hop_limit == 10
+    System.put_env("LINEAR_TRUSTED_AGENT_IDS", " #{@agent}, #{@agent}, ")
+    tracker = Config.settings!().tracker
+    assert tracker.trusted_agent_ids == [@agent]
+    assert {:ok, config} = Schema.parse(%{"tracker" => %{"trusted_agent_ids" => [], "agent_hop_limit" => 3}})
+    assert config.tracker.agent_hop_limit == 3
+    assert {:error, _} = Schema.parse(%{"tracker" => %{"trusted_agent_ids" => ["not-a-uuid"]}})
+    assert {:error, _} = Schema.parse(%{"tracker" => %{"agent_hop_limit" => 0}})
+    assert {:error, :linear_trusted_agent_is_coding_app} = AppAuth.validate(%{tracker | app: Map.put(tracker.app, "user_id", @agent)})
+
+    workspace = tracker.app["workspace_id"]
+    agent = %{"id" => @agent, "app" => true, "active" => true, "name" => "Pai", "organization" => %{"id" => workspace}}
+
+    for {candidate, valid?} <- [{agent, true}, {Map.put(agent, "app", false), false}, {Map.put(agent, "active", false), false}, {put_in(agent, ["organization", "id"], "foreign"), false}] do
+      SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+        assert payload["query"] =~ "SymphonyTrustedAgents"
+        response([candidate])
+      end)
+
+      if valid?, do: assert(TrustedAgents.verify() == :ok), else: assert(match?({:error, _}, TrustedAgents.verify()))
+    end
+  end
+
+  test "projects sharing a workspace reject different trusted lists before relay resolution" do
+    settings = Config.settings!()
+    first = %ProjectContext{settings: settings}
+    other = %ProjectContext{settings: %{settings | tracker: %{settings.tracker | trusted_agent_ids: [@agent]}}}
+    assert {:error, :linear_trusted_agents_workspace_mismatch} = Client.resolve_relay_contexts([first, other])
+    assert {:ok, []} = Client.resolve_relay_contexts([])
+  end
+
+  test "relay keeps the verified trusted binding when it publishes refreshed project contexts" do
+    context = %ProjectContext{id: "project", settings: Config.settings!()}
+    verified = %{context | trusted_binding: "verified-binding"}
+
+    assert [%ProjectContext{trusted_binding: "verified-binding"}] =
+             SymphonyElixir.Relay.resolved_contexts(%{contexts: [verified]}, [context])
   end
 
   test "verified project identity survives worker export and requires restart for configuration changes" do

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.Yolo.Followup do
   @moduledoc "Durable creation and linking shared by regular workers and PO aggregation/follow-ups."
   alias SymphonyElixir.{Config, Tracker}
-  alias SymphonyElixir.Linear.Description
+  alias SymphonyElixir.Linear.{Description, TrustedAgents}
   alias SymphonyElixir.TestRun.Derived, as: Derived
   alias SymphonyElixir.Yolo.{ActionScope, API, GeneratedLabel, Operations, Relations, Scope}
 
@@ -331,10 +331,7 @@ defmodule SymphonyElixir.Yolo.Followup do
   defp changed_pair(from, to) when from != to, do: {from, to}
   defp changed_pair(_, _), do: nil
 
-  defp human_actor?(node) do
-    actor = node["actor"]
-    is_map(actor) and is_binary(actor["id"]) and actor["app"] == false and is_nil(node["botActor"])
-  end
+  defp human_actor?(node), do: TrustedAgents.human_or_trusted?(node, TrustedAgents.ids())
 
   defp difference("description", expected, actual) when is_binary(expected) and is_binary(actual),
     do: Map.put(Description.first_difference(expected, actual), :field, "description")

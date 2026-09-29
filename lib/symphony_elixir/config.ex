@@ -202,6 +202,8 @@ defmodule SymphonyElixir.Config do
     |> then(fn binding -> if tracker.openclaw_yolo_agent, do: {binding, tracker.openclaw_yolo_agent}, else: binding end)
     |> bridge_binding(tracker.openclaw_linear_bridge)
     |> advisory_binding(tracker.advisory_agent_ids)
+    |> advisory_binding(tracker.trusted_agent_ids)
+    |> hop_binding(tracker.agent_hop_limit)
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
@@ -212,6 +214,9 @@ defmodule SymphonyElixir.Config do
 
   defp advisory_binding(binding, []), do: binding
   defp advisory_binding(binding, ids), do: {binding, ids}
+
+  defp hop_binding(binding, 10), do: binding
+  defp hop_binding(binding, limit), do: {binding, limit}
 
   @spec settings!() :: Schema.t()
   def settings! do

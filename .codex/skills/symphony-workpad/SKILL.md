@@ -125,7 +125,8 @@ widersprüchlich war.
   allein fordert beim autorisierten Test-/Merge-Einstieg keine Nachholrunde;
   unbekannter Vorzustand ist kein Skipbeleg. `Skip "Freigabe Review"` ersetzt
   keinen technischen Review-Skip. Fällige Test-/Merge-Gates bleiben bestehen.
-- Spätere belegte menschliche Gateentscheidungen ersetzen ältere Beschreibungs-/
+- Spätere belegte Gateentscheidungen des konfigurierten Menschen oder eines
+  verifizierten gelisteten Agenten ersetzen ältere Beschreibungs-/
   Workpad-Defaults. Skip-Labels erhalten; betroffene frühere Pflichtpunkte mit
   Quelle und Geltungsbereich als `bewusst übersprungen` einordnen, nie als bestanden.
   Separat übernommene PO-Prüfungen außerhalb der fälligen Gate-Checkliste führen,

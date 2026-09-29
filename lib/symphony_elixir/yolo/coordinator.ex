@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   alias SymphonyElixir.{Config, ProjectContext, Tracker, Workpad}
   alias SymphonyElixir.Linear.YoloAgent
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
-  alias SymphonyElixir.Yolo.{Escalation, Group, Impulse, Observation, Operations}
+  alias SymphonyElixir.Yolo.{AgentHop, Escalation, Group, Impulse, Observation, Operations}
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
   alias SymphonyElixir.Yolo.OpenClaw.Journal
@@ -416,17 +416,19 @@ defmodule SymphonyElixir.Yolo.Coordinator do
          {:ok, record} <- Impulse.observe(members, stored, opts),
          {:ok, valid_observations, _fingerprint, operator_errors} <-
            capture_group(group, members, record, Keyword.put(opts, :impulse_generations, Impulse.generations(record))),
+         {:ok, record, agent_held} <- AgentHop.gate_durable(record, valid_observations, opts),
          observations = retain_error_observations(valid_observations, record["observations"], operator_errors),
          record = Delivery.migrate(record, observations),
          record = record_operator_errors(group, members, record, operator_errors, opts),
-         available = Enum.filter(members, &Map.has_key?(valid_observations, &1.id)),
+         available = available_members(members, valid_observations, agent_held),
          signals = get_in(opts[:relay_signals] || %{}, [group]),
          record = reset_changed_retry(record, signals),
          :ok <- persist_observations(group, stored, record, observations, signals, members),
          {:ok, operations} <- Operations.pending(Enum.map(members, & &1.id)),
          effective = if(operations == [], do: record, else: Map.put(record, "processed", nil)),
          pending = pending_members(members, available, observations, effective),
-         waiting = pending_waiting_reason(pending, members, available, observations, effective, operator_errors),
+         waiting =
+           agent_waiting_reason(agent_held, pending, members, available, observations, effective, operator_errors),
          record = if(waiting == "delivery_end_unconfirmed", do: record, else: reset_changed_nonstart(record, pending, observations)),
          stored_observations = observations_for_pending(observations, record, pending, waiting),
          updated =
@@ -449,6 +451,14 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       _ ->
         :waiting
     end
+  end
+
+  defp available_members(members, observations, held), do: Enum.filter(members, &(Map.has_key?(observations, &1.id) and not MapSet.member?(held, &1.id)))
+
+  defp agent_waiting_reason(held, pending, members, available, observations, record, errors) do
+    if pending == [] and MapSet.size(held) > 0,
+      do: "agent_hop_limit",
+      else: pending_waiting_reason(pending, members, available, observations, record, errors)
   end
 
   defp capture_group(group, members, record, opts) do

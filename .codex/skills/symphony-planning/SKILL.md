@@ -66,7 +66,7 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
   nötig machen.
 - Jede Änderung mit Grund und Validierungsauswirkung im Workpad dokumentieren.
 - Verpflichtende Ticketvorgaben nicht eigenmächtig entfernen oder abschwächen.
-  Spätere belegte menschliche Gateentscheidungen gemäß `symphony-workpad`
+  Spätere belegte Gateentscheidungen gleichgestellter Linear-Akteure gemäß `symphony-workpad`
   übernehmen; überholte Beschreibungs-/Workpad-Defaults widerrufen sie nicht.
   Irrtümliche agentenseitige Frühfristen mit Quelle begründet korrigieren und
   offene Nachweise erhalten. Für delegierte PO-Arbeit gilt die Freigabe aus

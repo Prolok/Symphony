@@ -7,6 +7,9 @@ maßgeblich. Der OpenClaw-Wert benötigt eine gültige Linear-YOLO-Bindung;
 Agent-IDs bestehen aus Kleinbuchstaben, Ziffern, `_` und `-`.
 Ausführungsbindung und Agentenwechsel verlangen einen Dienstneustart.
 Ungültiger Reload erhält den zuvor akzeptierten Projektkontext.
+Für Linear-Entscheidungen gilt auch auf diesem Ausführungsweg die Gleichstellung
+verifizierter Agenten aus [WORKFLOW.md](../WORKFLOW.md#autonome-entscheidungen-und-linear-texte).
+Die menschliche Ausführungszuweisung und das GitHub-Approval bleiben getrennt.
 
 Fehlend, leer oder Whitespace erhält den Codex-Ausführungsweg. In diesem Fall
 gibt es keine OpenClaw-Aufrufe, Verfügbarkeitsprüfungen oder Zugriffe auf dessen
@@ -642,7 +645,8 @@ nicht erneut versandt, auch nach Neustart oder Ablauf fremder Dedup-Caches.
 Ein identischer bestätigter Vorschlag ist wirkungslos. Versandbestätigung ist
 kein Beleg für menschliches Lesen oder Zustimmung. Ein OK im normalen Kanal
 bezieht sich ausschließlich auf diesen Vorschlag; der bestehende OpenClaw-Agent
-muss die konkrete menschliche Entscheidung am Ticket nachvollziehbar festhalten.
+muss die konkrete Entscheidung eines gleichgestellten Linear-Akteurs am Ticket
+nachvollziehbar festhalten.
 Symphony führt keine Aktion aufgrund eines unkorrelierten OK aus und erteilt
 keine zusätzliche Zugangs-/Deploymentfreigabe.
 

@@ -36,6 +36,30 @@ defmodule SymphonyElixir.AdvisoryCommentsTest do
     end
   end
 
+  test "a trusted agent's session replies stay consultation while a direct app comment is delivered", ctx do
+    comments =
+      fixture(ctx.issue.id)
+      |> Enum.map(fn source ->
+        if source["id"] in ["answer", "answer2"], do: put_in(source, ["user", "id"], @agent), else: source
+      end)
+
+    opts = options(comments) |> Keyword.put(:advisory_agent_ids, []) |> Keyword.put(:trusted_agent_ids, [@agent])
+    assert {:ok, payload} = CommentCheckpoint.checkpoint(ctx.issue, opts)
+    assert_safe(payload)
+    assert Enum.all?(payload["inputs"], fn input -> input["origin"] == "baseline" end)
+    assert {:ok, stored} = CommentInbox.read(Config.settings!().tracker.app, ctx.issue)
+
+    assert Enum.all?(Enum.filter(stored["versions"], fn {_key, version} -> version["source"]["id"] in ["answer", "answer2"] end), fn {_key, version} ->
+             version["origin"] == "agent" and version["status"] == "context" and version["advisory_suppressed"] == true
+           end)
+
+    direct = source("direct-pai", "Direkte Entscheidung", ctx.issue.id) |> Map.put("user", %{"id" => @agent, "app" => true, "name" => "Pai"})
+    assert {:ok, _} = CommentCheckpoint.acknowledge(ctx.issue, Enum.map(payload["inputs"], &result(&1["key"])), opts)
+    assert {:ok, next} = CommentCheckpoint.checkpoint(ctx.issue, Keyword.put(opts, :fetch, fn -> {:ok, comments ++ [direct]} end))
+    assert [%{"origin" => "agent", "source" => ^direct, "agent_notice" => notice}] = next["inputs"]
+    assert notice =~ "vertrauenswürdiger Agent"
+  end
+
   test "later root page and delayed session never release the human consultation", ctx do
     [control, reply, answer, answer2, root] = fixture(ctx.issue.id)
     delayed = Map.put(root, "agentSession", nil)

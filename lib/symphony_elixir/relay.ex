@@ -51,7 +51,7 @@ defmodule SymphonyElixir.Relay do
 
   @spec resolved_contexts(Session.t(), [ProjectContext.t()]) :: [ProjectContext.t()]
   def resolved_contexts(session, contexts) do
-    fields = [:assignee_ids, :human_handoff_id, :yolo_agent_id]
+    fields = [:assignee_ids, :human_handoff_id, :yolo_agent_id, :advisory_binding, :trusted_binding]
     identities = Map.new(session.contexts, &{&1.id, Map.take(&1, fields)})
     Enum.map(contexts, &struct(&1, Map.get(identities, &1.id, %{})))
   end

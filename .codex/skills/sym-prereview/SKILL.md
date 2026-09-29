@@ -8,7 +8,8 @@ description: Fachliche Selbstkorrektur und gezielte PreReview-Prüfungen für Sy
 Für die frühe Selbstprüfung im normalen Entwicklerworkflow; in `PreReview (AI)`
 ruft `symphony-prereview` diese Checkliste auf. Der Prüfmaßstab benötigt weder
 YOLO-Steuerung noch Pai, OpenClaw oder privates Memory. Statuswechsel und
-menschliche Freigaben bleiben beim aufrufenden Workflow.
+Linear-Freigaben des konfigurierten Menschen oder verifizierter gelisteter Agenten
+bleiben beim aufrufenden Workflow; das GitHub-Sondergate bleibt menschlich.
 
 ## Checkliste
 

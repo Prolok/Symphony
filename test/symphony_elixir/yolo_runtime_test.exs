@@ -5,6 +5,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.Linear.Budget
   alias SymphonyElixir.Linear.CommentActionGuard
+  alias SymphonyElixir.Linear.CommentVersion
   alias SymphonyElixir.Linear.Description
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.Linear.WriteContext
@@ -86,7 +87,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     baseline = history.("baseline", %{})
     withdrawn = history.("withdrawn", %{"fromDelegate" => %{"id" => "pai"}})
-    restored = history.("restored", %{"toDelegate" => %{"id" => "pai"}})
+    restored = history.("restored", %{"toDelegate" => %{"id" => "pai"}, "actor" => %{"id" => "human", "app" => false}})
     event = fn position -> %{"generation" => "relay-generation", "position" => position, "event_id" => "event-#{position}"} end
     issue = %{issue | relay_event: event.(1)}
     assert {:ok, record} = history_observe([issue], %{}, history: fn _ -> {:ok, [baseline]} end)
@@ -295,7 +296,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       "botActor" => nil
     }
 
-    reassigned = %{baseline | "id" => "reassigned", "toDelegate" => %{"id" => "pai"}}
+    reassigned = %{baseline | "id" => "reassigned", "toDelegate" => %{"id" => "pai"}, "actor" => %{"id" => "human", "app" => false}}
     assert {:ok, record} = history_observe([issue], %{}, history: fn _ -> {:ok, [baseline]} end)
     assert get_in(record, ["impulses", issue.id, "history_head"]) == "baseline"
     event = %{"generation" => "relay", "position" => 1, "event_id" => "event-1"}
@@ -310,7 +311,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     event = fn position -> %{"generation" => "relay", "position" => position, "event_id" => "event-#{position}"} end
     issue = %{issue | relay_event: event.(1)}
-    node = %{"id" => "assigned", "createdAt" => "2026-09-24T12:00:00Z", "toDelegate" => %{"id" => "pai"}}
+    node = %{"id" => "assigned", "createdAt" => "2026-09-24T12:00:00Z", "toDelegate" => %{"id" => "pai"}, "actor" => %{"id" => "human", "app" => false}}
 
     query = fn _, _ ->
       {:ok,
@@ -370,6 +371,52 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
       assert Impulse.generations(record)[issue.id] == expected
     end
+  end
+
+  test "a verified listed app priority change has the same impulse and a foreign app does not", %{issues: [issue | _], context: context} do
+    tracker = %{context.settings.tracker | trusted_agent_ids: ["pai-app"]}
+    context = %{context | settings: %{context.settings | tracker: tracker}, trusted_binding: CommentVersion.digest([tracker.app, tracker.trusted_agent_ids])}
+    ProjectContext.bind(context)
+    base = %{"id" => "base", "createdAt" => "2026-09-24T12:00:00Z", "fromPriority" => nil, "toPriority" => nil}
+    change = %{"id" => "change", "createdAt" => "2026-09-24T12:01:00Z", "fromPriority" => 3, "toPriority" => 1, "actor" => %{"id" => "pai-app", "app" => true}, "botActor" => nil}
+    event = fn n -> %{"generation" => "relay", "position" => n} end
+    issue = %{issue | relay_event: event.(1)}
+    assert {:ok, prior} = history_observe([issue], %{}, history: fn _ -> {:ok, [base]} end)
+    issue = %{issue | relay_event: event.(2)}
+    assert {:ok, accepted} = history_observe([issue], prior, history: fn _ -> {:ok, [change, base]} end)
+    assert get_in(accepted, ["impulses", issue.id, "reason"]) == "human_priority_raised"
+    assert get_in(accepted, ["impulses", issue.id, "agent_input_ids"]) == ["change"]
+
+    other = put_in(change, ["actor", "id"], "foreign-app")
+    assert {:ok, ignored} = history_observe([issue], prior, history: fn _ -> {:ok, [other, base]} end)
+    assert Impulse.generations(ignored)[issue.id] == 0
+
+    delegation = change |> Map.merge(%{"fromPriority" => nil, "toPriority" => nil, "toDelegate" => %{"id" => "pai"}})
+    assert {:ok, delegated} = history_observe([issue], prior, history: fn _ -> {:ok, [delegation, base]} end)
+    assert get_in(delegated, ["impulses", issue.id, "reason"]) == "delegated_again"
+    assert get_in(delegated, ["impulses", issue.id, "agent_input_ids"]) == ["change"]
+    foreign_delegation = put_in(delegation, ["actor", "id"], "foreign-app")
+    assert {:ok, refused} = history_observe([issue], prior, history: fn _ -> {:ok, [foreign_delegation, base]} end)
+    assert Impulse.generations(refused)[issue.id] == 0
+  end
+
+  test "a trusted agent OK to a proposal ID changes one PO observation", %{issues: [issue | _]} do
+    baseline = inbox() |> Map.put("current", %{})
+
+    input = %{
+      "key" => "agent-ok",
+      "origin" => "agent",
+      "status" => "recognized",
+      "deleted" => false,
+      "source" => %{"id" => "agent-ok", "body" => "OK zu Vorschlag PRO-100", "user" => %{"id" => "pai-app", "app" => true, "name" => "Pai"}}
+    }
+
+    assert {:ok, before, _} = Observation.capture([issue], %{}, scan: fn _ -> {:ok, baseline} end)
+    changed = put_in(baseline, ["versions", "agent-ok"], input)
+    changed_issue = %{issue | last_comment_signal: %{relay_epoch: "agent-ok"}}
+    assert {:ok, after_input, _} = Observation.capture([changed_issue], before, scan: fn _ -> {:ok, changed} end)
+    refute after_input[issue.id]["source"] == before[issue.id]["source"]
+    assert {:ok, ^after_input, _} = Observation.capture([changed_issue], after_input, scan: fn _ -> flunk("same signal should not rescan") end)
   end
 
   test "coordinator retries a pending notification only after a fresh eligible lookup", %{issues: [issue | _], context: context} do
@@ -592,6 +639,66 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     for _ <- 1..3, do: tick(state, [issue], opts)
     refute_receive :review_started
     tick(state, [%{issue | delegate_id: nil}], opts)
+    refute_receive :review_started
+  end
+
+  test "trusted app redelegation restarts an ended delivery once after escalation", %{issues: [issue | _], context: context} do
+    tracker = %{context.settings.tracker | trusted_agent_ids: ["pai-app"]}
+    context = %{context | settings: %{context.settings | tracker: tracker}, trusted_binding: CommentVersion.digest([tracker.app, tracker.trusted_agent_ids])}
+    ProjectContext.bind(context)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    baseline = %{
+      "id" => "before",
+      "createdAt" => "2026-09-24T12:00:00Z",
+      "fromDelegate" => nil,
+      "toDelegate" => nil,
+      "fromPriority" => nil,
+      "toPriority" => nil,
+      "actor" => nil,
+      "botActor" => nil
+    }
+
+    withdrawn = %{baseline | "id" => "escalated", "createdAt" => "2026-09-24T12:03:00Z", "fromDelegate" => %{"id" => "pai"}}
+
+    redelegated = %{
+      baseline
+      | "id" => "pai-redelegated",
+        "createdAt" => "2026-09-24T12:04:00Z",
+        "toDelegate" => %{"id" => "pai"},
+        "actor" => %{"id" => "pai-app", "app" => true}
+    }
+
+    event = fn position -> %{"generation" => "relay", "position" => position, "event_id" => "event-#{position}"} end
+    Process.put(:history_nodes, [baseline])
+    Process.put(:review_issue, %{issue | relay_event: event.(1)})
+
+    opts = [
+      scan: &scan/1,
+      history: fn _ -> {:ok, Process.get(:history_nodes)} end,
+      sessions: fn _ -> {:ok, []} end,
+      start: fn group, _ ->
+        complete_observation(group, Process.get(:review_issue), scan: &scan/1)
+        send(self(), :review_started)
+        {:error, :fixture_end}
+      end
+    ]
+
+    issue = %{issue | relay_event: event.(1)}
+    tick(state, [issue], opts)
+    assert_receive :review_started
+    tick(state, [issue], opts)
+    refute_receive :review_started
+
+    tick(state, [%{issue | delegate_id: nil, relay_event: event.(2)}], opts)
+    refute_receive :review_started
+
+    Process.put(:history_nodes, [redelegated, withdrawn, baseline])
+    issue = %{issue | relay_event: event.(3)}
+    Process.put(:review_issue, issue)
+    tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [issue], opts)
+    assert_receive :review_started
+    for _ <- 1..3, do: tick(state, [issue], opts)
     refute_receive :review_started
   end
 
@@ -1145,6 +1252,24 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, after_repair} = Store.read("review")
     assert after_repair["observations"][issue.id]["operator_confirmation"] == digest
     assert after_repair["observations"][issue.id]["source"] == observed[issue.id]["source"]
+  end
+
+  test "a trusted Pai confirmation wakes review once through the digest", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "confirmed"}}
+    duty = operator_workpad("duty", "a")
+    duty = put_in(duty, ["source", "body"], String.replace(duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    snapshot = inbox(%{"duty" => duty}) |> Map.put("current", %{"workpad" => "duty"})
+    assert {:ok, digest} = Yolo.OperatorHandoff.current(issue, snapshot)
+    confirmation = %{"version" => 1, "handoff_digest" => digest, "result" => "Bestätigt", "evidence" => "Prüfung bestanden"}
+    body = "```symphony-operator-confirmation\n#{Jason.encode!(confirmation)}\n```"
+    answer = %{"key" => "answer", "origin" => "agent", "deleted" => false, "source" => %{"id" => "answer", "body" => body, "user" => %{"id" => "pai", "app" => true}}}
+    answered = snapshot |> put_in(["versions", "answer"], answer) |> put_in(["current", "answer"], "answer")
+
+    assert {:ok, ^digest} = Yolo.OperatorHandoff.confirmation(issue, answered, digest)
+    assert {:ok, agent_observations, _} = Observation.capture([issue], %{}, scan: fn _ -> {:ok, answered} end)
+    integration = put_in(answered, ["versions", "answer", "origin"], "integration")
+    assert {:ok, integration_observations, _} = Observation.capture([issue], %{}, scan: fn _ -> {:ok, integration} end)
+    assert agent_observations[issue.id]["source"] == integration_observations[issue.id]["source"]
   end
 
   test "only the current Pai confirmation wakes a waiting review once", %{issues: [issue | _]} do

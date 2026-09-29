@@ -6,7 +6,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
   alias SymphonyElixir.Yolo.Scope, as: YoloScope
 
   alias SymphonyElixir.{Config, Dialog, ProjectContext, Tracker, Workpad}
-  alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryThreads}
+  alias SymphonyElixir.Linear.{AdvisoryAgents, AdvisoryThreads, TrustedAgents}
   alias SymphonyElixir.Linear.{Budget, Client, CommentInbox, CommentVersion, Issue, IssueReadCache, WriteContext}
 
   @spec active?(map()) :: boolean()
@@ -26,12 +26,14 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
     opts = Keyword.put_new(opts, :journal_request, &journal_request/1)
     opts = Keyword.put_new(opts, :confirm_absence, &Client.confirm_comment_absence(issue.id, &1))
-    opts = Keyword.put_new(opts, :advisory_agent_ids, Config.settings!().tracker.advisory_agent_ids)
+    opts = Keyword.put_new(opts, :advisory_agent_ids, Enum.uniq(Config.settings!().tracker.advisory_agent_ids ++ Config.settings!().tracker.trusted_agent_ids))
+    opts = Keyword.put_new(opts, :trusted_agent_ids, Config.settings!().tracker.trusted_agent_ids)
     opts = Keyword.put_new(opts, :resolve_advisory, &Client.fetch_comment_thread(issue.id, &1))
 
     result =
       WriteContext.with_context(%{issue_id: issue.id, issue_identifier: issue.identifier}, fn ->
-        with :ok <- AdvisoryAgents.verify() do
+        with :ok <- AdvisoryAgents.verify(),
+             :ok <- TrustedAgents.verify() do
           CommentInbox.scan(app_binding(), issue, Keyword.get(opts, :fetch, fn -> Client.scan_issue_comments(issue.id) end), opts)
         end
       end)
@@ -125,7 +127,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
   defp background_key(issue) do
     tracker = Config.settings!().tracker
     binding = {tracker.app["workspace_id"], tracker.app["client_id"], tracker.app["user_id"], tracker.project_slug, tracker.team_key}
-    :crypto.hash(:sha256, :erlang.term_to_binary({binding, tracker.advisory_agent_ids, issue.id, :signal_v2})) |> Base.encode16()
+    :crypto.hash(:sha256, :erlang.term_to_binary({binding, tracker.advisory_agent_ids, tracker.trusted_agent_ids, issue.id, :signal_v2})) |> Base.encode16()
   end
 
   defp foreign_relay_epoch(issue, opts) do
@@ -225,16 +227,18 @@ defmodule SymphonyElixir.CommentCheckpoint do
 
   defp write_results(issue, results) do
     with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id),
-         {:ok, workpad} <- Workpad.find_comment(comments) do
-      body = Enum.reduce(results, workpad.body, &append_result/2)
+         {:ok, workpad} <- Workpad.find_comment(comments),
+         {:ok, inbox} <- CommentInbox.read(app_binding(), issue) do
+      body = Enum.reduce(results, workpad.body, &append_result(&1, &2, inbox))
       if body == workpad.body, do: :ok, else: Workpad.update_tracker_workpad(issue.id, body)
     end
   end
 
-  defp append_result(result, body) do
+  defp append_result(result, body, inbox) do
     blocks = inbox_blocks(body)
     body = Enum.map_join(blocks, &elem(&1, 0))
-    entry = result_entry(result)
+    version = inbox["versions"][result["key"]] || if(inbox["baseline"]["key"] == result["key"], do: inbox["baseline"])
+    entry = result_entry(result, version)
 
     if Enum.any?(blocks, fn {block, inbox?} -> inbox? and normalize_entry(block) == normalize_entry(entry) end) do
       body
@@ -243,10 +247,27 @@ defmodule SymphonyElixir.CommentCheckpoint do
     end
   end
 
-  defp result_entry(result) do
+  defp result_entry(result, version \\ nil) do
     replacement = if result["replacement"], do: " → `#{result["replacement"]}`", else: ""
     reason = String.replace(result["reason"], "\n", "\n  ")
-    "- Quelle `#{result["key"]}`: **#{result["outcome"]}**#{replacement} — #{reason}"
+    note = agent_note(version)
+    "- Quelle `#{result["key"]}`: **#{result["outcome"]}**#{replacement} — #{reason}#{note}"
+  end
+
+  defp agent_note(%{"origin" => "agent"} = version), do: " — #{agent_label(version)}"
+
+  defp agent_note(%{"origin" => "baseline", "sources" => sources}) do
+    agents = Enum.filter(sources, &TrustedAgents.trusted?(&1, Config.settings!().tracker.trusted_agent_ids))
+    if agents == [], do: "", else: " — " <> Enum.map_join(agents, "; ", &agent_label_source/1)
+  end
+
+  defp agent_note(_), do: ""
+
+  defp agent_label(version), do: agent_label_source(version["source"])
+
+  defp agent_label_source(source) do
+    user = source["user"] || %{}
+    "#{user["name"] || "Unbekannt"} (`#{user["id"]}`), vertrauenswürdiger Agent, einer Eingabe des konfigurierten Menschen gleichgestellt"
   end
 
   defp insert_result(blocks, body, entry) do
@@ -351,13 +372,24 @@ defmodule SymphonyElixir.CommentCheckpoint do
   end
 
   defp payload(state) do
-    payload = %{"last_successful_scan" => state["last_successful_scan"], "scan_error" => state["scan_error"], "inputs" => CommentInbox.pending(state)}
+    inputs = Enum.map(CommentInbox.pending(state), &annotate_input/1)
+
+    payload = %{"last_successful_scan" => state["last_successful_scan"], "scan_error" => state["scan_error"], "inputs" => inputs}
 
     case AdvisoryThreads.diagnostics(state) do
       [] -> payload
       diagnostics -> Map.put(payload, "advisory_threads", diagnostics)
     end
   end
+
+  defp annotate_input(%{"origin" => "agent"} = version), do: Map.put(version, "agent_notice", agent_label(version))
+
+  defp annotate_input(%{"origin" => "baseline"} = version),
+    do: Map.update!(version, "sources", &Enum.map(&1, fn source -> if trusted_source?(source), do: Map.put(source, "agent_notice", agent_label_source(source)), else: source end))
+
+  defp annotate_input(version), do: version
+
+  defp trusted_source?(source), do: TrustedAgents.trusted?(source, Config.settings!().tracker.trusted_agent_ids)
 
   defp app_binding, do: Config.settings!().tracker.app
 

@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.YoloActionsTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.Linear.{CommentActionGuard, WriteContext}
+  alias SymphonyElixir.Linear.{CommentActionGuard, CommentVersion, WriteContext}
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionScope, ActionTool, Admission, API, Followup, GeneratedLabel, Handoff, Operations}
   alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Relations, ReviewContract, Runner, Scope, Store}
@@ -1450,6 +1450,23 @@ defmodule SymphonyElixir.YoloActionsTest do
       assert {:ok, %{"id" => ^id}} = Followup.invoke(request, opts())
       assert db().created[id]["description"] == changed_description
       assert writes("YoloUpdate") == []
+    end)
+  end
+
+  test "recovery accepts a dated description edit from a verified listed app", %{issues: [source | _], context: context} do
+    tracker = %{context.settings.tracker | trusted_agent_ids: ["pai-app"]}
+    context = %{context | settings: %{context.settings | tracker: tracker}, trusted_binding: CommentVersion.digest([tracker.app, tracker.trusted_agent_ids])}
+    ProjectContext.bind(context)
+    request = args([source], "followup")
+
+    group([source], fn ->
+      change(&%{&1 | fail: "YoloCreate"})
+      assert {:error, :response_lost} = Followup.invoke(request, opts())
+      [{id, ticket}] = Map.to_list(db().created)
+      changed = ticket["description"] <> "\n\nPai bestätigt."
+      edit = %{"id" => "pai-edit", "createdAt" => "2026-09-25T10:18:00.000Z", "updatedDescription" => true, "actor" => %{"id" => "pai-app", "app" => true}, "botActor" => nil}
+      change(&%{&1 | fail: nil, created: %{id => Map.put(ticket, "description", changed)}, history: [edit]})
+      assert {:ok, %{"id" => ^id}} = Followup.invoke(request, opts())
     end)
   end
 

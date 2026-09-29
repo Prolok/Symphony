@@ -13,6 +13,8 @@ defmodule SymphonyElixir.TestRun do
   @spec stage() :: String.t() | nil
   def stage, do: if(routine(), do: routine().stage, else: Config.test_run_stage())
 
+  defp architecture_failure_path(plan, issue_id), do: Path.join([Path.dirname(journal_path(plan)), "architecture", issue_id <> ".json"])
+
   @spec start_allowed?(map()) :: boolean()
   def start_allowed?(issue) do
     SymphonyElixir.RoutineTest.start_allowed?(issue) and instance_start_allowed?(issue)
@@ -481,7 +483,7 @@ defmodule SymphonyElixir.TestRun do
   end
 
   defp description_matches?(description, fixture, plan) do
-    if routine() && plan["scenario"] == "workflow" do
+    if routine() && workflow_scenario?(plan) do
       case DurableState.read(description_receipt_path(plan, fixture)) do
         {:ok, receipt} ->
           bound_description?(receipt, fixture, plan) and description in [receipt["previous"], receipt["description"]]
@@ -507,7 +509,8 @@ defmodule SymphonyElixir.TestRun do
   @spec record_description_intent(String.t(), String.t(), map()) :: :ok | {:error, term()}
   def record_description_intent(id, description, writer) do
     with true <- routine() != nil and is_binary(description),
-         {:ok, %{"scenario" => "workflow"} = plan} <- plan(),
+         {:ok, plan} <- plan(),
+         true <- workflow_scenario?(plan),
          {:ok, journal} <- journal(plan),
          %{} = fixture <- Enum.find(journal["fixtures"], &(&1["id"] == id and &1["deleted"] == false)),
          {:ok, %{"issue" => issue}} <-
@@ -534,6 +537,27 @@ defmodule SymphonyElixir.TestRun do
     "Freigegebener Symphony-Routinetest #{plan["run_id"]}. Erstelle ausschließlich test-runs/#{plan["run_id"]}.txt mit dem Inhalt #{plan["run_id"]}. Führe den regulären Workflow einschließlich aller konfigurierten Qualitäts-, Freigabe- und Merge-Gates aus. Keine Änderungen an anderen Dateien oder Produktprojekten. Erfolg ist die gemergte PR mit Merge-Evidenz im Workpad und Status Review. Testdatei als nachvollziehbaren Testbeleg erhalten."
   end
 
+  defp fixture_description(%{"scenario" => scenario} = plan) when scenario in ~w(arch_green arch_red arch_justified arch_unjustified) do
+    common =
+      "Gebundener Architekturtest #{plan["run_id"]}: Arbeite ausschließlich im isolierten symphony-test-Repository. Erstelle docs/architecture/contract.json mit einem Prüfbefehl, Zeitlimit und Architekturpfaden sowie test-runs/#{plan["run_id"]}.txt. Durchlaufe den regulären Workflow bis zur gemergten PR mit Merge-Evidenz im Workpad und Status Review. "
+
+    case scenario do
+      "arch_green" ->
+        common <> "Der Prüfbefehl muss grün sein; begründe die neue Vertragsdatei im PR-Abschnitt ## Architekturänderung und belege die Kennzeichnung."
+
+      "arch_red" ->
+        common <>
+          "Führe zuerst einen roten Prüfbefehl bis zum Merge-BLOCKER architecture_check_failed, dokumentiere ihn im Workpad, korrigiere den Prüfbefehl und führe danach bis zum Merge fort. Begründe die Vertragsänderung im PR."
+
+      "arch_justified" ->
+        common <> "Ändere eine Architekturregel und begründe sie mit neuem/geändertem ADR oder vollständig ausgefülltem PR-Abschnitt ## Architekturänderung; belege die Kennzeichnung und den Merge."
+
+      "arch_unjustified" ->
+        common <>
+          "Ändere eine Architekturregel zunächst ohne ADR und ohne PR-Begründung bis zum Merge-BLOCKER architecture_change_unjustified. Dokumentiere den Befund, ergänze die Begründung und führe bis zum Merge fort."
+    end
+  end
+
   defp fixture_description(plan) do
     "Begrenzter Symphony-Infrastrukturtest #{plan["run_id"]}. Der reguläre Todo-Bootstrap mit Workpad und Übergabe nach Planung (AI) ist das Erfolgskriterium."
   end
@@ -548,8 +572,8 @@ defmodule SymphonyElixir.TestRun do
       merge = workflow_merge(plan, issue, workpad)
 
       complete =
-        if plan["scenario"] == "workflow",
-          do: merge != nil,
+        if workflow_scenario?(plan),
+          do: merge != nil and architecture_fixture_evidence?(plan, workpad, merge, context, fixture),
           else: get_in(issue, ["state", "name"]) == fixture_target(fixture) and workpad != nil
 
       with {:ok, fixture} <- Delegation.probe(context, fixture),
@@ -591,12 +615,95 @@ defmodule SymphonyElixir.TestRun do
     if routine(), do: :ok, else: PoIncoming.cleanup(context, plan)
   end
 
-  defp workflow_merge(%{"scenario" => "workflow"}, issue, workpad) do
-    if get_in(issue, ["state", "name"]) in ["Review", "Fertig"] and workpad != nil and String.contains?(workpad.body, "Merge-Evidenz"),
+  defp workflow_merge(plan, issue, workpad) do
+    if workflow_scenario?(plan) and get_in(issue, ["state", "name"]) in ["Review", "Fertig"] and workpad != nil and String.contains?(workpad.body, "Merge-Evidenz"),
       do: SymphonyElixir.RoutineTest.merge_evidence(issue["identifier"])
   end
 
-  defp workflow_merge(_, _, _), do: nil
+  defp workflow_scenario?(%{"scenario" => scenario}), do: scenario in ~w(workflow arch_green arch_red arch_justified arch_unjustified)
+  defp workflow_scenario?(_), do: false
+
+  defp architecture_fixture_evidence?(%{"scenario" => scenario} = plan, workpad, merge, context, fixture)
+       when scenario in ~w(arch_green arch_red arch_justified arch_unjustified) do
+    with %{"base" => base, "head" => head} = marker <- architecture_marker(workpad),
+         true <- valid_sha?(base) and valid_sha?(head),
+         {:ok, changed} <- architecture_changed_paths(context, merge, head),
+         true <- architecture_change_marked?(scenario, marker, merge, changed) do
+      scenario not in ~w(arch_red arch_unjustified) or architecture_failure_confirmed?(plan, fixture, scenario)
+    else
+      _ -> false
+    end
+  end
+
+  defp architecture_fixture_evidence?(_, _, _, _, _), do: true
+
+  @doc false
+  @spec architecture_change_marked?(String.t(), map(), map(), [String.t()]) :: boolean()
+  def architecture_change_marked?(scenario, %{"paths" => paths, "justification" => reason, "base" => base, "head" => head}, merge, changed)
+      when is_list(paths) and is_binary(reason) and is_binary(head) and is_binary(base) and is_list(changed) do
+    marker_identity_valid?(reason, base, head, merge) and
+      architecture_paths_valid?(paths, changed) and
+      architecture_rule_present?(scenario, paths)
+  end
+
+  def architecture_change_marked?(_, _, _, _), do: false
+
+  defp marker_identity_valid?(reason, base, head, merge),
+    do: String.trim(reason) != "" and valid_sha?(base) and head == merge["head"]
+
+  defp architecture_paths_valid?(paths, changed),
+    do: paths != [] and Enum.all?(paths, &is_binary/1) and "docs/architecture/contract.json" in paths and Enum.all?(paths, &(&1 in changed))
+
+  defp architecture_rule_present?(scenario, paths),
+    do: scenario in ~w(arch_green arch_red) or Enum.any?(paths, &(&1 != "docs/architecture/contract.json"))
+
+  defp architecture_marker(%{body: body}) do
+    case Regex.run(~r/\n### Architekturänderung\n\s*```json\n([^\n]+)\n```/, body) do
+      [_, json] ->
+        case Jason.decode(json) do
+          {:ok, marker} -> marker
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp valid_sha?(value), do: is_binary(value) and Regex.match?(~r/\A[0-9a-f]{40}\z/, value)
+
+  defp architecture_changed_paths(context, merge, head) do
+    case System.cmd("gh", ["pr", "view", merge["url"], "--json", "headRefOid,changedFiles,files"],
+           cd: context.root,
+           env: Config.without_linear_secret([]),
+           stderr_to_stdout: true
+         ) do
+      {json, 0} ->
+        with {:ok, %{"headRefOid" => ^head, "changedFiles" => count, "files" => files}} <- Jason.decode(json),
+             true <- is_integer(count) and is_list(files) and length(files) == count,
+             true <- Enum.all?(files, &is_binary(&1["path"])) do
+          {:ok, Enum.map(files, & &1["path"])}
+        else
+          _ -> {:error, :architecture_diff_unavailable}
+        end
+
+      _ ->
+        {:error, :architecture_diff_unavailable}
+    end
+  end
+
+  defp architecture_failure_confirmed?(plan, fixture, scenario) do
+    reason = if scenario == "arch_red", do: "architecture_check_failed", else: "architecture_change_unjustified"
+
+    with {:ok, %{"source" => source, "issue_id" => id, "head" => head, "reason" => ^reason}} <-
+           DurableState.read(architecture_failure_path(plan, fixture["id"])),
+         true <- source == plan["source"] and id == fixture["id"] and valid_sha?(head),
+         {:ok, history} <- Client.fetch_issue_state_history(fixture["id"]) do
+      Enum.any?(history, &(get_in(&1, ["state", "name"]) == "BLOCKER"))
+    else
+      _ -> false
+    end
+  end
 
   defp fixture_target(fixture) do
     cond do
@@ -668,7 +775,7 @@ defmodule SymphonyElixir.TestRun do
   defp workspace_receipt_path(plan, fixture), do: Path.join([Path.dirname(journal_path(plan)), "workspaces", fixture["id"] <> ".json"])
 
   defp workspace_head(plan, fixture, path) do
-    if plan["scenario"] == "workflow" and fixture["complete"] == true and is_map(fixture["merge"]) do
+    if workflow_scenario?(plan) and fixture["complete"] == true and is_map(fixture["merge"]) do
       {:ok, fixture["merge"]["head"]}
     else
       recorded_workspace_head(plan, fixture, path)

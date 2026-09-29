@@ -426,6 +426,7 @@ lesen.
 - `symphony-pull`: bei Eintritt in `In Arbeit (AI)`, `Review (AI)` und `Test (AI)` den Branch per Rebase mit dem neuesten `origin/main` synchronisieren. Wenn der Pull/Rebase einen Konflikt nicht autonom auflösen kann und der aufrufende Ablauf keinen spezielleren manuellen Rücksprung definiert, dokumentiere den Blocker im Workpad und verschiebe nach `BLOCKER`.
 - Repo-lokale Skills werden direkt unter `{{ runtime.active_repo_skill_root }}` gesucht.
 - Globale Skills werden direkt unter den globalen Skill-Wurzeln `{{ runtime.global_skill_roots_text }}` gesucht.
+- Nur für Repositories mit `docs/architecture/contract.json`: `symphony-architecture` aus den globalen Skill-Wurzeln beachten; Vertragsformat und Merge-Prüfung stehen in [Architekturvertrag](docs/architecture-contract.md).
 - `symphony-prereview`: wenn das Ticket `PreReview (AI)` erreicht, den globalen Skill `symphony-prereview` explizit öffnen und befolgen.
 - `symphony-review`: wenn das Ticket `Review (AI)` erreicht, den globalen Skill `symphony-review` explizit öffnen und befolgen; `runtime.maximum_review_iterations={{ runtime.maximum_review_iterations }}` begrenzt die Reviewrunden gemäß Skill.
 - `symphony-test`: wenn das Ticket `Test (AI)` erreicht, den globalen Skill `symphony-test` explizit öffnen und befolgen.

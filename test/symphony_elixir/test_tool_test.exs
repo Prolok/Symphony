@@ -11,7 +11,7 @@ defmodule SymphonyElixir.Codex.TestToolTest do
     File.mkdir_p!(workspace)
     settings = Config.settings!() |> put_in([Access.key(:workspace), Access.key(:root)], root)
     settings = put_in(settings.worker.test_executor_socket, Path.join(root, "executor.sock"))
-    settings = put_in(settings.worker.test_executor, %{"scenarios" => ~w(bootstrap workflow failure-probe po_handoff po_followup)})
+    settings = put_in(settings.worker.test_executor, %{"scenarios" => ~w(bootstrap workflow failure-probe po_handoff po_followup arch_green arch_red arch_justified arch_unjustified)})
     issue = %Issue{id: "bound", identifier: "PRO-756", state: "In Arbeit (AI)", assigned_to_worker: true}
     %{context: %ProjectContext{id: root, root: root, name: "symphony-test", settings: settings}, issue: issue, workspace: workspace}
   end
@@ -40,7 +40,7 @@ defmodule SymphonyElixir.Codex.TestToolTest do
           end
         ]
 
-        for name <- ["symphony_test", "symphony_linear.symphony_test"], scenario <- ~w(bootstrap workflow failure-probe po_handoff po_followup) do
+        for name <- ["symphony_test", "symphony_linear.symphony_test"], scenario <- ~w(bootstrap workflow failure-probe po_handoff po_followup arch_green arch_red arch_justified arch_unjustified) do
           args = Map.put(args(), "scenario", scenario)
           assert DynamicTool.execute(name, args, opts)["success"]
           reply = MCPServer.handle_request(%{"jsonrpc" => "2.0", "id" => 1, "method" => "tools/call", "params" => %{"name" => name, "arguments" => args}}, opts)

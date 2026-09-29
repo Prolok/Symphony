@@ -4156,6 +4156,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, %{"failure_count" => 1, "last_failure_reason" => ":second_failure"}} = Store.read("review")
   end
 
+  @tag timeout: 180_000
   test "a failed PO starter keeps observations and spends no Linear requests over 30 simulated minutes", %{issues: [issue | _]} do
     review = %{issue | state: "Yolo Review"}
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}

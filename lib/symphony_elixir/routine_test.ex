@@ -323,6 +323,31 @@ defmodule SymphonyElixir.RoutineTest do
     Config.test_executor() != nil and match?(%ProjectContext{name: "symphony-test"}, ProjectContext.current())
   end
 
+  @doc false
+  @spec record_architecture_failure(String.t(), String.t(), String.t(), term()) :: :ok
+  def record_architecture_failure(issue_id, identifier, head, {:error, {:bound_merge_incomplete, 10, output}})
+      when is_binary(issue_id) and is_binary(identifier) and is_binary(head) and is_binary(output) do
+    if target?() do
+      with [_, reason] <- Regex.run(~r/(?:\A|\n)(architecture_check_failed|architecture_change_unjustified):/, output),
+           {directory, %{"identifier" => ^identifier}} <- fixture(issue_id),
+           {:ok, %{"scenario" => scenario, "source" => source}} <- DurableState.read(Path.join(directory, "plan.json")),
+           true <- {scenario, reason} in [{"arch_red", "architecture_check_failed"}, {"arch_unjustified", "architecture_change_unjustified"}] do
+        DurableState.write(Path.join([directory, "architecture", issue_id <> ".json"]), %{
+          "source" => source,
+          "issue_id" => issue_id,
+          "head" => head,
+          "reason" => reason
+        })
+      else
+        _ -> :ok
+      end
+    end
+
+    :ok
+  end
+
+  def record_architecture_failure(_, _, _, _), do: :ok
+
   defp target?, do: manages_project?()
 
   defp fixture(id) do
@@ -412,7 +437,8 @@ defmodule SymphonyElixir.RoutineTest do
            true <- TestExecutor.active?(directory),
            {:ok, %{"active" => true}} <- DurableState.read(Path.join(directory, "control.json")),
            {:ok, plan} <- DurableState.read(Path.join(directory, "plan.json")) do
-        plan["scenario"] == "workflow" or (plan["scenario"] == "bootstrap" and issue.state == "Todo (AI)")
+        plan["scenario"] in ~w(workflow arch_green arch_red arch_justified arch_unjustified) or
+          (plan["scenario"] == "bootstrap" and issue.state == "Todo (AI)")
       else
         _ -> false
       end

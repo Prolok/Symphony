@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import asyncio
+import fnmatch
 import json
 import os
 import random
 import re
 import shutil
+import signal
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,6 +32,9 @@ MANUAL_REVIEW_LABEL_ENV = "SYMPHONY_ISSUE_LABELS_JSON"
 MANUAL_REVIEW_BLOCKER_EXIT = 7
 APP_LABEL_LOOKUP_EXIT = 8
 COMMENT_CHECKPOINT_EXIT = 9
+ARCHITECTURE_BLOCKER_EXIT = 10
+ARCHITECTURE_CONTRACT = "docs/architecture/contract.json"
+ARCHITECTURE_MARKER = "<!-- symphony-architecture: "
 BOUND_REQUEST = "SYMPHONY_BOUND_REQUEST "
 bound_request = None
 DECISIVE_REVIEW_STATES = {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}
@@ -79,6 +84,28 @@ class LabelRefreshError(RuntimeError):
 
 class AppLabelLookupRequired(LabelRefreshError):
     pass
+
+
+class ArchitectureError(RuntimeError):
+    def __init__(self, reason: str, detail: str):
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
+
+
+@dataclass
+class ArchitectureChange:
+    paths: list[str]
+    justification: str
+    body: str
+
+
+def unique_json_object(pairs: list[tuple[str, Any]]) -> dict:
+    result: dict = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON field: {key}")
+        result[key] = value
+    return result
 
 
 def is_rate_limit_error(error: str) -> bool:
@@ -539,6 +566,103 @@ CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 def sanitize_terminal_output(value: str) -> str:
     return CONTROL_CHARS_RE.sub("", value)
+
+
+async def contract_at(revision: str) -> dict | None:
+    try:
+        entry = (await run_git("ls-tree", revision, "--", ARCHITECTURE_CONTRACT)).strip()
+        if not entry:
+            return None
+        if not re.fullmatch(r"100(644|755) blob [0-9a-f]{40}\t" + re.escape(ARCHITECTURE_CONTRACT), entry):
+            raise ValueError("contract must be a regular tracked JSON file")
+        raw = await run_git("show", f"{revision}:{ARCHITECTURE_CONTRACT}")
+        contract = json.loads(raw, object_pairs_hook=unique_json_object)
+        if not isinstance(contract, dict) or not {"command", "timeout_seconds", "architecture_paths"} <= set(contract):
+            raise ValueError("expected command, timeout_seconds and architecture_paths")
+        command = contract["command"]
+        timeout = contract["timeout_seconds"]
+        paths = contract["architecture_paths"]
+        if not isinstance(command, list) or not command or any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in command):
+            raise ValueError("command must be a nonempty argv string list")
+        if type(timeout) not in (int, float) or not 0 < timeout <= 600:
+            raise ValueError("timeout_seconds must be greater than zero and at most 600")
+        if not isinstance(paths, list) or not paths or any(not isinstance(glob, str) or not glob or glob.startswith("/") or "\\" in glob or "\x00" in glob or ".." in glob.split("/") for glob in paths):
+            raise ValueError("architecture_paths must contain relative globs")
+        return contract
+    except (RuntimeError, ValueError, TypeError) as error:
+        raise ArchitectureError("architecture_contract_invalid", f"{revision[:12]}: {error}") from error
+
+
+def architecture_justification(body: str, changed: list[str], candidate: str) -> str | None:
+    for path in changed:
+        if path.startswith("docs/architecture/adr/") and path.endswith(".md"):
+            # A new or edited ADR must still exist on the candidate.
+            if path in candidate.splitlines():
+                return f"ADR: {path}"
+    section = re.search(r"(?ims)^## Architekturänderung[ \t]*\n(.*?)(?=^##[ \t]|\Z)", body)
+    if section:
+        content = re.sub(r"(?m)^<!-- symphony-architecture: .*? -->\s*$", "", section.group(1))
+        if all(re.search(rf"(?im)^[ \t]*{key}:[ \t]*\S.+$", content) for key in ("Änderung", "Grund", "Alternativen")):
+            return "PR: ## Architekturänderung"
+    return None
+
+
+async def architecture_gate(pr: PrInfo) -> ArchitectureChange | None:
+    if not git_sha(pr.base_sha) or not git_sha(pr.head_sha):
+        raise ArchitectureError("architecture_candidate_stale", "PR base/head SHA missing")
+    base = await contract_at(pr.base_sha)
+    candidate = await contract_at(pr.head_sha)
+    if base is None and candidate is None:
+        return None
+    if (await run_git("rev-parse", "HEAD")).strip() != pr.head_sha or await run_git("status", "--porcelain"):
+        raise ArchitectureError("architecture_candidate_stale", "checkout does not match the clean PR head")
+    if (await run_git("merge-base", pr.base_sha, pr.head_sha)).strip() != pr.base_sha:
+        raise ArchitectureError("architecture_candidate_stale", "PR head is not based on the current base; rebase and retest")
+    changed = [path for path in (await run_git("diff", "--no-renames", "--name-only", "-z", pr.base_sha, pr.head_sha)).split("\x00") if path]
+    globs = (base or {}).get("architecture_paths", []) + (candidate or {}).get("architecture_paths", [])
+    paths = sorted(path for path in changed if path == ARCHITECTURE_CONTRACT or any(fnmatch.fnmatchcase(path, glob) for glob in globs))
+    if candidate:
+        command = candidate["command"]
+        try:
+            proc = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE,
+                                                        stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+            output = [""]
+            reader = asyncio.create_task(read_architecture_output(proc.stdout, output))
+            waiter = asyncio.create_task(proc.wait())
+            _, pending = await asyncio.wait({waiter, reader}, timeout=candidate["timeout_seconds"])
+            if pending:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                reader.cancel()
+                await asyncio.gather(waiter, reader, return_exceptions=True)
+                raise ArchitectureError("architecture_check_failed", f"timeout after {candidate['timeout_seconds']}s; output: {output[0]}")
+            reader.result()
+        except OSError as error:
+            raise ArchitectureError("architecture_check_failed", f"command could not start: {error}") from error
+        if proc.returncode:
+            raise ArchitectureError("architecture_check_failed", f"exit {proc.returncode}; output: {output[0]}")
+    body = json.loads(await run_gh("pr", "view", str(pr.number), "--json", "body"))["body"] or ""
+    if not isinstance(body, str):
+        raise ArchitectureError("architecture_change_unjustified", "PR description unavailable")
+    candidate_files = (await run_git("ls-tree", "-r", "--name-only", pr.head_sha, "--", "docs/architecture/adr")).splitlines()
+    justification = architecture_justification(body, changed, "\n".join(candidate_files)) if paths else ""
+    if paths and not justification:
+        raise ArchitectureError("architecture_change_unjustified", f"Architecture paths changed: {', '.join(paths[:20])}; add a changed ADR or a PR section '## Architekturänderung' with Änderung, Grund and Alternativen")
+    return ArchitectureChange(paths, justification, body) if paths else None
+
+
+async def read_architecture_output(stream: asyncio.StreamReader, excerpt: list[str]) -> None:
+    while chunk := await stream.read(4096):
+        excerpt[0] = sanitize_terminal_output(excerpt[0] + chunk.decode(errors="replace"))[-2000:]
+
+
+async def mark_architecture_pr(pr: PrInfo, change: ArchitectureChange) -> None:
+    marker = ARCHITECTURE_MARKER + json.dumps({"paths": change.paths, "justification": change.justification, "base": pr.base_sha, "head": pr.head_sha}, ensure_ascii=False, separators=(",", ":")) + " -->"
+    clean = re.sub(r"(?m)^<!-- symphony-architecture: .*? -->\n?", "", change.body).rstrip()
+    if clean + "\n\n" + marker != change.body:
+        await run_gh("pr", "edit", str(pr.number), "--body", clean + "\n\n" + marker)
 
 
 def check_timestamp(check: dict[str, Any]) -> datetime | None:
@@ -1235,6 +1359,11 @@ async def watch_pr() -> None:
             "running land_watch again.",
         )
         raise SystemExit(5)
+    try:
+        await architecture_gate(pr)
+    except ArchitectureError as error:
+        print(str(error), flush=True)
+        raise SystemExit(ARCHITECTURE_BLOCKER_EXIT) from error
     head_sha = pr.head_sha
     checks_done = asyncio.Event()
     codex_task = asyncio.create_task(wait_for_codex(pr.number, checks_done))
@@ -1307,8 +1436,8 @@ async def watch_pr() -> None:
         raise_on_missing_manual_review_approval(labels, current, reviews)
 
 
-def request_bound_checkpoint(operation: str) -> dict:
-    print(BOUND_REQUEST + json.dumps({"operation": operation}), flush=True)
+def request_bound_checkpoint(operation: str, **details: Any) -> dict:
+    print(BOUND_REQUEST + json.dumps({"operation": operation, **details}, ensure_ascii=False), flush=True)
     line = sys.stdin.readline()
     if not line:
         raise RuntimeError("Bound runtime disconnected before merge.")
@@ -1345,6 +1474,28 @@ async def merge_bound(expected_head: str, title: str) -> None:
     remote = (await run_git("ls-remote", "--exit-code", "--heads", "origin", evidence.branch)).split()
     if remote != [expected_head, f"refs/heads/{evidence.branch}"]:
         raise RuntimeError("Remote branch head does not match the tested merge head.")
+    try:
+        architecture = await architecture_gate(current)
+    except ArchitectureError as error:
+        print(str(error), flush=True)
+        raise SystemExit(ARCHITECTURE_BLOCKER_EXIT) from error
+    if architecture:
+        await mark_architecture_pr(current, architecture)
+        marked = bound_request("architecture", paths=architecture.paths,
+                               justification=architecture.justification, base=current.base_sha,
+                               head=current.head_sha, url=current.url)
+        if marked.get("ok") is not True:
+            raise RuntimeError(f"Architecture marking incomplete: {marked.get('error', 'unknown error')}")
+        labels = await current_issue_labels()
+        issue_comments, review_comments, reviews, review_request_at = await fetch_review_context(current.number)
+        raise_on_human_feedback(issue_comments, review_comments, reviews, review_request_at)
+        raise_on_missing_manual_review_approval(labels, current, reviews)
+        summary = await collect_ci_summary(current)
+        if summary.failed or summary.pending:
+            raise CiEvidenceError("GitHub CI changed after architecture marking; repeat the bound merge.")
+        after_mark = await require_merge_preflight()
+        if after_mark.branch != evidence.branch or after_mark.pr != current:
+            raise RuntimeError("PR/base/head changed after architecture marking; repeat the bound merge.")
     print(check_summary_message(summary), flush=True)
     # The final fresh Linear scan executes in the bound parent, after GitHub
     # gates. This remaining API/action interval cannot be made atomic.

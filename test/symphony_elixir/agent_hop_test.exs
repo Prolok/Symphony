@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.AgentHopTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Relay.Store, as: Digest
   alias SymphonyElixir.Yolo.AgentHop
 
   test "limits ten agent wakes per issue, holds the next, and releases on human input or window expiry" do
@@ -64,6 +65,19 @@ defmodule SymphonyElixir.AgentHopTest do
     assert MapSet.member?(blocked, "shared")
     assert {:ok, _, blocked} = AgentHop.gate_durable(%{}, %{"shared" => held}, opts)
     assert MapSet.member?(blocked, "shared")
+  end
+
+  test "corrupt counters stop agent wake processing" do
+    root = Path.join(System.tmp_dir!(), "agent-hops-failure-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+    workspace = Config.settings!().tracker.app["workspace_id"]
+    key = Digest.digest({workspace, "shared"})
+    state_path = Path.join([root, "yolo", "agent-hops", key <> ".json"])
+    File.mkdir_p!(Path.dirname(state_path))
+    File.write!(state_path, "invalid JSON")
+
+    assert {:error, :runtime_state_corrupt} =
+             AgentHop.gate_durable(%{}, %{"shared" => observation("wake", ["agent-input"], [])}, agent_hop_state_root: root)
   end
 
   defp observation(key, agents, humans), do: %{"source" => key, "member_semantic" => key, "agent_sources" => agents, "human_sources" => humans}

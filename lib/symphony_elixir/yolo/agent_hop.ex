@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Yolo.AgentHop do
 
   @doc "Apply the per-issue limit across PO groups with an atomic durable record."
   @spec gate_durable(map(), map(), keyword()) :: {:ok, map(), MapSet.t()} | {:error, term()}
-  def gate_durable(record, observations, opts \\ []) do
+  def gate_durable(record, observations, opts) do
     Enum.reduce_while(observations, {:ok, record, MapSet.new()}, fn {id, observation}, {:ok, current, blocked} ->
       path = path(id, opts)
 
@@ -53,7 +53,7 @@ defmodule SymphonyElixir.Yolo.AgentHop do
   end
 
   @spec gate(map(), map(), keyword()) :: {map(), MapSet.t()}
-  def gate(record, observations, opts \\ []) do
+  def gate(record, observations, opts) do
     now = Keyword.get(opts, :agent_hop_now, fn -> System.system_time(:millisecond) end).()
     limit = Config.settings!().tracker.agent_hop_limit
 

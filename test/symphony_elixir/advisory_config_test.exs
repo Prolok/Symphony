@@ -69,6 +69,7 @@ defmodule SymphonyElixir.AdvisoryConfigTest do
     assert {:ok, config} = Schema.parse(%{"tracker" => %{"trusted_agent_ids" => [], "agent_hop_limit" => 3}})
     assert config.tracker.agent_hop_limit == 3
     assert {:error, _} = Schema.parse(%{"tracker" => %{"trusted_agent_ids" => ["not-a-uuid"]}})
+    assert {:error, _} = Schema.parse(%{"tracker" => %{"trusted_agent_ids" => 42}})
     assert {:error, _} = Schema.parse(%{"tracker" => %{"agent_hop_limit" => 0}})
     assert {:error, :linear_trusted_agent_is_coding_app} = AppAuth.validate(%{tracker | app: Map.put(tracker.app, "user_id", @agent)})
 
@@ -83,6 +84,9 @@ defmodule SymphonyElixir.AdvisoryConfigTest do
 
       if valid?, do: assert(TrustedAgents.verify() == :ok), else: assert(match?({:error, _}, TrustedAgents.verify()))
     end
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn _, _ -> {:error, :offline} end)
+    assert {:error, {:linear_api_request, :linear_app_request_unavailable}} = TrustedAgents.verify()
   end
 
   test "projects sharing a workspace reject different trusted lists before relay resolution" do

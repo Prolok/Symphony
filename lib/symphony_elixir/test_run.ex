@@ -13,6 +13,8 @@ defmodule SymphonyElixir.TestRun do
   @spec stage() :: String.t() | nil
   def stage, do: if(routine(), do: routine().stage, else: Config.test_run_stage())
 
+  defp architecture_failure_path(plan, issue_id), do: Path.join([Path.dirname(journal_path(plan)), "architecture", issue_id <> ".json"])
+
   @spec start_allowed?(map()) :: boolean()
   def start_allowed?(issue) do
     SymphonyElixir.RoutineTest.start_allowed?(issue) and instance_start_allowed?(issue)
@@ -571,7 +573,7 @@ defmodule SymphonyElixir.TestRun do
 
       complete =
         if workflow_scenario?(plan),
-          do: merge != nil and architecture_fixture_evidence?(plan, workpad),
+          do: merge != nil and architecture_fixture_evidence?(plan, workpad, merge, context, fixture),
           else: get_in(issue, ["state", "name"]) == fixture_target(fixture) and workpad != nil
 
       with {:ok, fixture} <- Delegation.probe(context, fixture),
@@ -621,18 +623,88 @@ defmodule SymphonyElixir.TestRun do
   defp workflow_scenario?(%{"scenario" => scenario}), do: scenario in ~w(workflow arch_green arch_red arch_justified arch_unjustified)
   defp workflow_scenario?(_), do: false
 
-  defp architecture_fixture_evidence?(%{"scenario" => "arch_red"}, workpad),
-    do: architecture_marked?(workpad) and String.contains?(workpad.body, "architecture_check_failed")
+  defp architecture_fixture_evidence?(%{"scenario" => scenario} = plan, workpad, merge, context, fixture)
+       when scenario in ~w(arch_green arch_red arch_justified arch_unjustified) do
+    with %{"base" => base, "head" => head} = marker <- architecture_marker(workpad),
+         true <- valid_sha?(base) and valid_sha?(head),
+         {:ok, changed} <- architecture_changed_paths(context, merge, head),
+         true <- architecture_change_marked?(scenario, marker, merge, changed) do
+      scenario not in ~w(arch_red arch_unjustified) or architecture_failure_confirmed?(plan, fixture, scenario)
+    else
+      _ -> false
+    end
+  end
 
-  defp architecture_fixture_evidence?(%{"scenario" => "arch_unjustified"}, workpad),
-    do: architecture_marked?(workpad) and String.contains?(workpad.body, "architecture_change_unjustified")
+  defp architecture_fixture_evidence?(_, _, _, _, _), do: true
 
-  defp architecture_fixture_evidence?(%{"scenario" => scenario}, workpad) when scenario in ~w(arch_green arch_justified),
-    do: architecture_marked?(workpad)
+  @doc false
+  @spec architecture_change_marked?(String.t(), map(), map(), [String.t()]) :: boolean()
+  def architecture_change_marked?(scenario, %{"paths" => paths, "justification" => reason, "base" => base, "head" => head}, merge, changed)
+      when is_list(paths) and is_binary(reason) and is_binary(head) and is_binary(base) and is_list(changed) do
+    marker_identity_valid?(reason, base, head, merge) and
+      architecture_paths_valid?(paths, changed) and
+      architecture_rule_present?(scenario, paths)
+  end
 
-  defp architecture_fixture_evidence?(_, _), do: true
-  defp architecture_marked?(%{body: body}), do: String.contains?(body, "### Architekturänderung") and String.contains?(body, "\"paths\"")
-  defp architecture_marked?(_), do: false
+  def architecture_change_marked?(_, _, _, _), do: false
+
+  defp marker_identity_valid?(reason, base, head, merge),
+    do: String.trim(reason) != "" and valid_sha?(base) and head == merge["head"]
+
+  defp architecture_paths_valid?(paths, changed),
+    do: paths != [] and Enum.all?(paths, &is_binary/1) and "docs/architecture/contract.json" in paths and Enum.all?(paths, &(&1 in changed))
+
+  defp architecture_rule_present?(scenario, paths),
+    do: scenario in ~w(arch_green arch_red) or Enum.any?(paths, &(&1 != "docs/architecture/contract.json"))
+
+  defp architecture_marker(%{body: body}) do
+    case Regex.run(~r/\n### Architekturänderung\n\s*```json\n([^\n]+)\n```/, body) do
+      [_, json] ->
+        case Jason.decode(json) do
+          {:ok, marker} -> marker
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp architecture_marker(_), do: nil
+  defp valid_sha?(value), do: is_binary(value) and Regex.match?(~r/\A[0-9a-f]{40}\z/, value)
+
+  defp architecture_changed_paths(context, merge, head) do
+    case System.cmd("gh", ["pr", "view", merge["url"], "--json", "headRefOid,changedFiles,files"],
+           cd: context.root,
+           env: Config.without_linear_secret([]),
+           stderr_to_stdout: true
+         ) do
+      {json, 0} ->
+        with {:ok, %{"headRefOid" => ^head, "changedFiles" => count, "files" => files}} <- Jason.decode(json),
+             true <- is_integer(count) and is_list(files) and length(files) == count,
+             true <- Enum.all?(files, &is_binary(&1["path"])) do
+          {:ok, Enum.map(files, & &1["path"])}
+        else
+          _ -> {:error, :architecture_diff_unavailable}
+        end
+
+      _ ->
+        {:error, :architecture_diff_unavailable}
+    end
+  end
+
+  defp architecture_failure_confirmed?(plan, fixture, scenario) do
+    reason = if scenario == "arch_red", do: "architecture_check_failed", else: "architecture_change_unjustified"
+
+    with {:ok, %{"source" => source, "issue_id" => id, "head" => head, "reason" => ^reason}} <-
+           DurableState.read(architecture_failure_path(plan, fixture["id"])),
+         true <- source == plan["source"] and id == fixture["id"] and valid_sha?(head),
+         {:ok, history} <- Client.fetch_issue_state_history(fixture["id"]) do
+      Enum.any?(history, &(get_in(&1, ["state", "name"]) == "BLOCKER"))
+    else
+      _ -> false
+    end
+  end
 
   defp fixture_target(fixture) do
     cond do

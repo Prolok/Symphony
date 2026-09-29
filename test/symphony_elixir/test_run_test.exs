@@ -1498,6 +1498,53 @@ defmodule SymphonyElixir.TestRunTest do
     assert Enum.all?(Jason.decode!(json)["fixtures"], & &1["deleted"])
   end
 
+  test "architecture failure receipt requires a bound merge failure from the matching fixture", ctx do
+    {context, config, request} = routine_context(ctx)
+    job = routine_job(config, %{request | "scenario" => "arch_red"})
+    plan = %{"instance" => "routine", "run_id" => request["run_id"], "scenario" => "arch_red", "source" => ctx.plan["source"]}
+    :ok = DurableState.write(Path.join(job["directory"], "plan.json"), plan)
+    assert {:ok, prepared} = TestRun.with_routine(context, plan, job["directory"], "prepare", fn -> TestRun.execute("prepare") end)
+    [fixture] = prepared["fixtures"]
+    head = String.duplicate("a", 40)
+    path = Path.join([job["directory"], "architecture", fixture["id"] <> ".json"])
+
+    ProjectContext.with_context(context, fn ->
+      record = fn status, output ->
+        RoutineTest.record_architecture_failure(
+          fixture["id"],
+          fixture["identifier"],
+          head,
+          {:error, {:bound_merge_incomplete, status, output}}
+        )
+      end
+
+      assert :ok = record.(9, "architecture_check_failed: fake")
+      refute File.exists?(path)
+      assert :ok = record.(10, "architecture_change_unjustified: wrong reason")
+      refute File.exists?(path)
+      assert :ok = record.(10, "architecture_check_failed: exit 1")
+    end)
+
+    assert {:ok, %{"reason" => "architecture_check_failed", "issue_id" => id, "head" => ^head, "source" => source}} = DurableState.read(path)
+    assert id == fixture["id"]
+    assert source == plan["source"]
+  end
+
+  test "architecture marker needs actual PR files and a rule change for justified scenarios" do
+    contract = "docs/architecture/contract.json"
+    rule = "docs/architecture/rules.md"
+    base = String.duplicate("a", 40)
+    head = String.duplicate("b", 40)
+    merge = %{"head" => head}
+    marker = %{"paths" => [contract], "justification" => "PR: Architekturänderung", "base" => base, "head" => head}
+
+    assert TestRun.architecture_change_marked?("arch_green", marker, merge, [contract])
+    refute TestRun.architecture_change_marked?("arch_justified", marker, merge, [contract])
+    refute TestRun.architecture_change_marked?("arch_unjustified", %{marker | "paths" => [contract, rule]}, merge, [contract])
+    assert TestRun.architecture_change_marked?("arch_justified", %{marker | "paths" => [contract, rule]}, merge, [contract, rule])
+    refute TestRun.architecture_change_marked?("arch_justified", %{marker | "paths" => [contract, rule]}, %{"head" => base}, [contract, rule])
+  end
+
   defp journal_path(root), do: Path.join(root, "test-state/runs/fixture-run/fixtures.json")
 
   defp count_calls(source, name),

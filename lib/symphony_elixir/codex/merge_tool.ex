@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Codex.MergeTool do
   @moduledoc "Bound execution of the existing land helper, with a fresh comment check at the actual merge request."
-  alias SymphonyElixir.{CommentCheckpoint, Config, PathSafety, RuntimePaths, SSH}
+  alias SymphonyElixir.{CommentCheckpoint, Config, PathSafety, RoutineTest, RuntimePaths, SSH}
   alias SymphonyElixir.Linear.{Client, WriteContext}
 
   @spec tool_spec() :: map()
@@ -28,7 +28,9 @@ defmodule SymphonyElixir.Codex.MergeTool do
          true <- issue.state == "Merge (AI)",
          {:ok, workspace} <- workspace(issue, WriteContext.current()["worker_host"]),
          {:ok, port} <- start_port(workspace, issue, head, WriteContext.current()["worker_host"]) do
-      run(port, issue, opts)
+      result = run(port, issue, opts)
+      RoutineTest.record_architecture_failure(issue.id, issue.identifier, head, result)
+      result
     else
       {:error, _} = error -> error
       _ -> {:error, :invalid_bound_merge_context}

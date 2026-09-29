@@ -492,6 +492,25 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     assert workpad_body() == body
     refute_received :status_mutation
     refute MergeTool.handle_checkpoint({:ok, %{request | "paths" => []}}, issue, opts)["ok"]
+    refute MergeTool.handle_checkpoint({:ok, %{"operation" => "architecture"}}, issue, opts)["ok"]
+
+    Process.put(:label_pages, %{nil => page})
+
+    Process.put(:architecture_label_nodes, [
+      %{"id" => "first", "name" => "Architekturänderung", "team" => nil},
+      %{"id" => "second", "name" => "Architekturänderung", "team" => nil}
+    ])
+
+    refute MergeTool.handle_checkpoint({:ok, request}, issue, opts)["ok"]
+
+    first = data(%{"issueLabels" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => true, "endCursor" => "next"}}})
+    last = data(%{"issueLabels" => %{"nodes" => [%{"id" => "architecture-label", "name" => "Architekturänderung", "team" => nil}], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}})
+    Process.put(:architecture_label_pages, %{nil => first, "next" => last})
+    assert MergeTool.handle_checkpoint({:ok, request}, issue, opts) == %{"ok" => true}
+
+    incomplete = data(%{"issueLabels" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => true, "endCursor" => nil}}})
+    Process.put(:architecture_label_pages, %{nil => incomplete})
+    refute MergeTool.handle_checkpoint({:ok, request}, issue, opts)["ok"]
   end
 
   test "missing architecture label does not block the bound merge marker", %{issue: issue} do
@@ -705,9 +724,15 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     {:ok, put_in(response, [:body, "data", "issues", "pageInfo"], %{"hasNextPage" => false, "endCursor" => nil})}
   end
 
-  defp request(%{"query" => "query SymphonyArchitectureLabel" <> _}, _headers) do
-    nodes = Process.get(:architecture_label_nodes, [%{"id" => "architecture-label", "name" => "Architekturänderung", "team" => nil}])
-    data(%{"issueLabels" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}})
+  defp request(%{"query" => "query SymphonyArchitectureLabel" <> _, "variables" => variables}, _headers) do
+    case Process.get(:architecture_label_pages) do
+      pages when is_map(pages) ->
+        Map.fetch!(pages, variables.after)
+
+      _ ->
+        nodes = Process.get(:architecture_label_nodes, [%{"id" => "architecture-label", "name" => "Architekturänderung", "team" => nil}])
+        data(%{"issueLabels" => %{"nodes" => nodes, "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}})
+    end
   end
 
   defp request(payload, _headers) do

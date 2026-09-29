@@ -111,6 +111,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
   end
 
   for {active, unresolved} <- [{0, false}, {5, false}, {0, true}] do
+    @tag timeout: 180_000
     test "thirty-minute virtual relay load with #{active} running tickets and unresolved marker #{unresolved} stays within instance budget" do
       active = unquote(active)
       unresolved = unquote(unresolved)

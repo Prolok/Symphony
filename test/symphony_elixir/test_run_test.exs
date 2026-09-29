@@ -1543,6 +1543,97 @@ defmodule SymphonyElixir.TestRunTest do
     refute TestRun.architecture_change_marked?("arch_unjustified", %{marker | "paths" => [contract, rule]}, merge, [contract])
     assert TestRun.architecture_change_marked?("arch_justified", %{marker | "paths" => [contract, rule]}, merge, [contract, rule])
     refute TestRun.architecture_change_marked?("arch_justified", %{marker | "paths" => [contract, rule]}, %{"head" => base}, [contract, rule])
+    refute TestRun.architecture_change_marked?("arch_green", %{}, merge, [])
+  end
+
+  test "architecture routines require a merged PR diff, a matching marker, and observed red gates", ctx do
+    {context, config, request} = routine_context(ctx)
+    git!(context.root, ["remote", "add", "origin", "https://github.com/Prolok/symphony-test.git"])
+    bin = Path.join(ctx.root, "fake-gh-architecture")
+    File.mkdir_p!(bin)
+    list_response = Path.join(bin, "list.json")
+    view_response = Path.join(bin, "view.json")
+    view_failure = Path.join(bin, "view-failure")
+    gh = Path.join(bin, "gh")
+
+    File.write!(gh, "#!/bin/sh\nif [ \"$2\" = view ]; then\n  if [ -f '#{view_failure}' ]; then exit 1; fi\n  cat '#{view_response}'\nelse\n  cat '#{list_response}'\nfi\n")
+    File.chmod!(gh, 0o755)
+    previous = System.fetch_env!("PATH")
+    System.put_env("PATH", bin <> ":" <> previous)
+    on_exit(fn -> System.put_env("PATH", previous) end)
+
+    base = String.duplicate("a", 40)
+    head = String.duplicate("b", 40)
+    url = "https://github.com/Prolok/symphony-test/pull/1"
+    contract = "docs/architecture/contract.json"
+    rule = "docs/architecture/rules.md"
+    merge = %{"state" => "MERGED", "mergeCommit" => %{"oid" => head}, "headRefOid" => head, "url" => url}
+    File.write!(list_response, Jason.encode!([merge]))
+
+    for scenario <- ~w(arch_green arch_red arch_justified arch_unjustified) do
+      request = %{request | "run_id" => scenario, "scenario" => scenario}
+      job = routine_job(config, request)
+      plan = %{"instance" => "routine", "run_id" => scenario, "scenario" => scenario, "source" => ctx.plan["source"]}
+      :ok = DurableState.write(Path.join(job["directory"], "plan.json"), plan)
+
+      stage = fn operation ->
+        TestRun.with_routine(context, plan, job["directory"], operation, fn -> TestRun.execute(operation) end)
+      end
+
+      assert {:ok, %{"fixtures" => [fixture]}} = stage.("prepare")
+      assert fixture["description"] =~ "Gebundener Architekturtest"
+      complete(ctx.source_agent)
+      paths = if scenario in ~w(arch_green arch_red), do: [contract], else: [contract, rule]
+      File.write!(view_response, Jason.encode!(%{"headRefOid" => head, "changedFiles" => length(paths), "files" => Enum.map(paths, &%{"path" => &1})}))
+      marker = %{"paths" => paths, "justification" => "PR: Architekturänderung", "base" => base, "head" => head, "url" => url}
+      body = "## Symphony Workpad\nMerge-Evidenz: fixture\n### Architekturänderung\n\n```json\n#{Jason.encode!(marker)}\n```\n"
+
+      Agent.update(ctx.source_agent, fn state ->
+        state = put_in(state.issues[fixture["id"]]["state"]["name"], "Review")
+        update_in(state.comments[fixture["id"]], fn [comment] -> [%{comment | "body" => body}] end)
+      end)
+
+      if scenario == "arch_green" do
+        File.write!(view_response, "invalid json")
+        assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
+        File.write!(view_response, Jason.encode!(%{"headRefOid" => head, "changedFiles" => length(paths), "files" => Enum.map(paths, &%{"path" => &1})}))
+        File.touch!(view_failure)
+        assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
+        File.rm!(view_failure)
+
+        Agent.update(ctx.source_agent, fn state ->
+          update_in(state.comments[fixture["id"]], fn [comment] -> [%{comment | "body" => "## Symphony Workpad\nMerge-Evidenz: fixture\n### Architekturänderung\n```json\ninvalid\n```"}] end)
+        end)
+
+        assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
+        Agent.update(ctx.source_agent, fn state -> update_in(state.comments[fixture["id"]], fn [comment] -> [%{comment | "body" => "## Symphony Workpad\nMerge-Evidenz: fixture"}] end) end)
+        assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
+        Agent.update(ctx.source_agent, fn state -> update_in(state.comments[fixture["id"]], fn [comment] -> [%{comment | "body" => body}] end) end)
+      end
+
+      if scenario in ~w(arch_red arch_unjustified) do
+        assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
+        reason = if scenario == "arch_red", do: "architecture_check_failed", else: "architecture_change_unjustified"
+
+        ProjectContext.with_context(context, fn ->
+          assert :ok =
+                   RoutineTest.record_architecture_failure(
+                     fixture["id"],
+                     fixture["identifier"],
+                     head,
+                     {:error, {:bound_merge_incomplete, 10, reason <> ": gate"}}
+                   )
+        end)
+
+        assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
+
+        Agent.update(ctx.source_agent, fn state ->
+          Map.update(state, :histories, %{fixture["id"] => [%{"state" => %{"name" => "BLOCKER"}}]}, &Map.put(&1, fixture["id"], [%{"state" => %{"name" => "BLOCKER"}}]))
+        end)
+      end
+
+      assert {:ok, %{"fixtures" => [%{"complete" => true, "merge" => %{"head" => ^head}}]}} = stage.("probe")
+    end
   end
 
   defp journal_path(root), do: Path.join(root, "test-state/runs/fixture-run/fixtures.json")
@@ -2572,6 +2663,9 @@ defmodule SymphonyElixir.TestRunTest do
 
   defp respond_query("query TestFixture(" <> _, _variables, %{failure: :probe_transport} = state),
     do: {{:error, %Req.TransportError{reason: :timeout}}, state}
+
+  defp respond_query("query SymphonyIssueStateHistory" <> _, variables, state),
+    do: answer(%{"issue" => %{"id" => variables["id"], "stateHistory" => page(get_in(state, [:histories, variables["id"]]) || [])}}, state)
 
   defp respond_query(query, variables, state) do
     cond do

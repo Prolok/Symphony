@@ -670,7 +670,6 @@ defmodule SymphonyElixir.TestRun do
     end
   end
 
-  defp architecture_marker(_), do: nil
   defp valid_sha?(value), do: is_binary(value) and Regex.match?(~r/\A[0-9a-f]{40}\z/, value)
 
   defp architecture_changed_paths(context, merge, head) do

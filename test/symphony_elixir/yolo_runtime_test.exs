@@ -543,7 +543,6 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   end
 
   test "session-backed redelegation restarts an ended delivery once after restart", %{issues: [issue | _]} do
-    alias SymphonyElixir.Yolo.Delivery
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
 
     baseline = %{
@@ -563,15 +562,14 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     event = fn position -> %{"generation" => "relay", "position" => position, "event_id" => "event-#{position}"} end
     Process.put(:history_nodes, [baseline])
     Process.put(:session_nodes, [first])
+    Process.put(:review_issue, %{issue | relay_event: event.(1)})
 
     opts = [
       scan: &scan/1,
       history: fn _ -> {:ok, Process.get(:history_nodes)} end,
       sessions: fn _ -> {:ok, Process.get(:session_nodes)} end,
       start: fn group, _ ->
-        {:ok, record} = Store.read(group)
-        :ok = Delivery.reserve(group, "ended-run", record["observations"])
-        :ok = fixture_delivery_end(group, "ended-run")
+        complete_observation(group, Process.get(:review_issue), scan: &scan/1)
         send(self(), :review_started)
         {:error, :fixture_end}
       end
@@ -586,6 +584,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     Process.put(:history_nodes, [merged])
     Process.put(:session_nodes, [second, first])
     issue = %{issue | relay_event: event.(3)}
+    Process.put(:review_issue, issue)
     tick(%{state | running: %{issue.id => %{}}}, [issue], opts)
     refute_receive :review_started
     tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [issue], opts)
@@ -639,7 +638,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     changed = %{issue | last_comment_signal: %{relay_epoch: 2}}
     tick(state, [changed], opts)
     assert_receive :operator_started
-    complete_operator_observation(issue)
+    complete_observation("blocker", changed, scan: Keyword.fetch!(opts, :scan))
 
     # The only durable restart input is the journal; no in-memory run survives.
     for epoch <- 3..5 do
@@ -1245,6 +1244,83 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Yolo.Delivery.pending([next_answer_issue], after_next_answer, decided_after) == [next_answer_issue]
   end
 
+  test "Pai confirmation starts one new review after a completed wait", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "duty"}}
+    duty = operator_workpad("duty", "a")
+    duty = put_in(duty, ["source", "body"], String.replace(duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    snapshot = inbox(%{"duty" => duty}) |> Map.put("current", %{"workpad" => "duty"})
+    assert {:ok, digest} = Yolo.OperatorHandoff.current(issue, snapshot)
+    Process.put(:confirmation_snapshot, snapshot)
+    Process.put(:confirmation_issue, issue)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, Process.get(:confirmation_snapshot)} end,
+      start: fn "review", _ ->
+        complete_observation("review", Process.get(:confirmation_issue), scan: fn _ -> {:ok, Process.get(:confirmation_snapshot)} end)
+        send(self(), :review_started)
+        {:error, :fixture_end}
+      end
+    ]
+
+    tick(state, [issue], opts)
+    assert_receive :review_started
+    for _ <- 1..2, do: tick(state, [issue], opts)
+    refute_receive :review_started
+
+    confirmation = %{"version" => 1, "handoff_digest" => digest, "result" => "Bestätigt", "evidence" => "Messung bestanden"}
+    body = "```symphony-operator-confirmation\n#{Jason.encode!(confirmation)}\n```"
+    answer = %{"key" => "answer", "origin" => "integration", "deleted" => false, "source" => %{"id" => "answer", "body" => body, "user" => %{"id" => "pai", "app" => true}}}
+    answered = snapshot |> put_in(["versions", "answer"], answer) |> put_in(["current", "answer"], "answer")
+    Process.put(:confirmation_snapshot, answered)
+    changed = %{issue | last_comment_signal: %{relay_epoch: "answer"}}
+    Process.put(:confirmation_issue, changed)
+    tick(state, [changed], opts)
+    assert_receive :review_started
+    for _ <- 1..2, do: tick(state, [changed], opts)
+    refute_receive :review_started
+
+    duplicate = %{answer | "key" => "copy", "source" => %{answer["source"] | "id" => "copy"}}
+    Process.put(:confirmation_snapshot, answered |> put_in(["versions", "copy"], duplicate) |> put_in(["current", "copy"], "copy"))
+    repeated = %{issue | last_comment_signal: %{relay_epoch: "copy"}}
+    tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [repeated], opts)
+    refute_receive :review_started
+  end
+
+  test "a foreign comment starts one new review after a completed wait", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "duty"}}
+    duty = operator_workpad("duty", "a")
+    duty = put_in(duty, ["source", "body"], String.replace(duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    Process.put(:foreign_snapshot, inbox(%{"duty" => duty}) |> Map.put("current", %{"workpad" => "duty"}))
+    Process.put(:foreign_issue, issue)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, Process.get(:foreign_snapshot)} end,
+      start: fn "review", _ ->
+        complete_observation("review", Process.get(:foreign_issue), scan: fn _ -> {:ok, Process.get(:foreign_snapshot)} end)
+        send(self(), :review_started)
+        {:error, :fixture_end}
+      end
+    ]
+
+    tick(state, [issue], opts)
+    assert_receive :review_started
+    for _ <- 1..2, do: tick(state, [issue], opts)
+    refute_receive :review_started
+
+    snapshot = Process.get(:foreign_snapshot)
+    comment = %{"key" => "human:comment", "origin" => "human", "deleted" => false}
+    Process.put(:foreign_snapshot, put_in(snapshot, ["versions", "comment"], comment))
+    changed = %{issue | last_comment_signal: %{relay_epoch: "comment"}}
+    Process.put(:foreign_issue, changed)
+    tick(state, [changed], opts)
+    assert_receive :review_started
+    for _ <- 1..2, do: tick(state, [changed], opts)
+    tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [changed], opts)
+    refute_receive :review_started
+  end
+
   defp operator_workpad(key, source) do
     duty = %{
       "version" => 1,
@@ -1264,9 +1340,41 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   end
 
   defp complete_operator_observation(issue) do
-    {:ok, record} = Store.read("blocker")
-    semantic = record["observations"][issue.id]["semantic"]
-    :ok = Store.write("blocker", Map.merge(record, %{"processed" => Observation.fingerprint(record["observations"]), "decisions" => %{issue.id => semantic}}))
+    complete_observation("blocker", issue)
+  end
+
+  defp complete_observation(group, issue, capture_opts \\ []) do
+    {:ok, record} = Store.read(group)
+
+    observations =
+      if capture_opts == [] do
+        record["observations"]
+      else
+        {:ok, captured, _} = Observation.capture([issue], record["observations"] || %{}, Keyword.put(capture_opts, :impulse_generations, Impulse.generations(record)))
+        captured
+      end
+
+    semantic = observations[issue.id]["semantic"]
+    source = observations[issue.id]["source"]
+    version = observations[issue.id]["member_semantic"]
+    run_id = Ecto.UUID.generate()
+
+    :ok =
+      Store.write(
+        group,
+        Map.merge(record, %{
+          "observations" => observations,
+          "processed" => Observation.fingerprint(observations),
+          "decisions" => %{issue.id => semantic},
+          "decision_sources" => %{issue.id => source},
+          "decision_versions" => %{issue.id => version},
+          "completed_sources" => %{issue.id => source},
+          "completed_versions" => %{issue.id => version},
+          "attempt" => %{"id" => run_id, "members" => [issue.id], "completed" => %{issue.id => "wait"}, "session_end" => true},
+          "deliveries" => %{issue.id => %{"run_id" => run_id, "semantic" => semantic}},
+          "delivery_ends" => %{run_id => true}
+        })
+      )
   end
 
   test "public defaults preserve empty reads and admitted issues, and reject corrupt dispatch", %{issues: [issue | _]} do
@@ -3406,8 +3514,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       assert Process.get(:review_counts) == %{scans: epoch, sessions: epoch}
       # Persist the observation acknowledged by a completed run, then recreate
       # the in-memory orchestrator and replay the exact relay notification.
-      {:ok, record} = Store.read("review")
-      :ok = Store.write("review", Map.put(record, "processed", Observation.fingerprint(record["observations"])))
+      complete_observation("review", changed, scan: fn _ -> {:ok, inbox(Process.get(:review_versions))} end)
       for _ <- 1..3, do: tick(%{state | yolo_runs: %{}}, [changed], opts)
       assert Process.get(:review_counts) == %{scans: epoch, sessions: epoch}
     end
@@ -5025,6 +5132,39 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Delivery.pending([issue], raised, Map.put(preserved, "observations", raised)) == [issue]
   end
 
+  test "a source change stays pending until an unconfirmed delivery ends", %{issues: [issue | _]} do
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    Process.put(:unconfirmed_issue, issue)
+
+    opts = [
+      scan: &scan/1,
+      start: fn group, _ ->
+        complete_observation(group, Process.get(:unconfirmed_issue), scan: &scan/1)
+        send(self(), :dispatched)
+        {:error, :fixture_end}
+      end
+    ]
+
+    tick(state, [issue], opts)
+    assert_receive :dispatched
+    assert {:ok, record} = Store.read("incoming")
+    run_id = record["attempt"]["id"]
+    attempt = Map.put(record["attempt"], "session_end", false)
+    assert :ok = Store.write("incoming", %{record | "attempt" => attempt, "delivery_ends" => %{}})
+
+    changed = %{issue | title: "Changed source"}
+    Process.put(:unconfirmed_issue, changed)
+    tick(state, [changed], opts)
+    refute_receive :dispatched
+    assert {:ok, waiting} = Store.read("incoming")
+    assert waiting["waiting_reason"] == "delivery_end_unconfirmed"
+    assert waiting["observations"][issue.id] == record["observations"][issue.id]
+
+    assert :ok = Store.write("incoming", Map.put(waiting, "delivery_ends", %{run_id => true}))
+    tick(state, [changed], opts)
+    assert_receive :dispatched
+  end
+
   test "a confirmed member is reused when a partly completed delivery resumes", %{issues: [first, second | _]} do
     alias SymphonyElixir.Yolo.Delivery
     {:ok, original, _} = Observation.capture([first, second], %{}, scan: &scan/1)
@@ -5273,18 +5413,20 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   end
 
   test "fresh predecessor status alone unlocks backlog exactly once and errors stay closed", %{issues: [issue | _]} do
-    alias SymphonyElixir.Yolo.Delivery
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
     Process.put(:predecessor, "Test (AI)")
-    dependencies = fn members -> {:ok, Enum.map(members, &%{&1 | blocked_by: [%{id: "fix", state: Process.get(:predecessor)}]})} end
+
+    dependencies = fn members ->
+      refreshed = Enum.map(members, &%{&1 | blocked_by: [%{id: "fix", state: Process.get(:predecessor)}]})
+      Process.put(:refreshed_issue, hd(refreshed))
+      {:ok, refreshed}
+    end
 
     opts = [
       dependencies: dependencies,
       scan: &scan/1,
       start: fn group, _ ->
-        {:ok, record} = Store.read(group)
-        :ok = Delivery.reserve(group, "run", record["observations"])
-        :ok = fixture_delivery_end(group, "run")
+        complete_observation(group, Process.get(:refreshed_issue), scan: &scan/1)
         send(self(), :dispatched)
         {:error, :done}
       end
@@ -5300,7 +5442,12 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     tick(state, [issue], Keyword.put(opts, :dependencies, fn _ -> {:error, :partial_relations} end))
     refute_receive :dispatched
 
-    removed = Keyword.put(opts, :dependencies, &{:ok, &1})
+    removed =
+      Keyword.put(opts, :dependencies, fn members ->
+        Process.put(:refreshed_issue, hd(members))
+        {:ok, members}
+      end)
+
     tick(state, [issue], removed)
     assert_receive :dispatched
     tick(state, [issue], removed)

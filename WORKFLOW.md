@@ -331,6 +331,9 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   menschlicher Prioritätserhöhung oder relevanter Auftrags-/Blockadeänderung erneut
   geprüft. Ungeklärte Ausführungen bleiben reserviert; eine fehlgeschlagene reine
   Benachrichtigung wird über ihr Journal ohne neuen Review erneut versucht.
+  Gleiche dauerhafte Zustellfehler erhalten Abstände von 5 bis 15 Minuten;
+  ein neuer Fehlergrund zunächst 30 Sekunden. Linear wird nur bei Fälligkeit gelesen. Neue Relay-Epoche,
+  Neustart oder wieder verfügbare Normalroute erlauben sofortige Prüfung.
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
   `config.toml` oder der geprüften Repository-Skills blockieren den

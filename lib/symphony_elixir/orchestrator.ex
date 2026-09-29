@@ -84,7 +84,7 @@ defmodule SymphonyElixir.Orchestrator do
       running: %{},
       yolo_runs: %{},
       yolo_marker_cache: %{},
-      yolo_operation_retries: MapSet.new(),
+      yolo_retries: %{operations: MapSet.new(), notifications: %{}, logs: %{}},
       completed: MapSet.new(),
       completed_states: %{},
       completion_refreshes: %{},

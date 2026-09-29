@@ -429,6 +429,89 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert tick(state, [issue], base).yolo_runs == %{}
   end
 
+  test "missing normal route does not read Linear on every five-second tick", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, "pai"))
+    issue = %{issue | url: "https://linear.example/PRO-0"}
+    proposal = %{"escalation" => %{"cause" => "Route fehlt", "attempts" => "Übergabe bestätigt", "proposal" => "Route prüfen", "decision" => "Benachrichtigen"}}
+    route = fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, proposal, escalation_route: route)
+
+    Process.put(:notification_linear_reads, 0)
+    Process.put(:notification_read_times, [])
+
+    fetch = fn _ ->
+      Process.put(:notification_linear_reads, Process.get(:notification_linear_reads) + 1)
+      Process.put(:notification_read_times, Process.get(:notification_read_times) ++ [Process.get(:notification_time)])
+      {:ok, [issue]}
+    end
+
+    state = %Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}
+
+    {_state, log} =
+      ExUnit.CaptureLog.with_log(fn ->
+        Enum.reduce(0..1_800_000//5_000, state, fn now, acc ->
+          Process.put(:notification_time, now)
+
+          tick(acc, [issue],
+            fetch: fetch,
+            notification_now: fn -> now end,
+            escalation_route: route,
+            escalation_send: fn _, _, _ -> flunk("missing route must not send") end,
+            start: fn _, _ -> flunk("notification retry must not start a review") end
+          )
+        end)
+      end)
+
+    assert Process.get(:notification_read_times) == [0, 300_000, 900_000, 1_800_000]
+    assert Process.get(:notification_linear_reads) == 4
+    assert length(Regex.scan(~r/YOLO notification waiting issue_id=#{issue.id}/, log)) <= 6
+  end
+
+  test "route recovery, relay change and restart wake a journalled notification", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, "pai"))
+    issue = %{issue | url: "https://linear.example/PRO-0"}
+    proposal = %{"escalation" => %{"cause" => "Route fehlt", "attempts" => "Übergabe bestätigt", "proposal" => "Route prüfen", "decision" => "Benachrichtigen"}}
+    missing = fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end
+    ready = fn _, _ -> {:ok, %{"channel" => "bound", "to" => "human"}} end
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, proposal, escalation_route: missing)
+    Process.put(:notification_reads, 0)
+
+    fetch = fn _ ->
+      Process.put(:notification_reads, Process.get(:notification_reads) + 1)
+      {:ok, [issue]}
+    end
+
+    send_message = fn _, _, _ ->
+      send(self(), :notification_sent)
+      {:ok, %{"messageId" => "sent"}}
+    end
+
+    opts = [fetch: fetch, escalation_send: send_message, start: fn _, _ -> flunk("retry must not start a review") end]
+    state = %Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}
+    state = tick(state, [issue], Keyword.merge(opts, notification_now: fn -> 0 end, escalation_route: missing))
+    assert Process.get(:notification_reads) == 1
+    state = tick(state, [issue], Keyword.merge(opts, notification_now: fn -> 5_000 end, escalation_route: missing))
+    assert Process.get(:notification_reads) == 1
+    state = tick(state, [issue], Keyword.merge(opts, notification_now: fn -> 10_000 end, escalation_route: ready))
+    assert_receive :notification_sent
+    assert Process.get(:notification_reads) == 2
+    _state = tick(state, [issue], Keyword.merge(opts, notification_now: fn -> 15_000 end, escalation_route: ready))
+    refute_receive :notification_sent
+
+    changed = put_in(proposal, ["escalation", "decision"], "Neue Entscheidung")
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, changed, escalation_route: missing)
+    state = tick(state, [issue], Keyword.merge(opts, notification_now: fn -> 20_000 end, escalation_route: missing))
+    assert Process.get(:notification_reads) == 3
+    state = tick(state, [issue], Keyword.merge(opts, notification_now: fn -> 25_000 end, escalation_route: missing))
+    assert Process.get(:notification_reads) == 3
+    changed_issue = %{issue | last_comment_signal: %{relay_epoch: "new"}}
+    _state = tick(state, [changed_issue], Keyword.merge(opts, notification_now: fn -> 30_000 end, escalation_route: missing))
+    assert Process.get(:notification_reads) == 4
+    _state = tick(%Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}, [changed_issue], Keyword.merge(opts, notification_now: fn -> 35_000 end, escalation_route: missing))
+    assert Process.get(:notification_reads) == 5
+    refute_receive :notification_sent
+  end
+
   test "session-backed redelegation restarts an ended delivery once after restart", %{issues: [issue | _]} do
     alias SymphonyElixir.Yolo.Delivery
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
@@ -2345,7 +2428,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         end)
       end)
 
-    assert MapSet.member?(state.yolo_operation_retries, {"incoming", intent["key"]})
+    assert MapSet.member?(state.yolo_retries.operations, {"incoming", intent["key"]})
 
     Agent.update(failure, fn _ -> {:yolo_state_unavailable, "Backlog"} end)
     state = Yolo.Recovery.resume_with_state(state, [issue], opts)
@@ -2415,10 +2498,9 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       recovery_write: fn _, _ -> {:error, :persist_failed} end
     ]
 
-    assert %Orchestrator.State{yolo_operation_retries: retries} =
-             Yolo.Recovery.resume_with_state(%Orchestrator.State{}, [issue], opts)
+    state = Yolo.Recovery.resume_with_state(%Orchestrator.State{}, [issue], opts)
 
-    assert MapSet.size(retries) == 0
+    assert MapSet.size(state.yolo_retries.operations) == 0
     assert {:ok, record} = Store.read("incoming")
     assert record["operation_retries"] == nil
   end

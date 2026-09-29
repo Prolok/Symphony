@@ -3,22 +3,8 @@ defmodule SymphonyElixir.Yolo.Recovery do
   require Logger
   alias SymphonyElixir.Linear.IssueLease
   alias SymphonyElixir.Relay.Store, as: Digest
-  alias SymphonyElixir.Yolo.{Admission, Followup, Group, Operations, Scope, Store}
+  alias SymphonyElixir.Yolo.{Admission, Followup, Group, Operations, RetryBackoff, Scope, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
-
-  @transient_reasons [
-    :transport_error,
-    :timeout,
-    :timed_out,
-    :offline,
-    :rate_limited,
-    :linear_app_rate_limited,
-    :linear_app_request_unavailable,
-    :relay_not_ready,
-    :linear_budget_reserved,
-    :issue_already_owned,
-    :issue_lease_unavailable
-  ]
 
   @spec resume(map(), [map()], keyword()) :: :ok
   def resume(state, issues, opts) do
@@ -48,7 +34,7 @@ defmodule SymphonyElixir.Yolo.Recovery do
 
   defp resume_locked(group, members, state, opts) do
     case Store.lock(group, fn -> resume_group(group, members, state, opts) end) do
-      %{yolo_operation_retries: _} = updated -> updated
+      %{yolo_retries: _} = updated -> updated
       _ -> state
     end
   end
@@ -121,7 +107,7 @@ defmodule SymphonyElixir.Yolo.Recovery do
   end
 
   defp retry_waiting?(previous, signal, now, state, key) do
-    MapSet.member?(state.yolo_operation_retries, key) and is_map(previous) and
+    MapSet.member?(state.yolo_retries.operations, key) and is_map(previous) and
       previous["signal"] == signal and is_integer(previous["retry_at"]) and previous["retry_at"] > now
   end
 
@@ -136,7 +122,7 @@ defmodule SymphonyElixir.Yolo.Recovery do
 
   defp record_result({:ok, _}, details, state) do
     clear_retry(details.group, details.intent["key"])
-    %{state | yolo_operation_retries: MapSet.delete(state.yolo_operation_retries, details.key)}
+    put_in(state.yolo_retries.operations, MapSet.delete(state.yolo_retries.operations, details.key))
   end
 
   defp record_result({:error, reason}, details, state) do
@@ -154,23 +140,15 @@ defmodule SymphonyElixir.Yolo.Recovery do
 
   defp persist_retry(current, details, reason, state) do
     previous = get_in(current, ["operation_retries", details.intent["key"]])
-    count = retry_count(previous, details.signal, reason)
-    entry = %{"signal" => details.signal, "reason" => inspect(reason), "count" => count, "retry_at" => details.now + retry_delay(reason, count)}
+    count = RetryBackoff.count(previous, details.signal, reason)
+    entry = %{"signal" => details.signal, "reason" => inspect(reason), "count" => count, "retry_at" => details.now + RetryBackoff.delay(reason, count)}
     retries = Map.put(current["operation_retries"] || %{}, details.intent["key"], entry)
     record = current |> Map.delete("operation_retry_at") |> Map.put("operation_retries", retries)
     write = Keyword.get(details.opts, :recovery_write, &Store.write/2)
 
     case write.(details.group, record) do
-      :ok -> %{state | yolo_operation_retries: MapSet.put(state.yolo_operation_retries, details.key)}
+      :ok -> put_in(state.yolo_retries.operations, MapSet.put(state.yolo_retries.operations, details.key))
       _ -> state
-    end
-  end
-
-  defp retry_count(previous, signal, reason) do
-    if is_map(previous) and previous["signal"] == signal and previous["reason"] == inspect(reason) and is_integer(previous["count"]) do
-      previous["count"] + 1
-    else
-      1
     end
   end
 
@@ -180,20 +158,6 @@ defmodule SymphonyElixir.Yolo.Recovery do
       Store.write(group, record |> Map.delete("operation_retry_at") |> Map.put("operation_retries", retries))
     end
   end
-
-  defp retry_delay(reason, count) do
-    if transient?(reason) or count == 1, do: 30_000, else: min(900_000, (count - 1) * 300_000)
-  end
-
-  defp transient?(reason) when is_atom(reason), do: reason in @transient_reasons
-  defp transient?({:linear_api_request, reason}), do: transient?(reason)
-  defp transient?({:linear_api_status, _, %{classification: "rate_limited"}}), do: true
-  defp transient?({:linear_api_status, status, _}) when status in [408, 429, 500, 502, 503, 504], do: true
-  defp transient?({:wait_marker_unresolved, _identifier, reason}), do: transient?(reason)
-  defp transient?({:wait_marker_unresolved, _identifier, reason, write_reason}), do: transient?(reason) or transient?(write_reason)
-  defp transient?(%Req.TransportError{}), do: true
-  defp transient?(reason) when is_tuple(reason) and tuple_size(reason) > 0, do: transient?(elem(reason, 0))
-  defp transient?(_), do: false
 
   defp with_leases([], _lease, callback), do: callback.()
   defp with_leases([issue | rest], lease, callback), do: lease.(issue, fn -> with_leases(rest, lease, callback) end)

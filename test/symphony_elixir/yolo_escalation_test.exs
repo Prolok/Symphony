@@ -67,6 +67,31 @@ defmodule SymphonyElixir.YoloEscalationTest do
     refute_receive :send
   end
 
+  test "retrying one pending proposal leaves another proposal journalled", %{issue: issue} do
+    missing = [escalation_route: fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end]
+    revised = put_in(request(), ["escalation", "decision"], "Andere Entscheidung")
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, request(), missing)
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, revised, missing)
+    assert {:ok, routes} = Escalation.pending_routes(issue.id)
+    assert length(routes) == 2
+    [{first_id, _} | _] = routes
+
+    send_message = fn destination, _, _ ->
+      send(self(), {:sent, destination["idempotencyKey"]})
+      {:ok, %{"messageId" => "confirmed"}}
+    end
+
+    opts = [escalation_route: &route/2, escalation_send: send_message]
+    assert :ok = Escalation.retry_pending(issue, Keyword.put(opts, :notification_id, first_id))
+    assert_receive {:sent, ^first_id}
+    refute_receive {:sent, _}
+    assert {:ok, [{other_id, _}]} = Escalation.pending_routes(issue.id)
+    refute other_id == first_id
+    assert :ok = Escalation.retry_pending(issue, Keyword.put(opts, :notification_id, other_id))
+    assert_receive {:sent, ^other_id}
+    assert {:ok, []} = Escalation.pending_routes(issue.id)
+  end
+
   test "missing target and incomplete proposals do not send; disabled OpenClaw has no access", %{issue: issue, context: context} do
     opts = [escalation_route: fn _, _ -> {:error, :missing_target} end, escalation_send: fn _, _, _ -> flunk("unexpected send") end]
     assert {:error, :missing_target} = Escalation.notify(issue, request(), opts)

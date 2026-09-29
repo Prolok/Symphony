@@ -133,11 +133,19 @@ defmodule SymphonyElixir.Yolo.Escalation do
          {:ok, messages} <- messages(record) do
       messages
       |> Map.values()
-      |> Enum.filter(&(&1["state"] == "route_pending"))
+      |> Enum.filter(&(&1["state"] == "route_pending" and (is_nil(opts[:notification_id]) or &1["id"] == opts[:notification_id])))
       |> Enum.reduce_while(:ok, &retry_entry(&1, &2, issue, opts))
     else
       false -> {:error, :openclaw_yolo_agent_unavailable}
       error -> error
+    end
+  end
+
+  @spec pending_routes(String.t()) :: {:ok, [{String.t(), String.t() | nil}]} | {:error, term()}
+  def pending_routes(id) do
+    with {:ok, record} <- Store.read("escalation:" <> id),
+         {:ok, messages} <- messages(record) do
+      {:ok, Enum.flat_map(messages, fn {key, entry} -> if entry["state"] == "route_pending", do: [{key, entry["last_error"]}], else: [] end)}
     end
   end
 

@@ -139,7 +139,7 @@ PR-/Remote-Preflight-Evidenz, `7` fehlendes gültiges manuelles GitHub-Approval
 bei gesetztem Label `Requires Manual Review` oder nicht verifizierbarer
 aktueller Linear-Labelstand im App-Server-Kontext; `8` App-Übergabe zum noch
 offenen Live-Label-/Approval-Gate über den gebundenen Toolzugriff (Schritt 9),
-`10` Architekturvertrag, Architekturprüfung oder Begründung fehlerhaft.
+`10` Architekturvertrag, Architekturprüfung oder Begründung fehlerhaft; `architecture_base_unavailable` kennzeichnet dabei eine vorübergehend nicht von `origin` ladbare PR-Basis und verlangt nach Erholung einen erneuten Lauf.
 
 Bei Exit `8` im selben Turn Schritt 9 über die erlaubten Tools vollständig
 ausführen. Der Helper hat dann lediglich seine GitHub-Prüfungen abgeschlossen;

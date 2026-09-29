@@ -419,6 +419,7 @@ class BoundNoCiTest(unittest.IsolatedAsyncioTestCase):
                     if failure == 'ci_changed': api.workflows = [dict(id=1)]
                     if failure == 'policy_changed': api.rules = [dict(ruleset_id=1, type='workflows')]
                     if failure == 'base_changed': api.ref['target']['oid'] = 'd' * 40
+                    return PR, None
                 labels = ['Requires Manual Review'] if failure in ('manual', 'stale_approval', 'self_approval', 'bot_approval', 'valid_approval') else []
                 def checkpoint(operation):
                     if failure == 'labels' and operation == 'labels': return {'ok': False}
@@ -431,7 +432,7 @@ class BoundNoCiTest(unittest.IsolatedAsyncioTestCase):
                 output = io.StringIO()
                 with mock.patch.dict(os.environ, {'SYMPHONY_ISSUE_IDENTIFIER': 'PRO-1'}), redirect_stdout(output), \
                      mock.patch.object(land, 'run_gh', gh), mock.patch.object(land, 'run_git', git), \
-                     mock.patch.object(land, 'watch_pr', watch), mock.patch.object(land, 'architecture_gate', mock.AsyncMock(return_value=None)), mock.patch.object(land, 'bound_request', None), \
+                     mock.patch.object(land, 'watch_pr', watch), mock.patch.object(land, 'bound_request', None), \
                      mock.patch.object(land, 'request_bound_checkpoint', checkpoint), \
                      mock.patch.object(land, 'collect_merge_preflight_evidence', mock.AsyncMock(return_value=evidence)), \
                      mock.patch.object(land, 'fetch_review_context', mock.AsyncMock(return_value=(comments, [], reviews, None))):

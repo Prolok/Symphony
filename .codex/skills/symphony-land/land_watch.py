@@ -122,14 +122,26 @@ def is_pr_not_found_error(error: str) -> bool:
     )
 
 
-async def run_git(*args: str) -> str:
+async def run_git(*args: str, timeout_seconds: float | None = None) -> str:
     proc = await asyncio.create_subprocess_exec(
         "git",
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=timeout_seconds is not None,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout_seconds)
+    except TimeoutError:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            await asyncio.wait_for(proc.communicate(), 5)
+        except TimeoutError:
+            pass
+        raise TimeoutError(f"git command timed out after {timeout_seconds}s") from None
     if proc.returncode == 0:
         return stdout.decode()
     error = stderr.decode().strip() or stdout.decode().strip() or "git command failed"
@@ -568,7 +580,16 @@ def sanitize_terminal_output(value: str) -> str:
     return CONTROL_CHARS_RE.sub("", value)
 
 
-async def contract_at(revision: str) -> dict | None:
+async def contract_at(revision: str, fetch_branch: str | None = None) -> dict | None:
+    if fetch_branch:
+        try:
+            await run_git("cat-file", "-e", f"{revision}^{{tree}}")
+        except RuntimeError:
+            try:
+                await run_git("fetch", "--no-tags", "origin", fetch_branch, timeout_seconds=30)
+                await run_git("cat-file", "-e", f"{revision}^{{tree}}")
+            except (RuntimeError, TimeoutError) as error:
+                raise ArchitectureError("architecture_base_unavailable", f"{revision[:12]}: could not load PR base from origin: {error}") from error
     try:
         entry = (await run_git("ls-tree", revision, "--", ARCHITECTURE_CONTRACT)).strip()
         if not entry:
@@ -584,8 +605,8 @@ async def contract_at(revision: str) -> dict | None:
         paths = contract["architecture_paths"]
         if not isinstance(command, list) or not command or any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in command):
             raise ValueError("command must be a nonempty argv string list")
-        if type(timeout) not in (int, float) or not 0 < timeout <= 600:
-            raise ValueError("timeout_seconds must be greater than zero and at most 600")
+        if type(timeout) not in (int, float) or not 0 < timeout <= 120:
+            raise ValueError("timeout_seconds must be greater than zero and at most 120")
         if not isinstance(paths, list) or not paths or any(not isinstance(glob, str) or not glob or glob.startswith("/") or "\\" in glob or "\x00" in glob or ".." in glob.split("/") for glob in paths):
             raise ValueError("architecture_paths must contain relative globs")
         return contract
@@ -602,7 +623,8 @@ def architecture_justification(body: str, changed: list[str], candidate: str) ->
     section = re.search(r"(?ims)^## Architekturänderung[ \t]*\n(.*?)(?=^##[ \t]|\Z)", body)
     if section:
         content = re.sub(r"(?m)^<!-- symphony-architecture: .*? -->\s*$", "", section.group(1))
-        if all(re.search(rf"(?im)^[ \t]*{key}:[ \t]*\S.+$", content) for key in ("Änderung", "Grund", "Alternativen")):
+        if all(re.search(rf"(?im)^[ \t]*(?:[-*+][ \t]+)?(?:\*\*{key}:\*\*|{key}:)[ \t]*\S.*$", content)
+               for key in ("Änderung", "Grund", "Alternativen")):
             return "PR: ## Architekturänderung"
     return None
 
@@ -610,7 +632,7 @@ def architecture_justification(body: str, changed: list[str], candidate: str) ->
 async def architecture_gate(pr: PrInfo) -> ArchitectureChange | None:
     if not git_sha(pr.base_sha) or not git_sha(pr.head_sha):
         raise ArchitectureError("architecture_candidate_stale", "PR base/head SHA missing")
-    base = await contract_at(pr.base_sha)
+    base = await contract_at(pr.base_sha, pr.base_branch or pr.base_sha)
     candidate = await contract_at(pr.head_sha)
     if base is None and candidate is None:
         return None
@@ -649,7 +671,7 @@ async def architecture_gate(pr: PrInfo) -> ArchitectureChange | None:
     candidate_files = (await run_git("ls-tree", "-r", "--name-only", pr.head_sha, "--", "docs/architecture/adr")).splitlines()
     justification = architecture_justification(body, changed, "\n".join(candidate_files)) if paths else ""
     if paths and not justification:
-        raise ArchitectureError("architecture_change_unjustified", f"Architecture paths changed: {', '.join(paths[:20])}; add a changed ADR or a PR section '## Architekturänderung' with Änderung, Grund and Alternativen")
+        raise ArchitectureError("architecture_change_unjustified", f"Architecture paths changed: {', '.join(paths[:20])}; add a changed ADR or PR section '## Architekturänderung' with lines 'Änderung: ...', 'Grund: ...', 'Alternativen: ...' (list bullets and bold labels are accepted)")
     return ArchitectureChange(paths, justification, body) if paths else None
 
 
@@ -1349,7 +1371,7 @@ async def wait_for_checks(pr: PrInfo, checks_done: asyncio.Event) -> None:
         await asyncio.sleep(POLL_SECONDS)
 
 
-async def watch_pr() -> None:
+async def watch_pr() -> tuple[PrInfo, ArchitectureChange | None]:
     evidence = await require_merge_preflight()
     pr = evidence.pr
     branch = evidence.branch
@@ -1360,7 +1382,7 @@ async def watch_pr() -> None:
         )
         raise SystemExit(5)
     try:
-        await architecture_gate(pr)
+        architecture = await architecture_gate(pr)
     except ArchitectureError as error:
         print(str(error), flush=True)
         raise SystemExit(ARCHITECTURE_BLOCKER_EXIT) from error
@@ -1434,6 +1456,7 @@ async def watch_pr() -> None:
             review_request_at,
         )
         raise_on_missing_manual_review_approval(labels, current, reviews)
+    return pr, architecture
 
 
 def request_bound_checkpoint(operation: str, **details: Any) -> dict:
@@ -1451,9 +1474,11 @@ async def merge_bound(expected_head: str, title: str) -> None:
     """The trusted runtime owns the pipe; no credential or approval token is passed to the shell."""
     global bound_request
     bound_request = request_bound_checkpoint
-    await watch_pr()
+    watched_pr, architecture = await watch_pr()
     evidence = await require_merge_preflight()
     current = evidence.pr
+    if (current.number, current.base_sha, current.head_sha) != (watched_pr.number, watched_pr.base_sha, watched_pr.head_sha):
+        raise RuntimeError("PR or base/head changed since the architecture check; repeat the bound merge.")
     if evidence.branch != f"symphony/{current_issue_identifier()}":
         raise RuntimeError("Branch does not belong to the bound issue.")
     if current.head_sha != expected_head or await run_git("status", "--porcelain"):
@@ -1462,7 +1487,7 @@ async def merge_bound(expected_head: str, title: str) -> None:
     issue_comments, review_comments, reviews, review_request_at = await fetch_review_context(current.number)
     raise_on_human_feedback(issue_comments, review_comments, reviews, review_request_at)
     raise_on_missing_manual_review_approval(labels, current, reviews)
-    # Do not reuse the watch decision after labels/reviews or across attempts.
+    # Fresh label, review and CI checks remain required after the watch decision.
     summary = await collect_ci_summary(current)
     if summary.failed or summary.pending:
         raise CiEvidenceError("GitHub CI changed or remains incomplete; repeat the bound merge.")
@@ -1474,12 +1499,13 @@ async def merge_bound(expected_head: str, title: str) -> None:
     remote = (await run_git("ls-remote", "--exit-code", "--heads", "origin", evidence.branch)).split()
     if remote != [expected_head, f"refs/heads/{evidence.branch}"]:
         raise RuntimeError("Remote branch head does not match the tested merge head.")
-    try:
-        architecture = await architecture_gate(current)
-    except ArchitectureError as error:
-        print(str(error), flush=True)
-        raise SystemExit(ARCHITECTURE_BLOCKER_EXIT) from error
     if architecture:
+        body = json.loads(await run_gh("pr", "view", str(current.number), "--json", "body"))["body"] or ""
+        if not isinstance(body, str) or (architecture.justification.startswith("PR:")
+                                         and not architecture_justification(body, architecture.paths, "")):
+            print("architecture_change_unjustified: PR description changed; restore '## Architekturänderung' with lines 'Änderung: ...', 'Grund: ...', 'Alternativen: ...'", flush=True)
+            raise SystemExit(ARCHITECTURE_BLOCKER_EXIT)
+        architecture = ArchitectureChange(architecture.paths, architecture.justification, body)
         await mark_architecture_pr(current, architecture)
         marked = bound_request("architecture", paths=architecture.paths,
                                justification=architecture.justification, base=current.base_sha,

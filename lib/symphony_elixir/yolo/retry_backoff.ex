@@ -30,6 +30,7 @@ defmodule SymphonyElixir.Yolo.RetryBackoff do
   end
 
   defp transient?(reason) when is_atom(reason), do: reason in @transient_reasons
+  defp transient?({:notification_refresh_failed, reason}), do: transient?(reason)
   defp transient?({:linear_api_request, reason}), do: transient?(reason)
   defp transient?({:linear_api_status, _, %{classification: "rate_limited"}}), do: true
   defp transient?({:linear_api_status, status, _}) when status in [408, 429, 500, 502, 503, 504], do: true

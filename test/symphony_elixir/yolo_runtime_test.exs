@@ -467,6 +467,36 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert length(Regex.scan(~r/YOLO notification waiting issue_id=#{issue.id}/, log)) <= 6
   end
 
+  test "transient notification refresh errors retain thirty-second retries", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, "pai"))
+    issue = %{issue | url: "https://linear.example/PRO-0"}
+    proposal = %{"escalation" => %{"cause" => "Route fehlt", "attempts" => "Übergabe bestätigt", "proposal" => "Route prüfen", "decision" => "Benachrichtigen"}}
+    route = fn _, _ -> {:error, :openclaw_normal_channel_unavailable} end
+    assert {:error, :openclaw_normal_channel_unavailable} = Escalation.notify(issue, proposal, escalation_route: route)
+
+    Process.put(:notification_read_times, [])
+
+    fetch = fn _ ->
+      Process.put(:notification_read_times, Process.get(:notification_read_times) ++ [Process.get(:notification_time)])
+      {:error, :timeout}
+    end
+
+    state = %Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}
+
+    Enum.reduce(0..60_000//5_000, state, fn now, acc ->
+      Process.put(:notification_time, now)
+
+      tick(acc, [issue],
+        fetch: fetch,
+        notification_now: fn -> now end,
+        escalation_route: route,
+        start: fn _, _ -> flunk("notification retry must not start a review") end
+      )
+    end)
+
+    assert Process.get(:notification_read_times) == [0, 30_000, 60_000]
+  end
+
   test "route recovery, relay change and restart wake a journalled notification", %{issues: [issue | _], context: context} do
     ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, "pai"))
     issue = %{issue | url: "https://linear.example/PRO-0"}

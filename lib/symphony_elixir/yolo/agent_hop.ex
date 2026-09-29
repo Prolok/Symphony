@@ -17,8 +17,10 @@ defmodule SymphonyElixir.Yolo.AgentHop do
   end
 
   defp gate_observation({id, observation}, {:ok, current, blocked}, opts) do
-    if gate_needed?(current, id, observation) do
-      case gate_one(path(id, opts), id, observation, current, opts) do
+    path = path(id, opts)
+
+    if gate_needed?(current, id, observation, path) do
+      case gate_one(path, id, observation, current, opts) do
         {:ok, entry, true} -> {:cont, {:ok, put_entry(current, id, entry), MapSet.put(blocked, id)}}
         {:ok, entry, false} -> {:cont, {:ok, put_entry(current, id, entry), blocked}}
         {:error, _} = error -> {:halt, error}
@@ -28,16 +30,22 @@ defmodule SymphonyElixir.Yolo.AgentHop do
     end
   end
 
-  defp gate_needed?(record, id, observation) do
+  defp gate_needed?(record, id, observation, path) do
     previous = get_in(record, ["agent_hops", id])
+
+    # A new coordinator process checks the shared file once before trusting a group-local cursor.
+    Process.get({__MODULE__, path}, :unknown) in [:unknown, true] or held?(previous) or sources_changed?(record, id, observation, previous)
+  end
+
+  defp held?(%{"held" => held}), do: is_binary(held)
+  defp held?(_), do: false
+
+  defp sources_changed?(record, id, observation, previous) do
     impulse = get_in(record, ["impulses", id]) || %{}
     agents = sources(observation, impulse, "agent")
     humans = sources(observation, impulse, "human")
 
     case previous do
-      %{"held" => held} when is_binary(held) ->
-        true
-
       %{"agent_sources" => old_agents, "human_sources" => old_humans} when is_list(old_agents) and is_list(old_humans) ->
         MapSet.new(agents) != MapSet.new(old_agents) or MapSet.new(humans) != MapSet.new(old_humans)
 
@@ -52,6 +60,7 @@ defmodule SymphonyElixir.Yolo.AgentHop do
            {next, held} <- gate(Map.put(current, "agent_hops", %{id => previous}), %{id => observation}, opts),
            entry = get_in(next, ["agent_hops", id]),
            :ok <- persist_entry(path, previous, entry) do
+        Process.put({__MODULE__, path}, is_binary(entry["held"]))
         {:ok, entry, MapSet.member?(held, id)}
       end
     end)

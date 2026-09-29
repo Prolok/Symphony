@@ -159,6 +159,44 @@ defmodule SymphonyElixir.AgentHopTest do
     assert File.read!(path) == original
   end
 
+  test "a stale group cursor still observes a hold written by another group" do
+    root = Path.join(System.tmp_dir!(), "agent-hops-shared-hold-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(root) end)
+    opts = [agent_hop_state_root: root, agent_hop_now: fn -> 10_000 end]
+
+    first = observation("wake-1", ["agent-1"], [])
+    assert {:ok, older_group, _} = AgentHop.gate_durable(%{}, %{"issue" => first}, opts)
+
+    for n <- 2..10 do
+      assert {:ok, _, blocked} =
+               AgentHop.gate_durable(%{}, %{"issue" => observation("wake-#{n}", ["agent-#{n}"], [])}, opts)
+
+      assert MapSet.size(blocked) == 0
+    end
+
+    current = observation("wake-11", ["agent-1"], [])
+    assert {:ok, _, blocked} = AgentHop.gate_durable(%{}, %{"issue" => current}, opts)
+    assert MapSet.member?(blocked, "issue")
+
+    workspace_id = Config.settings!().tracker.app["workspace_id"]
+    key = Digest.digest({workspace_id, "issue"})
+    path = Path.join([root, "yolo", "agent-hops", key <> ".json"])
+    Process.delete({AgentHop, path})
+
+    assert {:ok, _, blocked} = AgentHop.gate_durable(older_group, %{"issue" => current}, opts)
+    assert MapSet.member?(blocked, "issue")
+
+    later = Keyword.put(opts, :agent_hop_now, fn -> 86_410_001 end)
+    assert {:ok, released, blocked} = AgentHop.gate_durable(older_group, %{"issue" => current}, later)
+    assert MapSet.size(blocked) == 0
+
+    {{:ok, ^released, blocked}, paths} =
+      journal_lock_paths(fn -> AgentHop.gate_durable(released, %{"issue" => current}, later) end)
+
+    assert MapSet.size(blocked) == 0
+    assert paths == []
+  end
+
   defp journal_lock_paths(fun, trace_state \\ false) do
     tracer = spawn(fn -> collect_lock_paths([]) end)
     :erlang.trace_pattern({IssueLease, :with_journal_lock, 2}, true, [:local])

@@ -1321,6 +1321,62 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     refute_receive :review_started
   end
 
+  test "a changed source survives a failed review start and the unchanged-signal retry", %{issues: [issue | _]} do
+    issue = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "duty"}}
+    duty = operator_workpad("duty", "a")
+    duty = put_in(duty, ["source", "body"], String.replace(duty["source"]["body"], "Test (AI)", "Yolo Review"))
+    Process.put(:retry_snapshot, inbox(%{"duty" => duty}) |> Map.put("current", %{"workpad" => "duty"}))
+    Process.put(:retry_issue, issue)
+    Process.put(:retry_starts, 0)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    opts = [
+      scan: fn _ -> {:ok, Process.get(:retry_snapshot)} end,
+      start: fn "review", _ ->
+        count = Process.get(:retry_starts)
+        Process.put(:retry_starts, count + 1)
+
+        if count == 1 do
+          {:error, :starter_broken}
+        else
+          if count == 2 do
+            current = Process.get(:retry_issue)
+
+            assert {:error, :retry_preflight_proved} =
+                     run_group("review", [current], [current],
+                       fetch: fn _ -> {:ok, [current]} end,
+                       lease: fn _, callback -> callback.() end,
+                       scan: fn _ -> {:ok, Process.get(:retry_snapshot)} end,
+                       workspace: fn _, _ -> {:error, :retry_preflight_proved} end
+                     )
+          end
+
+          complete_observation("review", Process.get(:retry_issue), scan: fn _ -> {:ok, Process.get(:retry_snapshot)} end)
+          {:error, :fixture_end}
+        end
+      end
+    ]
+
+    tick(state, [issue], opts)
+    assert Process.get(:retry_starts) == 1
+
+    snapshot = Process.get(:retry_snapshot)
+    comment = %{"key" => "human:comment", "origin" => "human", "deleted" => false}
+    Process.put(:retry_snapshot, put_in(snapshot, ["versions", "comment"], comment))
+    changed = %{issue | last_comment_signal: %{relay_epoch: "comment"}}
+    Process.put(:retry_issue, changed)
+    tick(state, [changed], opts)
+    assert Process.get(:retry_starts) == 2
+    assert {:ok, %{"retry_at" => retry_at} = failed} = Store.read("review")
+    assert is_integer(retry_at)
+    refute failed["observations"][issue.id]["source"] == failed["deferred_observations"][issue.id]["source"]
+
+    {:ok, record} = Store.read("review")
+    :ok = Store.write("review", %{record | "retry_at" => System.system_time(:millisecond) - 1})
+    tick(state, [changed], opts)
+    assert Process.get(:retry_starts) == 3
+  end
+
   defp operator_workpad(key, source) do
     duty = %{
       "version" => 1,
@@ -1364,6 +1420,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
         group,
         Map.merge(record, %{
           "observations" => observations,
+          "deferred_observations" => nil,
           "processed" => Observation.fingerprint(observations),
           "decisions" => %{issue.id => semantic},
           "decision_sources" => %{issue.id => source},

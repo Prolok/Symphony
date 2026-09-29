@@ -201,7 +201,11 @@ defmodule SymphonyElixir.Yolo.Runner do
 
   defp pending_observations(%{"relay_signals" => signals, "observations" => observations} = record)
        when is_map(signals) and map_size(signals) > 0 do
-    if record["processed"] == Observation.fingerprint(observations), do: %{}, else: observations
+    if is_map(record["deferred_observations"]) do
+      record["deferred_observations"]
+    else
+      if record["processed"] == Observation.fingerprint(observations), do: %{}, else: observations
+    end
   end
 
   defp pending_observations(_), do: %{}
@@ -238,12 +242,12 @@ defmodule SymphonyElixir.Yolo.Runner do
   end
 
   defp reserve_attempt(group, record, observations, attempt),
-    do: Store.write(group, Map.merge(record, %{"observations" => observations, "attempt" => attempt, "error" => nil}))
+    do: Store.write(group, Map.merge(record, %{"observations" => observations, "deferred_observations" => nil, "attempt" => attempt, "error" => nil}))
 
   defp record_created(group, issues, project_issues, run_id, {record, observations, fingerprint}, opts, attempt, workspace) do
     attempt = Map.merge(attempt, %{"workspace" => workspace.path, "sha" => workspace.sha})
 
-    case Keyword.get(opts, :store_write, &Store.write/2).(group, Map.merge(record, %{"observations" => observations, "attempt" => attempt, "error" => nil})) do
+    case Keyword.get(opts, :store_write, &Store.write/2).(group, Map.merge(record, %{"observations" => observations, "deferred_observations" => nil, "attempt" => attempt, "error" => nil})) do
       :ok -> run_created(group, issues, project_issues, run_id, workspace, {record, observations, fingerprint}, opts)
       {:error, _} = error -> cleanup_unrecorded(group, run_id, workspace, error)
     end

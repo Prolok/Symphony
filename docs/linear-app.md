@@ -240,7 +240,13 @@ dauerhaft gezählt; auch ein identischer freier Endstand erlaubt genau eine neue
 Nach einem Gruppenfehler bleibt die vollständige Beobachtung auch ohne
 erfolgreichen PO-Start erhalten. Unveränderte Relay-Signale lösen während des
 Cooldowns keine ticketbezogenen Linear-Lesezugriffe aus. Wiederholungen verwenden
-den zuletzt vollständig gelesenen Abhängigkeitsstand. Derselbe Fehlergrund
+den zuletzt vollständig gelesenen Abhängigkeitsstand.
+
+Bei einer noch offenen Zustellentscheidung bleibt der vorherige Beobachtungsstand
+als Vergleichsbasis erhalten; der neue vollständige Stand wird für Wiederholungen
+separat gespeichert.
+
+Derselbe Fehlergrund
 wiederholt nach 30, 60, 120, 240, 480 und höchstens 900 Sekunden; sein Wechsel
 wird einmal protokolliert. Eine fremde Kommentar- oder Statusänderung im Relay
 setzt den Cooldown zurück und lässt die Gruppe sofort neu prüfen. Vor einer

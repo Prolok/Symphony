@@ -8,6 +8,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   alias SymphonyElixir.Linear.CommentVersion
   alias SymphonyElixir.Linear.Description
   alias SymphonyElixir.Linear.DurableState
+  alias SymphonyElixir.Linear.IssueLease
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.Yolo.{BlockerBrake, Completion, Coordinator, Escalation, Group, Impulse}
   alias SymphonyElixir.Yolo.{Observation, Operations, Scope, Store}
@@ -43,6 +44,41 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   end
 
   defp tick(state, issues, opts), do: Coordinator.tick(state, issues, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
+
+  defp hop_lock_calls(fun) do
+    parent = self()
+    tracer = spawn(fn -> hop_lock_trace(parent, []) end)
+    :erlang.trace_pattern({IssueLease, :with_journal_lock, 2}, true, [:local])
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    try do
+      result = fun.()
+      send(tracer, :flush)
+
+      paths =
+        receive do
+          {:hop_lock_paths, paths} -> paths
+        after
+          1_000 -> flunk("hop lock trace was not delivered")
+        end
+
+      {result, paths}
+    after
+      :erlang.trace(self(), false, [:call])
+      :erlang.trace_pattern({IssueLease, :with_journal_lock, 2}, false, [:local])
+      send(tracer, :stop)
+    end
+  end
+
+  defp hop_lock_trace(parent, paths) do
+    receive do
+      {:trace, _, :call, {IssueLease, :with_journal_lock, [path | _]}} -> hop_lock_trace(parent, [path | paths])
+      :flush -> send(parent, {:hop_lock_paths, Enum.reverse(paths)})
+      :stop -> :ok
+      _ -> hop_lock_trace(parent, paths)
+    end
+  end
+
   defp run_group(group, issues, project, opts \\ []), do: Yolo.Runner.run(group, issues, project, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
 
   defp init_review_git(root, context) do
@@ -1935,6 +1971,24 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     ]
 
     assert %Orchestrator.State{} = Coordinator.tick(state, [review], opts)
+  end
+
+  test "idle review ticks with no trusted agents never lock or create hop counters", %{issues: issues, context: context, root: root} do
+    assert context.settings.tracker.trusted_agent_ids == []
+    reviews = Enum.map(issues, &%{&1 | state: "Yolo Review", blocked_by: [], relations_complete: true})
+    assert length(Group.groups(reviews)["review"] || []) == 3
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    counter_dir = Path.join([root, "state", "yolo", "agent-hops"])
+
+    opts = [
+      scan: &scan/1,
+      wait_comments: fn _ -> {:ok, []} end,
+      start: fn _, _ -> {:error, :fixture_end} end
+    ]
+
+    {_, paths} = hop_lock_calls(fn -> Enum.reduce(1..10, state, fn _, current -> tick(current, reviews, opts) end) end)
+    assert Enum.filter(paths, &String.contains?(&1, "agent-hops")) == []
+    assert {:error, :enoent} = File.ls(counter_dir)
   end
 
   test "coordinator uses fallback without relay despite a stale relay epoch", %{issues: [issue | _]} do

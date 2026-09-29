@@ -483,8 +483,34 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
   defp insert(version, versions, baseline?) do
     version = if baseline?, do: Map.put(version, "status", "historical"), else: version
-    Map.put_new(versions, version["key"], Map.put(version, "sequence", map_size(versions) + 1))
+
+    Map.update(versions, version["key"], Map.put(version, "sequence", map_size(versions) + 1), fn stored ->
+      refresh_trust_origin(stored, version["origin"])
+    end)
   end
+
+  defp refresh_trust_origin(%{"origin" => "agent"} = stored, "integration") do
+    status = stored["status"]
+
+    stored
+    |> Map.put("origin", "integration")
+    |> Map.put("status", if(status in @open, do: "context", else: status))
+    |> maybe_remember_trust_status(status)
+  end
+
+  defp refresh_trust_origin(%{"origin" => "integration"} = stored, "agent") do
+    status = if stored["status"] == "context", do: stored["trust_pending_status"] || "recognized", else: stored["status"]
+
+    stored
+    |> Map.put("origin", "agent")
+    |> Map.put("status", status)
+    |> Map.delete("trust_pending_status")
+  end
+
+  defp refresh_trust_origin(stored, _origin), do: stored
+
+  defp maybe_remember_trust_status(stored, status) when status in @open, do: Map.put(stored, "trust_pending_status", status)
+  defp maybe_remember_trust_status(stored, _status), do: stored
 
   defp check_absent(versions, ids, baseline, opts) do
     missing = versions |> Map.values() |> Enum.reject(&(&1["deleted"] or MapSet.member?(ids, &1["source"]["id"]))) |> Enum.uniq_by(& &1["source"]["id"])

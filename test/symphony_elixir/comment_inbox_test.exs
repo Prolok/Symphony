@@ -134,6 +134,37 @@ defmodule SymphonyElixir.CommentInboxTest do
     assert empty["versions"][CommentVersion.key(agent)]["origin"] == "integration"
   end
 
+  test "a changed trust binding reclassifies open persisted versions without replaying acknowledged input", ctx do
+    establish(ctx)
+
+    agent =
+      comment("pai", "Entscheidung")
+      |> Map.put("user", %{"id" => "pai-app", "app" => true, "name" => "Pai"})
+      |> Map.merge(%{"issue" => %{"id" => ctx.issue.id}, "agentSession" => nil, "isArtificialAgentSessionRoot" => false, "bodyData" => nil})
+
+    classify = fn _ -> :foreign end
+
+    assert {:ok, state} = scan(ctx, [agent], classify: classify)
+    assert CommentInbox.pending(state) == []
+    assert {:ok, state} = scan(ctx, [agent], classify: classify, trusted_agent_ids: ["pai-app"])
+    assert [%{"origin" => "agent", "status" => "recognized"}] = CommentInbox.pending(state)
+    assert {:ok, state} = deliver(ctx)
+    assert [%{"origin" => "agent", "status" => "delivered"}] = CommentInbox.pending(state)
+
+    assert {:ok, state} = scan(ctx, [agent], classify: classify)
+    assert CommentInbox.pending(state) == []
+    assert state["versions"][CommentVersion.key(agent)]["origin"] == "integration"
+    assert {:ok, state} = scan(ctx, [agent], classify: classify, trusted_agent_ids: ["pai-app"])
+    assert [%{"origin" => "agent", "status" => "delivered"}] = CommentInbox.pending(state)
+
+    assert {:ok, state} = ack(ctx, CommentVersion.key(agent))
+    assert CommentInbox.pending(state) == []
+    assert {:ok, _state} = scan(ctx, [agent], classify: classify)
+    assert {:ok, state} = scan(ctx, [agent], classify: classify, trusted_agent_ids: ["pai-app"])
+    assert CommentInbox.pending(state) == []
+    assert state["versions"][CommentVersion.key(agent)]["status"] == "processed"
+  end
+
   test "deletion after acknowledgement has an independent restartable assessment", ctx do
     establish(ctx)
     source = comment("done", "Änderung übernehmen")

@@ -158,7 +158,10 @@ im gebundenen Workspace, lehnt die eigene App und abweichende Listen von
 Projekten desselben Workspaces ab und verlangt nach Bindungsänderungen einen
 Neustart. Direkte Kommentare und historisch belegte Änderungen dieser Apps
 wirken wie Eingaben des konfigurierten Menschen; Sessionberatung bleibt Kontext,
-Symphony-Ausgaben bleiben Echo. `tracker.agent_hop_limit` begrenzt diese
+Symphony-Ausgaben bleiben Echo.
+Nach einem Bindungswechsel klassifiziert der nächste vollständige Kommentarscan
+bereits gespeicherte offene Versionen neu; bestätigte Ergebnisse bleiben abgeschlossen.
+`tracker.agent_hop_limit` begrenzt diese
 agentenbedingten Weckungen je Issue im rollierenden 24-Stunden-Fenster
 (Standard 10); zurückgehaltene Eingaben bleiben dauerhaft und werden nach
 Fensterende oder einem neuen menschlichen Eingang verarbeitet. Die Befugnisse

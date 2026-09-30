@@ -37,11 +37,35 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
     assert Server.calls(server) == before
     assert Agent.get(counts, & &1) == %{}
+    relay_request = Req.default_options()[:plug]
+    parent = self()
+
+    Req.default_options(
+      plug: fn conn ->
+        if conn.method == "POST" and String.ends_with?(conn.request_path, "/ack") do
+          send(parent, {:ack_pending, self()})
+
+          receive do
+            :release_ack -> :ok
+          after
+            2_000 -> raise "relay ACK barrier timed out"
+          end
+        end
+
+        relay_request.(conn)
+      end
+    )
+
     Server.publish(server, "one", %{"issueId" => "issue-0"})
     Process.sleep(100)
     assert Server.consumer(server, "one", "one").cursor == 0
     assert Server.calls(server) == before
-    assert wait_for_poll(server, length(before))
+    assert_receive {:ack_pending, poller}, 6_500
+    on_exit(fn -> send(poller, :release_ack) end)
+    waiter = Task.async(fn -> wait_for_poll(server, length(before)) end)
+    refute Task.yield(waiter, 250)
+    send(poller, :release_ack)
+    assert Task.await(waiter, 1_000)
     assert Server.consumer(server, "one", "one").cursor == 1
     assert Agent.get_and_update(counts, &{&1, %{}}) == %{read: 1}
 
@@ -671,7 +695,9 @@ defmodule SymphonyElixir.RelayBudgetTest do
   defp wait_for_poll(server, count) do
     Enum.any?(1..65, fn _ ->
       Process.sleep(100)
-      length(Server.calls(server)) > count and ProjectPoller.polling().next_poll_in_ms > 0
+
+      length(Server.calls(server)) > count and
+        match?(%{checking?: false, next_poll_in_ms: remaining} when is_integer(remaining) and remaining > 0, ProjectPoller.polling())
     end)
   end
 

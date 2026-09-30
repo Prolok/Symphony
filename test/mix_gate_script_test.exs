@@ -40,6 +40,7 @@ defmodule MixGateScriptTest do
     printf 'python=%s\\n' "${SYMPHONY_PYTHON-unset}"
     printf 'codex_command=%s\\n' "${SYMPHONY_CODEX_COMMAND-unset}"
     printf 'linear_yolo_agent=%s\\n' "${LINEAR_YOLO_AGENT-unset}"
+    printf 'linear_trusted_agents=%s\\n' "${LINEAR_TRUSTED_AGENT_IDS-unset}"
     printf 'openclaw_yolo_agent=%s\\n' "${OPENCLAW_YOLO_AGENT-unset}"
     printf 'openclaw_notify_session=%s\\n' "${OPENCLAW_YOLO_NOTIFY_SESSION-unset}"
     printf 'secret_access=%s\\n' "${SYMPHONY_LINEAR_SECRET_ACCESS-unset}"
@@ -66,6 +67,7 @@ defmodule MixGateScriptTest do
         {"SYMPHONY_PYTHON", "/tmp/wrong-python"},
         {"SYMPHONY_CODEX_COMMAND", "false"},
         {"LINEAR_YOLO_AGENT", "synthetic-inherited-linear-agent"},
+        {"LINEAR_TRUSTED_AGENT_IDS", "11111111-1111-4111-8111-111111111111"},
         {"OPENCLAW_YOLO_AGENT", "synthetic-inherited-openclaw-agent"},
         {"OPENCLAW_YOLO_NOTIFY_SESSION", "agent:synthetic:main"},
         {"SYMPHONY_LINEAR_SECRET_ACCESS", "denied"},
@@ -92,6 +94,7 @@ defmodule MixGateScriptTest do
     assert output =~ "python=unset"
     assert output =~ "codex_command=unset"
     assert output =~ "linear_yolo_agent=unset"
+    assert output =~ "linear_trusted_agents=unset"
     assert output =~ "openclaw_yolo_agent=unset"
     assert output =~ "openclaw_notify_session=unset"
     assert output =~ "secret_access=denied"

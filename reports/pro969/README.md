@@ -88,3 +88,25 @@ Die finalen PreReview-Gates stehen in [Prüflog](prereview-check.log) und
 [Testlog](prereview-targeted.log): `make check` grün, 276 gezielte Tests grün
 einschließlich aller ticketseitigen Testdateien und der Cache-Regression.
 Der direkte Projekt-Snapshot antwortete erneut in 0 ms bei 2146 ms aktivem Scan.
+
+Der isolierte read-only Review gegen `origin/main d357be5` fand drei Fehler in
+der nebenläufigen Integration. Alle drei wurden im bestehenden Orchestrator
+korrigiert: Regulärer Dispatch läuft auch bei ständig gebündelten Folgepolls;
+Recovery akzeptiert eigene Reservierungs-Claims, schützt aber aktive Worker und
+PO-Gruppen; die Ergebnisintegration entfernt auch Claims kurzlebiger Recovery-
+Starts, die im ursprünglichen Baselinezustand noch fehlten.
+
+Drei neue Regressionen waren vor diesen Korrekturen rot (14 Tests, drei passende
+Fehler). Mit zusätzlichem Nachweis eines einmaligen regulären Workerstarts trotz
+Folgepoll sind nun alle 15 OrchestratorIO-Tests grün. Der Kurzlauf entfernt den
+Recovery-Claim und erhält zwischenzeitliche Worker-/Retry-Claims; die Recovery-
+Probe weist konkurrierende Starts ab und erlaubt einen neuen Beobachter nach
+Ende seines Vorgängers. [Vor-Fix-Log](review-before.log),
+[Nach-Fix-Log](review-after.log).
+
+Am finalen Review-Fixstand sind `make check` und 332 gezielte Bestandstests grün.
+Der direkte Snapshot antwortet in 0 ms bei 2167 ms aktivem Scan, ohne falschen
+Stall. [Prüflog](review-check.log), [Testlog](review-targeted.log).
+Das Reviewbudget von einer Runde ist ausgeschöpft; die gezielt validierten
+Fixes wurden vom Hauptworker bewertet und nicht erneut vom Subagenten geprüft.
+Vollsuite und gebundene Routinetests bleiben Aufgabe von `Test (AI)`.

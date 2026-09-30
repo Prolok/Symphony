@@ -1,0 +1,52 @@
+Compiling 2 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 541314, max_cases: 20
+
+PRO-969 after: snapshot_elapsed_ms=0 blocked_scan_ms=2147 no_stall_retry=true
+.......
+
+  1) test recovery retries its own reserved claims but rejects live workers and duplicate groups (SymphonyElixir.OrchestratorIOTest)
+     test/symphony_elixir/orchestrator_io_test.exs:306
+     match (=) failed
+     code:  assert {:ok, recovered} = call.("recovery", [member], true)
+     left:  {:ok, recovered}
+     right: {:error, :capacity}
+     stacktrace:
+       test/symphony_elixir/orchestrator_io_test.exs:326: (test)
+
+.
+
+  2) test completed PO ticks update the regular capacity queue despite repeated follow-up polls (SymphonyElixir.OrchestratorIOTest)
+     test/symphony_elixir/orchestrator_io_test.exs:290
+     Assertion with == failed
+     code:  assert completed.waiting == [%{issue_id: candidate.id, identifier: candidate.identifier}]
+     left:  []
+     right: [%{identifier: "PRO-1000", issue_id: "queued"}]
+     stacktrace:
+       test/symphony_elixir/orchestrator_io_test.exs:299: anonymous fn/3 in SymphonyElixir.OrchestratorIOTest."test completed PO ticks update the regular capacity queue despite repeated follow-up polls"/1
+       (elixir 1.19.5) lib/enum.ex:4562: Enum.reduce/3
+       (symphony_elixir 0.1.0) lib/symphony_elixir/project_context.ex:47: SymphonyElixir.ProjectContext.with_context/2
+       test/symphony_elixir/orchestrator_io_test.exs:294: (test)
+
+...
+
+  3) test a recovery that exits before tick reconciliation releases its newly recorded claim (SymphonyElixir.OrchestratorIOTest)
+     test/symphony_elixir/orchestrator_io_test.exs:340
+     Expected false or nil, got true
+     code: refute MapSet.member?(completed.claimed, member.id)
+     arguments:
+
+         # 1
+         MapSet.new(["po-1", "retry", "worker"])
+
+         # 2
+         "po-1"
+
+     stacktrace:
+       test/symphony_elixir/orchestrator_io_test.exs:356: anonymous fn/3 in SymphonyElixir.OrchestratorIOTest."test a recovery that exits before tick reconciliation releases its newly recorded claim"/1
+       (symphony_elixir 0.1.0) lib/symphony_elixir/project_context.ex:47: SymphonyElixir.ProjectContext.with_context/2
+       test/symphony_elixir/orchestrator_io_test.exs:345: (test)
+
+
+Finished in 6.7 seconds (0.00s async, 6.7s sync)
+14 tests, 3 failures

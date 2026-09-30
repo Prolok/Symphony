@@ -254,7 +254,7 @@ defmodule SymphonyElixir.Orchestrator do
     state =
       if task.context == SymphonyElixir.ProjectContext.current() do
         state = integrate_yolo_tick(state, task, result)
-        if poll_pending?(state), do: state, else: dispatch_candidates(state, task.issues)
+        dispatch_candidates(state, task.issues)
       else
         coalesce_poll(state)
       end
@@ -525,9 +525,18 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | poll_check_in_progress: Map.put(progress, :pending?, true)}
   end
 
-  defp yolo_start_busy?(state, group, members) do
-    Map.has_key?(state.yolo_runs, group) or
-      Enum.any?(members, &(Map.has_key?(state.running, &1.id) or MapSet.member?(state.claimed, &1.id)))
+  defp yolo_start_busy?(state, group, members, recovering?) do
+    ids = MapSet.new(members, & &1.id)
+
+    Enum.any?(state.yolo_runs, fn {name, run} ->
+      is_pid(run.pid) and Process.alive?(run.pid) and (name == group or Enum.any?(run.ids, &MapSet.member?(ids, &1)))
+    end) or
+      Enum.any?(members, fn member ->
+        Map.has_key?(state.running, member.id) or
+          if recovering?,
+            do: Map.has_key?(state.retry_attempts, member.id),
+            else: MapSet.member?(state.claimed, member.id)
+      end)
   end
 
   defp valid_yolo_start?(nil, _token), do: false
@@ -580,7 +589,8 @@ defmodule SymphonyElixir.Orchestrator do
         {group, merge_yolo_event(run, current, previous)}
       end)
 
-    removed = MapSet.difference(task.baseline.claimed, result.claimed)
+    recorded = state.yolo_runs |> Enum.flat_map(fn {_, run} -> run.ids end) |> MapSet.new()
+    removed = MapSet.difference(MapSet.union(task.baseline.claimed, recorded), result.claimed)
     added = MapSet.difference(result.claimed, task.baseline.claimed)
     retained = MapSet.intersection(state.claimed, MapSet.new(Map.keys(state.running) ++ Map.keys(state.retry_attempts)))
 
@@ -3201,7 +3211,7 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_call({:start_yolo_group, token, group, members, callback, event, recovering?}, _from, state) do
     task = poll_task(state)
     valid? = valid_yolo_start?(task, token)
-    busy? = yolo_start_busy?(state, group, members)
+    busy? = yolo_start_busy?(state, group, members, recovering?)
 
     if valid? and not busy? and (recovering? or available_slots(state) > 0) do
       result = YoloCoordinator.start_worker(state, group, callback, recovering?)

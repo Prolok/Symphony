@@ -287,6 +287,105 @@ defmodule SymphonyElixir.OrchestratorIOTest do
     assert state.retry_attempts == %{}
   end
 
+  test "completed PO ticks update the regular capacity queue despite repeated follow-up polls", %{pid: pid, context: context} do
+    candidate = %Issue{id: "queued", identifier: "PRO-1000", title: "Queued worker", state: "In Arbeit (AI)"}
+    baseline = %{:sys.get_state(pid) | max_concurrent_agents: 0}
+
+    ProjectContext.with_context(context, fn ->
+      Enum.reduce(1..3, baseline, fn _, state ->
+        task = %{ref: make_ref(), context: context, pending?: true, issues: [candidate], baseline: state}
+        polling = %{state | poll_check_in_progress: task, waiting: []}
+        assert {:noreply, completed} = Orchestrator.handle_info({task.ref, state}, polling)
+        assert completed.waiting == [%{issue_id: candidate.id, identifier: candidate.identifier}]
+        assert_receive :tick
+        completed
+      end)
+    end)
+  end
+
+  test "a pending follow-up poll still starts a regular worker exactly once", %{pid: pid, context: context} do
+    candidate = %Issue{id: "regular", identifier: "PRO-1001", title: "Regular worker", state: "In Arbeit (AI)"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [candidate])
+    context = put_in(context.settings.codex.command, "sleep 20")
+    baseline = :sys.get_state(pid)
+
+    ProjectContext.with_context(context, fn ->
+      task = %{ref: make_ref(), context: context, pending?: true, issues: [candidate], baseline: baseline}
+      assert {:noreply, started} = Orchestrator.handle_info({task.ref, baseline}, %{baseline | poll_check_in_progress: task})
+      assert_receive :tick
+      assert %{pid: worker} = started.running[candidate.id]
+
+      try do
+        next = %{task | ref: make_ref(), baseline: started}
+        assert {:noreply, repeated} = Orchestrator.handle_info({next.ref, started}, %{started | poll_check_in_progress: next})
+        assert_receive :tick
+        assert repeated.running[candidate.id].pid == worker
+      after
+        Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker)
+        Enum.each(started.comment_scans, fn {_, scan} -> Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, scan) end)
+      end
+    end)
+  end
+
+  test "recovery retries its own reserved claims but rejects live workers and duplicate groups", %{pid: pid, issues: issues} do
+    send(pid, :run_poll_cycle)
+    assert_receive {:scan_entered, scanner, _}, 2_000
+    task = poll_task(:sys.get_state(pid))
+    member = List.last(issues)
+    parent = self()
+
+    callback = fn ->
+      send(parent, {:recovery_started, self()})
+
+      receive do
+        :stop -> :ok
+      end
+    end
+
+    :sys.replace_state(pid, fn state -> %{state | claimed: MapSet.put(state.claimed, member.id), max_concurrent_agents: 0} end)
+
+    call = fn group, members, recovering? ->
+      GenServer.call(pid, {:start_yolo_group, task.token, group, members, callback, %{}, recovering?})
+    end
+
+    assert call.("recovery", [member], false) == {:error, :capacity}
+    assert {:ok, recovered} = call.("recovery", [member], true)
+    assert_receive {:recovery_started, ^recovered}
+    assert call.("recovery", [member], true) == {:error, :capacity}
+    assert call.("other", [member], true) == {:error, :capacity}
+    assert call.("regular", [%{member | id: "worker"}], true) == {:error, :capacity}
+    ref = Process.monitor(recovered)
+    send(recovered, :stop)
+    assert_receive {:DOWN, ^ref, :process, ^recovered, :normal}
+    assert {:ok, restarted} = call.("recovery", [member], true)
+    assert_receive {:recovery_started, ^restarted}
+    Process.exit(scanner, :kill)
+    await_state(pid, &is_nil(poll_task(&1)))
+  end
+
+  test "a recovery that exits before tick reconciliation releases its newly recorded claim", %{pid: pid, context: context, issues: issues} do
+    baseline = :sys.get_state(pid)
+    task = %{ref: make_ref(), token: make_ref(), context: context, pending?: true, issues: [], baseline: baseline}
+    member = hd(issues)
+
+    ProjectContext.with_context(context, fn ->
+      polling = %{baseline | poll_check_in_progress: task}
+      message = {:start_yolo_group, task.token, "recovery", [member], fn -> :ok end, %{}, true}
+      assert {:reply, {:ok, recovered}, started} = Orchestrator.handle_call(message, {self(), make_ref()}, polling)
+      ref = Process.monitor(recovered)
+      assert_receive {:DOWN, ^ref, :process, ^recovered, _}
+      assert MapSet.member?(started.claimed, member.id)
+
+      current = %{started | retry_attempts: %{"retry" => %{capacity_wait: true}}, claimed: MapSet.put(started.claimed, "retry")}
+      assert {:noreply, completed} = Orchestrator.handle_info({task.ref, baseline}, current)
+      assert completed.yolo_runs == %{}
+      refute MapSet.member?(completed.claimed, member.id)
+      assert MapSet.member?(completed.claimed, "worker")
+      assert MapSet.member?(completed.claimed, "retry")
+      assert_receive :tick
+    end)
+  end
+
   defp empty_comments do
     page = %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}}
     {:ok, %{status: 200, body: %{"data" => %{"issue" => %{"comments" => page, "foreignComments" => page}}}}}

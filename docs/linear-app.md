@@ -69,6 +69,9 @@ kapazitätsbedingt wartende Tickets getrennt von echten Fehlerrückläufen. `:wo
 erscheint dabei nicht als Fehler.
 Pro Projekt läuft höchstens ein YOLO-Takt im bestehenden TaskSupervisor.
 Weitere Poll-Signale bündeln einen Folgetakt mit dem jüngsten Projektkontext.
+Reguläre Kandidaten werden auch bei gebündelten Folgepolls nach jedem
+abgeschlossenen Takt verarbeitet. Recovery kann eigene Reservierungen erneut
+übernehmen; aktive Worker und PO-Gruppen bleiben gegen Doppelstarts geschützt.
 Starts und Kapazitätsentscheidungen bleiben im Orchestrator; Ergebnisse
 aktualisieren nur den zugehörigen YOLO-Zustand und erhalten neuere Worker-Ereignisse.
 Die AgentHop-Warmprüfung bleibt über Taskwechsel erhalten; ein Neustart prüft

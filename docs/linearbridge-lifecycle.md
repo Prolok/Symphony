@@ -6,17 +6,20 @@ keine Codingaufträge und startet keine Modellrunde.
 
 ## Optionale Einrichtung
 
-`tracker.openclaw_linear_bridge` im zentralen Workflow, ohne geheime Werte:
+Projektweise über `OPENCLAW_LINEAR_BRIDGE` als JSON-Objekt in der vorhandenen
+`.symphony/.env` (lokaler Override: `.symphony/.env.local`), ohne geheime Werte:
 
-```yaml
-tracker:
-  openclaw_linear_bridge:
-    producer_id: symphony-example
-    consumer_account_id: account-example
-    key_id: producer-key-example
-    secret_env: SYMPHONY_LINEAR_BRIDGE_KEY
-    gateway_port: 18789
+```dotenv
+OPENCLAW_LINEAR_BRIDGE='{"producer_id":"symphony-example","consumer_account_id":"account-example","key_id":"producer-key-example","secret_env":"SYMPHONY_LINEAR_BRIDGE_KEY","gateway_port":18789}'
 ```
+
+Wie bei den übrigen Tracker-Fallbacks hat eine explizite zentrale
+`tracker.openclaw_linear_bridge`-Map vollständig Vorrang. Nur bei fehlender
+Option bzw. YAML-null wird das JSON des gebundenen Projekts ausgewertet;
+keine Feldmischung. Für die Freischaltung nur eines Projekts die zentrale
+Option weglassen. Ohne beide bleibt die Bridge aus. Ungültige wirksame Werte
+(auch Leerwert, JSON-null oder Nichtobjekt) weisen die Projektkonfiguration ab;
+ein ungültiger zentraler Wert fällt nicht auf Projektwerte zurück.
 
 Die drei IDs sind ASCII-Slugs (1–128 Zeichen, Buchstaben/Ziffern, danach auch
 `_.-`). `secret_env` ist optional und verwendet den dargestellten Standard.
@@ -60,7 +63,7 @@ Zustellkonfiguration, nicht zum v1-Wire-Schema oder zu dessen Snapshot-Hashes.
 Für die isolierte Integration richtet der zuständige Betreiber den Consumer
 mit passender Produzenten-/Accountbindung und vorhandenem autorisiertem Zugang
 auf dem gewählten lokalen Port ein, bevor Symphony neue Testaufträge erzeugt.
-Die Testinstanz erhält diese Workflowoption vor ihrem Start. Symphony startet
+Die Testinstanz erhält ihren JSON-Projektwert vor dem Start. Symphony startet
 oder installiert den Consumer nicht und verändert keine OpenClaw-Konfiguration.
 Ein bereits journalisierter Produktionsauftrag kann durch einen Portwechsel
 nicht zum Testauftrag werden. Backlog- und Zwei-Mitglieder-Reviewlauf müssen

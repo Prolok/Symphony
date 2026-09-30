@@ -10,17 +10,27 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
     root = Path.dirname(Workflow.workflow_file_path())
     File.mkdir_p!(Path.join(root, ".symphony"))
-    File.write!(Path.join(root, ".symphony/.env"), "LINEAR_ASSIGNEE=human@example.com\n")
+    write_project_env(root, config())
     {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
     context = put_in(context.settings.tracker.app["state_root"], Path.join(root, "state"))
-    context = put_in(context.settings.tracker.openclaw_linear_bridge, config())
-    context = put_in(context.settings.tracker.openclaw_yolo_agent, "po")
     ProjectContext.bind(context)
     %{context: context, root: root}
   end
 
   defp config, do: %{"producer_id" => "symphony-example", "consumer_account_id" => "account-example", "key_id" => "producer-key-example"}
   defp fixture(name), do: File.read!("test/fixtures/openclaw/linear_bridge/#{name}.json") |> Jason.decode!()
+
+  defp write_project_env(root, bridge) do
+    File.mkdir_p!(Path.join(root, ".symphony"))
+    base = "LINEAR_ASSIGNEE=human@example.com\nLINEAR_YOLO_AGENT=Pai\nOPENCLAW_YOLO_AGENT=po\n"
+    File.write!(Path.join(root, ".symphony/.env"), base <> if(bridge, do: "OPENCLAW_LINEAR_BRIDGE='#{Jason.encode!(bridge)}'\n", else: ""))
+  end
+
+  defp load_project_bridge(root, bridge) do
+    write_project_env(root, bridge)
+    assert {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    context
+  end
 
   defp order(name \\ "incoming") do
     payload = fixture(name)
@@ -75,6 +85,113 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     end
 
     :ok
+  end
+
+  test "two loaded projects bind new orders independently and disabled ticks perform no bridge work", %{root: root} do
+    active_config = Map.merge(config(), %{"producer_id" => "producer-a", "consumer_account_id" => "account-a", "key_id" => "key-a", "gateway_port" => 19_892})
+    active = load_project_bridge(Path.join(root, "A"), active_config)
+    inactive = load_project_bridge(Path.join(root, "B"), nil)
+    before_env = System.get_env()
+    parent = self()
+
+    for context <- [active, inactive] do
+      ProjectContext.with_context(context, fn ->
+        original = order() |> Map.merge(%{"project_id" => context.id, "agent" => "po", "session_id" => "agent:po:symphony:#{OpenClaw.digest(context.id)}:incoming:#{order()["id"]}"})
+        assert :ok = Journal.write(original)
+        assert {:ok, current} = Journal.read("incoming")
+
+        if context == active do
+          assert current["linear_bridge"]["config"] == LinearBridge.config_with_defaults(active_config)
+
+          consumer =
+            transport(
+              fn wire ->
+                payload = Jason.decode!(Base.decode64!(wire["payload_b64"]))
+                assert payload["producer_id"] == "producer-a"
+                assert payload["consumer_account_id"] == "account-a"
+                assert payload["binding"]["project_id"] == active.id
+                send(parent, :active_delivered)
+                {:ok, Jason.encode!(ack(wire))}
+              end,
+              "19892"
+            )
+
+          assert :ok = Delivery.flush(options(consumer))
+          assert {:ok, %{"ack_sequence" => 1}} = DurableState.read(Delivery.receipt_path(current))
+        else
+          refute Map.has_key?(current, "linear_bridge")
+          deny = fn _ -> flunk("disabled project accessed key or consumer") end
+          # A corrupt unrelated outbox would fail if the disabled tick scanned journals.
+          File.write!(Journal.path("review"), "not-json")
+          before_tasks = Task.Supervisor.children(SymphonyElixir.TaskSupervisor)
+
+          assert {:ok, []} =
+                   trace_bridge_work(fn ->
+                     assert :ok = Delivery.flush(transport: deny, bridge_key: deny)
+                     assert :ok = Delivery.tick(transport: deny, bridge_key: deny)
+                     :ok
+                   end)
+
+          assert Task.Supervisor.children(SymphonyElixir.TaskSupervisor) == before_tasks
+          refute File.exists?(Delivery.receipt_path(current))
+          assert File.read!(Journal.path("review")) == "not-json"
+          assert {:ok, ^current} = Journal.read("incoming")
+        end
+      end)
+    end
+
+    assert_received :active_delivered
+    assert System.get_env() == before_env
+    # Positive control: the same observer sees enabled locks and durable I/O.
+    assert {:ok, calls} = ProjectContext.with_context(active, fn -> trace_bridge_work(fn -> Delivery.flush() end) end)
+    assert Enum.any?(calls, &match?({IssueLease, :with_lock, _}, &1))
+    assert Enum.any?(calls, &match?({DurableState, :read, _}, &1))
+  end
+
+  defp trace_bridge_work(callback) do
+    patterns = [
+      {IssueLease, :with_lock, 3},
+      {Journal, :bridge_orders, 0},
+      {DurableState, :read, 1},
+      {DurableState, :write, 2},
+      {Task.Supervisor, :start_child, 2},
+      {File, :read, 1},
+      {SymphonyElixir.Linear.Client, :graphql, :_}
+    ]
+
+    tracer = spawn(fn -> collect_bridge_calls([]) end)
+    Enum.each(patterns, &:erlang.trace_pattern(&1, true, [:local]))
+    :erlang.trace(self(), true, [:call, :set_on_spawn, {:tracer, tracer}])
+
+    try do
+      result = callback.()
+      ref = :erlang.trace_delivered(self())
+      assert_receive {:trace_delivered, _, ^ref}
+      send(tracer, {:flush, self()})
+      assert_receive {:bridge_calls, calls}, 1_000
+      {result, Enum.reverse(calls)}
+    after
+      :erlang.trace(self(), false, [:call, :set_on_spawn])
+      Enum.each(patterns, &:erlang.trace_pattern(&1, false, [:local]))
+      send(tracer, :stop)
+    end
+  end
+
+  defp collect_bridge_calls(calls) do
+    receive do
+      {:trace, _, :call, call} ->
+        collect_bridge_calls([call | calls])
+
+      {:flush, parent} ->
+        send(parent, {:bridge_calls, calls})
+        collect_bridge_calls(calls)
+
+      :stop ->
+        :ok
+
+      _ ->
+        collect_bridge_calls(calls)
+    end
   end
 
   test "default coordinator ticks handle empty and corrupt outboxes without dispatch", %{context: context} do
@@ -279,15 +396,19 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
 
   test "a changed recipient or key cannot reroute an original outbox", %{context: context} do
     assert :ok = Journal.write(order())
-    ProjectContext.bind(put_in(context.settings.tracker.openclaw_linear_bridge["consumer_account_id"], "foreign"))
+    changed = load_project_bridge(context.root, Map.put(config(), "consumer_account_id", "foreign"))
+    changed = put_in(changed.settings.tracker.app["state_root"], context.settings.tracker.app["state_root"])
+    ProjectContext.bind(changed)
     deny = fn _ -> flunk("must preserve original account") end
     assert :ok = Delivery.flush(transport: deny, bridge_key: deny)
     assert {:ok, current} = Journal.read("incoming")
+    assert current["linear_bridge"]["config"] == LinearBridge.config_with_defaults(config())
     assert {:ok, %{"ack_sequence" => 0}} = DurableState.read(Delivery.receipt_path(current))
   end
 
   test "isolated delivery binds the port and replays identical bytes after restart without rerouting", %{context: context} do
-    isolated = put_in(context.settings.tracker.openclaw_linear_bridge["gateway_port"], 19_892)
+    isolated = load_project_bridge(context.root, Map.put(config(), "gateway_port", 19_892))
+    isolated = put_in(isolated.settings.tracker.app["state_root"], context.settings.tracker.app["state_root"])
     ProjectContext.bind(isolated)
     assert :ok = Journal.write(order("review"))
     assert {:ok, current} = Journal.read("review")

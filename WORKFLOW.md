@@ -337,7 +337,10 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   Belegimporte und ausdrücklich beauftragte administrative Altfallbereinigungen
   erfolgen getrennt durch den Betreiber gemäß diesem Vertrag.
   Optional übergibt `tracker.openclaw_linear_bridge` journalisierte PO-Lifecycles
-  authentifiziert an LinearBridge; dessen optionaler `gateway_port` wählt nur
+  authentifiziert an LinearBridge; fehlt die zentrale Option, dient
+  `OPENCLAW_LINEAR_BRIDGE` (JSON-Objekt) aus der Projektkonfiguration als Fallback.
+  Die zentrale Map hat vollständig Vorrang; Änderungen verlangen Neustart.
+  Der optionale `gateway_port` wählt nur
   das lokale Bridgeziel und bleibt auftragsgebunden (Standard `18789`);
   [Einrichtung und Vertrag](docs/linearbridge-lifecycle.md).
   Fachlich offene, bereits zugestellte Mitglieder werden nach belegter Neudelegation

@@ -11,6 +11,7 @@ defmodule SymphonyElixir.TestSupport do
     "LINEAR_YOLO_AGENT",
     "LINEAR_ADVISORY_AGENT_IDS",
     "OPENCLAW_YOLO_AGENT",
+    "OPENCLAW_LINEAR_BRIDGE",
     "OPENCLAW_YOLO_NOTIFY_SESSION"
   ]
 

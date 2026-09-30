@@ -2,6 +2,165 @@ defmodule SymphonyElixir.OpenClawConfigTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.ProjectContext
 
+  test "lifecycle binding falls back to the public project JSON value" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
+    root = Path.dirname(Workflow.workflow_file_path())
+    File.mkdir_p!(Path.join(root, ".symphony"))
+    encoded = Jason.encode!(bridge_config())
+    File.write!(Path.join(root, ".symphony/.env"), "LINEAR_ASSIGNEE=human@example.com\nOPENCLAW_LINEAR_BRIDGE='#{encoded}'\nSYMPHONY_LINEAR_BRIDGE_CUSTOM=\"not-public-even-if-malformed\n")
+    assert {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    assert context.settings.tracker.openclaw_linear_bridge == bridge_config()
+    assert context.env["OPENCLAW_LINEAR_BRIDGE"] == encoded
+    refute Map.has_key?(context.env, "SYMPHONY_LINEAR_BRIDGE_CUSTOM")
+  end
+
+  defp bridge_config do
+    %{"producer_id" => "symphony-example", "consumer_account_id" => "account-example", "key_id" => "example-key"}
+  end
+
+  test "project bridge fallback respects local overrides, central precedence and isolated environment" do
+    {root, workflow} = bridge_project()
+    write_bridge_env(root, Jason.encode!(bridge_config()))
+    local = Map.put(bridge_config(), "consumer_account_id", "local-account")
+    File.write!(Path.join(root, ".symphony/.env.local"), "OPENCLAW_LINEAR_BRIDGE='#{Jason.encode!(local)}'\n")
+
+    for central <- [nil, "null"] do
+      write_central_bridge(workflow, central)
+      assert {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+      assert context.settings.tracker.openclaw_linear_bridge == local
+    end
+
+    central = Map.put(bridge_config(), "producer_id", "central-producer")
+    write_central_bridge(workflow, Jason.encode!(central))
+    File.write!(Path.join(root, ".symphony/.env.local"), "OPENCLAW_LINEAR_BRIDGE='invalid-unused-fallback'\n")
+    assert {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    assert context.settings.tracker.openclaw_linear_bridge == central
+
+    File.rm!(Path.join(root, ".symphony/.env.local"))
+
+    for invalid <- ["false", "[]", Jason.encode!(%{"producer_id" => "incomplete"})] do
+      write_central_bridge(workflow, invalid)
+      assert {:error, {:invalid_workflow_config, message}} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+      assert message =~ "openclaw_linear_bridge"
+    end
+
+    write_central_bridge(workflow, nil)
+    write_bridge_env(root, nil)
+    previous = System.get_env("OPENCLAW_LINEAR_BRIDGE")
+    System.put_env("OPENCLAW_LINEAR_BRIDGE", Jason.encode!(central))
+    on_exit(fn -> restore_env("OPENCLAW_LINEAR_BRIDGE", previous) end)
+    assert {:ok, inactive} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    assert inactive.settings.tracker.openclaw_linear_bridge == nil
+    refute Map.has_key?(inactive.env, "OPENCLAW_LINEAR_BRIDGE")
+  end
+
+  test "invalid public bridge values reject the project and reload without leaking raw values" do
+    {root, _workflow} = bridge_project()
+    write_bridge_env(root, Jason.encode!(bridge_config()))
+    assert {:ok, context} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+
+    invalid_bindings =
+      [Map.delete(bridge_config(), "key_id"), %{}] ++
+        for {field, values} <- [
+              {"producer_id", ["bad slug", nil]},
+              {"consumer_account_id", [String.duplicate("a", 129), 12]},
+              {"key_id", ["bad\nkey", ""]},
+              {"secret_env", ["LINEAR_APP_SECRET", 12, "SYMPHONY_LINEAR_BRIDGE_"]},
+              {"gateway_port", [0, -1, 65_536, 19_892.0, nil, true, "19892", "$PORT"]},
+              {"inline_key", ["synthetic-private-detail"]}
+            ],
+            value <- values,
+            do: Map.put(bridge_config(), field, value)
+
+    invalid_values = ["", "{synthetic-private-detail", "null", "true", "12", "[]", "\"synthetic-private-detail\""] ++ Enum.map(invalid_bindings, &Jason.encode!/1)
+
+    for value <- invalid_values do
+      write_bridge_env(root, value)
+      assert {:error, {:invalid_workflow_config, message}} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+      assert message =~ "openclaw_linear_bridge"
+      refute message =~ "synthetic-private-detail"
+      logs = capture_log(fn -> assert ProjectContext.refresh(context) == context end)
+      assert logs =~ "project_root=#{context.root}"
+      assert logs =~ "invalid_workflow_config"
+      assert logs =~ "openclaw_linear_bridge"
+      refute logs =~ "synthetic-private-detail"
+    end
+
+    for port <- [1, 18_789, 65_535] do
+      valid = Map.put(bridge_config(), "gateway_port", port)
+      write_bridge_env(root, Jason.encode!(valid))
+      assert {:ok, restarted} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+      assert restarted.settings.tracker.openclaw_linear_bridge == valid
+    end
+  end
+
+  test "every project bridge binding change requires restart and preserves exported runtime binding" do
+    {root, _workflow} = bridge_project()
+    write_bridge_env(root, nil)
+    assert {:ok, inactive} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    write_bridge_env(root, Jason.encode!(bridge_config()))
+    assert {:ok, active} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+    assert_restart_required(inactive)
+    active_env = ProjectContext.with_context(active, &Config.linear_runtime_env/0)
+    inactive_env = ProjectContext.with_context(inactive, &Config.linear_runtime_env/0)
+    refute active_env["SYMPHONY_LINEAR_BINDING_HASH"] == inactive_env["SYMPHONY_LINEAR_BINDING_HASH"]
+
+    changes =
+      [nil] ++
+        for {key, value} <- [
+              {"producer_id", "other-producer"},
+              {"consumer_account_id", "other-account"},
+              {"key_id", "other-key"},
+              {"gateway_port", 19_892},
+              {"secret_env", "SYMPHONY_LINEAR_BRIDGE_OTHER"}
+            ],
+            do: Map.put(bridge_config(), key, value)
+
+    for changed <- changes do
+      write_bridge_env(root, if(changed, do: Jason.encode!(changed)))
+      assert_restart_required(active)
+      assert {:ok, restarted} = ProjectContext.load(root, Workflow.workflow_file_path(), %{})
+      assert restarted.settings.tracker.openclaw_linear_bridge == changed
+      runtime = ProjectContext.with_context(restarted, &Config.linear_runtime_env/0)
+      refute runtime["SYMPHONY_LINEAR_BINDING_HASH"] == active_env["SYMPHONY_LINEAR_BINDING_HASH"]
+    end
+
+    System.put_env("SYMPHONY_WORKFLOW_FILE", active.workflow_path)
+
+    ProjectContext.with_context(nil, fn ->
+      assert :ok = ProjectContext.restore(active_env["SYMPHONY_PROJECT_CONTEXT"], Path.join(root, ".symphony"))
+      assert Config.openclaw_linear_bridge() == bridge_config()
+      assert Config.linear_runtime_env()["SYMPHONY_LINEAR_BINDING_HASH"] == active_env["SYMPHONY_LINEAR_BINDING_HASH"]
+    end)
+
+    System.put_env("SYMPHONY_LINEAR_AUTH_MODE", "app")
+    System.put_env("SYMPHONY_LINEAR_BINDING_HASH", active_env["SYMPHONY_LINEAR_BINDING_HASH"])
+    unresolved = %{inactive | settings: nil}
+    assert {:error, :linear_runtime_binding_changed} = ProjectContext.with_context(unresolved, &Config.settings/0)
+    assert {:ok, _} = ProjectContext.with_context(%{active | settings: nil}, &Config.settings/0)
+  end
+
+  defp bridge_project do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
+    root = Path.dirname(Workflow.workflow_file_path())
+    File.mkdir_p!(Path.join(root, ".symphony"))
+    {root, File.read!(Workflow.workflow_file_path())}
+  end
+
+  defp write_bridge_env(root, value) do
+    File.write!(Path.join(root, ".symphony/.env"), "LINEAR_ASSIGNEE=human@example.com\n" <> if(value, do: "OPENCLAW_LINEAR_BRIDGE='#{value}'\n", else: ""))
+  end
+
+  defp write_central_bridge(workflow, value) do
+    File.write!(Workflow.workflow_file_path(), if(value, do: String.replace(workflow, "tracker:\n", "tracker:\n  openclaw_linear_bridge: #{value}\n"), else: workflow))
+  end
+
+  defp assert_restart_required(context) do
+    logs = capture_log(fn -> assert ProjectContext.refresh(context) == context end)
+    assert logs =~ "project_root=#{context.root}"
+    assert logs =~ "project_binding_change_requires_restart"
+  end
+
   test "OpenClaw selection is project local, trimmed and requires a Linear YOLO binding" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
     root = Path.dirname(Workflow.workflow_file_path())

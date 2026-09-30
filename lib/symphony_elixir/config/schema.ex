@@ -88,6 +88,7 @@ defmodule SymphonyElixir.Config.Schema do
 
       attrs = Map.put(attrs, "advisory_agent_ids", advisory_ids(Map.get(attrs, "advisory_agent_ids", SymphonyElixir.ProjectContext.env("LINEAR_ADVISORY_AGENT_IDS"))))
       attrs = Map.put(attrs, "trusted_agent_ids", trusted_ids(Map.get(attrs, "trusted_agent_ids", SymphonyElixir.ProjectContext.env("LINEAR_TRUSTED_AGENT_IDS"))))
+      {attrs, bridge_error} = lifecycle_bridge(attrs)
 
       schema
       |> cast(
@@ -95,6 +96,7 @@ defmodule SymphonyElixir.Config.Schema do
         ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent advisory_agent_ids trusted_agent_ids agent_hop_limit openclaw_yolo_agent openclaw_linear_bridge active_states terminal_states)a,
         empty_values: []
       )
+      |> validate_bridge_source(bridge_error)
       |> validate_inclusion(:auth_mode, ["app"])
       |> validate_change(:openclaw_linear_bridge, fn field, bridge ->
         if LinearBridge.valid_config?(bridge), do: [], else: [{field, "invalid lifecycle bridge binding"}]
@@ -107,6 +109,24 @@ defmodule SymphonyElixir.Config.Schema do
       end)
       |> validate_number(:agent_hop_limit, greater_than: 0)
     end
+
+    defp lifecycle_bridge(%{"openclaw_linear_bridge" => _} = attrs), do: {attrs, nil}
+
+    defp lifecycle_bridge(attrs) do
+      case SymphonyElixir.ProjectContext.env("OPENCLAW_LINEAR_BRIDGE") do
+        nil ->
+          {attrs, nil}
+
+        value ->
+          case Jason.decode(value) do
+            {:ok, bridge} when is_map(bridge) -> {Map.put(attrs, "openclaw_linear_bridge", bridge), nil}
+            _ -> {attrs, "must be a JSON object in OPENCLAW_LINEAR_BRIDGE"}
+          end
+      end
+    end
+
+    defp validate_bridge_source(changeset, nil), do: changeset
+    defp validate_bridge_source(changeset, message), do: add_error(changeset, :openclaw_linear_bridge, message)
 
     defp advisory_ids(nil), do: []
     defp advisory_ids("$" <> name), do: advisory_ids(String.split(SymphonyElixir.ProjectContext.env(name) || "", ","))

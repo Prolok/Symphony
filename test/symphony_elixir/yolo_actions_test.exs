@@ -504,6 +504,88 @@ defmodule SymphonyElixir.YoloActionsTest do
     )
   end
 
+  test "a fix with sources from different projects or teams creates no intent", %{issues: [first, second | _]} do
+    for other <- [%{second | project_id: "other-project"}, %{second | team_id: "other-team"}] do
+      change(&%{&1 | issues: %{first.id => first, other.id => other}})
+
+      group([first, other], fn ->
+        assert {:error, :yolo_followup_sources_changed} = Followup.invoke(args([first, other], "followup"), opts())
+        assert {:ok, []} = Operations.pending([first.id, other.id])
+      end)
+    end
+
+    assert writes("YoloCreate") == []
+  end
+
+  test "missing and malformed remote provenance cannot turn an unrelated ticket into a fix", ctx do
+    source = %{hd(ctx.issues) | state: "Yolo Review"}
+    metadata = %{"version" => 1, "followup_type" => "fix", "origin_ids" => [source.id], "component" => "yolo/followup"}
+
+    descriptions = [
+      nil,
+      42,
+      "Unrelated ticket\n\n## Symphony Folgefix\n\n```json\ninvalid-json\n```",
+      "Unrelated ticket\n\n## Symphony Folgefix\n\n```json\n#{Jason.encode!(Map.put(metadata, "version", 2))}\n```",
+      "Unrelated ticket\n\n## Symphony Folgefix\n\n```json\n#{Jason.encode!(Map.put(metadata, "origin_ids", [42]))}\n```"
+    ]
+
+    tickets =
+      descriptions
+      |> Enum.with_index()
+      |> Map.new(fn {description, index} ->
+        id = "unrelated-#{index}"
+        {id, %{"id" => id, "projectId" => source.project_id, "description" => description}}
+      end)
+
+    change(&%{&1 | issues: %{source.id => source}, created: tickets})
+
+    Scope.with_scope(
+      "review",
+      [source],
+      "run",
+      fn ->
+        assert {:ok, created} = Followup.invoke(args([source], "followup"), opts())
+        assert db().created[created["id"]]["description"] =~ "## Symphony Folgefix"
+        assert length(writes("YoloCreate")) == 1
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "review accepts a completed linked legacy fix without requiring new metadata", ctx do
+    source = %{hd(ctx.issues) | state: "Yolo Review"}
+    change(&%{&1 | issues: %{source.id => source}})
+    finding = hd(ReviewFixture.findings())
+
+    request =
+      args([source], "followup")
+      |> Map.drop(~w(followup_type component prevention))
+      |> Map.put("operation_key", finding["followup_operation_key"])
+      |> Map.put("blocks_origins", true)
+
+    key = "followup:#{source.id}:#{request["operation_key"]}"
+    assert :ok = Operations.run(key, request, fn _ -> :ok end)
+
+    Scope.with_scope(
+      "review",
+      [source],
+      "run",
+      fn ->
+        assert {:ok, created} = Followup.invoke(request, opts())
+        {:ok, [intent]} = Operations.related([source.id])
+        assert intent["done"] == true
+        assert intent["issue_id"] == created["id"]
+        refute Map.has_key?(intent["request"], "followup_type")
+        evidence = Map.put(ReviewFixture.evidence(), "findings", [finding])
+        assert :ok = ReviewContract.validate(source, %{"review" => evidence})
+
+        assert :ok = Operations.save(%{intent | "done" => false})
+        assert {:error, :yolo_review_evidence_invalid} = ReviewContract.validate(source, %{"review" => evidence})
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
   test "relay-stamped review handoff checks fresh blockers without a dependency exception", %{issues: [issue, blocker | _], workspace: workspace} do
     review = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "current"}}
     change(&%{&1 | issues: Map.put(&1.issues, review.id, review), relations: [relation(blocker.id, review.id)]})

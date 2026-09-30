@@ -3,8 +3,9 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
 
   use GenServer
 
-  alias SymphonyElixir.Linear.Budget
-  alias SymphonyElixir.{ProjectContext, ProjectPoller, Tracker}
+  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller}
+  alias SymphonyElixir.Linear.{Adapter, Budget, CommentVersion, WriteContext}
+  alias SymphonyElixir.Tracker
 
   @safety_ms 900_000
 
@@ -14,17 +15,89 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
   @spec fetch([String.t()], keyword()) :: {:ok, [SymphonyElixir.Linear.Issue.t()]} | {:error, term()}
   def fetch(ids, opts \\ []) when is_list(ids) do
     ids = Enum.uniq(ids)
-    fetch_linear = Keyword.get(opts, :fetch_linear, &Tracker.fetch_issue_states_by_ids/1)
+    fetch_linear = Keyword.get(opts, :fetch_linear, fn ids -> Tracker.adapter().fetch_issue_states_by_ids(ids) end)
     context = Keyword.get(opts, :context, ProjectContext.current())
     relay = Keyword.get(opts, :relay, &ProjectPoller.read_issues/2)
-    now = Keyword.get(opts, :now, System.monotonic_time(:millisecond))
+    now = Keyword.get_lazy(opts, :now, &clock/0)
 
     cond do
       ids == [] -> {:ok, []}
+      opts[:force_full] == true -> fetch_linear.(ids)
       not match?(%ProjectContext{}, context) or is_nil(context.settings.tracker.relay) -> fetch_linear.(ids)
-      true -> relay_fetch(ids, context, relay, fetch_linear, now, Keyword.get(opts, :critical, false))
+      true -> serialized({context.id, Enum.sort(ids)}, fn -> relay_fetch(ids, context, relay, fetch_linear, now, Keyword.get(opts, :critical, false)) end)
     end
   end
+
+  @spec comments(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def comments(id, opts \\ []) do
+    context = ProjectContext.current()
+
+    if opts[:force_full] != true and ready?(context, id) do
+      with {:ok, [issue]} <- fetch([id], opts),
+           {:ok, inbox} <- CommentCheckpoint.background_scan(issue, opts |> Keyword.put_new(:background_now, &comment_clock/0) |> Keyword.put(:include_own_outputs, true)) do
+        {:ok, current_comments(inbox)}
+      end
+    else
+      Adapter.fetch_issue_comments(id)
+    end
+  end
+
+  defp current_comments(inbox) do
+    Enum.map(inbox["current"] || %{}, fn {_id, key} ->
+      {:ok, normalized} = CommentVersion.normalize(inbox["versions"][key]["source"])
+      normalized
+    end)
+  end
+
+  defp ready?(%ProjectContext{settings: %{tracker: %{relay: relay}}} = context, id) when not is_nil(relay),
+    do: match?({:ok, _}, ProjectPoller.comment_epoch(context, id))
+
+  defp ready?(_, _), do: false
+
+  @spec verify_binding(term(), (-> :ok | {:error, term()})) :: :ok | {:error, term()}
+  def verify_binding(binding, verify) do
+    serialized({:binding, binding}, fn -> verify_binding_serialized(binding, verify) end)
+  end
+
+  defp verify_binding_serialized(binding, verify) do
+    context = ProjectContext.current()
+    id = WriteContext.current()["issue_id"]
+
+    if ready?(context, id) do
+      case ProjectPoller.comment_epoch(context, id) do
+        {:ok, {generation, _, _}} -> verify_ready_binding(context, id, generation, binding, verify)
+        _ -> verify.()
+      end
+    else
+      verify.()
+    end
+  end
+
+  defp verify_ready_binding(context, id, generation, binding, verify) do
+    keys = [{{context.id, context.settings.tracker.app["workspace_id"], {:binding, binding}}, generation}]
+    now = clock()
+
+    case verification(keys, now) do
+      {true, _} ->
+        :ok
+
+      {false, cache_generation} ->
+        verify_and_mark(context, id, generation, verify, {keys, now, cache_generation})
+    end
+  end
+
+  defp verify_and_mark(context, id, generation, verify, {keys, now, cache_generation}) do
+    with :ok <- verify.() do
+      unchanged? = match?({:ok, {^generation, _, _}}, ProjectPoller.comment_epoch(context, id))
+      if unchanged?, do: mark(keys, now, cache_generation)
+      :ok
+    end
+  end
+
+  defp serialized(key, callback), do: :global.trans({{__MODULE__, key}, self()}, callback, [node()])
+
+  defp clock, do: Application.get_env(:symphony_elixir, :linear_read_now_fun, fn -> System.monotonic_time(:millisecond) end).()
+  defp comment_clock, do: Application.get_env(:symphony_elixir, :linear_read_now_fun, fn -> System.system_time(:millisecond) end).()
 
   @spec invalidate([String.t()] | :all) :: :ok
   def invalidate(ids) when is_list(ids) or ids == :all do
@@ -43,7 +116,8 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
   end
 
   defp use_relay_entries(ids, entries, context, relay, fetch_linear, now, critical?) do
-    keys = Enum.zip_with(ids, entries, fn id, {epoch, _issue} -> {{context.id, context.settings.tracker.app["workspace_id"], id}, epoch} end)
+    binding = CommentVersion.digest([context.id, context.settings.tracker.app, context.settings.tracker.project_slug, context.settings.tracker.team_key, context.assignee_ids])
+    keys = Enum.zip_with(ids, entries, fn id, {epoch, _issue} -> {{binding, context.settings.tracker.app["workspace_id"], id}, epoch} end)
 
     case verification(keys, now) do
       {true, _generation} ->

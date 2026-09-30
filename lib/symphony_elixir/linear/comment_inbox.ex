@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.Linear.CommentInbox do
   @moduledoc "Project-local, restartable input versions, serialized with the existing host journal lock."
 
-  alias SymphonyElixir.Linear.{AdvisoryThreads, CommentJournal, CommentVersion, DurableState, IssueLease, TrustedAgents}
+  alias SymphonyElixir.Linear.{AdvisoryThreads, Budget}
+  alias SymphonyElixir.Linear.{CommentJournal, CommentVersion, DurableState, IssueLease, TrustedAgents}
 
   @open ~w(recognized delivered)
   @outcomes ["übernommen", "Rückfrage", "nicht anwendbar", "ersetzt"]
@@ -10,13 +11,20 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   def scan(binding, issue, fetch, opts \\ []) do
     opts = Keyword.update(opts, :advisory_agent_ids, Keyword.get(opts, :trusted_agent_ids, []), &Enum.uniq(&1 ++ Keyword.get(opts, :trusted_agent_ids, [])))
 
-    with {:ok, state} <- read(binding, issue) do
-      scan_or_cached(state, binding, issue, fetch, opts)
+    with {:ok, state} <- read(binding, issue),
+         {:ok, output_epoch} <- output_epoch(binding, issue, state, opts) do
+      scan_or_cached(state, binding, issue, fetch, Keyword.put(opts, :output_epoch, output_epoch))
     end
   end
 
+  defp output_epoch(binding, issue, state, opts) do
+    if opts[:include_own_outputs] == true,
+      do: CommentJournal.output_epoch(binding, issue.id),
+      else: {:ok, get_in(state, ["background", "output_epoch"])}
+  end
+
   defp scan_or_cached(state, binding, issue, fetch, opts) do
-    if opts[:force_full] != true and background_fresh?(state, opts),
+    if opts[:force_full] != true and background_fresh?(state, binding, opts),
       do: {:ok, state},
       else: scan_serialized(binding, issue, fetch, opts)
   end
@@ -52,7 +60,7 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   end
 
   defp scan_attempt_state(state, binding, issue, fetch, opts, remaining) do
-    if opts[:force_full] != true and background_fresh?(state, opts) do
+    if opts[:force_full] != true and background_fresh?(state, binding, opts) do
       {:ok, state}
     else
       # All Linear callbacks run before either local lock is acquired. A changed
@@ -80,16 +88,21 @@ defmodule SymphonyElixir.Linear.CommentInbox do
   defp scan_result({:error, reason}, state),
     do: {:save_error, Map.put(state, "scan_error", inspect(reason)), reason}
 
-  defp background_fresh?(state, opts) do
+  defp background_fresh?(state, binding, opts) do
     case background_cache(state, opts) do
       %{"checked_at" => checked} when is_integer(checked) ->
         interval = background_interval(state, opts)
-        not foreign_relay_changed?(state["background"], opts) and clock(opts) >= checked and clock(opts) < checked + interval
+
+        not foreign_relay_changed?(state["background"], opts) and not own_output_changed?(state["background"], opts) and
+          clock(opts) >= checked and
+          (clock(opts) < checked + interval or (not is_nil(opts[:relay_epoch]) and Budget.low?(binding)))
 
       _ ->
         false
     end
   end
+
+  defp own_output_changed?(cache, opts), do: opts[:include_own_outputs] == true and cache["output_epoch"] != opts[:output_epoch]
 
   defp background_interval(state, opts) do
     if AdvisoryThreads.unresolved?(state),
@@ -130,7 +143,8 @@ defmodule SymphonyElixir.Linear.CommentInbox do
         "foreign" => foreign_source(signal, binding),
         "full_at" => now,
         "checked_at" => now,
-        "foreign_relay_epoch" => opts[:foreign_relay_epoch]
+        "foreign_relay_epoch" => opts[:foreign_relay_epoch],
+        "output_epoch" => opts[:output_epoch]
       }
 
       {:ok, Map.put(observed, "background", cache)}
@@ -153,7 +167,9 @@ defmodule SymphonyElixir.Linear.CommentInbox do
 
     unchanged = unchanged_signal?(signal, cache, binding, now, opts)
 
-    if opts[:force_full] != true and not foreign_relay_changed?(cache, opts) and unchanged do
+    reusable? = not foreign_relay_changed?(cache, opts) and not own_output_changed?(cache, opts)
+
+    if opts[:force_full] != true and reusable? and unchanged do
       cache = state["background"]
       cache = %{cache | "checked_at" => now, "signal" => signal_key(signal), "foreign" => signal_foreign(signal, binding)}
       {:ok, Map.put(state, "background", cache)}
@@ -174,7 +190,8 @@ defmodule SymphonyElixir.Linear.CommentInbox do
             "full_at" => now,
             "signal" => signal_key(signal),
             "foreign" => signal_foreign(signal, binding),
-            "foreign_relay_epoch" => opts[:foreign_relay_epoch]
+            "foreign_relay_epoch" => opts[:foreign_relay_epoch],
+            "output_epoch" => opts[:output_epoch]
           }
 
           {:ok, Map.put(observed, "background", cache)}

@@ -282,7 +282,7 @@ defmodule SymphonyElixir.Workpad do
   end
 
   defp fetch_single_tracker_comment(issue_id) do
-    with {:ok, comments} <- Tracker.fetch_issue_comments(issue_id) do
+    with {:ok, comments} <- Tracker.fetch_issue_comments(issue_id, force_full: true) do
       find_comment(comments)
     end
   end

@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   unknown outcomes remain visible and cannot cause a blind duplicate creation.
   """
 
-  alias SymphonyElixir.Linear.{CommentMutations, DurableState, IssueLease, LocalState}
+  alias SymphonyElixir.Linear.{CommentMutations, CommentVersion, DurableState, IssueLease, LocalState}
   alias SymphonyElixir.Workpad
 
   @lookup "query SymphonyReceipt($id: String!) { comment(id: $id) { id body bodyData quotedText resolvingUser { id } resolvingComment { id } updatedAt user { id } issue { id identifier } } }"
@@ -157,6 +157,27 @@ defmodule SymphonyElixir.Linear.CommentJournal do
   def classify(binding, comment) do
     with {:ok, view} <- snapshot(binding) do
       classify_snapshot(view, binding, comment)
+    end
+  end
+
+  @doc "Local output changes invalidate shared comment reads even before their relay echo arrives."
+  @spec output_epoch(map(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def output_epoch(binding, issue_id) do
+    with {:ok, files} <- active_files(binding),
+         confirmed = Enum.filter(files, &String.ends_with?(&1, ".confirmed.json")),
+         {:ok, index} <- active_index_catalog(binding),
+         {:ok, records} <- read_many(confirmed, &output_record(binding, &1, index || %{})) do
+      outputs = for record <- records, record["issue_id"] == issue_id, do: record["operation_id"]
+      {:ok, outputs |> Enum.sort() |> CommentVersion.digest()}
+    end
+  end
+
+  defp output_record(binding, file, index) do
+    id = String.replace_suffix(file, ".confirmed.json", "")
+
+    case get_in(index, [id, "record"]) do
+      %{"_indexed" => true} = record -> {:ok, record}
+      _ -> read_intent(binding, id <> ".intent.json")
     end
   end
 

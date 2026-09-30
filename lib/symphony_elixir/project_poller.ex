@@ -167,8 +167,8 @@ defmodule SymphonyElixir.ProjectPoller do
       node = get_in(record, ["issues", id])
 
       if Client.complete_relay_issue?(node, context) and id in record["known"] do
-        epoch = {record["generation"], record["epochs"][id]}
         issue = node |> Client.relay_issue() |> Relay.stamp_issue(record)
+        epoch = {record["generation"], issue.last_comment_signal.relay_epoch}
         {:cont, {:ok, [{epoch, issue} | acc]}}
       else
         {:halt, {:error, :relay_issue_incomplete}}

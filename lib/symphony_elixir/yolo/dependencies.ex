@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.Yolo.Dependencies do
   @moduledoc "Complete, fresh dependency snapshots and connected acceptance chains."
-  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay}
-  alias SymphonyElixir.Linear.{Budget, YoloAgent}
+  alias SymphonyElixir.Linear.{Budget, IssueReadCache, YoloAgent}
+  alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.WaitMarker
   alias SymphonyElixir.Yolo.{Admission, API}
 
@@ -48,15 +48,15 @@ defmodule SymphonyElixir.Yolo.Dependencies do
         {:error, reason, updated} -> {:halt, {:error, reason, updated}}
       end
     end)
-    |> finish_background(project_id)
+    |> finish_background()
   end
 
-  defp finish_background({:ok, refreshed, entries}, project_id) do
+  defp finish_background({:ok, refreshed, entries}) do
     refreshed = Enum.reverse(refreshed)
 
     active_markers =
       refreshed
-      |> Enum.flat_map(&active_marker_identifiers(&1, entries, project_id))
+      |> Enum.flat_map(&active_marker_identifiers/1)
       |> MapSet.new()
 
     entries =
@@ -68,13 +68,12 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     {:ok, refreshed, entries}
   end
 
-  defp finish_background(error, _project_id), do: error
+  defp finish_background(error), do: error
 
-  defp active_marker_identifiers(issue, entries, project_id) do
+  defp active_marker_identifiers(issue) do
     if YoloAgent.delegated?(issue) and issue.state in @waiting_states do
       blockers = for %{marker: true, identifier: identifier} <- issue.blocked_by, do: identifier
-      cached = get_in(entries, [{project_id, issue.id}, :markers]) || []
-      blockers ++ cached ++ WaitMarker.parse(issue.description || "")
+      blockers ++ WaitMarker.parse(issue.description || "")
     else
       []
     end
@@ -124,55 +123,9 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   end
 
   defp background_markers(issue, cache, opts) do
-    epoch = get_in(issue.last_comment_signal || %{}, [:relay_epoch])
-
-    if opts[:relay_background] == true and is_binary(epoch) and relay_ready?(issue, opts) do
-      relay_markers(issue, cache, epoch, opts)
-    else
-      key = {ProjectContext.current().id, issue.id}
-      read_markers(issue, Map.delete(cache, key), nil, nil, opts)
+    with {:ok, markers} <- WaitMarker.workpad_markers(issue, Keyword.put_new(opts, :budget_background, true)) do
+      {:ok, markers, cache}
     end
-  end
-
-  defp relay_markers(issue, cache, epoch, opts) do
-    key = {ProjectContext.current().id, issue.id}
-    now = Keyword.get(opts, :background_now, fn -> System.monotonic_time(:millisecond) end).()
-    entry = cache[key]
-    interval = max(900_000, CommentCheckpoint.background_interval_ms())
-
-    cond do
-      is_map(entry) and entry.epoch == epoch and now - entry.scanned_at < interval ->
-        {:ok, entry.markers, cache}
-
-      is_map(entry) and entry.epoch == epoch and not safety_lookup_allowed?(issue) ->
-        {:ok, entry.markers, cache}
-
-      true ->
-        read_markers(issue, cache, key, {epoch, now}, opts)
-    end
-  end
-
-  defp safety_lookup_allowed?(issue) do
-    Budget.allow_background_lookup?(SymphonyElixir.Config.settings!().tracker.app, issue.id <> ":wait_marker")
-  end
-
-  defp read_markers(issue, cache, key, stamp, opts) do
-    case WaitMarker.workpad_markers(issue, Keyword.put_new(opts, :budget_background, true)) do
-      {:ok, markers} -> {:ok, markers, put_marker_cache(cache, key, stamp, markers)}
-      error -> error
-    end
-  end
-
-  defp put_marker_cache(cache, nil, nil, _markers), do: cache
-  defp put_marker_cache(cache, key, {epoch, now}, markers), do: Map.put(cache, key, %{epoch: epoch, scanned_at: now, markers: markers})
-
-  defp relay_ready?(issue, opts) do
-    ready? =
-      Keyword.get(opts, :relay_ready, fn issue ->
-        Relay.enabled?() and match?({:ok, _}, ProjectPoller.comment_epoch(ProjectContext.current(), issue.id))
-      end)
-
-    ready?.(issue)
   end
 
   defp load(issues, opts) do
@@ -202,7 +155,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   defp background_blockers(%{id: id, blocked_by: blockers, relations_complete: complete?, last_comment_signal: %{relay_epoch: epoch}}, opts)
        when is_list(blockers) and is_binary(epoch) do
     cond do
-      opts[:relay_background] != true -> blockers(id, opts)
+      opts[:force_full] == true or opts[:relay_background] != true -> blockers(id, opts)
       complete? and Enum.all?(blockers, &is_binary(Map.get(&1, :state_type))) -> {:ok, blockers}
       Budget.allow_background_lookup?(SymphonyElixir.Config.settings!().tracker.app, id) -> blockers(id, opts)
       true -> {:error, :linear_budget_reserved}
@@ -213,6 +166,18 @@ defmodule SymphonyElixir.Yolo.Dependencies do
 
   @spec blockers(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def blockers(id, opts) do
+    if is_nil(opts[:query]) and opts[:force_full] != true do
+      case IssueReadCache.fetch([id], opts) do
+        {:ok, [%{relations_complete: true, blocked_by: blockers}]} -> {:ok, blockers}
+        {:ok, _} -> linear_blockers(id, opts)
+        error -> error
+      end
+    else
+      linear_blockers(id, opts)
+    end
+  end
+
+  defp linear_blockers(id, opts) do
     document =
       "query YoloBlockers($id: String!, $after: String) { issue(id: $id) { inverseRelations(first: 100, after: $after) { nodes { id type issue { id identifier state { name type } } } pageInfo { hasNextPage endCursor } } } }"
 
@@ -258,7 +223,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   def actionable(issues, opts) do
     backlog = Enum.filter(issues, &YoloAgent.delegated?/1)
 
-    with {:ok, fresh} <- refresh(backlog, Keyword.put(opts, :budget_background, false)) do
+    with {:ok, fresh} <- refresh(backlog, opts |> Keyword.put(:budget_background, false) |> Keyword.put(:force_full, true)) do
       cond do
         Enum.all?(fresh, &dispatchable?/1) -> :ok
         Enum.any?(fresh, &(&1.state == "Backlog" and not dispatchable?(&1))) -> {:error, :yolo_backlog_blocked}

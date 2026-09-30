@@ -2,12 +2,15 @@ defmodule SymphonyElixir.Linear.AdvisoryAgents do
   @moduledoc "Verify explicitly configured advisory app users through the bound workspace client."
 
   alias SymphonyElixir.{Config, ProjectContext}
-  alias SymphonyElixir.Linear.{Client, CommentVersion}
+  alias SymphonyElixir.Linear.{Client, CommentVersion, IssueReadCache}
 
   @spec verify() :: :ok | {:error, term()}
   def verify do
     tracker = Config.settings!().tracker
-    if verified?(ProjectContext.current()), do: :ok, else: verify(tracker.advisory_agent_ids, tracker.app["workspace_id"], tracker.app["user_id"])
+
+    if verified?(ProjectContext.current()),
+      do: :ok,
+      else: IssueReadCache.verify_binding(binding_key(tracker), fn -> verify(tracker.advisory_agent_ids, tracker.app["workspace_id"], tracker.app["user_id"]) end)
   end
 
   @spec verified?(ProjectContext.t() | nil) :: boolean()

@@ -15,7 +15,7 @@ defmodule SymphonyElixir.WaitMarker do
 
   @spec workpad_markers(map(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def workpad_markers(issue, opts) do
-    comments = Keyword.get(opts, :wait_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comment_bodies/1))
+    comments = Keyword.get(opts, :wait_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comment_bodies(&1, opts)))
 
     with {:ok, bodies} <- comments.(issue.id) do
       workpads = bodies |> Enum.map(&comment_body/1) |> Enum.filter(&(is_binary(&1) and String.starts_with?(&1, Workpad.marker())))

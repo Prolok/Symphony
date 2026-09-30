@@ -1009,6 +1009,10 @@ Nutze dies nur, wenn der Abschluss durch fehlende erforderliche Tools oder fehle
 
 ## Kommentar-Checkpoints für reguläre Arbeit
 
+Ticket-Leser aus Tools, Checkpoints und PO-Aktionen teilen bei bereitem Relay
+den geprüften Issue-/Abhängigkeits- und Kommentarstand. Freie GraphQL-Abfragen
+bleiben Durchreichung; vor Statusaktionen bleibt der vollständige direkte Abgleich bindend.
+
 Für tatsächlich übernommene aktive Issues ist der Kommentareingang Standard.
 Der Hintergrundabgleich beobachtet Kommentare ohne bereites Relay frühestens alle
 `max(30 Sekunden, polling.interval_ms)`. Bei bereitem Relay nutzt er die lokale

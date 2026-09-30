@@ -2111,87 +2111,33 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Agent.get(reads, & &1) == 2
   end
 
-  test "relay marker cache follows comment epochs and its safety interval", %{issues: [issue | _], context: context} do
+  test "dependency readers delegate marker freshness to the shared comment reader", %{issues: [issue | _]} do
     review = %{issue | state: "Yolo Review", blocked_by: [], relations_complete: true, last_comment_signal: %{relay_epoch: "first"}}
     {:ok, comments} = Agent.start_link(fn -> [] end)
     {:ok, reads} = Agent.start_link(fn -> 0 end)
-    {:ok, target_state} = Agent.start_link(fn -> "Review" end)
-    empty_relations = %{"data" => %{"issue" => %{"inverseRelations" => %{"nodes" => [], "pageInfo" => %{"hasNextPage" => false}}}}}
 
     opts = [
       relay_background: true,
-      relay_ready: fn _ -> true end,
-      background_now: fn -> Process.get(:marker_now, 0) end,
       wait_comments: fn _ ->
         Agent.update(reads, &(&1 + 1))
         {:ok, Agent.get(comments, & &1)}
       end,
-      query: fn _, _ -> {:ok, empty_relations} end,
-      resolve: fn identifier, _ ->
-        {:ok, %{id: identifier, identifier: identifier, state: Agent.get(target_state, & &1), marker: true}}
-      end
+      resolve: fn identifier, _ -> {:ok, %{id: identifier, identifier: identifier, state: "Review", marker: true}} end
     ]
 
-    assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([review], %{}, opts)
+    assert {:ok, [%{blocked_by: []}], cache} = Yolo.Dependencies.refresh_background([review], %{}, opts)
     Agent.update(comments, fn _ -> ["## Symphony Workpad\nWartet auf: PRI-1", "Wartet auf: PRI-99"] end)
-    assert {:ok, [%{blocked_by: []}], cache} = Yolo.Dependencies.refresh_background([review], cache, opts)
-    assert Agent.get(reads, & &1) == 1
-
-    changed = %{review | last_comment_signal: %{relay_epoch: "second"}}
-    assert {:ok, [updated], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
+    assert {:ok, [updated], cache} = Yolo.Dependencies.refresh_background([review], cache, opts)
     assert [%{identifier: "PRI-1"}] = updated.blocked_by
     assert Agent.get(reads, & &1) == 2
+    refute Map.has_key?(cache, {ProjectContext.current().id, review.id})
 
-    described = %{changed | description: "Wartet auf: PRI-2"}
-    assert {:ok, [%{blocked_by: targets}], cache} = Yolo.Dependencies.refresh_background([described], cache, opts)
+    described = %{review | description: "Wartet auf: PRI-2"}
+    assert {:ok, [%{blocked_by: targets}], _cache} = Yolo.Dependencies.refresh_background([described], cache, opts)
     assert Enum.map(targets, & &1.identifier) == ["PRI-2", "PRI-1"]
-    assert Agent.get(reads, & &1) == 2
-    Agent.update(target_state, fn _ -> "Merge (AI)" end)
-    assert {:ok, [%{blocked_by: [%{state: "Merge (AI)"}]}], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
-    assert Agent.get(reads, & &1) == 2
-
-    withdrawn = %{changed | delegate_id: nil}
-    assert {:ok, [^withdrawn], cache} = Yolo.Dependencies.refresh_background([withdrawn], cache, opts)
-    assert {:ok, [redelegated], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
-    assert [%{identifier: "PRI-1"}] = redelegated.blocked_by
-    assert Agent.get(reads, & &1) == 2
-
-    Process.put(:marker_now, 899_999)
-    assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
-    assert Agent.get(reads, & &1) == 2
-    Process.put(:marker_now, 900_000)
-    assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
-    assert Agent.get(reads, & &1) == 3
-
-    app = Config.settings!().tracker.app
-
-    on_exit(fn ->
-      Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"})
-      Budget.pressure(app)
-    end)
-
-    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
-    assert Budget.pressure(app) == :critical
-    Process.put(:marker_now, 1_800_000)
-    assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([changed], cache, opts)
-    assert Agent.get(reads, & &1) == 3
-    Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"})
-    assert Budget.pressure(app) == :normal
-
-    fallback = %{changed | last_comment_signal: nil}
-    assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([fallback], cache, opts)
-    assert {:ok, [_], _} = Yolo.Dependencies.refresh_background([fallback], cache, opts)
-    assert Agent.get(reads, & &1) == 5
-
-    degraded_context = put_in(context.settings.tracker.relay, %{"endpoint" => "https://relay.test"})
-    ProjectContext.bind(degraded_context)
-    degraded_opts = Keyword.put(opts, :relay_ready, fn _ -> false end)
-    assert {:ok, [_], cache} = Yolo.Dependencies.refresh_background([changed], cache, degraded_opts)
-    assert {:ok, [_], _} = Yolo.Dependencies.refresh_background([changed], cache, degraded_opts)
-    assert Agent.get(reads, & &1) == 7
   end
 
-  test "a later dependency failure retains earlier completed marker scans", %{issues: [first, second | _]} do
+  test "a later dependency failure retries through the shared comment reader", %{issues: [first, second | _]} do
     first = %{first | last_comment_signal: %{relay_epoch: "first"}, blocked_by: [], relations_complete: true}
     second = %{second | last_comment_signal: %{relay_epoch: "second"}, blocked_by: [], relations_complete: true}
     {:ok, reads} = Agent.start_link(fn -> %{} end)
@@ -2209,16 +2155,16 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:error, :offline, cache} = Yolo.Dependencies.refresh_background([first, second], %{}, opts)
     assert Agent.get(reads, & &1) == %{first.id => 1, second.id => 1}
     assert {:error, :offline, _cache} = Yolo.Dependencies.refresh_background([first, second], cache, opts)
-    assert Agent.get(reads, & &1) == %{first.id => 1, second.id => 2}
+    assert Agent.get(reads, & &1) == %{first.id => 2, second.id => 2}
 
     state = Coordinator.tick(%Orchestrator.State{max_concurrent_agents: 0, codex_totals: %{}}, [first, second], opts)
-    assert Map.has_key?(state.yolo_marker_cache, {ProjectContext.current().id, first.id})
-    assert Agent.get(reads, & &1) == %{first.id => 2, second.id => 3}
+    refute Map.has_key?(state.yolo_marker_cache, {ProjectContext.current().id, first.id})
+    assert Agent.get(reads, & &1) == %{first.id => 3, second.id => 3}
     _state = Coordinator.tick(state, [first, second], opts)
-    assert Agent.get(reads, & &1) == %{first.id => 2, second.id => 4}
+    assert Agent.get(reads, & &1) == %{first.id => 4, second.id => 4}
   end
 
-  test "a target lookup failure retains the completed workpad marker scan", %{issues: [issue | _]} do
+  test "target lookup recovery reads markers without retaining a second comment cache", %{issues: [issue | _]} do
     issue = %{
       issue
       | description: "Wartet auf: PRI-1",
@@ -2241,12 +2187,12 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     ]
 
     assert {:error, :linear_budget_reserved, cache} = Yolo.Dependencies.refresh_background([issue], %{}, opts)
-    assert Map.has_key?(cache, {ProjectContext.current().id, issue.id})
+    refute Map.has_key?(cache, {ProjectContext.current().id, issue.id})
 
     ready = Keyword.put(opts, :resolve, fn identifier, _ -> {:ok, %{id: identifier, identifier: identifier, state: "Review", marker: true}} end)
     assert {:ok, [%{blocked_by: targets}], _cache} = Yolo.Dependencies.refresh_background([issue], cache, ready)
     assert Enum.map(targets, & &1.identifier) == ["PRI-1", "PRI-2"]
-    assert Agent.get(reads, & &1) == 1
+    assert Agent.get(reads, & &1) == 2
   end
 
   test "foreign target is queried once across contexts and relay state releases the wait", %{issues: [issue | _], context: source} do
@@ -4633,6 +4579,11 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert Process.get(:po_scans) == 1
     assert Process.get(:po_starts) == 1
 
+    # Simulated time must not acquire extra retries through real wall-clock
+    # expiry when this fixture runs alongside slow journal/process checks.
+    {:ok, initial} = Store.read("review")
+    :ok = Store.write("review", %{initial | "retry_at" => System.system_time(:millisecond) + 1_800_000})
+
     {_deadline, retries} =
       Enum.reduce(5_000..1_800_000//5_000, {30_000, 0}, fn elapsed, {deadline, retries} ->
         due? = elapsed >= deadline
@@ -4650,6 +4601,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
           count = retries + 2
           {:ok, current} = Store.read("review")
           assert current["failure_count"] == count
+          :ok = Store.write("review", %{current | "retry_at" => System.system_time(:millisecond) + 1_800_000})
           {elapsed + min(30_000 * Integer.pow(2, min(count - 1, 5)), 900_000), retries + 1}
         else
           {deadline, retries}

@@ -226,7 +226,7 @@ defmodule SymphonyElixir.CommentCheckpoint do
   end
 
   defp write_results(issue, results) do
-    with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id),
+    with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id, force_full: true),
          {:ok, workpad} <- Workpad.find_comment(comments),
          {:ok, inbox} <- CommentInbox.read(app_binding(), issue) do
       body = Enum.reduce(results, workpad.body, &append_result(&1, &2, inbox))

@@ -50,6 +50,7 @@ defmodule SymphonyElixir.Linear.RateLimit do
       workspace_id: binding["workspace_id"],
       kind: Keyword.get(opts, :budget_kind, :other),
       operation: Keyword.get(opts, :budget_operation, "unknown"),
+      context: Map.take(Keyword.get(opts, :context, %{}), ~w(phase run_id issue_id issue_identifier session_id tool_call_id)),
       status: response_status(result),
       headers: diagnostics
     }

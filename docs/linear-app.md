@@ -1611,6 +1611,21 @@ Die Grenzen für Projektroot, Vorabmeldungen und gestartete Läufe stehen in
 
 ## Dauerhafter Kommentareingang
 
+Bei bereitem Relay teilen Ticket-Lesezugriffe aus Tools, Checkpoints und
+PO-Aktionen die bestehende Issue-Verifikation und den vollständigen Kommentarstand.
+Issue- und vollständige Abhängigkeitsprojektionen gelten nur für die geprüfte
+Projekt-/App-Bindung und Relay-Epoche samt Vorgängersignalen, höchstens 15 Minuten.
+Unvollständige Relationen werden vollständig über Linear gelesen. Die
+Advisory-Verifikation verwendet dieselbe Frischeregel für App-/Agentbindung und
+Relaygeneration; eine bereits beim Start verifizierte Projektbindung bleibt erhalten.
+Freie `linear_graphql`-Abfragen werden unverändert durchgereicht. Optionale
+Request-Messungen enthalten Lauf, Phase und Toolaufruf, aber keine Querytexte.
+Statusaktionen prüfen Issue, Abhängigkeiten und Kommentare weiterhin direkt;
+Workpad-Schreibvorgänge lesen direkt zurück. Reine Kommentarleser erkennen neue
+eigene bestätigte Ausgaben bereits am vorhandenen Journal, vor ihrem Relay-Echo.
+Wartemarker teilen diesen Kommentarstand und halten keine zweite Scanfrische;
+die [Architekturentscheidung](architecture/linear-lesepfad.md) beschreibt die Alternativen.
+
 Reguläre übernommene aktive Issues verwenden im Hintergrund den lokalen Relay-
 Stand. Gleichzeitige Prüfungen derselben Bindung teilen das Ergebnis; die
 Fälligkeit wird nach der Journal-Sperre erneut geprüft. Ein vollständiger

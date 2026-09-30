@@ -6,7 +6,7 @@ defmodule SymphonyElixir.Yolo.ActionScope do
 
   @spec sources([String.t()], keyword()) :: {:ok, [map()]} | {:error, term()}
   def sources(ids, opts) do
-    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
 
     with true <- ids != [] and Enum.all?(ids, &bound?/1),
          {:ok, issues} <- fetch.(ids),

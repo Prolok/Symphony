@@ -615,7 +615,9 @@ Workpad als Betreiberpflicht übergeben, ohne neue persönliche Nutzerabnahme.
 `kind=escalate` erhält `Yolo Review` und beendet den Lauf als Warteentscheidung.
 BLOCKER-Übergaben vor der Schlussphase bleiben möglich. Der strukturierte
 `escalation`-Beleg enthält `cause`, `attempts`, `proposal` und `decision`.
-Nur bei aktiviertem OpenClaw wird eine Nachricht versandt. Der Adapter fragt
+Nur bei aktiviertem OpenClaw ohne
+[Testprojekt-Opt-in](linear-app.md#eskalationsziel-in-testprojekten) wird eine Nachricht versandt.
+Das Opt-in unterdrückt auch ausstehende Routen-Retries. Der Adapter fragt
 `sessions.list` für exakt `agent:<konfigurierter-agent>:main` ab und verwendet
 nur dessen vorhandenen `deliveryContext` (Kanal, Empfänger, optional Konto/Thread).
 Liegt der normale Gesprächskanal in einer eigenen Sitzung, kann der Betreiber

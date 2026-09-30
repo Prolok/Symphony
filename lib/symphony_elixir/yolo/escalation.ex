@@ -1,7 +1,8 @@
 defmodule SymphonyElixir.Yolo.Escalation do
-  @moduledoc "Once-per-proposal notification on the configured agent's existing human channel."
+  @moduledoc "Evidenced escalation to a verified project agent or the existing human channel."
   alias SymphonyElixir.{Config, Tracker}
-  alias SymphonyElixir.Yolo.{OpenClaw, Store}
+  alias SymphonyElixir.Linear.TrustedAgents
+  alias SymphonyElixir.Yolo.{API, OpenClaw, Store}
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
 
   @spec validate(map()) :: :ok | {:error, term()}
@@ -16,9 +17,10 @@ defmodule SymphonyElixir.Yolo.Escalation do
   @spec handover(map(), map(), keyword(), (map(), map(), keyword() -> :ok | {:error, term()})) :: :ok | {:error, term()}
   def handover(issue, %{"escalation" => details} = args, opts, update) do
     with :ok <- validate(args),
-         human when is_binary(human) <- Config.human_handoff_id(),
-         :ok <- visible_note(issue, details, opts),
-         :ok <- update.(issue, %{assigneeId: human, delegateId: nil}, opts) do
+         {:ok, recipient} <- recipient(opts),
+         {:ok, input} <- handover_input(recipient),
+         :ok <- visible_note(issue, details, recipient, opts),
+         :ok <- update.(issue, input, opts) do
       :ok
     else
       {:error, _} = error -> error
@@ -26,28 +28,118 @@ defmodule SymphonyElixir.Yolo.Escalation do
     end
   end
 
-  defp visible_note(issue, details, opts) do
-    proposal = String.trim(details["proposal"])
-    decision = String.trim(details["decision"])
-    body = "Entscheidung benötigt für #{issue.identifier}\n\nFrage: #{decision}\nEmpfehlung: #{proposal}"
-    fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1)
-    create = Keyword.get(opts, :escalation_comment, &Tracker.create_comment/2)
-
-    with {:ok, comments} <- fetch.(issue.id), do: ensure_note(comments, issue.id, body, fetch, create)
-  end
-
-  defp ensure_note(comments, id, body, fetch, create) do
-    if Enum.any?(comments, &(Map.get(&1, :body) == body)) do
-      :ok
-    else
-      result = create.(id, body)
-      verify_note(fetch.(id), body, result)
+  @spec recipient(keyword()) :: {:ok, map() | nil} | {:error, term()}
+  def recipient(opts) do
+    case trusted_target() do
+      {:ok, nil} -> {:ok, nil}
+      {:ok, id} -> resolve_recipient(id, opts)
+      error -> error
     end
   end
 
-  defp verify_note({:ok, comments}, body, result) do
+  defp trusted_target do
+    with {:ok, settings} <- Config.settings() do
+      id = settings.tracker.escalation_trusted_agent_id
+
+      cond do
+        is_nil(id) -> {:ok, nil}
+        id not in settings.tracker.trusted_agent_ids -> {:error, :linear_escalation_trusted_agent_not_trusted}
+        id not in TrustedAgents.ids() -> {:error, :linear_escalation_trusted_agent_unverified}
+        true -> {:ok, id}
+      end
+    end
+  end
+
+  defp resolve_recipient(id, opts) do
+    document = "query YoloEscalationRecipient($filter: UserFilter!) { users(filter: $filter, first: 2) { nodes { id app active url isMentionable organization { id } } pageInfo { hasNextPage } } }"
+    app = Config.settings!().tracker.app
+
+    with {:ok, %{"users" => %{"nodes" => [user], "pageInfo" => %{"hasNextPage" => false}}}} <- API.query(document, %{filter: %{"id" => %{"eq" => id}}}, opts),
+         true <- user["id"] == id and user["app"] == true and user["active"] == true and id != app["user_id"],
+         true <- get_in(user, ["organization", "id"]) == app["workspace_id"],
+         true <- is_boolean(user["isMentionable"]),
+         true <- user["isMentionable"] == false or profile_url?(user["url"]) do
+      {:ok, %{id: id, url: if(user["isMentionable"], do: user["url"])}}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :linear_escalation_trusted_agent_unconfirmed}
+    end
+  end
+
+  defp profile_url?(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: "https", host: "linear.app", path: path, userinfo: nil} when is_binary(path) -> String.starts_with?(path, "/")
+      _ -> false
+    end
+  end
+
+  defp profile_url?(_), do: false
+
+  @spec owner(keyword()) :: {:ok, String.t()} | {:error, term()}
+  def owner(opts) do
+    with {:ok, recipient} <- recipient(opts) do
+      case {recipient, Config.human_handoff_id()} do
+        {nil, human} when is_binary(human) -> {:ok, "Menschliche Zuständigkeit: @#{human}."}
+        # Preserve the workpad's strict Markdown readback. Only the visible
+        # decision comment emits a profile URL that Linear turns into a mention.
+        {%{} = agent, _} -> {:ok, recipient_line(%{agent | url: nil})}
+        _ -> {:error, :yolo_escalation_handoff_unconfirmed}
+      end
+    end
+  end
+
+  defp recipient_line(agent), do: "Eskalationsziel: Trusted Agent `#{agent.id}`" <> if(agent.url, do: " – #{agent.url}", else: "")
+
+  defp handover_input(nil) do
+    case Config.human_handoff_id() do
+      human when is_binary(human) -> {:ok, %{assigneeId: human, delegateId: nil}}
+      _ -> {:error, :yolo_escalation_handoff_unconfirmed}
+    end
+  end
+
+  defp handover_input(%{}), do: {:ok, %{delegateId: nil}}
+
+  defp visible_note(issue, details, recipient, opts) do
+    proposal = String.trim(details["proposal"])
+    decision = String.trim(details["decision"])
+    prefix = "Entscheidung benötigt für #{issue.identifier}"
+    suffix = "\n\nFrage: #{decision}\nEmpfehlung: #{proposal}"
+    body = prefix <> if(recipient, do: "\n\n" <> recipient_line(recipient), else: "") <> suffix
+    matches = note_matcher(body, prefix, suffix, recipient)
+    fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1)
+    create = Keyword.get(opts, :escalation_comment, &Tracker.create_comment/2)
+
+    with {:ok, comments} <- fetch.(issue.id), do: ensure_note(comments, issue.id, body, matches, fetch, create)
+  end
+
+  defp note_matcher(body, _, _, nil), do: &(Map.get(&1, :body) == body)
+  defp note_matcher(body, _, _, %{url: nil}), do: &(Map.get(&1, :body) == body)
+
+  defp note_matcher(body, prefix, suffix, recipient) do
+    # Confirm the rendered link's target as well as the stable recipient UUID.
+    # An absent, foreign or additional mention must not acknowledge this note.
+    start = prefix <> "\n\nEskalationsziel: Trusted Agent `#{recipient.id}` – "
+    targets = Enum.map_join([recipient.url, "linear://userMention/#{recipient.id}"], "|", &Regex.escape/1)
+    rendered = Regex.compile!("\\A#{Regex.escape(start)}\\[[^\\]\\r\\n]+\\]\\((?:#{targets})\\)#{Regex.escape(suffix)}\\z")
+
+    fn comment ->
+      actual = Map.get(comment, :body)
+      is_binary(actual) and (actual == body or Regex.match?(rendered, actual))
+    end
+  end
+
+  defp ensure_note(comments, id, body, matches, fetch, create) do
+    if Enum.any?(comments, matches) do
+      :ok
+    else
+      result = create.(id, body)
+      verify_note(fetch.(id), matches, result)
+    end
+  end
+
+  defp verify_note({:ok, comments}, matches, result) do
     cond do
-      Enum.any?(comments, &(Map.get(&1, :body) == body)) -> :ok
+      Enum.any?(comments, matches) -> :ok
       result == :ok -> {:error, :yolo_escalation_comment_unconfirmed}
       true -> result
     end
@@ -57,9 +149,18 @@ defmodule SymphonyElixir.Yolo.Escalation do
 
   @spec notify(map(), map(), keyword()) :: :ok | {:error, term()}
   def notify(issue, args, opts) do
-    case Config.openclaw_yolo_agent() do
-      nil -> :ok
-      agent -> notify_enabled(issue, args, agent, opts)
+    case trusted_target() do
+      {:ok, nil} ->
+        case Config.openclaw_yolo_agent() do
+          nil -> :ok
+          agent -> notify_enabled(issue, args, agent, opts)
+        end
+
+      {:ok, _id} ->
+        :ok
+
+      error ->
+        error
     end
   end
 
@@ -126,6 +227,14 @@ defmodule SymphonyElixir.Yolo.Escalation do
 
   @spec retry_pending(map(), keyword()) :: :ok | {:error, term()}
   def retry_pending(issue, opts \\ []) do
+    case trusted_target() do
+      {:ok, nil} -> retry_human_pending(issue, opts)
+      {:ok, _id} -> :ok
+      error -> error
+    end
+  end
+
+  defp retry_human_pending(issue, opts) do
     key = "escalation:" <> issue.id
 
     with true <- is_binary(Config.openclaw_yolo_agent()),
@@ -143,6 +252,14 @@ defmodule SymphonyElixir.Yolo.Escalation do
 
   @spec pending_routes(String.t()) :: {:ok, [{String.t(), String.t() | nil}]} | {:error, term()}
   def pending_routes(id) do
+    case trusted_target() do
+      {:ok, nil} -> human_pending_routes(id)
+      {:ok, _id} -> {:ok, []}
+      error -> error
+    end
+  end
+
+  defp human_pending_routes(id) do
     with {:ok, record} <- Store.read("escalation:" <> id),
          {:ok, messages} <- messages(record) do
       {:ok, Enum.flat_map(messages, fn {key, entry} -> if entry["state"] == "route_pending", do: [{key, entry["last_error"]}], else: [] end)}
@@ -158,6 +275,14 @@ defmodule SymphonyElixir.Yolo.Escalation do
 
   @spec pending(String.t()) :: {:ok, boolean()} | {:error, term()}
   def pending(id) do
+    case trusted_target() do
+      {:ok, nil} -> human_pending(id)
+      {:ok, _id} -> {:ok, false}
+      error -> error
+    end
+  end
+
+  defp human_pending(id) do
     with {:ok, record} <- Store.read("escalation:" <> id),
          {:ok, messages} <- messages(record) do
       {:ok, Enum.any?(Map.values(messages), &(&1["state"] == "route_pending"))}

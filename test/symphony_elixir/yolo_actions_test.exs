@@ -7,6 +7,8 @@ defmodule SymphonyElixir.YoloActionsTest do
   alias SymphonyElixir.Yolo.{Delivery, Observation}
   alias SymphonyElixir.YoloReviewFixture, as: ReviewFixture
 
+  @trusted "b57e9f80-53ce-4d96-9180-370f03d60d16"
+
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_assignee: "human@example.com")
     root = Path.dirname(Workflow.workflow_file_path())
@@ -82,6 +84,20 @@ defmodule SymphonyElixir.YoloActionsTest do
   end
 
   defp respond("YoloStates", _, _), do: ok("team", %{"states" => connection(Enum.map(["Backlog", "Umsetzungsticket erstellt", "Todo (AI)", "Review"], &%{"id" => &1, "name" => &1}))})
+
+  defp respond("YoloEscalationRecipient", _, _) do
+    user = %{
+      "id" => @trusted,
+      "app" => true,
+      "active" => true,
+      "url" => "https://linear.app/test/profiles/pai",
+      "isMentionable" => true,
+      "organization" => %{"id" => Config.settings!().tracker.app["workspace_id"]}
+    }
+
+    ok("users", connection([user]))
+  end
+
   defp respond("YoloGeneratedLabel", _, _), do: ok("issueLabels", connection(db().labels))
 
   defp respond("YoloGeneratedLabelCreate", _, %{"input" => input}) do
@@ -1197,6 +1213,120 @@ defmodule SymphonyElixir.YoloActionsTest do
     assert length(db().escalation_comments[source.id]) == 1
     assert db().issues[source.id].assignee_id == "human"
     assert db().issues[source.id].delegate_id == nil
+  end
+
+  defp trusted_escalation_context(context) do
+    tracker = %{
+      context.settings.tracker
+      | trusted_agent_ids: [@trusted],
+        escalation_trusted_agent_id: @trusted,
+        openclaw_yolo_agent: "po"
+    }
+
+    %{
+      context
+      | assignee_ids: ["human", "second-human"],
+        yolo_agent_id: @trusted,
+        settings: %{context.settings | tracker: tracker},
+        trusted_binding: CommentVersion.digest([tracker.app, tracker.trusted_agent_ids])
+    }
+  end
+
+  test "trusted escalation preserves the actual assignee in Yolo Review and BLOCKER despite uncertain writes", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(trusted_escalation_context(context))
+    escalation = %{"cause" => "Strategische Frage", "attempts" => "Varianten geprüft", "proposal" => "Variante A wählen", "decision" => "Welche Variante gilt?"}
+
+    for state <- ["Yolo Review", "BLOCKER"] do
+      source = %{issue | state: state, delegate_id: @trusted, assignee_id: "second-human", blocked_by: [], relations_complete: true}
+      change(&%{&1 | issues: %{source.id => source}, workpads: %{}, escalation_comments: %{}, fail: "YoloUpdate", calls: []})
+      options = opts()
+      create = options[:escalation_comment]
+
+      options =
+        Keyword.merge(options,
+          escalation_route: fn _, _ -> flunk("trusted escalation must not resolve human route") end,
+          escalation_send: fn _, _, _ -> flunk("trusted escalation must not send") end,
+          escalation_comment: fn id, body ->
+            create.(id, body)
+            {:error, :response_lost}
+          end
+        )
+
+      group([source], fn ->
+        {:ok, record} = Store.read("incoming")
+        :ok = Store.write("incoming", Map.put(record, "attempt", %{"id" => "run", "members" => [source.id]}))
+        assert :ok = Operations.run("trusted-pending", args([source], "followup"), fn _ -> :ok end)
+        assert {:ok, [pending]} = Operations.pending([source.id])
+        assert {:error, {:yolo_operations_pending, _}} = Completion.verify_operations([source])
+        args = %{"kind" => "escalate", "issue_id" => source.id, "report" => "Entscheidung offen", "escalation" => escalation, "review" => ReviewFixture.evidence()}
+        assert :ok = Handoff.invoke(args, options)
+        {:ok, completed} = Store.read("incoming")
+        assert get_in(completed, ["attempt", "completed", source.id])
+        assert {:ok, [^pending]} = Operations.pending([source.id])
+        assert :ok = Completion.verify_operations([db().issues[source.id]])
+
+        if state == "BLOCKER" do
+          handed_off = db().issues[source.id]
+
+          for assignee <- [nil, "outside-human"] do
+            changed = %{handed_off | assignee_id: assignee}
+            assert {:error, {:yolo_operations_pending, _}} = Completion.verify_operations([changed])
+          end
+
+          trusted = ProjectContext.current()
+          unverified = %{trusted | trusted_binding: nil}
+          without_opt_in = put_in(trusted.settings.tracker.escalation_trusted_agent_id, nil)
+          missing_assignees = %{trusted | assignee_ids: nil}
+
+          for rejected <- [unverified, without_opt_in, missing_assignees] do
+            ProjectContext.with_context(rejected, fn ->
+              assert {:error, {:yolo_operations_pending, _}} = Completion.verify_operations([handed_off])
+            end)
+          end
+        end
+      end)
+
+      assert [{"YoloUpdate", %{"input" => %{"delegateId" => nil} = input}}] = writes("YoloUpdate")
+      assert map_size(input) == 1
+      assert db().issues[source.id].state == state
+      assert db().issues[source.id].assignee_id == "second-human"
+      assert db().issues[source.id].delegate_id == nil
+      assert [%{body: note}] = db().escalation_comments[source.id]
+      assert note =~ "https://linear.app/test/profiles/pai"
+
+      for text <- [note, db().workpads[source.id]] do
+        assert text =~ "Trusted Agent `#{@trusted}`"
+        refute text =~ "human"
+        refute text =~ "Menschliche Zuständigkeit"
+      end
+    end
+  end
+
+  test "trusted handoff rejects stale delegation, changed assignee or status before completing", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(trusted_escalation_context(context))
+    source = %{issue | state: "Yolo Review", delegate_id: @trusted, assignee_id: "second-human", blocked_by: [], relations_complete: true}
+    escalation = %{"cause" => "Frage", "attempts" => "Geprüft", "proposal" => "A", "decision" => "A?"}
+
+    for readback <- [source, %{source | delegate_id: nil, assignee_id: "human"}, %{source | delegate_id: nil, state: "Review"}] do
+      change(&%{&1 | issues: %{source.id => source}, workpads: %{}, escalation_comments: %{}})
+      options = Keyword.put(opts(), :fetch, fn _ -> {:ok, [readback]} end)
+      # Admission fetches also use this callback; provide the fresh original until update.
+      options =
+        Keyword.put(options, :fetch, fn _ ->
+          if db().issues[source.id].delegate_id == nil, do: {:ok, [readback]}, else: {:ok, [source]}
+        end)
+
+      group([source], fn ->
+        {:ok, record} = Store.read("incoming")
+        :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
+
+        assert {:error, :yolo_handoff_unconfirmed} =
+                 Handoff.invoke(%{"kind" => "escalate", "issue_id" => source.id, "report" => "Offen", "escalation" => escalation, "review" => ReviewFixture.evidence()}, options)
+
+        {:ok, unfinished} = Store.read("incoming")
+        refute get_in(unfinished, ["attempt", "completed", source.id])
+      end)
+    end
   end
 
   test "explicit BLOCKER escalation also transfers sole ownership to the human", %{issues: [issue | _]} do

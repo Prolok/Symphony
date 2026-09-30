@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.Yolo.Completion do
   @moduledoc "Explicit per-member receipts; a normal Codex exit alone never completes a PO group."
-  alias SymphonyElixir.{CommentCheckpoint, Config, Tracker}
-  alias SymphonyElixir.Linear.IssueLease
+  alias SymphonyElixir.{CommentCheckpoint, Config, ProjectContext, Tracker}
+  alias SymphonyElixir.Linear.{IssueLease, TrustedAgents}
   alias SymphonyElixir.Yolo.{Admission, Operations, Scope, Store}
 
   @spec tool_spec() :: map()
@@ -97,12 +97,25 @@ defmodule SymphonyElixir.Yolo.Completion do
 
   defp operations_complete(issue, escalated) do
     with {:ok, pending} <- Operations.pending([issue.id]) do
-      # A human owns the explicitly handed-off BLOCKER, including its unresolved
-      # intents. The handoff report records these instead of claiming success.
-      handed_off? = issue.state == "BLOCKER" and is_nil(issue.delegate_id) and is_binary(Config.human_handoff_id()) and issue.assignee_id == Config.human_handoff_id()
+      # The configured recipient owns the handed-off BLOCKER, including its
+      # unresolved intents. The report records these instead of claiming success.
+      handed_off? = issue.state == "BLOCKER" and is_nil(issue.delegate_id) and handed_off_owner?(issue)
 
       waiting? = issue.state == "Yolo Review" and Enum.all?(pending, &(&1["key"] in escalated))
       if pending == [] or handed_off? or waiting?, do: :ok, else: {:error, {:yolo_operations_pending, Enum.map(pending, & &1["key"])}}
+    end
+  end
+
+  defp handed_off_owner?(issue) do
+    case Config.escalation_trusted_agent_id() do
+      nil ->
+        is_binary(Config.human_handoff_id()) and issue.assignee_id == Config.human_handoff_id()
+
+      id ->
+        case ProjectContext.current() do
+          %{assignee_ids: ids} when is_list(ids) -> id in TrustedAgents.ids() and issue.assignee_id in ids
+          _ -> false
+        end
     end
   end
 

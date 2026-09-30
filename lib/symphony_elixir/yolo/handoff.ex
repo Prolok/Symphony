@@ -155,12 +155,13 @@ defmodule SymphonyElixir.Yolo.Handoff do
 
     try do
       expected = if Map.has_key?(input, :stateId), do: "Review", else: issue.state
+      expected_assignee = Map.get(input, :assigneeId, issue.assignee_id)
       result = API.update(issue.id, input, opts)
       fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
 
       case fetch.([issue.id]) do
         {:ok, [%{delegate_id: nil, assignee_id: human, state: state}]}
-        when human == input.assigneeId and state == expected ->
+        when human == expected_assignee and state == expected ->
           :ok
 
         _ ->
@@ -201,21 +202,22 @@ defmodule SymphonyElixir.Yolo.Handoff do
     fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1)
     write = Keyword.get(opts, :workpad, &Workpad.update_tracker_workpad/2)
 
-    owner =
+    owner_result =
       case {kind, wait_reason} do
         {"wait", :dependency} ->
-          "\n\nWartet auf blockierende Abhängigkeit; Agentdelegation und Status bleiben bestehen."
+          {:ok, "Wartet auf blockierende Abhängigkeit; Agentdelegation und Status bleiben bestehen."}
 
         {"wait", {:operator_duty, digest}} ->
-          "\n\nBetreiberpflicht offen; Agentdelegation und Status bleiben bestehen. Auftrags-Digest: `#{digest}`."
+          {:ok, "Betreiberpflicht offen; Agentdelegation und Status bleiben bestehen. Auftrags-Digest: `#{digest}`."}
+
+        {"escalate", _} ->
+          Escalation.owner(opts)
 
         _ ->
-          "\n\nMenschliche Zuständigkeit: @" <> Config.human_handoff_id() <> "."
+          {:ok, "Menschliche Zuständigkeit: @" <> Config.human_handoff_id() <> "."}
       end
 
-    entry = "\n\n### YOLO-Übergabe\n\n" <> report <> owner
-
-    with {:ok, comments} <- fetch.(issue.id), {:ok, workpad} <- Workpad.find_comment(comments) do
+    with {:ok, owner} <- owner_result, entry = "\n\n### YOLO-Übergabe\n\n" <> report <> "\n\n" <> owner, {:ok, comments} <- fetch.(issue.id), {:ok, workpad} <- Workpad.find_comment(comments) do
       if String.contains?(workpad.body, entry), do: :ok, else: write.(issue.id, workpad.body <> entry)
     end
   end

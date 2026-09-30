@@ -352,7 +352,8 @@ ausschließlich dem gebundenen Test-Cleanup vorbehalten.
 Rücksprünge aus `Yolo Review` nach BLOCKER oder Coding sowie direktes Fertig sind
 gesperrt. Betreiberpflichten warten dort quellengebunden mit `kind=wait`;
 strategische Entscheidungen und auch für den Betreiber unzugängliche Rechte
-werden mit `kind=escalate` an den Menschen übergeben.
+werden mit `kind=escalate` an den Menschen oder das konfigurierte
+[Testprojekt-Eskalationsziel](#eskalationsziel-in-testprojekten) übergeben.
 Ausdrücklich eskalierte offene Anlageoperationen erlauben den Laufabschluss als
 belegtes Warten; ihre Anlage/Links bleiben offen. Der Beleg gilt nur für die
 benannten Operationen dieses Laufs, nicht für später hinzugekommene Anlagen.
@@ -406,6 +407,27 @@ Anlagejournal, reservierte ID und Ergebnis werden dadurch nicht ersetzt.
 Die Einstufung verwendet bekannte Fehlerkennungen und strukturierte Client-Fehler;
 Freitext aus Fehlerdetails, etwa Titel- oder Beschreibungsfragmente, zählt nicht.
 Unbekannte Gründe erhalten den Backoff für dauerhafte Fehler.
+
+#### Eskalationsziel in Testprojekten
+
+Reine Testprojekte können in `.symphony/.env` oder `.symphony/.env.local`
+`LINEAR_ESCALATION_TRUSTED_AGENT_ID=<App-User-UUID>` setzen; alternativ
+`tracker.escalation_trusted_agent_id` im Workflow. Fehlend oder leer bleibt die
+bisherige Menschenübergabe aktiv. Das Ziel muss in `LINEAR_TRUSTED_AGENT_IDS`
+stehen und beim Start als aktive fremde App im selben Workspace verifiziert
+sein. Eine ungültige UUID, fehlende Mitgliedschaft oder veraltete Trust-Bindung
+sperrt die Eskalation mit einem eindeutigen Konfigurations-/Verifikationsfehler;
+es gibt keinen Rückfall auf den Menschen. Änderungen verlangen einen Neustart.
+
+Mit Opt-in entfernt `kind=escalate` nur die Delegation; Status und vorhandener
+menschlicher Assignee bleiben erhalten. „Entscheidung benötigt“ adressiert
+ausschließlich den Trusted Agent über seine Linear-Profil-Erwähnung, bei einer
+ausdrücklich nicht erwähnbaren App über deren UUID. Der Workpad-Übergabebericht
+nennt ausschließlich dessen UUID. OpenClaw-Benachrichtigungen einschließlich alter
+`route_pending`-Einträge bleiben für dieses Projekt stumm; vorhandene Journalbelege bleiben erhalten.
+Die Erwähnung startet keine Arbeit. Erst die Neudelegation durch einen
+gleichgestellten Linear-Akteur weckt den bestehenden `delegated_again`-Pfad.
+Assignee-Scope, normale Abnahme-Handoffs und andere Projekte bleiben unverändert.
 
 ### Verwaiste PO-Checkouts
 
@@ -669,7 +691,8 @@ Nur der vollständige, aktuelle Kommentar dieser Identität mit passendem Digest
 weckt eine neue Reviewprüfung. Fremde Apps, Klartext, fehlerhafte und alte Digests,
 gelöschte oder überarbeitete Fassungen tun das nicht. Derselbe Digest bleibt bei
 Duplikaten, Polls und Neustarts dieselbe Entscheidung. Echte Eskalationen entfernen
-die Delegation, behalten den Status, weisen den konfigurierten Menschen allein zu
+die Delegation, behalten den Status, weisen ohne
+[Testprojekt-Opt-in](#eskalationsziel-in-testprojekten) den konfigurierten Menschen allein zu
 und zeigen Frage und Empfehlung aus `decision` und `proposal` im Ticket; Erfolg
 setzt den frischen Zuweisungs-Readback voraus. Neudelegation durch einen
 gleichgestellten Linear-Akteur ist der

@@ -313,6 +313,7 @@ defmodule SymphonyElixir.MaintenanceTest do
     ProjectContext.with_context(context, fn ->
       assert {:ok, _} = Maintenance.update(%{"enabled" => true, "reason" => "Update"})
       state = %Orchestrator.State{}
+      state = put_in(state.yolo_retries[:agent_hops], %{})
       issues = for phase <- ["Todo (AI)", "Yolo Review", "BLOCKER"], do: %{issue(phase) | delegate_id: "agent"}
       assert Coordinator.tick(state, issues, start: fn _, _ -> flunk("PO started") end) == state
     end)

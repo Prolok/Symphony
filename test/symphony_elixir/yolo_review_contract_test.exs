@@ -264,6 +264,106 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     )
   end
 
+  test "a justified mandatory live check prevents acceptance and keeps a source-bound operator wait", ctx do
+    requirement = "Zwingender Livenachweis: laufende Lease-Wiederaufnahme prüfen; nur am Echtsystem belastbar, ein Irrtum würde Datenverlust bedeuten"
+    issue = %{ctx.issue | description: requirement}
+
+    duty = %{
+      "version" => 1,
+      "action" => requirement,
+      "head_sha" => ctx.workspace.sha,
+      "source_sha256" => String.duplicate("b", 64),
+      "expected" => "Quellgebunden belegen, dass bestehende Leases ohne doppelte Schreibausführung übernommen werden",
+      "resume_state" => "Yolo Review"
+    }
+
+    Agent.update(ctx.db, fn state ->
+      body = String.replace(state.body, "- [x] Synthetic acceptance", "- [x] Synthetic acceptance\n- [ ] #{requirement}; fällig: Yolo Review")
+      %{state | issue: issue, body: body <> "\n\n### Betreiberauftrag\n\n```symphony-operator-handoff\n#{Jason.encode!(duty)}\n```\n"}
+    end)
+
+    options =
+      Keyword.put(ctx.opts, :scan, fn _ ->
+        body = Agent.get(ctx.db, & &1.body)
+
+        {:ok,
+         %{
+           "last_successful_scan" => "now",
+           "scan_error" => nil,
+           "current" => %{"workpad" => "duty"},
+           "versions" => %{"duty" => %{"key" => "duty", "origin" => "own", "deleted" => false, "source" => %{"id" => "workpad", "body" => body}}}
+         }}
+      end)
+
+    Scope.with_scope(
+      "review",
+      [issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [ctx.issue.id]}))
+        request = %{"kind" => "handoff", "issue_id" => ctx.issue.id, "report" => "Isolierte Prüfungen bestanden; zwingender Livenachweis offen", "review" => Fixture.evidence()}
+        assert {:error, :yolo_acceptance_incomplete} = Handoff.invoke(request, options)
+        evidence = Map.put(Fixture.evidence(), "limitations", [requirement])
+        assert ActionTool.execute(%{request | "kind" => "wait", "review" => evidence}, options)["success"]
+        assert Completion.ready?("review", [ctx.issue])
+      end,
+      workspace: ctx.workspace
+    )
+
+    result = Agent.get(ctx.db, & &1)
+    assert result.updates == 0
+    assert result.issue.state == "Yolo Review"
+    assert result.issue.delegate_id == "pai"
+    assert result.body =~ "- [ ] #{requirement}"
+    assert result.body =~ "Auftrags-Digest: `#{SymphonyElixir.Relay.Store.digest(duty)}`"
+    refute result.body =~ "Wartet auf blockierende Abhängigkeit"
+  end
+
+  test "an unavailable isolated test prerequisite can escalate while acceptance stays open", ctx do
+    requirement = "Isolierte Integrationsprobe: Betreiber-Testmanifest fehlt nach Prüfung aller autorisierten Bereitstellungswege"
+
+    Agent.update(ctx.db, fn state ->
+      %{state | body: String.replace(state.body, "- [x] Synthetic acceptance", "- [x] Synthetic acceptance\n- [ ] #{requirement}; fällig: Yolo Review")}
+    end)
+
+    Scope.with_scope(
+      "review",
+      [ctx.issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [ctx.issue.id]}))
+        evidence = Map.put(Fixture.evidence(), "limitations", [requirement])
+        request = %{"kind" => "handoff", "issue_id" => ctx.issue.id, "report" => requirement, "review" => evidence}
+
+        assert {:error, :yolo_acceptance_incomplete} = Handoff.invoke(request, ctx.opts)
+        assert {:error, :yolo_wait_requires_dependency} = Handoff.invoke(%{request | "kind" => "wait"}, ctx.opts)
+
+        escalation = %{
+          "cause" => "Externes Betreiber-Testmanifest fehlt; isolierte Pflichtprüfung nicht ausführbar",
+          "attempts" => "Vorhandene Rechte, Zugänge und freigegebene Testbereitstellung geprüft; kein autonomer Weg",
+          "proposal" => "Manifest für die isolierte Prüfung bereitstellen",
+          "decision" => "Externe Testbereitstellung ermöglichen und neu delegieren"
+        }
+
+        assert ActionTool.execute(Map.put(%{request | "kind" => "escalate"}, "escalation", escalation), ctx.opts)["success"]
+        assert Completion.ready?("review", [ctx.issue])
+      end,
+      workspace: ctx.workspace
+    )
+
+    result = Agent.get(ctx.db, & &1)
+    assert result.updates == 1
+    assert result.issue.state == "Yolo Review"
+    assert result.issue.delegate_id == nil
+    assert result.issue.assignee_id == "human"
+    assert result.body =~ "- [ ] #{requirement}"
+    assert result.body =~ "Manifest für die isolierte Prüfung bereitstellen"
+    refute result.body =~ "Auftrags-Digest"
+    refute result.body =~ "symphony-operator-handoff"
+  end
+
   test "a state change while recording acceptance prevents the terminal update", ctx do
     Scope.with_scope(
       "review",
@@ -505,18 +605,26 @@ defmodule SymphonyElixir.YoloReviewContractTest do
   defp selected_executor(executor), do: executor
 
   for executor <- [:codex, :openclaw] do
-    test "#{executor} runs the same versioned fixture and hands off once", ctx do
+    test "#{executor} hands off without findings while rollout remains open for the maintenance window", ctx do
       executor = selected_executor(unquote(executor))
       context = ctx.context
       if executor == :openclaw, do: ProjectContext.bind(put_in(context.settings.tracker.openclaw_yolo_agent, "po"))
       parent = self()
+
+      rollout =
+        "\n\n### Ausrollschritte\n\n- [ ] Main-Update/-Neustart, Paketaktivierung, Laden der Livekonfiguration und erste echte Inbetriebnahme im nächsten Wartungsfenster; Quelle: Ticketentscheidung\n"
+
+      Agent.update(ctx.db, &%{&1 | body: &1.body <> rollout})
 
       session = fn _, prompt, _, _ ->
         assert prompt =~ "Exportprojekt: Schlussabnahme"
         assert prompt =~ "review_contract"
         assert prompt =~ ctx.workspace.sha
         assert prompt =~ "fix_and_regression_test"
+        assert prompt =~ "Ausrollen ist Betrieb und keine Abnahmebedingung"
+        assert prompt =~ "Nur zwingende Livenachweise"
         request = %{"kind" => "handoff", "issue_id" => ctx.issue.id, "report" => "CSV fixture checked", "review" => Fixture.evidence()}
+        assert {:error, :yolo_wait_requires_dependency} = Handoff.invoke(Map.put(request, "kind", "wait"), ctx.opts)
         assert ActionTool.execute(request, ctx.opts)["success"]
         send(parent, :accepted)
         {:ok, %{session_id: "codex-session"}}
@@ -533,6 +641,8 @@ defmodule SymphonyElixir.YoloReviewContractTest do
           params = Jason.decode!(params)
           assert params["message"] =~ "Exportprojekt: Schlussabnahme"
           assert params["message"] =~ "Memory ersetzt weder sym-yolo-review"
+          assert params["message"] =~ "Ausrollen ist Betrieb und keine Abnahmebedingung"
+          assert params["message"] =~ "Nur zwingende Livenachweise"
           id = params["idempotencyKey"]
           descriptor = Path.join([ctx.context.settings.workspace.root, "yolo-runs", id, "tools.json"])
           binding = File.read!(descriptor) |> Jason.decode!()
@@ -570,6 +680,9 @@ defmodule SymphonyElixir.YoloReviewContractTest do
       assert result.issue.state == "Review"
       assert result.issue.delegate_id == nil
       assert result.body =~ "Existing evidence"
+      assert result.body =~ rollout
+      refute result.body =~ "symphony-operator-handoff"
+      refute result.body =~ "Betreiberpflicht offen"
       assert result.body =~ ctx.workspace.sha
       assert Group.groups([result.issue]) == %{}
       if executor == :openclaw, do: assert({:ok, %{"state" => "completed"}} = Journal.read("review"))

@@ -77,6 +77,11 @@ widersprüchlich war.
 
 ## Pflichtnachweise und Übergaben
 
+- Offene Ausrollschritte unter `### Ausrollschritte` für das Wartungsfenster führen,
+  außerhalb der Abnahmecheckliste. Überholte Ausroll-Abnahmepunkte mit Quelle und
+  Begründung dorthin umordnen, ohne Ausführung zu behaupten; zwingende Livenachweise
+  gemäß [Abnahmeregel](../../../docs/linear-app.md#quellengebundener-betreiberauftrag)
+  bleiben unter `### Validierung`.
 - Jeden Validierungspunkt mit Aktion, ausführendem Verantwortlichen und fälliger
   Phase samt Entscheidungsquelle/technischer Begründung gemäß `WORKFLOW.md`,
   „Phasenpflichten und Betreiberübergaben“, führen. Später fällige Nachweise offen

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.RelayBudgetTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.Codex.{CommentTool, DynamicTool, MCPServer}
-  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, Tracker, WorkerCapacity}
+  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, Tracker}
   alias SymphonyElixir.Linear.{Budget, CommentVersion, IssueLease, IssueReadCache, WriteContext}
   alias SymphonyElixir.RelayFixture, as: Server
   alias SymphonyElixir.Yolo.{ActionScope, BlockerBrake, Coordinator, Dependencies, Escalation, Operations}
@@ -16,7 +16,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     [context] = Enum.map(contexts(root, ["one"]), &put_in(&1.settings.polling.interval_ms, interval))
     bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
     configure_http(server, [context], [issue_node(context)], bump)
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: [context]})
     assert {:ok, [_]} = ProjectPoller.candidates(context)
@@ -68,7 +68,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     refute Client.complete_relay_issue?(put_in(issue_node(context)["labels"]["nodes"], List.duplicate(%{"name" => "label"}, 50)), context)
     bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
     configure_http(server, [context], [issue_node(context)], bump)
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: [context]})
     context = ProjectPoller.context(context)
@@ -129,7 +129,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     end
 
     configure_http(server, [context], [node], bump)
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: [context]})
     context = ProjectPoller.context(context)
@@ -158,7 +158,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     [context] = contexts(root, ["one"])
     node = issue_node(context)
     configure_http(server, [context], [node], fn _ -> :ok end)
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: [context]})
     context = ProjectPoller.context(context)
@@ -331,7 +331,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     counts = start_supervised!({Agent, fn -> %{} end})
     bump = fn kind -> Agent.update(counts, &Map.update(&1, kind, 1, fn n -> n + 1 end)) end
     configure_http(server, [context], [node], bump)
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: [context]})
     context = %{ProjectPoller.context(context) | yolo_agent_id: "agent"}
@@ -402,7 +402,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
       bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
       configure_http(server, contexts, nodes, bump, unresolved)
-      start_supervised!({WorkerCapacity, contexts: contexts})
+      start_worker_capacity!(contexts: contexts)
       start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
       start_supervised!({ProjectPoller, contexts: contexts})
       context = ProjectPoller.context(context)
@@ -682,7 +682,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
     contexts = contexts(root, ["one", "two"])
     bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
     configure_http(server, contexts, Enum.map(contexts, &issue_node/1), bump)
-    start_supervised!({WorkerCapacity, contexts: contexts})
+    start_worker_capacity!(contexts: contexts)
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: contexts})
     background(contexts, 0)
@@ -750,7 +750,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
     bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
     configure_http(server, [context], [node], bump)
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: [context]})
     assert {:ok, _} = ProjectPoller.candidates(context)
@@ -814,7 +814,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
       nodes = contexts |> Enum.take(active) |> Enum.map(&issue_node/1)
       bump = fn key -> Agent.update(counts, &Map.update(&1, key, 1, fn n -> n + 1 end)) end
       configure_http(server, contexts, nodes, bump)
-      start_supervised!({WorkerCapacity, contexts: contexts})
+      start_worker_capacity!(contexts: contexts)
       start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
       start_supervised!({ProjectPoller, contexts: contexts})
       background(contexts, active)

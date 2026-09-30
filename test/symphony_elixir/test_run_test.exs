@@ -341,7 +341,7 @@ defmodule SymphonyElixir.TestRunTest do
     assert {:ok, prepared} = TestRun.execute("prepare")
     System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
     assert {:ok, [context | _]} = TestRun.bind_contexts(ctx.contexts)
-    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     fixture = Enum.find(prepared["fixtures"], &(&1["project"] == context.name))
 
     issue = %Issue{

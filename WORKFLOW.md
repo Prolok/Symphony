@@ -364,6 +364,10 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   Start; vorhandene Sessions bleiben erhalten. Persönliche MCPs und Plugins
   bleiben gesperrt. Secrets bleiben aus öffentlicher Umgebung und Prompts
   ausgeschlossen; private Envdateien sind kein Agentenzugriffspfad.
+- Der lokale [Wartungsmodus](docs/linear-app.md#wartungsmodus-update-und-neustart)
+  sperrt dienstweit neue Starts; laufende Arbeit wird regulär beendet. Ein Neustart
+  ist erst bei `maintenance.enabled && maintenance.idle` zulässig. Nach vollständigem
+  Dienstneustart ist der Modus aus und zurückgestellte Arbeit wird frisch geprüft.
 - Eine gemeinsame Dienstinstanz pro Benutzer; ein konkurrierender Start endet
   mit „Symphony läuft bereits“. Manuelle Helfer sind keine zweiten Dienste.
   `--test-instance <name>` erlaubt zusätzlich genau einen exklusiven Testbetrieb

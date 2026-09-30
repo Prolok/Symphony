@@ -323,7 +323,8 @@ defmodule SymphonyElixir.StatusDashboard do
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling),
              project_statuses: Map.get(snapshot, :project_statuses, []),
-             partial: Map.get(snapshot, :partial, false)
+             partial: Map.get(snapshot, :partial, false),
+             maintenance: Map.get(snapshot, :maintenance)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -375,6 +376,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
            project_link_lines,
            mode_lines,
+           format_maintenance_lines(snapshot, terminal_columns_override || terminal_columns()),
            project_refresh_line,
            format_project_status_lines(snapshot),
            colorize("├─ Running", @ansi_bold),
@@ -405,6 +407,20 @@ defmodule SymphonyElixir.StatusDashboard do
         |> Enum.join("\n")
     end
   end
+
+  defp format_maintenance_lines(%{maintenance: %{enabled: true} = control}, columns) do
+    status = if control.idle, do: "Leer und bereit für Neustart", else: "Laufende Arbeit wird beendet"
+    reason = control.reason |> String.replace(~r/\s+/, " ") |> sanitize_ansi_and_control_bytes()
+
+    lines =
+      ["│ Wartungsmodus: #{status}", "│ Grund: #{reason}", "│ seit: #{control.requested_at}"] ++
+        if(control.deadline_at, do: ["│ Frist: #{control.deadline_at}"], else: [])
+
+    Enum.map(lines, &truncate_plain(&1, max(columns, 4)))
+  end
+
+  defp format_maintenance_lines(%{maintenance: %{enabled: false}}, _columns), do: ["│ Normalbetrieb"]
+  defp format_maintenance_lines(_, _columns), do: []
 
   defp format_project_status_lines(snapshot) do
     partial = if Map.get(snapshot, :partial, false), do: [colorize("│ Teilstand: nicht verfügbare Projekte fehlen in Zeilen und Summen", @ansi_red)], else: []
@@ -621,7 +637,8 @@ defmodule SymphonyElixir.StatusDashboard do
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling),
              project_statuses: Map.get(snapshot, :project_statuses, []),
-             partial: Map.get(snapshot, :partial, false)
+             partial: Map.get(snapshot, :partial, false),
+             maintenance: Map.get(snapshot, :maintenance)
            }}
 
         _ ->

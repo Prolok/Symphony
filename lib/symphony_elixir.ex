@@ -52,6 +52,7 @@ defmodule SymphonyElixir.Application do
           SymphonyElixir.Linear.Budget,
           SymphonyElixir.Linear.IssueReadCache,
           SymphonyElixir.WorkflowStore,
+          {SymphonyElixir.WorkerCapacity, contexts: SymphonyElixir.Projects.configured()},
           orchestrator_child(),
           SymphonyElixir.HttpServer,
           SymphonyElixir.StatusDashboard,

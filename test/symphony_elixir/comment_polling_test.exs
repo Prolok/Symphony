@@ -112,7 +112,7 @@ defmodule SymphonyElixir.CommentPollingTest do
     on_exit(fn -> :sys.resume(orchestrator) end)
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: 600_000)
     context = %SymphonyElixir.ProjectContext{settings: Config.settings!()}
-    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     assert CommentCheckpoint.background_interval_ms() == 600_000
     parent = self()
     {:ok, counter} = Agent.start_link(fn -> 0 end)

@@ -27,6 +27,19 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     end
   end
 
+  @spec maintenance(Conn.t(), map()) :: Conn.t()
+  def maintenance(conn, params) do
+    if conn.remote_ip in [{127, 0, 0, 1}, {0, 0, 0, 0, 0, 0, 0, 1}] do
+      case SymphonyElixir.Maintenance.update(params) do
+        {:ok, control} -> json(conn, %{maintenance: control})
+        {:error, :invalid_maintenance_request} -> error_response(conn, 400, "invalid_maintenance_request", "enabled, reason und optionale deadline_seconds prüfen")
+        {:error, _} -> error_response(conn, 503, "maintenance_unavailable", "Startarbiter nicht verfügbar")
+      end
+    else
+      error_response(conn, 403, "local_operator_only", "Wartungsbefehle erfordern einen Loopback-Peer")
+    end
+  end
+
   @spec refresh(Conn.t(), map()) :: Conn.t()
   def refresh(conn, _params) do
     case Presenter.refresh_payload(orchestrator()) do

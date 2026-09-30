@@ -4548,7 +4548,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       receive do: (:stop -> :ok)
     end
 
-    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
 
     for external <- [false, true] do
       running = tick(%{state | external_poll: external}, issues, scan: &scan/1, runner: runner)

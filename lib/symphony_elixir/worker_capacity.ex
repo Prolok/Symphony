@@ -11,7 +11,7 @@ defmodule SymphonyElixir.WorkerCapacity do
   @spec configure([SymphonyElixir.ProjectContext.t()]) :: :ok
   def configure(contexts), do: GenServer.call(__MODULE__, {:configure, contexts})
 
-  @spec count(String.t()) :: non_neg_integer()
+  @spec count(String.t() | nil) :: non_neg_integer()
   def count(host), do: GenServer.call(__MODULE__, {:count, host})
 
   @spec count_state(String.t()) :: non_neg_integer()
@@ -36,8 +36,17 @@ defmodule SymphonyElixir.WorkerCapacity do
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
-    state = %{workers: %{}, bindings: %{}, task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor)}
-    {:ok, configure_state(state, Keyword.fetch!(opts, :contexts))}
+
+    state = %{
+      workers: %{},
+      bindings: %{},
+      subscribers: %{},
+      maintenance: normal_maintenance(),
+      deadline_timer: nil,
+      task_supervisor: Keyword.get(opts, :task_supervisor, SymphonyElixir.TaskSupervisor)
+    }
+
+    {:ok, configure_state(state, Keyword.get(opts, :contexts, []))}
   end
 
   @impl true
@@ -46,6 +55,35 @@ defmodule SymphonyElixir.WorkerCapacity do
   end
 
   @impl true
+  def handle_call(:maintenance, _from, state) do
+    drained = map_size(state.workers) == 0 and pending_bindings(state.contexts) == {:ok, MapSet.new()}
+    {:reply, Map.put(state.maintenance, :drained, drained), state}
+  end
+
+  def handle_call({:maintenance_subscribe, pid}, _from, state) do
+    subscribers = if Map.has_key?(state.subscribers, pid), do: state.subscribers, else: Map.put(state.subscribers, pid, Process.monitor(pid))
+    if state.maintenance.enabled, do: send(pid, {:maintenance_changed, state.maintenance})
+    if deadline_due?(state.maintenance), do: send(pid, {:maintenance_deadline, state.maintenance.generation})
+    {:reply, :ok, %{state | subscribers: subscribers}}
+  end
+
+  def handle_call({:maintenance, request}, _from, state) do
+    if same_request?(state.maintenance, request) do
+      {:reply, {:ok, public_maintenance(state.maintenance)}, state}
+    else
+      if state.deadline_timer, do: Process.cancel_timer(state.deadline_timer)
+      control = new_maintenance(request)
+
+      timer =
+        if control[:deadline_ms],
+          do: Process.send_after(self(), {:maintenance_deadline, control.generation}, request.deadline_seconds * 1_000)
+
+      Enum.each(state.subscribers, fn {pid, _} -> send(pid, {:maintenance_changed, control}) end)
+      SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
+      {:reply, {:ok, public_maintenance(control)}, %{state | maintenance: control, deadline_timer: timer}}
+    end
+  end
+
   def handle_call({:recover_child, issue_state, fun, project}, {owner, _}, state) do
     case Task.Supervisor.start_child(state.task_supervisor, fun) do
       {:ok, pid} = result ->
@@ -79,7 +117,7 @@ defmodule SymphonyElixir.WorkerCapacity do
     host_limit = Map.get(state.host_limits, host, :infinity)
     state_limit = Map.get(state.state_limits, issue_state, state.limit)
 
-    if capacity_available?(state) and host_count(state, host) < host_limit and
+    if not state.maintenance.enabled and capacity_available?(state) and host_count(state, host) < host_limit and
          state_count(state, issue_state) < state_limit do
       case Task.Supervisor.start_child(state.task_supervisor, fun) do
         {:ok, pid} = result ->
@@ -92,11 +130,18 @@ defmodule SymphonyElixir.WorkerCapacity do
           {:reply, error, state}
       end
     else
-      {:reply, {:error, :worker_capacity}, state}
+      {:reply, {:error, if(state.maintenance.enabled, do: :maintenance, else: :worker_capacity)}, state}
     end
   end
 
   @impl true
+  def handle_info({:maintenance_deadline, generation}, %{maintenance: %{generation: generation, enabled: true}} = state) do
+    Enum.each(state.subscribers, fn {pid, _} -> send(pid, {:maintenance_deadline, generation}) end)
+    {:noreply, %{state | deadline_timer: nil}}
+  end
+
+  def handle_info({:maintenance_deadline, _}, state), do: {:noreply, state}
+
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
     workers =
       Map.reject(state.workers, fn {pid, {_host, _issue_state, worker_ref, owner_ref}} ->
@@ -115,7 +160,8 @@ defmodule SymphonyElixir.WorkerCapacity do
         end
       end)
 
-    {:noreply, %{state | workers: workers, bindings: Map.take(state.bindings, Map.keys(workers))}}
+    subscribers = Map.reject(state.subscribers, fn {_, monitor} -> monitor == ref end)
+    {:noreply, %{state | workers: workers, bindings: Map.take(state.bindings, Map.keys(workers)), subscribers: subscribers}}
   end
 
   defp configure_state(state, contexts) do
@@ -126,7 +172,7 @@ defmodule SymphonyElixir.WorkerCapacity do
         Enum.reduce(worker.ssh_hosts, limits, fn host, acc -> Map.update(acc, host, limit, &min(&1, limit)) end)
       end)
 
-    limit = contexts |> Enum.map(& &1.settings.agent.max_concurrent_agents) |> Enum.min()
+    limit = contexts |> Enum.map(& &1.settings.agent.max_concurrent_agents) |> Enum.min(fn -> :infinity end)
 
     state_limits =
       Enum.reduce(contexts, %{}, fn context, limits ->
@@ -160,4 +206,27 @@ defmodule SymphonyElixir.WorkerCapacity do
   defp host_count(state, host), do: Enum.count(state.workers, fn {_pid, {worker_host, _, _, _}} -> worker_host == host end)
   defp state_count(state, name), do: Enum.count(state.workers, fn {_pid, {_, worker_state, _, _}} -> worker_state == name end)
   defp normalize_state(name), do: Schema.normalize_issue_state(name)
+
+  defp normal_maintenance, do: %{enabled: false, generation: Ecto.UUID.generate(), requested_at: nil, reason: nil, deadline_at: nil, deadline_ms: nil, deadline_seconds: nil}
+  defp new_maintenance(%{enabled: false}), do: normal_maintenance()
+
+  defp new_maintenance(request) do
+    now = DateTime.utc_now()
+    seconds = request.deadline_seconds
+
+    %{
+      enabled: true,
+      generation: Ecto.UUID.generate(),
+      requested_at: DateTime.to_iso8601(now),
+      reason: request.reason,
+      deadline_seconds: seconds,
+      deadline_at: if(seconds, do: DateTime.to_iso8601(DateTime.add(now, seconds))),
+      deadline_ms: if(seconds, do: System.monotonic_time(:millisecond) + seconds * 1_000)
+    }
+  end
+
+  defp same_request?(%{enabled: false}, %{enabled: false}), do: true
+  defp same_request?(current, request), do: current.enabled == request.enabled and current.reason == request[:reason] and current.deadline_seconds == request[:deadline_seconds]
+  defp deadline_due?(control), do: control.enabled and is_integer(control.deadline_ms) and control.deadline_ms <= System.monotonic_time(:millisecond)
+  defp public_maintenance(control), do: Map.drop(control, [:deadline_ms, :deadline_seconds])
 end

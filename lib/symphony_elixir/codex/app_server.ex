@@ -616,6 +616,15 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
+      {:maintenance_interrupt, generation} ->
+        if SymphonyElixir.Maintenance.interrupt_current?(generation) do
+          send_message(port, %{"id" => "maintenance-interrupt", "method" => "turn/interrupt", "params" => %{"threadId" => metadata.thread_id, "turnId" => metadata.turn_id}})
+          stop_port(port)
+          exit(:maintenance_interrupt)
+        else
+          receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, metadata)
+        end
+
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
     after

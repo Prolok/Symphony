@@ -57,7 +57,7 @@ defmodule SymphonyElixir.Yolo.Followup do
   end
 
   defp resume_partial(intent, ids, missing, opts) do
-    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
 
     with true <- Enum.any?(ids ++ [intent["issue_id"]], &Scope.member?/1),
          {:ok, prior} <- fetch.(missing),

@@ -10,8 +10,10 @@ Cache-Einträge, gebunden an App, Workspace, Agentbindung und Relaygeneration.
 Die getrennte Wartemarker-Kommentarfrische entfällt. Zielauflösungen und
 Fehlerberichte behalten ihre fachlichen Metadaten. Bestätigte eigene Kommentare
 invalidieren Kommentarleser über das bestehende Journal, auch vor dem Relay-Echo.
-Vollständige Prüfungen vor Statusaktionen und aktuelles Workpadlesen beim Schreiben
-bleiben direkt. Freie GraphQL-Abfragen werden unverändert durchgereicht.
+Vollständige Prüfungen vor Starts, Statusaktionen und Abschlussbestätigungen sowie
+Workpad-Ausgangstexte beim Schreiben bleiben direkt. Kommentarlesen prüft seine
+eigene Epoche und Frist; eine fällige Issue-Sicherheitsprüfung sperrt keine gültigen
+Kommentarstände unter kritischem Budget. Freie GraphQL-Abfragen bleiben Durchreichung.
 
 Damit hängt die Leselast von Änderungen und Sicherheitsprüfungen ab, statt von
 der Anzahl der Werkzeugaufrufe. Weitere Caches je Einstieg würden dieselben

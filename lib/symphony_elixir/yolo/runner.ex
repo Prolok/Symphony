@@ -449,7 +449,8 @@ defmodule SymphonyElixir.Yolo.Runner do
   end
 
   defp verify_start(group, issues, project_issues, workspace, opts) do
-    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+    opts = Keyword.put(opts, :force_full, true)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
 
     # Fetch/checkpoints and checkout creation may take time. Keep all leases held
     # and recheck the exact frozen members immediately before starting Codex.
@@ -531,7 +532,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp record_terminal_delivery(_run_id, _message), do: :ok
 
   defp retained_members(issues, opts) do
-    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
 
     with {:ok, current} <- fetch.(Enum.map(issues, & &1.id)),
          true <- Enum.sort(Enum.map(current, & &1.id)) == Enum.sort(Enum.map(issues, & &1.id)) do

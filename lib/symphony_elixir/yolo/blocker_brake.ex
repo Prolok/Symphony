@@ -78,7 +78,7 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
     with true <- is_binary(human),
          :ok <- note(issue, details, opts),
          :ok <- API.update(issue.id, %{assigneeId: human, delegateId: nil}, opts),
-         {:ok, [fresh]} <- Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1).([issue.id]),
+         {:ok, [fresh]} <- Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true)).([issue.id]),
          true <- fresh.state == "BLOCKER" and fresh.delegate_id == nil and fresh.assignee_id == human do
       notify_once(issue, details, opts)
       :handed_off
@@ -104,7 +104,7 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
   end
 
   defp record_delivery_issue(issue, entry, opts) do
-    fetch = Keyword.get(opts, :workpad_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1))
+    fetch = Keyword.get(opts, :workpad_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comments(&1, force_full: true)))
     write = Keyword.get(opts, :workpad_write, Keyword.get(opts, :workpad, &Workpad.update_tracker_workpad/2))
 
     result =
@@ -118,7 +118,7 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
   end
 
   defp note(issue, details, opts) do
-    fetch = Keyword.get(opts, :workpad_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1))
+    fetch = Keyword.get(opts, :workpad_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comments(&1, force_full: true)))
     write = Keyword.get(opts, :workpad_write, Keyword.get(opts, :workpad, &Workpad.update_tracker_workpad/2))
     entry = "BLOCKER-Schleifenbremse: Ursache #{details["cause"]}; Versuche #{details["attempts"]}; Vorschlag #{details["proposal"]}; Entscheidung #{details["decision"]}."
 

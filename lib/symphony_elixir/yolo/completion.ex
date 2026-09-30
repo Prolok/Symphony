@@ -35,7 +35,7 @@ defmodule SymphonyElixir.Yolo.Completion do
   @spec invoke(term(), keyword()) :: :ok | {:error, term()}
   def invoke(%{"issue_id" => id, "result" => result}, opts) when is_binary(result) do
     scope = Scope.current()
-    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
     check = Keyword.get(opts, :before_action, &CommentCheckpoint.before_action/1)
 
     with true <- Scope.member?(id) and String.trim(result) != "",

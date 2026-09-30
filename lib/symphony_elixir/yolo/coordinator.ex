@@ -113,7 +113,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   end
 
   defp retry_notification(issue, id, route_result, opts) do
-    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
 
     case fetch.([issue.id]) do
       {:ok, [fresh]} ->
@@ -557,7 +557,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp report_operator_error(issue, :yolo_operator_handoff_incomplete, opts) do
     note = "Betreiberauftrag ungültig: mehrere oder nicht auswertbare Blöcke im aktuellen Workpad; Auftrag dort korrigieren. Dieses Ticket bleibt bis dahin für den YOLO-Lauf gesperrt."
-    comments = Keyword.get(opts, :workpad_comments, &Tracker.fetch_issue_comments/1)
+    comments = Keyword.get(opts, :workpad_comments, &Tracker.fetch_issue_comments(&1, force_full: true))
     write = Keyword.get(opts, :workpad_write, &Workpad.update_tracker_workpad/2)
 
     with {:ok, found} <- comments.(issue.id) do

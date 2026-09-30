@@ -1011,7 +1011,7 @@ Nutze dies nur, wenn der Abschluss durch fehlende erforderliche Tools oder fehle
 
 Ticket-Leser aus Tools, Checkpoints und PO-Aktionen teilen bei bereitem Relay
 den geprüften Issue-/Abhängigkeits- und Kommentarstand. Freie GraphQL-Abfragen
-bleiben Durchreichung; vor Statusaktionen bleibt der vollständige direkte Abgleich bindend.
+bleiben Durchreichung; vor Starts und Statusaktionen bleibt der vollständige direkte Abgleich bindend.
 
 Für tatsächlich übernommene aktive Issues ist der Kommentareingang Standard.
 Der Hintergrundabgleich beobachtet Kommentare ohne bereites Relay frühestens alle

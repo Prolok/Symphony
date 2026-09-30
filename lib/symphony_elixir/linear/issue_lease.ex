@@ -133,7 +133,7 @@ defmodule SymphonyElixir.Linear.IssueLease do
   defp run_ready(binding, issue, callback) do
     with :ok <- ready_target(issue.id),
          :ok <- verify_delegation(issue),
-         {:ok, comments} <- Tracker.fetch_issue_comments(issue.id),
+         {:ok, comments} <- Tracker.fetch_issue_comments(issue.id, force_full: true),
          :ok <- retry_journal_busy(fn -> workpad_ready(binding, issue, comments) end, 3) do
       callback.()
     end
@@ -157,7 +157,7 @@ defmodule SymphonyElixir.Linear.IssueLease do
 
   defp verify_delegation(issue) do
     if YoloAgent.delegated?(issue) do
-      with {:ok, [current]} <- Tracker.fetch_issue_states_by_ids([issue.id]),
+      with {:ok, [current]} <- Tracker.fetch_issue_states_by_ids([issue.id], force_full: true),
            true <- YoloAgent.continued?(issue, current),
            :ok <- SymphonyElixir.Relay.execution_allowed(current) do
         :ok

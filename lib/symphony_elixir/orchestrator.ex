@@ -1949,7 +1949,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp fetch_completed_issue(issue_id) do
-    with {:ok, issues} <- Tracker.fetch_issue_states_by_ids([issue_id]) do
+    with {:ok, issues} <- Tracker.fetch_issue_states_by_ids([issue_id], force_full: true) do
       case find_issue_by_id(issues, issue_id) do
         %Issue{state: issue_state} = issue when is_binary(issue_state) and issue_state != "" -> {:ok, issue}
         _ -> {:error, :completion_issue_state_unresolved}

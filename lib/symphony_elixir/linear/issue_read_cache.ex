@@ -32,13 +32,14 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
   def comments(id, opts \\ []) do
     context = ProjectContext.current()
 
-    if opts[:force_full] != true and ready?(context, id) do
-      with {:ok, [issue]} <- fetch([id], opts),
-           {:ok, inbox} <- CommentCheckpoint.background_scan(issue, opts |> Keyword.put_new(:background_now, &comment_clock/0) |> Keyword.put(:include_own_outputs, true)) do
-        {:ok, current_comments(inbox)}
-      end
-    else
-      Adapter.fetch_issue_comments(id)
+    case opts[:force_full] != true && ProjectPoller.read_issues(context, [id]) do
+      {:ok, [{_epoch, issue}]} ->
+        with {:ok, inbox} <- CommentCheckpoint.background_scan(issue, opts |> Keyword.put_new(:background_now, &comment_clock/0) |> Keyword.put(:include_own_outputs, true)) do
+          {:ok, current_comments(inbox)}
+        end
+
+      _ ->
+        Adapter.fetch_issue_comments(id)
     end
   end
 

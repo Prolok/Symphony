@@ -2,9 +2,9 @@ defmodule SymphonyElixir.RelayBudgetTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.Codex.{CommentTool, DynamicTool, MCPServer}
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, Tracker, WorkerCapacity}
-  alias SymphonyElixir.Linear.{IssueReadCache, WriteContext}
+  alias SymphonyElixir.Linear.{Budget, IssueLease, IssueReadCache, WriteContext}
   alias SymphonyElixir.RelayFixture, as: Server
-  alias SymphonyElixir.Yolo.{ActionScope, Coordinator, Dependencies, Escalation, Operations, Scope}
+  alias SymphonyElixir.Yolo.{ActionScope, Coordinator, Dependencies, Escalation, Operations, Runner, Scope}
 
   test "the actual five-second timer fetches an available event then stays Linear-free on warm ticks" do
     root = Path.dirname(Workflow.workflow_file_path())
@@ -181,6 +181,124 @@ defmodule SymphonyElixir.RelayBudgetTest do
       assert {:ok, []} = SymphonyElixir.WaitMarker.workpad_markers(issue, [])
       assert {:ok, ["PRI-1"]} = SymphonyElixir.WaitMarker.workpad_markers(issue, force_full: true)
     end)
+  end
+
+  @tag :review_regression
+  test "delegated lease admission rejects Linear ownership changes before the relay echo" do
+    {context, node, linear, _comments, _counts} = mutable_read_fixture()
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, [issue]} = Tracker.fetch_issue_states_by_ids([node["id"]])
+      Agent.update(linear, &Map.put(&1, "delegate", nil))
+      assert {:ok, [cached]} = Tracker.fetch_issue_states_by_ids([issue.id])
+      assert cached.delegate_id == issue.delegate_id
+      assert {:error, :yolo_delegation_changed} = IssueLease.ready_for_delivery(issue)
+    end)
+  end
+
+  @tag :review_regression
+  test "final PO start rejects a Linear description change during checkout creation" do
+    {context, node, linear, _comments, _counts} = mutable_read_fixture()
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, [issue]} = Tracker.fetch_issue_states_by_ids([node["id"]])
+
+      opts = [
+        lease: fn _, callback -> callback.() end,
+        scan: fn _ -> {:ok, %{"versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end,
+        workspace: fn _, _ ->
+          Agent.update(linear, &Map.put(&1, "description", "Anforderungen zwischenzeitlich geändert"))
+          {:ok, %{path: context.root, sha: "sha"}}
+        end,
+        unchanged: fn _ -> true end,
+        checkpoint: fn _ -> {:ok, %{}} end,
+        session: fn _, _, _, _ -> {:error, :unexpected_cached_start} end
+      ]
+
+      assert {:error, :yolo_launch_changed} = Runner.run("incoming", [issue], [issue], opts)
+    end)
+  end
+
+  @tag :review_regression
+  test "wait notes preserve the latest remote workpad before its relay echo" do
+    {context, node, _linear, comments, _counts} = mutable_read_fixture()
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, [issue]} = Tracker.fetch_issue_states_by_ids([node["id"]])
+      assert {:ok, [old]} = Tracker.fetch_issue_comments(issue.id)
+      current = old.body <> "\nAktuelle Ergänzung aus Linear.\n"
+      Agent.update(comments, &put_in(&1, [issue.id, "body"], current))
+      assert {:ok, [^old]} = Tracker.fetch_issue_comments(issue.id)
+
+      assert :ok = SymphonyElixir.WaitMarker.record_wait(issue, [%{identifier: "PRI-1", state: "Todo"}])
+      written = Agent.get(comments, &get_in(&1, [issue.id, "body"]))
+      assert String.contains?(written, "Aktuelle Ergänzung aus Linear.")
+      assert String.contains?(written, "Wartemarker offen: PRI-1")
+    end)
+  end
+
+  @tag :review_regression
+  test "warm marker reads survive an expired issue verification under critical budget" do
+    {context, node, _linear, _comments, counts} = mutable_read_fixture()
+    clock = start_supervised!({Agent, fn -> 0 end}, id: :read_clock)
+    Application.put_env(:symphony_elixir, :linear_read_now_fun, fn -> Agent.get(clock, & &1) end)
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_read_now_fun) end)
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, [issue]} = Tracker.fetch_issue_states_by_ids([node["id"]])
+      assert {:ok, []} = SymphonyElixir.WaitMarker.workpad_markers(issue, [])
+      Agent.update(counts, fn _ -> %{} end)
+      Agent.update(clock, fn _ -> 3_600_001 end)
+      app = context.settings.tracker.app
+      Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
+
+      assert {:ok, []} = SymphonyElixir.WaitMarker.workpad_markers(issue, [])
+      assert Agent.get(counts, & &1) == %{}
+    end)
+  end
+
+  defp mutable_read_fixture do
+    root = Path.dirname(Workflow.workflow_file_path())
+    server = start_supervised!(Server)
+    [context] = contexts(root, ["one"])
+    app = context.settings.tracker.app
+    normal = %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"}
+    Budget.record(app, :read, normal)
+    on_exit(fn -> Budget.record(app, :read, normal) end)
+    node = issue_node(context)
+
+    node = %{
+      node
+      | "state" => %{"name" => "Backlog"},
+        "delegate" => %{"id" => "agent"},
+        "labels" => %{"nodes" => [%{"name" => ~s(Skip "Freigabe Implementierung")}, %{"name" => ~s(Skip "Freigabe Review")}]}
+    }
+
+    counts = start_supervised!({Agent, fn -> %{} end})
+    bump = fn kind -> Agent.update(counts, &Map.update(&1, kind, 1, fn n -> n + 1 end)) end
+    configure_http(server, [context], [node], bump)
+    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
+    start_supervised!({ProjectPoller, contexts: [context]})
+    context = %{ProjectPoller.context(context) | yolo_agent_id: "agent"}
+    linear = start_supervised!({Agent, fn -> node end}, id: :linear_source)
+    comment = initial_workpad(node, [context])
+    comments = start_supervised!({Agent, fn -> %{node["id"] => comment} end}, id: :comment_source)
+    request = Application.fetch_env!(:symphony_elixir, :linear_client_request_fun)
+
+    Application.put_env(:symphony_elixir, :linear_client_request_fun, fn payload, headers ->
+      query = payload[:query] || payload["query"]
+
+      if query =~ "SymphonyLinearIssuesById" or query =~ "comments(" or query =~ "commentUpdate(" or query =~ "SymphonyReceipt(" do
+        {kind, data} = budget_response(query, payload, context.settings.tracker.app, [context.settings.tracker.project_slug], [Agent.get(linear, & &1)], false, comments)
+        bump.(kind)
+        {:ok, %{status: 200, body: %{"data" => data}}}
+      else
+        request.(payload, headers)
+      end
+    end)
+
+    {context, node, linear, comments, counts}
   end
 
   for {active, unresolved} <- [{0, false}, {5, false}, {0, true}] do

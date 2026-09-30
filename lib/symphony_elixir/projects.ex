@@ -194,6 +194,7 @@ defmodule SymphonyElixir.Projects do
       projects: Enum.map(state.contexts, & &1.name),
       project_statuses: statuses,
       partial: Enum.any?(statuses, &(&1.status == :unavailable)),
+      maintenance: SymphonyElixir.Maintenance.aggregate(Enum.map(snapshots, &elem(&1, 1)), Enum.all?(statuses, &(&1.status == :fresh))),
       running: entries(snapshots, :running, state.contexts),
       retrying: entries(snapshots, :retrying, state.contexts),
       waiting: entries(snapshots, :waiting, state.contexts),

@@ -69,6 +69,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
       </header>
 
+      <section :if={@payload[:maintenance]} class="section-card" id="maintenance-status">
+        <h2><%= if @payload.maintenance.enabled, do: "Wartungsmodus", else: "Normalbetrieb" %></h2>
+        <p :if={@payload.maintenance.enabled}>
+          <%= if @payload.maintenance.idle, do: "Leer und bereit für Neustart", else: "Laufende Arbeit wird beendet" %>
+          · <%= @payload.maintenance.reason %> · seit <%= @payload.maintenance.requested_at %>
+        </p>
+        <p :if={@payload.maintenance.deadline_at}>Frist: <%= @payload.maintenance.deadline_at %></p>
+      </section>
+
       <%= if @payload[:error] do %>
         <section class="error-card">
           <h2 class="error-title">

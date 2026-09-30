@@ -5,7 +5,7 @@ defmodule SymphonyElixir.WorkerCapacityTest do
   test "recovered external runs reserve shared capacity even after a lower limit reload" do
     settings = Config.settings!()
     context = %ProjectContext{settings: %{settings | agent: %{settings.agent | max_concurrent_agents: 1}}}
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     assert {:ok, first} = WorkerCapacity.recover_child("YOLO incoming", &wait/0)
     assert {:ok, second} = WorkerCapacity.recover_child("YOLO review", &wait/0)
     assert WorkerCapacity.count(nil) == 2
@@ -24,7 +24,7 @@ defmodule SymphonyElixir.WorkerCapacityTest do
   test "worker capacity race becomes a visible wait without a retry error" do
     settings = Config.settings!()
     context = %ProjectContext{settings: %{settings | agent: %{settings.agent | max_concurrent_agents: 1}}}
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     assert {:ok, occupied} = WorkerCapacity.start_child(nil, "In Arbeit (AI)", &wait/0)
 
     issue = %SymphonyElixir.Linear.Issue{
@@ -48,7 +48,7 @@ defmodule SymphonyElixir.WorkerCapacityTest do
     settings = Config.settings!()
     worker = %{settings.worker | ssh_hosts: ["shared", "other"], max_concurrent_agents_per_host: 1}
     context = %ProjectContext{settings: %{settings | worker: worker}}
-    start_supervised!({WorkerCapacity, contexts: [context, context]})
+    start_worker_capacity!(contexts: [context, context])
     parent = self()
 
     owners =
@@ -93,7 +93,7 @@ defmodule SymphonyElixir.WorkerCapacityTest do
     settings = Config.settings!()
     context = %ProjectContext{settings: %{settings | agent: %{settings.agent | max_concurrent_agents: 1}}}
     tasks = start_supervised!({Task.Supervisor, max_children: 1})
-    start_supervised!({WorkerCapacity, contexts: [context], task_supervisor: tasks})
+    start_worker_capacity!(contexts: [context], task_supervisor: tasks)
     assert {:ok, pid} = WorkerCapacity.start_child(nil, "Review (AI)", &wait/0)
     assert {:error, :worker_capacity} = WorkerCapacity.start_child("another", "Review (AI)", &wait/0)
     updated = put_in(context.settings.agent.max_concurrent_agents, 2)
@@ -111,7 +111,7 @@ defmodule SymphonyElixir.WorkerCapacityTest do
     settings = Config.settings!()
     agent = %{settings.agent | max_concurrent_agents_by_state: %{"review (ai)" => 1}}
     context = %ProjectContext{settings: %{settings | agent: agent}}
-    start_supervised!({WorkerCapacity, contexts: [context, context]})
+    start_worker_capacity!(contexts: [context, context])
     assert {:ok, pid} = WorkerCapacity.start_child(nil, "Review (AI)", &wait/0)
     assert {:error, :worker_capacity} = WorkerCapacity.start_child("other-host", "review (ai)", &wait/0)
     assert WorkerCapacity.count_state("REVIEW (AI)") == 1

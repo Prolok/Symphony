@@ -17,6 +17,7 @@ defmodule SymphonyElixirWeb.Presenter do
           projects: Map.get(snapshot, :projects, []),
           project_statuses: Map.get(snapshot, :project_statuses, []),
           partial: Map.get(snapshot, :partial, false),
+          maintenance: Map.get(snapshot, :maintenance),
           counts: counts(snapshot),
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),

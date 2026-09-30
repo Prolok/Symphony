@@ -32,7 +32,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
     claimed = state.claimed |> MapSet.difference(previous_ids) |> MapSet.union(current_ids)
     state = %{state | yolo_runs: runs, claimed: claimed}
 
-    if is_binary(Config.yolo_agent_id()) do
+    if not SymphonyElixir.Maintenance.enabled?() and is_binary(Config.yolo_agent_id()) do
       issues = recover_origins(state, issues, opts)
       relay_signals = relay_signals(issues)
       retrying_groups = retrying_groups(relay_signals)
@@ -713,12 +713,10 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   @doc false
   @spec start_worker(map(), String.t(), (-> term()), boolean()) :: {:ok, pid()} | {:error, term()}
-  def start_worker(state, name, callback, recovering?) do
-    cond do
-      state.external_poll and recovering? -> SymphonyElixir.WorkerCapacity.recover_child("YOLO #{name}", callback)
-      state.external_poll -> SymphonyElixir.WorkerCapacity.start_child(nil, "YOLO #{name}", callback)
-      true -> Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, callback)
-    end
+  def start_worker(_state, name, callback, recovering?) do
+    if recovering?,
+      do: SymphonyElixir.WorkerCapacity.recover_child("YOLO #{name}", callback),
+      else: SymphonyElixir.WorkerCapacity.start_child(nil, "YOLO #{name}", callback)
   end
 
   @doc false
@@ -733,7 +731,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   end
 
   defp handle_start_failure(state, group, members, opts, prior_record, reason) do
-    unless opts[:recovering] == true or reason in [:capacity, :worker_capacity] or
+    unless opts[:recovering] == true or reason in [:capacity, :worker_capacity, :maintenance] or
              start_effect_recorded?(group, prior_record) do
       Runner.record_start_failure(group, members, reason)
     end

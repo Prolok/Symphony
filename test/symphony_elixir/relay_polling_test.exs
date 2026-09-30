@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.RelayPollingTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, WorkerCapacity}
+  alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay}
   alias SymphonyElixir.RelayFixture, as: Server
 
   test "warm project ticks, running issue reads and comment background do not call Linear; gates remain fresh" do
@@ -67,7 +67,7 @@ defmodule SymphonyElixir.RelayPollingTest do
     on_exit(fn -> Application.delete_env(:symphony_elixir, :linear_client_request_fun) end)
     assert {:ok, session} = Relay.open([context])
     assert {:ok, [^node]} = session.fetch.(["issue"])
-    start_supervised!({WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
     start_supervised!({ProjectPoller, contexts: [context]})
     assert {:ok, [issue]} = ProjectPoller.candidates(context)

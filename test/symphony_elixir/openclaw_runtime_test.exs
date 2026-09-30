@@ -708,7 +708,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
   test "an orphaned external reservation blocks global capacity before any recovery poll", %{context: context} do
     context = put_in(context.settings.agent.max_concurrent_agents, 1)
-    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     order = %{"id" => "orphan", "group" => "incoming", "members" => [], "state" => "unknown"}
     assert :ok = Journal.write(order)
     assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("slot freed") end)
@@ -730,7 +730,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     result = tick(state, issues, start: fn _, _ -> flunk("unsafe replacement") end)
     assert result.max_concurrent_agents == 0
     assert result.yolo_runs["incoming"].pid == sleeper
-    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("unsafe worker") end)
   end
 
@@ -1793,7 +1793,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     context = put_in(context.settings.agent.max_concurrent_agents, 1)
     ProjectContext.bind(context)
     order = fenced_order(issues, opts)
-    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     parent = self()
     fresh = Enum.map(issues, &%{&1 | state: "Yolo Review"})
 
@@ -2080,7 +2080,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     ProjectContext.bind(context)
     order = executed_order(issues, opts)
     {evidence, recovery_opts} = terminal_evidence(order)
-    start_supervised!({SymphonyElixir.WorkerCapacity, contexts: [context]})
+    start_worker_capacity!(contexts: [context])
     parent = self()
     current = Enum.map(issues, &%{&1 | state: "Review", delegate_id: nil})
 

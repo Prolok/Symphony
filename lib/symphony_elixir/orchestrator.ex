@@ -16,6 +16,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.CommentCheckpoint
   alias SymphonyElixir.Linear.{Budget, IssueReadCache, WriteContext}
   alias SymphonyElixir.Linear.YoloAgent
+  alias SymphonyElixir.{Maintenance, MaintenanceRecovery, WorkerCapacity}
 
   alias SymphonyElixir.{
     AgentRunner,
@@ -66,6 +67,8 @@ defmodule SymphonyElixir.Orchestrator do
     Runtime state for the orchestrator polling loop.
     """
 
+    # Each field represents independent lifecycle state retained across polls.
+    # credo:disable-for-next-line Credo.Check.Warning.StructFieldAmount
     defstruct [
       :poll_interval_ms,
       :idle_shutdown_ms,
@@ -80,6 +83,7 @@ defmodule SymphonyElixir.Orchestrator do
       :shutdown_fun,
       :output_fun,
       external_poll: false,
+      maintenance_error: nil,
       shutdown_requested: false,
       running: %{},
       yolo_runs: %{},
@@ -158,7 +162,8 @@ defmodule SymphonyElixir.Orchestrator do
         schedule_tick(state, initial_poll_delay_ms)
       end
 
-    {:ok, state}
+    :ok = Maintenance.register()
+    {:ok, restore_maintenance_retries(state)}
   end
 
   @impl true
@@ -192,6 +197,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_info({:maintenance_changed, %{enabled: true}}, state) do
+    {:noreply, pause_maintenance_retries(state)}
+  end
+
+  def handle_info({:maintenance_changed, %{enabled: false}}, state) do
+    state = resume_maintenance_retries(state)
+    send(self(), :tick)
+    {:noreply, state}
+  end
+
+  def handle_info({:maintenance_deadline, generation}, state) do
+    {:noreply, interrupt_maintenance_workers(state, generation)}
+  end
+
   def handle_info({:project_poll, context}, state) do
     task = poll_task(state)
 
@@ -240,7 +259,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     previous = state
-    state = state |> refresh_runtime_config() |> maybe_dispatch() |> scan_running_comments()
+
+    state =
+      state
+      |> refresh_runtime_config()
+      |> maybe_dispatch()
+      |> maybe_interrupt_maintenance_workers()
+      |> scan_running_comments()
+
     state = maybe_touch_activity_for_state_change(previous, state)
     state = if poll_task(state), do: state, else: finish_poll_cycle(state)
     notify_dashboard()
@@ -284,6 +310,12 @@ defmodule SymphonyElixir.Orchestrator do
       issue_id ->
         state =
           case reason do
+            :maintenance_interrupt ->
+              {running_entry, state} = pop_running_entry(state, issue_id)
+              Logger.info("Maintenance interrupted issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{running_entry_session_id(running_entry)}")
+              state = record_session_completion_totals(state, running_entry)
+              restore_maintenance_retries(state)
+
             :normal ->
               schedule_running_entry_finalization(state, issue_id, Map.get(running, issue_id), reason)
 
@@ -356,6 +388,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update, issue_id)
+        updated_running_entry = reconcile_maintenance_interrupt_update(updated_running_entry, update)
 
         state =
           state
@@ -389,14 +422,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
-      case retry_attempt_state(state, issue_id, retry_token) do
-        {:ok, attempt, metadata, state} ->
-          case handle_retry_issue(state, issue_id, attempt, metadata) do
-            {:noreply, next_state} -> {:noreply, touch_activity(next_state)}
-          end
-
-        :missing ->
-          {:noreply, state}
+      if Maintenance.enabled?() do
+        {:noreply, pause_maintenance_retries(state)}
+      else
+        dispatch_due_retry(state, issue_id, retry_token)
       end
 
     notify_dashboard()
@@ -461,7 +490,30 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  defp reconcile_maintenance_interrupt_update(%{maintenance_interrupt_requested: generation} = entry, %{event: :maintenance_interrupt_rejected, generation: generation}) do
+    Map.delete(entry, :maintenance_interrupt_requested)
+  end
+
+  defp reconcile_maintenance_interrupt_update(entry, %{event: :maintenance_interrupt_pending}) do
+    Map.put(entry, :maintenance_interrupt_pending, true)
+  end
+
+  defp reconcile_maintenance_interrupt_update(entry, _update), do: entry
+
+  defp dispatch_due_retry(state, issue_id, retry_token) do
+    case retry_attempt_state(state, issue_id, retry_token) do
+      {:ok, attempt, metadata, state} ->
+        {:noreply, next_state} = handle_retry_issue(state, issue_id, attempt, metadata)
+        {:noreply, touch_activity(next_state)}
+
+      :missing ->
+        {:noreply, state}
+    end
+  end
+
   defp maybe_dispatch(%State{} = state) do
+    state = if state.maintenance_error, do: restore_maintenance_retries(state), else: state
+    state = if Maintenance.enabled?(), do: pause_maintenance_retries(state), else: state
     state = reconcile_running_issues(state)
 
     with :ok <- Config.validate!(),
@@ -620,7 +672,8 @@ defmodule SymphonyElixir.Orchestrator do
     state = reconcile_idle_review_stays(state, issues)
     {state, issues} = reconcile_observed_completed_states(state, issues)
     state = retain_visible_dialog_observations(state, issues)
-    state = if available_slots(state) > 0, do: choose_issues(state, issues), else: state
+    dispatch? = not Maintenance.enabled?() and is_nil(state.maintenance_error) and available_slots(state) > 0
+    state = if dispatch?, do: choose_issues(state, issues), else: state
     refresh_waiting_issues(state, issues)
   end
 
@@ -1122,8 +1175,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
     elapsed_ms = stall_elapsed_ms(running_entry, now)
+    interruption_pending? = running_entry[:maintenance_interrupt_pending] == true
 
-    if manual_in_progress_bootstrap_running_entry?(running_entry) or
+    if manual_in_progress_bootstrap_running_entry?(running_entry) or interruption_pending? or
          Map.get(running_entry, :codex_turn_completed, false) or
          not is_nil(Map.get(running_entry, :exit_finalize_token)) or
          not Process.alive?(running_entry.pid) do
@@ -1667,6 +1721,7 @@ defmodule SymphonyElixir.Orchestrator do
            )
          end) do
       {:ok, pid} ->
+        recovery_result = MaintenanceRecovery.delete(issue.id)
         ref = Process.monitor(pid)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
@@ -1718,10 +1773,14 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           state
           | running: running,
+            maintenance_error: if(recovery_result == :ok, do: nil, else: recovery_result),
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id),
             waiting: Enum.reject(state.waiting, &(&1.issue_id == issue.id))
         }
+
+      {:error, :maintenance} ->
+        defer_maintenance_issue(state, issue, attempt, run_opts, worker_host)
 
       {:error, :worker_capacity} ->
         Logger.info("Worker capacity reached for #{issue_context(issue)}; waiting for a free slot")
@@ -1750,11 +1809,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp start_agent_task(%State{external_poll: true}, worker_host, issue_state, fun) do
-    SymphonyElixir.WorkerCapacity.start_child(worker_host, issue_state, fun)
+  defp start_agent_task(_state, worker_host, issue_state, fun) do
+    WorkerCapacity.start_child(worker_host, issue_state, fun)
   end
-
-  defp start_agent_task(_state, _worker_host, _issue_state, fun), do: Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun)
 
   defp revalidate_issue_for_dispatch(%Issue{id: issue_id} = previous, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
@@ -1993,7 +2050,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     log_scheduled_retry(issue_id, identifier, next_attempt, delay_ms, error, access_blocked, metadata)
 
-    %{
+    next_state = %{
       state
       | retry_attempts:
           Map.put(state.retry_attempts, issue_id, %{
@@ -2002,6 +2059,8 @@ defmodule SymphonyElixir.Orchestrator do
             retry_token: retry_token,
             due_at_ms: due_at_ms,
             access_blocked: access_blocked,
+            maintenance_deferred: Map.get(metadata, :maintenance_deferred, Map.get(previous_retry, :maintenance_deferred, false)),
+            interrupted_state: Map.get(metadata, :interrupted_state, Map.get(previous_retry, :interrupted_state)),
             identifier: identifier,
             error: error,
             capacity_wait: Map.get(metadata, :capacity_wait, false),
@@ -2017,6 +2076,8 @@ defmodule SymphonyElixir.Orchestrator do
           }),
         waiting: waiting_after_retry(state.waiting, issue_id, metadata)
     }
+
+    if Maintenance.enabled?(), do: pause_maintenance_retries(next_state), else: next_state
   end
 
   defp log_scheduled_retry(issue_id, identifier, attempt, delay_ms, error, access_blocked, metadata) do
@@ -2073,6 +2134,8 @@ defmodule SymphonyElixir.Orchestrator do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
+          maintenance_deferred: Map.get(retry_entry, :maintenance_deferred, false),
+          interrupted_state: Map.get(retry_entry, :interrupted_state),
           delegate_id: Map.get(retry_entry, :delegate_id),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
@@ -2105,7 +2168,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
-    case Tracker.fetch_candidate_issues() do
+    fetch =
+      if metadata[:maintenance_deferred],
+        do: Tracker.fetch_issue_states_by_ids([issue_id], force_full: true),
+        else: Tracker.fetch_candidate_issues()
+
+    case fetch do
       {:ok, issues} ->
         issues
         |> find_issue_by_id(issue_id)
@@ -2134,8 +2202,18 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp reconcile_interrupted_retry(issue, metadata) do
+    if metadata[:interrupted_state] && metadata.interrupted_state != issue.state do
+      Map.drop(metadata, [:recovered_turn_context, :review_subagent_call_ids, :review_subagent_ids, :codex_token_checkpoint, :interrupted_state])
+    else
+      metadata
+    end
+  end
+
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
     terminal_states = terminal_state_set()
+
+    metadata = reconcile_interrupted_retry(issue, metadata)
     metadata = reconcile_retry_review_stay(issue, metadata)
     state = clear_completed_state_after_status_change(state, issue)
 
@@ -2276,8 +2354,144 @@ defmodule SymphonyElixir.Orchestrator do
     StatusDashboard.notify_update()
   end
 
+  defp restore_maintenance_retries(state) do
+    case MaintenanceRecovery.load() do
+      {:ok, hints} ->
+        Enum.reduce(hints, %{state | maintenance_error: nil}, &restore_maintenance_hint/2)
+
+      {:error, reason} ->
+        %{state | maintenance_error: reason}
+    end
+  end
+
+  defp restore_maintenance_hint({id, hint}, state) do
+    if Map.has_key?(state.running, id) or Map.has_key?(state.retry_attempts, id) do
+      state
+    else
+      delay = max((hint[:due_at_unix_ms] || 0) - System.system_time(:millisecond), 0)
+      metadata = Map.merge(hint, %{maintenance_deferred: true, delay_type: :maintenance, maintenance_delay_ms: delay})
+      schedule_issue_retry(state, id, hint.attempt, metadata)
+    end
+  end
+
+  defp pause_maintenance_retries(state) do
+    Enum.reduce(state.retry_attempts, state, &pause_maintenance_retry/2)
+  end
+
+  defp pause_maintenance_retry({_id, %{maintenance_paused: true}}, state), do: state
+
+  defp pause_maintenance_retry({id, retry}, state) do
+    case MaintenanceRecovery.put(id, Map.put(retry, :maintenance_deferred, true)) do
+      :ok ->
+        if is_reference(retry[:timer_ref]), do: Process.cancel_timer(retry.timer_ref)
+        paused = Map.merge(retry, %{timer_ref: nil, retry_token: nil, maintenance_paused: true, maintenance_deferred: true})
+        %{state | retry_attempts: Map.put(state.retry_attempts, id, paused)}
+
+      {:error, reason} ->
+        %{state | maintenance_error: reason}
+    end
+  end
+
+  defp resume_maintenance_retries(state) do
+    Enum.reduce(state.retry_attempts, state, fn {id, retry}, acc ->
+      if retry[:maintenance_paused] == true and retry[:access_blocked] != true do
+        token = make_ref()
+        delay = max((retry[:due_at_ms] || 0) - System.monotonic_time(:millisecond), 0)
+        timer = Process.send_after(self(), {:retry_issue, id, token}, delay)
+        resumed = Map.merge(retry, %{timer_ref: timer, retry_token: token, maintenance_paused: false})
+        %{acc | retry_attempts: Map.put(acc.retry_attempts, id, resumed)}
+      else
+        acc
+      end
+    end)
+  end
+
+  defp defer_maintenance_issue(state, issue, attempt, run_opts, host) do
+    metadata = %{
+      identifier: issue.identifier,
+      delegate_id: issue.delegate_id,
+      worker_host: host,
+      error: nil,
+      delay_type: :maintenance,
+      maintenance_deferred: true,
+      recovered_turn_context: run_opts[:recovered_turn_context],
+      review_stay: review_issue_state?(issue.state)
+    }
+
+    schedule_issue_retry(state, issue.id, attempt || 0, metadata) |> put_waiting_issue(issue)
+  end
+
+  defp maybe_interrupt_maintenance_workers(state) do
+    control = Maintenance.status()
+    if maintenance_deadline_due?(control), do: interrupt_maintenance_workers(state, control.generation), else: state
+  end
+
+  defp maintenance_deadline_due?(control) do
+    control.enabled and is_integer(control[:deadline_ms]) and control.deadline_ms <= System.monotonic_time(:millisecond)
+  end
+
+  defp interrupt_maintenance_workers(state, generation) do
+    control = Maintenance.status()
+
+    if control.generation == generation and maintenance_deadline_due?(control) do
+      Enum.reduce(state.running, state, fn {id, entry}, acc -> interrupt_maintenance_worker(acc, id, entry, generation) end)
+    else
+      state
+    end
+  end
+
+  defp interrupt_maintenance_worker(state, id, entry, generation) do
+    phase = Map.get(entry, :dispatch_issue, entry.issue).state
+
+    if Map.get(entry, :run_mode) == :regular and Maintenance.interruptible?(phase) and
+         entry.issue.state == phase and is_binary(entry[:codex_app_server_pid]) and
+         entry[:maintenance_interrupt_pending] != true and
+         entry[:maintenance_interrupt_requested] != generation and maintenance_check_due?(entry, generation) do
+      check = %{generation: generation, source: entry.issue, next_at_ms: System.monotonic_time(:millisecond) + 300_000}
+      entry = Map.put(entry, :maintenance_deadline_check, check)
+      state = %{state | running: Map.put(state.running, id, entry)}
+
+      with {:ok, [fresh]} <- Tracker.fetch_issue_states_by_ids([id], force_full: true),
+           true <- fresh.state == phase,
+           control = Maintenance.status(),
+           true <- control.generation == generation and maintenance_deadline_due?(control),
+           hint = maintenance_interruption_hint(entry, phase),
+           :ok <- MaintenanceRecovery.put(id, hint) do
+        send(entry.pid, {:maintenance_interrupt, generation})
+        %{state | running: Map.put(state.running, id, Map.put(entry, :maintenance_interrupt_requested, generation))}
+      else
+        {:error, reason} -> %{state | maintenance_error: reason}
+        _ -> state
+      end
+    else
+      state
+    end
+  end
+
+  defp maintenance_check_due?(%{maintenance_deadline_check: %{generation: generation, source: source, next_at_ms: next_at}, issue: source}, generation),
+    do: System.monotonic_time(:millisecond) >= next_at
+
+  defp maintenance_check_due?(_entry, _generation), do: true
+
+  defp maintenance_interruption_hint(entry, phase) do
+    %{
+      attempt: normalize_retry_attempt(entry[:retry_attempt]),
+      identifier: entry.identifier,
+      delegate_id: entry.issue.delegate_id,
+      worker_host: entry[:worker_host],
+      workspace_path: entry[:workspace_path],
+      interrupted_state: phase,
+      recovered_turn_context: recoverable_turn_context(entry, :maintenance_interrupt),
+      review_subagent_call_ids: review_subagent_call_ids_for_retry(entry),
+      review_subagent_ids: review_subagent_ids_for_retry(entry),
+      codex_token_checkpoint: codex_token_checkpoint(entry),
+      review_stay: running_review_stay?(entry),
+      maintenance_deferred: true
+    }
+  end
+
   defp handle_active_retry(state, issue, attempt, metadata) do
-    if retry_candidate_issue?(issue, terminal_state_set()) and
+    if is_nil(state.maintenance_error) and retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(issue, state, metadata[:worker_host]) do
       {:noreply, dispatch_retry_issue(state, issue, attempt, metadata)}
@@ -2314,9 +2528,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp release_issue_claim(%State{} = state, issue_id) do
+    recovery_result = MaintenanceRecovery.delete(issue_id)
+
     %{
       state
       | claimed: MapSet.delete(state.claimed, issue_id),
+        maintenance_error: if(recovery_result == :ok, do: state.maintenance_error, else: recovery_result),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
         waiting: Enum.reject(state.waiting, &(&1.issue_id == issue_id))
     }
@@ -2860,6 +3077,8 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | dialog_observations: dialog_observations}
   end
 
+  defp retry_delay(_attempt, %{delay_type: :maintenance} = metadata), do: Map.get(metadata, :maintenance_delay_ms, 0)
+
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
     if metadata[:delay_type] == :continuation and attempt == 1 do
       @continuation_retry_delay_ms
@@ -3145,6 +3364,8 @@ defmodule SymphonyElixir.Orchestrator do
   @impl true
   def handle_call(:snapshot, _from, state) do
     state = refresh_runtime_config(state)
+    state = restore_maintenance_retries(state)
+    state = if Maintenance.enabled?(), do: pause_maintenance_retries(state), else: state
     now = DateTime.utc_now()
     now_ms = System.monotonic_time(:millisecond)
 
@@ -3190,22 +3411,24 @@ defmodule SymphonyElixir.Orchestrator do
 
     activity_at = if map_size(state.yolo_runs) > 0, do: now_ms, else: state.last_activity_at_ms
 
-    {:reply,
-     %{
-       running: running ++ YoloCoordinator.entries(state.yolo_runs),
-       retrying: retrying,
-       waiting: state.waiting,
-       yolo_running: map_size(state.yolo_runs),
-       last_activity_at_ms: activity_at,
-       idle_shutdown_ms: state.idle_shutdown_ms,
-       codex_totals: state.codex_totals,
-       rate_limits: Map.get(state, :codex_rate_limits),
-       polling: %{
-         checking?: state.poll_check_in_progress not in [nil, false],
-         next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
-         poll_interval_ms: state.poll_interval_ms
-       }
-     }, state}
+    snapshot = %{
+      running: running ++ YoloCoordinator.entries(state.yolo_runs),
+      retrying: retrying,
+      waiting: state.waiting,
+      yolo_running: map_size(state.yolo_runs),
+      last_activity_at_ms: activity_at,
+      idle_shutdown_ms: state.idle_shutdown_ms,
+      codex_totals: state.codex_totals,
+      rate_limits: Map.get(state, :codex_rate_limits),
+      polling: %{
+        checking?: state.poll_check_in_progress not in [nil, false],
+        next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
+        poll_interval_ms: state.poll_interval_ms
+      }
+    }
+
+    maintenance = Maintenance.project(snapshot, is_nil(state.maintenance_error))
+    {:reply, Map.put(snapshot, :maintenance, maintenance), state}
   end
 
   def handle_call({:start_yolo_group, token, group, members, callback, event, recovering?}, _from, state) do

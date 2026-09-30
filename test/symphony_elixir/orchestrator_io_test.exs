@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.OrchestratorIOTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.ProjectContext
+  alias SymphonyElixir.{Maintenance, ProjectContext, WorkerCapacity}
+  alias SymphonyElixir.Yolo.{Coordinator, Delivery, Store}
 
   setup tags do
     SymphonyElixir.TestSupport.isolate_application_orchestrator()
@@ -23,7 +24,7 @@ defmodule SymphonyElixir.OrchestratorIOTest do
           id: "po-#{n}",
           identifier: "PRO-#{n}",
           title: "PO member",
-          state: "Yolo Review",
+          state: tags[:maintenance_phase] || "Yolo Review",
           delegate_id: "pai",
           assignee_id: "human",
           assigned_to_worker: true,
@@ -257,6 +258,86 @@ defmodule SymphonyElixir.OrchestratorIOTest do
     await_state(pid, &is_nil(poll_task(&1)))
     assert call.(task.token, issues) == {:error, :capacity}
   end
+
+  for {phase, group} <- [{"Backlog", "incoming"}, {"Yolo Review", "review"}, {"BLOCKER", "blocker"}] do
+    @tag successful_scan: true, maintenance_phase: phase, maintenance_group: group, maintenance_start_race: true
+    test "maintenance after the tick check defers #{group} without consuming its impulse", %{
+      pid: pid,
+      context: context,
+      issues: issues,
+      maintenance_group: group
+    } do
+      comments = [%{id: "workpad", body: "## Symphony Workpad\n\n### Validierung\n\n- [ ] Betreiber prüft den Hostzugang.\n"}]
+      Application.put_env(:symphony_elixir, :memory_tracker_comments, Map.new(issues, &{&1.id, comments}))
+
+      ProjectContext.with_context(context, fn ->
+        assert {:ok, initial} = Store.read(group)
+        impulses = Map.new(issues, &{&1.id, %{"generation" => 1, "reason" => "delegated_again"}})
+        assert :ok = Store.write(group, Map.put(initial, "impulses", impulses))
+      end)
+
+      send(pid, :run_poll_cycle)
+      assert_receive {:scan_entered, scanner, _}, 2_000
+      assert poll_task(:sys.get_state(pid))
+      update_worker(pid, :turn_completed)
+      assert {:ok, _} = Maintenance.update(%{"enabled" => true, "reason" => "Prepared PO race"})
+      send(scanner, :release_scan)
+      deferred = await_state(pid, &is_nil(poll_task(&1)))
+      assert deferred.yolo_runs == %{}
+      assert deferred.retry_attempts == %{}
+      refute Enum.any?(issues, &MapSet.member?(deferred.claimed, &1.id))
+      assert WorkerCapacity.count(nil) == 0
+      GenServer.stop(pid)
+
+      ProjectContext.with_context(context, fn ->
+        assert {:ok, record} = Store.read(group)
+        assert record["impulses"] == impulses_for(issues)
+        assert Enum.sort(Map.keys(record["observations"])) == Enum.sort(Enum.map(issues, & &1.id))
+        assert Delivery.pending(issues, record["observations"], record) == issues
+        assert record["attempt"] == nil
+        assert record["processed"] == nil
+        assert record["deliveries"] in [nil, %{}]
+        assert record["retry_at"] == nil
+        assert record["failure_count"] == nil
+
+        # Keep the real PO arbiter and delivery journal while substituting only
+        # the Codex session. The prepared source must start once after disable.
+        assert {:ok, _} = Maintenance.update(%{"enabled" => false})
+        parent = self()
+
+        runner = fn name, members, _ ->
+          {:ok, current} = Store.read(name)
+          :ok = Delivery.reserve(name, "maintenance-resumed", current["observations"])
+          send(parent, {:resumed_po, self(), Enum.map(members, & &1.id)})
+
+          receive do
+            :stop -> :ok
+          end
+        end
+
+        opts = [
+          dependencies: &{:ok, &1},
+          scan: fn _ ->
+            {:ok, %{"current" => %{}, "versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}}
+          end,
+          runner: runner
+        ]
+
+        resumed = Coordinator.tick(deferred, issues, opts)
+        assert %{pid: worker} = resumed.yolo_runs[group]
+        on_exit(fn -> Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)
+        assert_receive {:resumed_po, ^worker, ids}, 2_000
+        assert ids == Enum.map(issues, & &1.id)
+        repeated = Coordinator.tick(resumed, issues, opts)
+        assert repeated.yolo_runs[group].pid == worker
+        refute_receive {:resumed_po, _, _}
+        assert {:ok, delivered} = Store.read(group)
+        assert Delivery.pending(issues, delivered["observations"], delivered) == []
+      end)
+    end
+  end
+
+  defp impulses_for(issues), do: Map.new(issues, &{&1.id, %{"generation" => 1, "reason" => "delegated_again"}})
 
   test "the next coalesced poll reconciles a worker status change", %{pid: pid, worker: worker} do
     send(pid, :run_poll_cycle)

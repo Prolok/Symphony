@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
 
   alias SymphonyElixir.Codex.{DynamicTool, MCPServer}
   alias SymphonyElixir.Linear.{DurableState, RateLimit}
-  alias SymphonyElixir.{ProjectContext, ProjectPoller, WorkerCapacity}
+  alias SymphonyElixir.{ProjectContext, ProjectPoller}
 
   setup do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_project_slug: "$LINEAR_PROJECT_SLUG")
@@ -105,7 +105,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
     test "polling isolates results and deadlines with #{order}", %{contexts: [a, b, c]} do
       contexts = if unquote(order) == :limited_first, do: [a, b, c], else: [c, a, b]
       start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
-      start_supervised!({WorkerCapacity, contexts: contexts})
+      start_worker_capacity!(contexts: contexts)
       start_supervised!({ProjectPoller, contexts: contexts})
       assert {:ok, []} = ProjectPoller.candidates(a)
       assert_received {:candidates, "shared"}
@@ -153,7 +153,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
   } do
     limit(a, "3600")
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
-    start_supervised!({WorkerCapacity, contexts: [a, b, c]})
+    start_worker_capacity!(contexts: [a, b, c])
     start_supervised!({ProjectPoller, contexts: [a, b, c]})
 
     assert {:error, {:linear_api_request, {:linear_app_rate_limited, _}}} =
@@ -229,7 +229,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
     end)
 
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
-    start_supervised!({WorkerCapacity, contexts: [a, c]})
+    start_worker_capacity!(contexts: [a, c])
     start_supervised!({ProjectPoller, contexts: [a, c]})
 
     assert {:error, {:linear_api_status, 503, %{classification: "http"}}} =
@@ -270,7 +270,7 @@ defmodule SymphonyElixir.ProjectRateLimitTest do
     end)
 
     start_supervised!({Registry, keys: :unique, name: SymphonyElixir.ProjectRegistry})
-    start_supervised!({WorkerCapacity, contexts: [a, c]})
+    start_worker_capacity!(contexts: [a, c])
     start_supervised!({ProjectPoller, contexts: [a, c]})
 
     assert {:error, {:linear_api_request, :linear_app_identity_unavailable}} =

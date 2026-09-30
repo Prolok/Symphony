@@ -66,7 +66,9 @@ gemeinsam für den Dienst.
 Symphony unterstützt ausschließlich OAuth2 Client Credentials. Persönliche API-Keys,
 PKCE und Legacy-Workflows sind keine Authentifizierungswege. Die
 [Betriebsanleitung](docs/linear-app.md) beschreibt Einrichtung und einmalige
-Betreiberübergabe vorhandener Daten.
+Betreiberübergabe vorhandener Daten. Der
+[Wartungsmodus](docs/linear-app.md#wartungsmodus-update-und-neustart) hält neue Starts
+für Updates und Neustarts an, bis laufende Arbeit beendet ist.
 
 ## Installation und Inbetriebnahme
 

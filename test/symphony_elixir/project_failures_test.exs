@@ -334,7 +334,7 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     assert :ok = WorkflowStore.force_reload()
     ProjectPoller.refresh()
     assert {:ok, []} = ProjectPoller.candidates(context)
-    refreshed = :sys.get_state(Projects.server(context))
+    refreshed = await_project_reload(Projects.server(context), 61_000)
     assert refreshed.poll_interval_ms == 61_000
     assert refreshed.max_concurrent_agents == 2
     assert :sys.get_state(ProjectPoller).interval == 61_000
@@ -395,6 +395,21 @@ defmodule SymphonyElixir.ProjectFailuresTest do
       last_activity = System.monotonic_time(:millisecond) - elapsed
       %{state | idle_shutdown_ms: timeout, idle_shutdown_ms_override: timeout, last_activity_at_ms: last_activity}
     end)
+  end
+
+  defp await_project_reload(server, interval, attempts \\ 300)
+
+  defp await_project_reload(_server, _interval, 0), do: flunk("project reload did not complete")
+
+  defp await_project_reload(server, interval, attempts) do
+    state = :sys.get_state(server)
+
+    if state.poll_interval_ms == interval do
+      state
+    else
+      Process.sleep(10)
+      await_project_reload(server, interval, attempts - 1)
+    end
   end
 
   defp restore_application(key, nil), do: Application.delete_env(:symphony_elixir, key)

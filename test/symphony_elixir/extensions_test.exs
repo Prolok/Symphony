@@ -964,6 +964,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "relay" => %{},
              "projects" => [],
              "project_statuses" => [],
+             "maintenance" => nil,
              "partial" => false,
              "generated_at" => state_payload["generated_at"],
              "counts" => %{"running" => 1, "reserved" => 0, "reserved_slots" => 0, "retrying" => 1},

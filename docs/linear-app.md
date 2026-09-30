@@ -942,6 +942,68 @@ konkretem Übergabehinweis. Sie verschiebt und löscht diese Daten nicht automat
 Zugangswiderrufe oder Secretrotation sind für diese Codebereinigung nicht nötig.
 Es gibt keine langfristige Mischversions- oder Altkonfigurationsmatrix.
 
+## Wartungsmodus, Update und Neustart
+
+`POST /api/v1/maintenance` steuert den gesamten lokalen Dienst einschließlich aller
+Projekte. Nur der tatsächliche IPv4-/IPv6-Loopback-Peer darf schreiben; Proxyheader
+verleihen keinen Zugriff. Der HTTP-Server muss aktiviert sein (standardmäßig auf
+`127.0.0.1`). Beispiel für den konfigurierten Port:
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:4000/api/v1/maintenance \
+  -H 'Content-Type: application/json' \
+  -d '{"enabled":true,"reason":"Update auf main"}'
+curl --fail-with-body http://127.0.0.1:4000/api/v1/state
+```
+
+Ab bestätigter Aktivierung werden keine neuen Worker-, Dialog-/Bootstrap-,
+PO-Eingangs-, Yolo-Review- oder BLOCKER-Läufe angenommen. Vorher angenommene Läufe
+beenden ihre Arbeit regulär; bereits angenommene externe Aufträge werden weiter
+beobachtet. Retries und offene Impulse werden erhalten. Wiederholung derselben
+Anforderung ändert weder Aktivierungszeit noch Frist. Ungültige Parameter ändern
+den Zustand nicht. Grund (1–2.000 Bytes), `requested_at` und optional `deadline_at`
+sind in API sowie Web-/Terminal-Dashboard sichtbar.
+
+Optional setzt `"deadline_seconds":300` eine Frist von 1 bis 86.400 Sekunden.
+Danach werden nur aktive Codex-Arbeitsläufe in Todo, Planung, In Arbeit, PreReview,
+Review oder Test (AI) bei unverändertem, frisch bestätigtem Linear-Status kontrolliert
+unterbrochen. Workspace, offene Änderungen und Review-Aufenthalt bleiben erhalten.
+Merge (AI), Yolo Review, BLOCKER, Dialog-/Bootstrap-Läufe und externe PO-Aufträge
+werden nie durch die Frist beendet. Sie können den Leerlauf verzögern.
+Der Lauf bleibt bis zum bestätigten Ende seines aktiven Codex-Turns reserviert;
+eine Interrupt-Antwort allein, ein Timeout oder ein Verbindungsabbruch belegt
+keinen abgeschlossenen Abbruch. Der normale Stall-Neustart gibt einen solchen
+Lauf nicht frei. Vorübergehend abgewiesene Fristanforderungen werden mit dem
+begrenzten Statusprüfintervall erneut geprüft.
+
+Der modellfreie Wächter wartet auf **`maintenance.enabled == true` und
+`maintenance.idle == true`** in `/api/v1/state`. `draining` bleibt wahr, solange
+laufende oder reservierte Arbeit, fehlende/frühere Projektantworten oder nicht
+lesbare dauerhafte Hinweise keinen sicheren Leerlauf erlauben. Wartende Kandidaten
+und erfolgreich gesicherte Retries verhindern den Wartungsleerlauf nicht.
+Keinen Neustart allein wegen Ablauf der Frist erzwingen.
+
+Nach diesem Signal den Dienst mit seinem regulären Stopverfahren beenden, im
+ursprünglichen Checkout per `git pull --ff-only origin main` aktualisieren und
+über den normalen `./symphony`-Launcher mit den bisherigen Optionen starten.
+Das Update und der Neustart bleiben Betreiberaktionen; der Wartungsbefehl führt
+sie nicht aus. Erst der vollständige Dienstneustart setzt den Wartungsmodus zurück.
+Zurückgestellte Hinweise werden aus demselben lokalen Zustand geladen und vor
+Ausführung gegen Status, Zuständigkeit, Delegation, Leases und Abschlussmarker
+geprüft. Die Wiederaufnahme ist Teil des isolierten Integrationstests; ein
+Wartungsnachweis an der Hauptinstanz ist keine zusätzliche Abnahmebedingung.
+
+Ohne Neustart lässt sich der Drain abbrechen:
+
+```bash
+curl --fail-with-body -X POST http://127.0.0.1:4000/api/v1/maintenance \
+  -H 'Content-Type: application/json' -d '{"enabled":false}'
+```
+
+Danach prüft der Dienst die wartende Arbeit zeitnah erneut. Es gibt keine
+automatische Abschaltung nach einer Frist: Ein vergessener Wartungsmodus bleibt
+sichtbar aktiv bis zum Ausschalten oder vollständigen Neustart.
+
 ## Dienst-Mutex und Nachweise
 
 `./symphony` hält vor Build-/Link-/Dispatch-Nebenwirkungen einen nichtblockierenden

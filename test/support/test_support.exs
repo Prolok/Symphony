@@ -140,7 +140,13 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0,
+          start_worker_capacity!: 1
+        ]
 
       setup do
         runtime_env_snapshot = SymphonyElixir.TestSupport.scrub_symphony_runtime_env()
@@ -165,6 +171,7 @@ defmodule SymphonyElixir.TestSupport do
         Workflow.set_workflow_file_path(workflow_file)
         Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
         stop_default_http_server()
+        :ok = SymphonyElixir.Maintenance.update(%{"enabled" => false}) |> elem(0)
 
         on_exit(fn ->
           System.delete_env("SYMPHONY_TEST_LINEAR_SECRET")
@@ -248,6 +255,16 @@ defmodule SymphonyElixir.TestSupport do
         {:ok, _started} = Application.ensure_all_started(:symphony_elixir)
         :ok
     end
+  end
+
+  def start_worker_capacity!(opts) do
+    Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkerCapacity)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkerCapacity)
+    end)
+
+    ExUnit.Callbacks.start_supervised!({SymphonyElixir.WorkerCapacity, opts})
   end
 
   def isolate_application_orchestrator do

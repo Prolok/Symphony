@@ -15,6 +15,8 @@ defmodule SymphonyElixirWeb.Presenter do
           generated_at: generated_at,
           service: SymphonyElixir.TestInstance.public_info(),
           projects: Map.get(snapshot, :projects, []),
+          project_statuses: Map.get(snapshot, :project_statuses, []),
+          partial: Map.get(snapshot, :partial, false),
           counts: counts(snapshot),
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
@@ -178,7 +180,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       attempt: entry.attempt,
-      due_at: due_at_iso8601(entry.due_in_ms),
+      due_at: retry_due_at(entry),
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path)
@@ -218,7 +220,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp retry_issue_payload(retry) do
     %{
       attempt: retry.attempt,
-      due_at: due_at_iso8601(retry.due_in_ms),
+      due_at: retry_due_at(retry),
       error: retry.error,
       worker_host: Map.get(retry, :worker_host),
       workspace_path: Map.get(retry, :workspace_path)
@@ -290,6 +292,9 @@ defmodule SymphonyElixirWeb.Presenter do
   defp event_name(event) when is_atom(event), do: Atom.to_string(event)
   defp event_name(event) when is_binary(event), do: event
   defp event_name(_event), do: nil
+
+  defp retry_due_at(%{due_at: %DateTime{} = due_at}), do: iso8601(due_at)
+  defp retry_due_at(retry), do: due_at_iso8601(retry.due_in_ms)
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
     DateTime.utc_now()

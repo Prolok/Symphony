@@ -67,6 +67,26 @@ abgebrochener Projektprozess gibt die von ihm gestarteten Worker und Plätze fre
 Nach erfolgreichem Kandidatenabruf zeigen Terminal und Web-Dashboard ausführbare,
 kapazitätsbedingt wartende Tickets getrennt von echten Fehlerrückläufen. `:worker_capacity`
 erscheint dabei nicht als Fehler.
+Der Gesamt-Snapshot liest die unabhängig gesammelten letzten Projektantworten;
+ein synchroner Linear-Aufruf im Projekt-Takt blockiert weder API noch Dashboard.
+Nach jeder Antwort folgt frühestens eine Sekunde später die nächste Abfrage;
+je Projektprozess bleibt höchstens eine Anfrage offen. `project_statuses` enthält
+Projekt-ID, Name, Root, `status`, `observed_at`, `age_ms` und `error`, während
+`projects` die bisherige Namensliste bleibt. Bis 2.000 ms Alter gilt `fresh`,
+danach `stale` mit sichtbar steigendem Alter. Ab 300.000 ms gilt `unavailable`
+mit `snapshot_expired`; fehlender Erststand und Prozessende/-wechsel sind sofort
+sichtbar. Ausgeschlossene Projekte fehlen in Zeilen und Summen, und `partial`
+kennzeichnet diesen Teilstand. Eine neue Antwort stellt den Stand wieder her.
+Fristen verwenden monotone Zeit; `observed_at` ist nur der Anzeigezeitpunkt.
+Gecachte Retry-Restzeiten sinken um dieses Alter; der angezeigte Fälligkeitstermin
+bleibt auch nach Ablauf unverändert.
+Die Fünf-Minuten-Grenze lässt einzelne und mehrere lange Linear-Aufrufe zu,
+ist aber keine globale Taktobergrenze und löst keinen Prozessneustart aus.
+Der Idle-Shutdown verlangt neue Antworten aller aktuellen Projektprozesse in
+derselben Prüfung innerhalb einer Sekunde, ohne laufenden Poll-Zyklus;
+Cacheeinträge oder unvollständige Prüfungen belegen keinen globalen Leerlauf.
+Die gemeinsame Idle-Abfrage wartet ebenfalls den Mindestabstand seit der letzten
+Antwort jedes Projekts ab und ersetzt dessen anstehende Refresh-Abfrage.
 Die Vorbereitung lehnt überschneidende Worktree-Roots verschiedener Projekte
 einschließlich Symlink-Aliasen ab. Ein gemeinsamer literaler Root oder der allgemeine
 Fallbackroot muss dafür durch projektspezifische Roots ersetzt werden, etwa

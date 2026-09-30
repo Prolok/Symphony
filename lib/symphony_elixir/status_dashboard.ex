@@ -321,7 +321,9 @@ defmodule SymphonyElixir.StatusDashboard do
              waiting: Map.get(snapshot, :waiting, []),
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             project_statuses: Map.get(snapshot, :project_statuses, []),
+             partial: Map.get(snapshot, :partial, false)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
         }
@@ -374,6 +376,7 @@ defmodule SymphonyElixir.StatusDashboard do
            project_link_lines,
            mode_lines,
            project_refresh_line,
+           format_project_status_lines(snapshot),
            colorize("├─ Running", @ansi_bold),
            "│",
            running_table_header_row(running_event_width),
@@ -401,6 +404,26 @@ defmodule SymphonyElixir.StatusDashboard do
         |> List.flatten()
         |> Enum.join("\n")
     end
+  end
+
+  defp format_project_status_lines(snapshot) do
+    partial = if Map.get(snapshot, :partial, false), do: [colorize("│ Teilstand: nicht verfügbare Projekte fehlen in Zeilen und Summen", @ansi_red)], else: []
+
+    statuses =
+      snapshot
+      |> Map.get(:project_statuses, [])
+      |> Enum.reject(&(&1.status in [:fresh, "fresh"]))
+      |> Enum.map(fn project ->
+        age = if is_integer(project.age_ms), do: "#{div(project.age_ms, 1_000)} s", else: "unbekannt"
+
+        if project.status in [:stale, "stale"] do
+          colorize("│ Projekt #{project.name}: veraltet, Alter #{age}", @ansi_yellow)
+        else
+          colorize("│ Projekt #{project.name}: Fehler #{project.error}, Alter #{age}", @ansi_red)
+        end
+      end)
+
+    partial ++ statuses
   end
 
   defp cached_input_percent(_cached, input) when not is_integer(input) or input <= 0, do: 0
@@ -596,7 +619,9 @@ defmodule SymphonyElixir.StatusDashboard do
              waiting: Map.get(snapshot, :waiting, []),
              codex_totals: codex_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
+             polling: Map.get(snapshot, :polling),
+             project_statuses: Map.get(snapshot, :project_statuses, []),
+             partial: Map.get(snapshot, :partial, false)
            }}
 
         _ ->

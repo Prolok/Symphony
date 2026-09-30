@@ -289,10 +289,10 @@ defmodule SymphonyElixir.ProjectFailuresTest do
 
     :sys.replace_state(worker, &%{&1 | retry_attempts: Map.put(&1.retry_attempts, "denied", paused)})
     :ok = :sys.suspend(worker)
-    refresh = Task.async(fn -> Projects.handle_call(:request_refresh, nil, [context]) end)
+    refresh = Task.async(fn -> Orchestrator.request_refresh() end)
 
     try do
-      assert {:ok, {:reply, %{queued: true}, [^context]}} = Task.yield(refresh, 500)
+      assert {:ok, %{queued: true}} = Task.yield(refresh, 500)
     after
       :sys.resume(worker)
       Task.shutdown(refresh)
@@ -320,7 +320,8 @@ defmodule SymphonyElixir.ProjectFailuresTest do
     ProjectPoller.refresh()
     assert_receive :relay_poll, 2_000
     assert {:ok, []} = ProjectPoller.candidates(context)
-    assert {:reply, :unavailable, _} = Projects.handle_call(:snapshot, nil, [%{context | id: "missing"}])
+    missing = start_supervised!({Projects, contexts: [%{context | id: "missing"}], name: Module.concat(__MODULE__, :MissingProject)})
+    assert %{partial: true, project_statuses: [%{error: "process_unavailable"}]} = Orchestrator.snapshot(missing, 1_000)
 
     changed =
       context.workflow.config

@@ -166,7 +166,7 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
     end
 
     refute_receive {:page, _, _, _}, 100
-    snapshot = Orchestrator.snapshot()
+    snapshot = await_snapshot(MapSet.new(nodes, & &1["id"]))
     assert snapshot.projects == ["One", "Two", "Three"]
     assert snapshot.polling.next_poll_in_ms > 0
     assert snapshot.polling.poll_interval_ms == 60_000
@@ -221,6 +221,21 @@ defmodule SymphonyElixir.ProjectRuntimeTest do
       _ ->
         Process.sleep(25)
         await_file(path, attempts - 1)
+    end
+  end
+
+  defp await_snapshot(expected_ids, attempts \\ 200)
+  defp await_snapshot(_expected_ids, 0), do: flunk("project snapshot did not observe the fixture issues")
+
+  defp await_snapshot(expected_ids, attempts) do
+    snapshot = Orchestrator.snapshot()
+    observed_ids = MapSet.new(snapshot.running ++ snapshot.retrying ++ snapshot.waiting, & &1.issue_id)
+
+    if MapSet.subset?(expected_ids, observed_ids) do
+      snapshot
+    else
+      Process.sleep(25)
+      await_snapshot(expected_ids, attempts - 1)
     end
   end
 

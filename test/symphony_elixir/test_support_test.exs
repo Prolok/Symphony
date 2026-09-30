@@ -64,6 +64,29 @@ defmodule SymphonyElixir.TestSupportTest do
     end
   end
 
+  test "fixture isolation clears trusted Linear agents and restores set and unset values" do
+    key = "LINEAR_TRUSTED_AGENT_IDS"
+    previous = System.get_env(key)
+    on_exit(fn -> restore_env(key, previous) end)
+    agent = "11111111-1111-4111-8111-111111111111"
+
+    for inherited <- [agent, nil] do
+      restore_env(key, inherited)
+      snapshot = TestSupport.scrub_symphony_runtime_env()
+
+      try do
+        assert System.get_env(key) == nil
+        assert Config.settings!().tracker.trusted_agent_ids == []
+        System.put_env(key, agent)
+        assert Config.settings!().tracker.trusted_agent_ids == [agent]
+      after
+        TestSupport.restore_env_snapshot(snapshot)
+      end
+
+      assert System.get_env(key) == inherited
+    end
+  end
+
   @tag tmp_dir: true
   test "independent BEAM fixtures cannot adopt or clean each other's workflow roots", %{tmp_dir: tmp_dir} do
     first = start_fixture(tmp_dir)

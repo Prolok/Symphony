@@ -5,6 +5,29 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
 
   @terminal_columns 115
 
+  test "empty projects still show stale age and unavailable project errors" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      codex_totals: %{},
+      partial: true,
+      project_statuses: [
+        %{name: "Blocked", status: :stale, age_ms: 12_345, error: nil},
+        %{name: "Expired", status: :unavailable, age_ms: 300_000, error: "snapshot_expired"},
+        %{name: "Missing", status: :unavailable, age_ms: nil, error: "process_unavailable"},
+        %{name: "Healthy", status: :fresh, age_ms: 0, error: nil}
+      ]
+    }
+
+    rendered = render_snapshot({:ok, snapshot}, 0.0) |> Snapshot.strip_ansi()
+    assert rendered =~ "Projekt Blocked: veraltet, Alter 12 s"
+    assert rendered =~ "Projekt Expired: Fehler snapshot_expired, Alter 300 s"
+    assert rendered =~ "Projekt Missing: Fehler process_unavailable, Alter unbekannt"
+    assert rendered =~ "Teilstand: nicht verfügbare Projekte fehlen in Zeilen und Summen"
+    refute rendered =~ "Projekt Healthy:"
+    refute rendered =~ "Orchestrator snapshot unavailable"
+  end
+
   test "capacity queue shows waiting tickets separately from genuine retry errors" do
     snapshot = %{
       running: [],

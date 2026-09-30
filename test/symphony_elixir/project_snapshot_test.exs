@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.ProjectSnapshotTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.Projects
+  alias SymphonyElixir.TestSupport.Snapshot
+  alias SymphonyElixirWeb.Presenter
 
   setup do
     unless Process.whereis(SymphonyElixir.ProjectRegistry) do
@@ -45,9 +47,9 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     {pid, clock, contexts} = start_aggregator()
     Enum.each(receive_requests(contexts), &reply/1)
     fresh = await_snapshot(pid, &(length(&1.running) == 2))
-    send(pid, :check_idle)
+    begin_idle_check(pid, clock)
     pending = receive_requests(contexts)
-    advance(clock, 2_000)
+    advance(clock, 1_000)
     assert Enum.all?(Orchestrator.snapshot(pid, 1_000).project_statuses, &(&1.status == :fresh))
     advance(clock, 1)
     stale = Orchestrator.snapshot(pid, 1_000)
@@ -87,11 +89,11 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
   end
 
   test "process death and replacement discard cache and ignore the old reply" do
-    {pid, _clock, contexts} = start_aggregator()
+    {pid, clock, contexts} = start_aggregator()
     requests = receive_requests(contexts)
     Enum.each(requests, &reply/1)
     await_snapshot(pid, &(length(&1.running) == 2))
-    send(pid, :check_idle)
+    begin_idle_check(pid, clock)
     pending = receive_requests(contexts)
     first = hd(contexts)
     stop_supervised!(first.id)
@@ -162,7 +164,54 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     reply_idle(List.last(pending))
     await_snapshot(pid, &(not &1.partial))
     refute_receive :shutdown, 20
+    begin_idle_check(pid, clock)
+    Enum.each(receive_requests(contexts), &reply_idle/1)
+    assert_receive :shutdown, 1_000
+  end
+
+  test "cached retries count down while both API views retain the original deadline" do
+    {pid, clock, contexts} = start_aggregator()
+    retry = %{issue_id: "retry-one", identifier: "PRO-3", attempt: 1, due_in_ms: 30_000, error: "blocked"}
+
+    for {id, from} <- receive_requests(contexts) do
+      retries = if id == hd(contexts).id, do: [retry], else: []
+      GenServer.reply(from, %{snapshot(id) | running: [], retrying: retries})
+    end
+
+    await_snapshot(pid, &(length(&1.retrying) == 1))
+    first = Presenter.state_payload(pid, 1_000)
+    deadline = hd(first.retrying).due_at
+    advance(clock, 20_000)
+    stale = Orchestrator.snapshot(pid, 1_000)
+    assert hd(stale.retrying).due_in_ms == 10_000
+    rendered = StatusDashboard.format_snapshot_content_for_test({:ok, stale}, 0.0, 115)
+    assert Snapshot.strip_ansi(rendered) =~ "in 10.000s"
+    assert hd(Presenter.state_payload(pid, 1_000).retrying).due_at == deadline
+    {:ok, issue} = Presenter.issue_payload("One:PRO-3", pid, 1_000)
+    assert issue.retry.due_at == deadline
+    advance(clock, 40_000)
+    overdue = Orchestrator.snapshot(pid, 1_000)
+    assert hd(overdue.retrying).due_in_ms == 0
+    assert hd(Presenter.state_payload(pid, 1_000).retrying).due_at == deadline
+    {:ok, issue} = Presenter.issue_payload("One:PRO-3", pid, 1_000)
+    assert issue.retry.due_at == deadline
+  end
+
+  test "idle requests respect the interval since a delayed reply and still confirm shutdown" do
+    parent = self()
+    {pid, clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
+    initial = receive_requests(contexts)
+    advance(clock, 900)
+    Enum.each(initial, &reply_idle/1)
+    await_snapshot(pid, &(not &1.partial))
+    advance(clock, 100)
     send(pid, :check_idle)
+    Orchestrator.snapshot(pid, 1_000)
+    refute_receive {:snapshot_requested, _, _}, 20
+    refute_receive :shutdown, 20
+    advance(clock, 900)
+    check = :sys.get_state(pid).idle_check
+    send(pid, {:start_idle_check, check.token})
     Enum.each(receive_requests(contexts), &reply_idle/1)
     assert_receive :shutdown, 1_000
   end
@@ -172,14 +221,14 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     {pid, clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
     Enum.each(receive_requests(contexts), &reply_idle/1)
     await_snapshot(pid, &(not &1.partial))
-    send(pid, :check_idle)
+    begin_idle_check(pid, clock)
     pending = receive_requests(contexts)
     reply_idle(hd(pending))
     {id, from} = List.last(pending)
     GenServer.reply(from, put_in(idle_snapshot(id), [:polling, :checking?], true))
     await_idle_completion(pid)
     refute_receive :shutdown, 20
-    send(pid, :check_idle)
+    begin_idle_check(pid, clock)
     pending = receive_requests(contexts)
     advance(clock, 1_000)
     Enum.each(pending, &reply_idle/1)
@@ -189,10 +238,10 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
 
   test "a replacement during an idle check invalidates that check" do
     parent = self()
-    {pid, _clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
+    {pid, clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
     Enum.each(receive_requests(contexts), &reply_idle/1)
     await_snapshot(pid, &(not &1.partial))
-    send(pid, :check_idle)
+    begin_idle_check(pid, clock)
     pending = receive_requests(contexts)
     reply_idle(hd(pending))
     stop_supervised!(hd(contexts).id)
@@ -200,6 +249,54 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     reply_idle(List.last(pending))
     await_idle_completion(pid)
     refute_receive :shutdown, 20
+  end
+
+  test "a replacement during idle preparation restores independent refreshes" do
+    parent = self()
+    {pid, _clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
+    Enum.each(receive_requests(contexts), &reply_idle/1)
+    await_snapshot(pid, &(not &1.partial))
+    send(pid, :check_idle)
+    Orchestrator.snapshot(pid, 1_000)
+    check = :sys.get_state(pid).idle_check
+    assert check.started_at == nil
+    stop_supervised!(hd(contexts).id)
+    start_server(hd(contexts))
+    assert Orchestrator.snapshot(pid, 1_000).partial
+    assert :sys.get_state(pid).idle_check == nil
+    send(pid, {:start_idle_check, check.token})
+    assert_receive {:snapshot_requested, "snapshot-one", replacement}, 1_000
+    assert_receive {:snapshot_requested, "snapshot-two", healthy}, 1_500
+    GenServer.reply(healthy, snapshot("snapshot-two", 10))
+    assert await_snapshot(pid, &(&1.codex_totals.input_tokens == 10)).partial
+    refute_receive :shutdown, 20
+    GenServer.reply(replacement, idle_snapshot("snapshot-one"))
+    assert await_snapshot(pid, &(not &1.partial)).codex_totals.input_tokens == 11
+  end
+
+  test "normal timers coordinate staggered replies into a full live idle check" do
+    parent = self()
+    shutdown = fn -> send(parent, :shutdown) end
+
+    {pid, _clock, contexts} =
+      start_aggregator(contexts(), clock_fun: fn -> System.monotonic_time(:millisecond) end, shutdown_fun: shutdown)
+
+    initial = receive_requests(contexts)
+
+    observations =
+      Map.new(initial, fn {id, _from} = request ->
+        Process.sleep(20)
+        reply_idle(request)
+        await_snapshot(pid, &Enum.any?(&1.project_statuses, fn status -> status.id == id and status.status == :fresh end))
+        {id, :sys.get_state(pid).projects[id].observed_at_ms}
+      end)
+
+    for {id, _from} = request <- receive_requests(contexts) do
+      assert System.monotonic_time(:millisecond) - observations[id] >= 1_000
+      reply_idle(request)
+    end
+
+    assert_receive :shutdown, 1_000
   end
 
   test "stopping the aggregator removes pending request aliases and monitors" do
@@ -226,10 +323,15 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
   defp start_server(context), do: start_supervised!(Supervisor.child_spec({SnapshotServer, {context, self()}}, id: context.id))
   defp advance(clock, ms), do: Agent.update(clock, &(&1 + ms))
 
+  defp begin_idle_check(pid, clock) do
+    advance(clock, 1_000)
+    send(pid, :check_idle)
+  end
+
   defp receive_requests(contexts) do
     requests =
       for _ <- contexts do
-        assert_receive {:snapshot_requested, id, from}, 1_000
+        assert_receive {:snapshot_requested, id, from}, 2_000
         {id, from}
       end
 

@@ -95,16 +95,39 @@ defmodule SymphonyElixir.Projects do
     if state.idle_check == nil and map_size(state.projects) > 0 and
          Enum.all?(state.projects, fn {_, entry} -> entry.pid != nil and entry.request == nil end) do
       token = make_ref()
-      timer = Process.send_after(self(), {:idle_deadline, token}, @idle_timeout_ms)
-      check = %{token: token, timer: timer, started_at: state.clock.(), pending: MapSet.new(Map.keys(state.projects)), snapshots: []}
-      state = %{state | idle_check: check}
-      projects = Map.new(state.projects, fn {id, entry} -> {id, request_snapshot(entry)} end)
-      {:noreply, %{state | projects: projects}}
+      now_ms = state.clock.()
+      delay = state.projects |> Map.values() |> Enum.map(&snapshot_delay(&1, now_ms)) |> Enum.max()
+      timer = Process.send_after(self(), {:start_idle_check, token}, delay)
+      check = %{token: token, timer: timer, started_at: nil, pending: MapSet.new(Map.keys(state.projects)), snapshots: []}
+
+      projects =
+        Map.new(state.projects, fn {id, entry} ->
+          cancel_snapshot_timer(entry)
+          {id, %{entry | timer: nil}}
+        end)
+
+      {:noreply, %{state | idle_check: check, projects: projects}}
     else
       if state.idle_check == nil, do: schedule_idle_check()
       {:noreply, state}
     end
   end
+
+  def handle_info({:start_idle_check, token}, %{idle_check: %{token: token, started_at: nil}} = state) do
+    state = reconcile_projects(state)
+
+    if state.idle_check && Enum.all?(state.projects, fn {_, entry} -> entry.pid != nil and entry.request == nil end) do
+      Process.cancel_timer(state.idle_check.timer)
+      timer = Process.send_after(self(), {:idle_deadline, token}, @idle_timeout_ms)
+      check = %{state.idle_check | timer: timer, started_at: state.clock.()}
+      projects = Map.new(state.projects, fn {id, entry} -> {id, request_snapshot(entry)} end)
+      {:noreply, %{state | idle_check: check, projects: projects}}
+    else
+      {:noreply, if(state.idle_check, do: finish_idle_check(state, false), else: state)}
+    end
+  end
+
+  def handle_info({:start_idle_check, _token}, state), do: {:noreply, state}
 
   def handle_info({:idle_deadline, token}, %{idle_check: %{token: token}} = state) do
     {:noreply, finish_idle_check(state, false)}
@@ -165,7 +188,7 @@ defmodule SymphonyElixir.Projects do
       state.contexts
       |> Enum.zip(statuses)
       |> Enum.reject(fn {_, status} -> status.status == :unavailable end)
-      |> Enum.map(fn {context, _} -> {context, state.projects[context.id].snapshot} end)
+      |> Enum.map(fn {context, _} -> {context, aged_snapshot(state.projects[context.id], now_ms)} end)
 
     result = %{
       projects: Enum.map(state.contexts, & &1.name),
@@ -198,8 +221,8 @@ defmodule SymphonyElixir.Projects do
       end)
 
     changed? = Enum.any?(projects, fn {id, entry} -> state.projects[id] && state.projects[id].pid != entry.pid end)
-    state = if changed? and state.idle_check, do: finish_idle_check(state, false), else: state
-    %{state | projects: projects}
+    state = %{state | projects: projects}
+    if changed? and state.idle_check, do: finish_idle_check(state, false), else: state
   end
 
   defp reconcile_project(%{pid: pid} = previous, pid, _id), do: previous
@@ -234,6 +257,9 @@ defmodule SymphonyElixir.Projects do
     %{entry | timer: {timer, token}}
   end
 
+  defp snapshot_delay(%{observed_at_ms: nil}, _now_ms), do: @snapshot_interval_ms
+  defp snapshot_delay(entry, now_ms), do: max(@snapshot_interval_ms - (now_ms - entry.observed_at_ms), 0)
+
   defp cancel_snapshot_timer(%{timer: {ref, _}}), do: Process.cancel_timer(ref)
   defp cancel_snapshot_timer(_entry), do: :ok
 
@@ -260,14 +286,15 @@ defmodule SymphonyElixir.Projects do
 
   defp record_snapshot(state, id, entry, snapshot) do
     now_ms = state.clock.()
+    observed_at = DateTime.utc_now()
 
     entry =
       %{
         entry
         | request: nil,
-          snapshot: snapshot,
+          snapshot: observe_retry_deadlines(snapshot, observed_at),
           error: if(snapshot, do: nil, else: "snapshot_error"),
-          observed_at: if(snapshot, do: DateTime.utc_now() |> DateTime.to_iso8601()),
+          observed_at: if(snapshot, do: DateTime.to_iso8601(observed_at)),
           observed_at_ms: if(snapshot, do: now_ms)
       }
       |> schedule_snapshot(id)
@@ -275,6 +302,28 @@ defmodule SymphonyElixir.Projects do
     state = %{state | projects: Map.put(state.projects, id, entry)}
     SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
     record_idle_response(state, id, snapshot, now_ms)
+  end
+
+  defp observe_retry_deadlines(nil, _observed_at), do: nil
+
+  defp observe_retry_deadlines(snapshot, observed_at) do
+    Map.update(snapshot, :retrying, [], fn retries ->
+      Enum.map(retries, fn
+        %{due_in_ms: due_in_ms} = retry when is_integer(due_in_ms) -> Map.put(retry, :due_at, DateTime.add(observed_at, due_in_ms, :millisecond))
+        retry -> retry
+      end)
+    end)
+  end
+
+  defp aged_snapshot(entry, now_ms) do
+    age_ms = max(now_ms - entry.observed_at_ms, 0)
+
+    Map.update(entry.snapshot, :retrying, [], fn retries ->
+      Enum.map(retries, fn
+        %{due_in_ms: due_in_ms} = retry when is_integer(due_in_ms) -> %{retry | due_in_ms: max(due_in_ms - age_ms, 0)}
+        retry -> retry
+      end)
+    end)
   end
 
   defp record_idle_response(%{idle_check: nil} = state, _id, _snapshot, _now_ms), do: state
@@ -302,7 +351,14 @@ defmodule SymphonyElixir.Projects do
   defp finish_idle_check(state, idle?) do
     Process.cancel_timer(state.idle_check.timer)
     if idle?, do: state.shutdown.(), else: schedule_idle_check()
-    %{state | idle_check: nil}
+
+    projects =
+      Map.new(state.projects, fn
+        {id, %{request: nil, timer: nil} = entry} -> {id, schedule_snapshot(entry, id)}
+        project -> project
+      end)
+
+    %{state | idle_check: nil, projects: projects}
   end
 
   defp schedule_idle_check, do: Process.send_after(self(), :check_idle, @snapshot_interval_ms)

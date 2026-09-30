@@ -78,11 +78,15 @@ mit `snapshot_expired`; fehlender Erststand und Prozessende/-wechsel sind sofort
 sichtbar. Ausgeschlossene Projekte fehlen in Zeilen und Summen, und `partial`
 kennzeichnet diesen Teilstand. Eine neue Antwort stellt den Stand wieder her.
 Fristen verwenden monotone Zeit; `observed_at` ist nur der Anzeigezeitpunkt.
+Gecachte Retry-Restzeiten sinken um dieses Alter; der angezeigte Fälligkeitstermin
+bleibt auch nach Ablauf unverändert.
 Die Fünf-Minuten-Grenze lässt einzelne und mehrere lange Linear-Aufrufe zu,
 ist aber keine globale Taktobergrenze und löst keinen Prozessneustart aus.
 Der Idle-Shutdown verlangt neue Antworten aller aktuellen Projektprozesse in
 derselben Prüfung innerhalb einer Sekunde, ohne laufenden Poll-Zyklus;
 Cacheeinträge oder unvollständige Prüfungen belegen keinen globalen Leerlauf.
+Die gemeinsame Idle-Abfrage wartet ebenfalls den Mindestabstand seit der letzten
+Antwort jedes Projekts ab und ersetzt dessen anstehende Refresh-Abfrage.
 Die Vorbereitung lehnt überschneidende Worktree-Roots verschiedener Projekte
 einschließlich Symlink-Aliasen ab. Ein gemeinsamer literaler Root oder der allgemeine
 Fallbackroot muss dafür durch projektspezifische Roots ersetzt werden, etwa

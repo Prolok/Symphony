@@ -696,8 +696,13 @@ defmodule SymphonyElixir.RelayBudgetTest do
     Enum.any?(1..65, fn _ ->
       Process.sleep(100)
 
-      length(Server.calls(server)) > count and
-        match?(%{checking?: false, next_poll_in_ms: remaining} when is_integer(remaining) and remaining > 0, ProjectPoller.polling())
+      if length(Server.calls(server)) > count do
+        polling = ProjectPoller.polling()
+        remaining = polling.next_poll_in_ms
+        polling.checking? == false and is_integer(remaining) and remaining > 0
+      else
+        false
+      end
     end)
   end
 

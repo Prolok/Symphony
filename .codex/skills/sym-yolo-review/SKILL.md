@@ -150,8 +150,9 @@ Nach Merge sämtlicher Folgefixes gemeinsam prüfen und Vorgänger zuerst nach
 `Review` übergeben. Für zwingende Livenachweise gilt der
 [Betreiber-Warteweg](../../../WORKFLOW_YOLO_AGENT.md#yolo-review-gemeinsame-fachliche-schlussabnahme)
 mit aktuellem Auftrags-Digest, Ergebnis und Beleg.
-`kind=escalate` nur für strategische Produktentscheidungen oder Zugang/Rechte,
-die weder Agent noch Betreiber erhalten können. Die Eskalation belässt den Status,
+`kind=escalate` folgt der [Eskalationsgrenze](../../../WORKFLOW_YOLO_AGENT.md#laufvertrag),
+auch bei extern nicht autonom bereitstellbaren isolierten Pflichtprüfungen.
+Die Eskalation belässt den Status,
 entfernt die Delegation und übergibt Frage und Empfehlung sichtbar an den Menschen.
 Mit [Testprojekt-Opt-in](../../../docs/linear-app.md#eskalationsziel-in-testprojekten)
 bleibt der Assignee erhalten; ausschließlich der verifizierte Trusted Agent wird

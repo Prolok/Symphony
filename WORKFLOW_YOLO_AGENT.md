@@ -172,7 +172,8 @@ Abgenommen wird mit isolierten Nachweisen: Tests, isolierte Testinstanz, Kopie d
 echten Zustands, Testprojekte oder echte Host-Builds in Wegwerfumgebungen.
 Ein Livenachweis am Echtsystem ist nur zwingend, wenn das Verhalten ohne Echtsystem
 nicht belastbar prüfbar ist und ein Irrtum Datenverlust, ein Sicherheitsproblem oder
-einen Betriebsausfall bedeuten würde, oder wenn Tilo ihn im Ticket ausdrücklich verlangt;
+einen Betriebsausfall bedeuten würde, oder wenn ein entscheidungsberechtigter
+Linear-Akteur ihn im Ticket ausdrücklich verlangt;
 im Ticket mit Begründung als zwingend kennzeichnen.
 Ausrollen ist Betrieb und keine Abnahmebedingung: Main-Update/-Neustart,
 Paketaktivierung, Laden der Livekonfiguration und erste echte Inbetriebnahme unter
@@ -189,8 +190,8 @@ Der Auftrags-Digest im Wartebericht bindet die strukturierte Pai-Bestätigung;
 erst sie weckt den nächsten Reviewlauf. Unveränderte Aufträge allein tun das nicht.
 Bei blockierender Abhängigkeit nennt `kind=wait` stattdessen die Abhängigkeit
 als Wartegrund, auch wenn ein Auftrag im Workpad steht; ein Digest entfällt.
-`kind=escalate` ist ausschließlich für strategische Produktentscheidungen oder
-Zugang/Rechte zulässig, die weder Agent noch Betreiber erhalten können. Eine echte
+`kind=escalate` folgt der Eskalationsgrenze des [Laufvertrags](#laufvertrag), auch bei
+autonom unlösbarer externer Bereitstellung einer isolierten Pflichtprüfung. Eine echte
 Eskalation belässt `Yolo Review` und zeigt Frage und Empfehlung im Ticket.
 Empfänger, Delegationsentzug, Testprojekt-Ausnahme und Neudelegation richten sich
 nach [BLOCKER](#blocker).

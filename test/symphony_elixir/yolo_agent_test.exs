@@ -35,7 +35,8 @@ defmodule SymphonyElixir.YoloAgentTest do
     assert prompt =~ "Abgenommen wird mit isolierten Nachweisen"
     assert prompt =~ "ohne Echtsystem nicht belastbar prüfbar"
     assert prompt =~ "und ein Irrtum Datenverlust, ein Sicherheitsproblem oder einen Betriebsausfall"
-    assert prompt =~ "oder wenn Tilo ihn im Ticket ausdrücklich verlangt"
+    assert prompt =~ "oder wenn ein entscheidungsberechtigter Linear-Akteur ihn im Ticket ausdrücklich verlangt"
+    refute prompt =~ "oder wenn Tilo ihn im Ticket ausdrücklich verlangt"
     assert prompt =~ "mit Begründung als zwingend kennzeichnen"
     assert prompt =~ "Ausrollen ist Betrieb und keine Abnahmebedingung"
     assert prompt =~ "Main-Update/-Neustart, Paketaktivierung, Laden der Livekonfiguration und erste echte Inbetriebnahme"
@@ -83,9 +84,29 @@ defmodule SymphonyElixir.YoloAgentTest do
     refute doc =~ "Dienstwechsel und Paketaktivierung erst in `Yolo Review` fällig"
     refute doc =~ "Betreiberpflichten warten dort quellengebunden"
     assert doc =~ "ohne Echtsystem nicht belastbar prüfbar"
+    assert doc =~ "oder wenn ein entscheidungsberechtigter Linear-Akteur ihn im Ticket ausdrücklich verlangt"
     assert doc =~ "mit Begründung als zwingend"
     assert doc =~ "### Ausrollschritte"
     assert doc =~ "Livefehler danach werden neue Tickets"
+  end
+
+  test "unavailable isolated acceptance prerequisites use escalation without becoming live duties" do
+    prompt = File.read!("WORKFLOW_YOLO_AGENT.md")
+    [_, review] = String.split(prompt, "## Yolo Review: gemeinsame fachliche Schlussabnahme", parts: 2)
+    review = review |> String.split(~r/^## /m, parts: 2) |> hd() |> String.replace(~r/\s+/, " ")
+
+    assert review =~ "`kind=escalate` folgt der Eskalationsgrenze des [Laufvertrags](#laufvertrag)"
+    assert review =~ "autonom unlösbarer externer Bereitstellung einer isolierten Pflichtprüfung"
+    assert review =~ "Nur zwingende Livenachweise"
+
+    skill = File.read!(".codex/skills/sym-yolo-review/SKILL.md") |> String.replace(~r/\s+/, " ")
+    assert skill =~ "#laufvertrag"
+    refute skill =~ "`kind=escalate` nur für strategische Produktentscheidungen oder Zugang/Rechte"
+
+    doc = File.read!("docs/linear-app.md") |> String.replace(~r/\s+/, " ")
+    assert doc =~ "Autonom unlösbare externe Voraussetzungen isolierter Pflichtprüfungen"
+    assert doc =~ "Die Pflichtprüfung bleibt offen"
+    assert doc =~ "Fehlende Testbereitstellung allein macht einen isoliert prüfbaren Fall nicht zum zwingenden Echtsystem-Nachweis"
   end
 
   test "agent configuration is optional and independent of the start switch", %{root: root} do

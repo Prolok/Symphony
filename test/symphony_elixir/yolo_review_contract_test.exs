@@ -320,6 +320,50 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     refute result.body =~ "Wartet auf blockierende Abhängigkeit"
   end
 
+  test "an unavailable isolated test prerequisite can escalate while acceptance stays open", ctx do
+    requirement = "Isolierte Integrationsprobe: Betreiber-Testmanifest fehlt nach Prüfung aller autorisierten Bereitstellungswege"
+
+    Agent.update(ctx.db, fn state ->
+      %{state | body: String.replace(state.body, "- [x] Synthetic acceptance", "- [x] Synthetic acceptance\n- [ ] #{requirement}; fällig: Yolo Review")}
+    end)
+
+    Scope.with_scope(
+      "review",
+      [ctx.issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [ctx.issue.id]}))
+        evidence = Map.put(Fixture.evidence(), "limitations", [requirement])
+        request = %{"kind" => "handoff", "issue_id" => ctx.issue.id, "report" => requirement, "review" => evidence}
+
+        assert {:error, :yolo_acceptance_incomplete} = Handoff.invoke(request, ctx.opts)
+        assert {:error, :yolo_wait_requires_dependency} = Handoff.invoke(%{request | "kind" => "wait"}, ctx.opts)
+
+        escalation = %{
+          "cause" => "Externes Betreiber-Testmanifest fehlt; isolierte Pflichtprüfung nicht ausführbar",
+          "attempts" => "Vorhandene Rechte, Zugänge und freigegebene Testbereitstellung geprüft; kein autonomer Weg",
+          "proposal" => "Manifest für die isolierte Prüfung bereitstellen",
+          "decision" => "Externe Testbereitstellung ermöglichen und neu delegieren"
+        }
+
+        assert ActionTool.execute(Map.put(%{request | "kind" => "escalate"}, "escalation", escalation), ctx.opts)["success"]
+        assert Completion.ready?("review", [ctx.issue])
+      end,
+      workspace: ctx.workspace
+    )
+
+    result = Agent.get(ctx.db, & &1)
+    assert result.updates == 1
+    assert result.issue.state == "Yolo Review"
+    assert result.issue.delegate_id == nil
+    assert result.issue.assignee_id == "human"
+    assert result.body =~ "- [ ] #{requirement}"
+    assert result.body =~ "Manifest für die isolierte Prüfung bereitstellen"
+    refute result.body =~ "Auftrags-Digest"
+    refute result.body =~ "symphony-operator-handoff"
+  end
+
   test "a state change while recording acceptance prevents the terminal update", ctx do
     Scope.with_scope(
       "review",

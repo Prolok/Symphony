@@ -352,7 +352,7 @@ ausschließlich dem gebundenen Test-Cleanup vorbehalten.
 Rücksprünge aus `Yolo Review` nach BLOCKER oder Coding sowie direktes Fertig sind
 gesperrt. Nur zwingende Livenachweise gemäß der
 [Abnahmeregel](#quellengebundener-betreiberauftrag) warten dort quellengebunden mit `kind=wait`;
-strategische Entscheidungen und auch für den Betreiber unzugängliche Rechte
+Eskalationen gemäß [Laufvertrag](../WORKFLOW_YOLO_AGENT.md#laufvertrag)
 werden mit `kind=escalate` an den Menschen oder das konfigurierte
 [Testprojekt-Eskalationsziel](#eskalationsziel-in-testprojekten) übergeben.
 Ausdrücklich eskalierte offene Anlageoperationen erlauben den Laufabschluss als
@@ -649,10 +649,18 @@ Host-Builds in Wegwerfumgebungen. Auch Live-Szenarien im Testprojekt zählen daz
 wenn sie ohne Neustart der Hauptinstanz laufen. Ein Livenachweis am Echtsystem
 ist nur zwingend, wenn das Verhalten ohne Echtsystem nicht belastbar prüfbar ist
 und ein Irrtum Datenverlust, ein Sicherheitsproblem oder einen Betriebsausfall
-bedeuten würde, oder wenn Tilo ihn im Ticket ausdrücklich verlangt. Jeden solchen
+bedeuten würde, oder wenn ein entscheidungsberechtigter Linear-Akteur ihn im Ticket
+ausdrücklich verlangt. Jeden solchen
 Nachweis im Ticket mit Begründung als zwingend kennzeichnen; Workpad und Auftrag
 erhalten diese Quelle und den konkreten Prüfumfang. Fehlende Testbereitstellung
 allein macht einen isoliert prüfbaren Fall nicht zum zwingenden Echtsystem-Nachweis.
+
+Autonom unlösbare externe Voraussetzungen isolierter Pflichtprüfungen folgen nach
+ausgeschöpfter erlaubter Diagnose und Testbereitstellung mit `kind=escalate` der
+[Eskalationsgrenze](../WORKFLOW_YOLO_AGENT.md#laufvertrag), etwa ein nur extern
+bereitstellbares Testmanifest. Die Pflichtprüfung bleibt offen; fehlende Aktion,
+Versuche, Quellstand und Fortsetzungsbedingung im Workpad festhalten. Das ist kein
+Betreiber-Warteauftrag für einen Livenachweis.
 
 Ausrollen ist Betrieb und keine Abnahmebedingung: Main-Update/-Neustart,
 Paketaktivierung, Laden der Livekonfiguration und erste echte Inbetriebnahme.

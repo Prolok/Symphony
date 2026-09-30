@@ -60,7 +60,8 @@ YOLO-/Skip-Behandlung.
   `Umsetzungsticket erstellt` sein: nur die offene Operation unverändert
   abschließen, diese Ursprünge nicht erneut fachlich bewerten oder umplanen.
 - Bei einem OpenClaw-Agenten mit vorhandenem Betreiberauftrag gehören erforderliche
-  isolierte Produktprüfungen und selbst lösbare Testbereitstellung zur autonomen
+  isolierte Produktprüfungen gemäß [Yolo Review](#yolo-review-gemeinsame-fachliche-schlussabnahme)
+  und selbst lösbare Testbereitstellung zur autonomen
   Bearbeitung. Vorhandene Freigabe, Zugänge, Testprojekt und Rückfallbestand prüfen;
   bestehende Betreiberwerkzeuge außerhalb des unveränderten Prüfcheckouts nutzen.
   Rollenbeschränkungen des Coding-Workers oder ein fehlender lokaler Executor sind
@@ -102,6 +103,9 @@ nach `Umsetzungsticket erstellt` wechseln. Vorhandene Anforderungen und
 Abhängigkeiten erhalten bzw. übertragen; keine Duplikate bei Wiederaufnahme.
 Spätere, historisch belegte menschliche Änderungen am angelegten Ticket bleiben
 bei der Wiederaufnahme erhalten; die Relationsbestätigung bleibt bindend.
+Abnahmekriterien verlangen standardmäßig isolierte Nachweise gemäß
+[Yolo Review](#yolo-review-gemeinsame-fachliche-schlussabnahme); übernommene
+Echtsystem-Pflichten und Ausrollschritte anhand dieser Regel einordnen.
 
 Prüfe Abhängigkeiten untereinander und zu laufender Arbeit, setze erforderliche
 `blockedBy`-Relationen ohne Zyklen und übergib ausführbare Tickets nach `Todo (AI)`.
@@ -164,11 +168,23 @@ Kanten erhalten und die gemeinsame Prüfung beginnt. Unabhängige Projektarbeit
 sperrt sie nicht. Vor Entscheidungen Kette und Mergebelege frisch bestätigen;
 Vorgänger vor den abhängigen Ursprüngen abschließen. Teilübergaben erhalten.
 
-Offene Abnahmen sind hier fällig. Autorisierte Bereitstellung und Betreiberprüfungen
-mit vorhandenen Zugängen selbst ausführen. Fällige Betreiberaktionen wie Main-Update
-oder -Neustart, Live-Aktivierung, Live-/Host-Messung und isoliertes Deployment
-als quellengebundenen Betreiberauftrag mit `resume_state: Yolo Review` im Workpad
-festhalten und mit `kind=wait` abschließen, auch ohne offene Abhängigkeit.
+Abgenommen wird mit isolierten Nachweisen: Tests, isolierte Testinstanz, Kopie des
+echten Zustands, Testprojekte oder echte Host-Builds in Wegwerfumgebungen.
+Ein Livenachweis am Echtsystem ist nur zwingend, wenn das Verhalten ohne Echtsystem
+nicht belastbar prüfbar ist und ein Irrtum Datenverlust, ein Sicherheitsproblem oder
+einen Betriebsausfall bedeuten würde, oder wenn Tilo ihn im Ticket ausdrücklich verlangt;
+im Ticket mit Begründung als zwingend kennzeichnen.
+Ausrollen ist Betrieb und keine Abnahmebedingung: Main-Update/-Neustart,
+Paketaktivierung, Laden der Livekonfiguration und erste echte Inbetriebnahme unter
+`### Ausrollschritte` im Übergabe-Workpad offen für das nächste Wartungsfenster führen,
+später automatisch über MyOpenClaw. Ausrollen ist kein Grund für `kind=wait`;
+Livefehler danach werden neue Tickets. [Details](docs/linear-app.md#quellengebundener-betreiberauftrag).
+
+Offene Abnahmen sind hier fällig. Autorisierte isolierte Bereitstellung und Prüfungen
+mit vorhandenen Zugängen selbst ausführen. Nur zwingende Livenachweise ohne zulässigen
+autonomen Fortsetzungsweg als quellengebundenen Betreiberauftrag mit
+`resume_state: Yolo Review` im Workpad festhalten und mit `kind=wait` abschließen,
+auch ohne offene Abhängigkeit.
 Der Auftrags-Digest im Wartebericht bindet die strukturierte Pai-Bestätigung;
 erst sie weckt den nächsten Reviewlauf. Unveränderte Aufträge allein tun das nicht.
 Bei blockierender Abhängigkeit nennt `kind=wait` stattdessen die Abhängigkeit
@@ -270,7 +286,9 @@ entstehen sie ohne diese Zuweisungen; keine Agentidentität erfinden.
 Nutze für Anlage und Verknüpfung `symphony_yolo_action` mit `kind=followup`,
 `origin_ids`, dauerhaft gleichem `operation_key`, vollständiger `description`
 und `validation`; `blocked_by` nennt vorausgehende Issue-IDs. Verwende für
-Aggregation `kind=aggregate`. Der Laufkontext enthält bereits protokollierte
+Aggregation `kind=aggregate`. Abnahmekriterien verwenden standardmäßig isolierte
+Nachweise gemäß [Yolo Review](#yolo-review-gemeinsame-fachliche-schlussabnahme).
+Der Laufkontext enthält bereits protokollierte
 Operationen: Unvollständige mit exakt demselben Auftrag wieder aufnehmen,
 keine Ersatzanlage nach unklarem Schreibausgang. Der Aggregationspfad überträgt
 Abhängigkeiten und schließt Ursprünge erst nach bestätigten Links; das neue
@@ -314,9 +332,10 @@ Keine Ersatzanlage oder eigene Neuzustellung durch den Agenten.
 
 Für echte Eskalationen `kind=escalate` in `Yolo Review` bzw. die
 [BLOCKER-Übergabe](#blocker) verwenden.
-Live-/Host-/Zielumgebungs- und isolierte Integrationsnachweise aus dem Workpad
-sind bei Delegation erst hier in `Yolo Review` fällig; Belege tragen den
-Produkt-Quellhash gemäß `docs/linear-app.md`.
+Finale Abnahmen aus dem Workpad sind bei Delegation erst in
+[Yolo Review](#yolo-review-gemeinsame-fachliche-schlussabnahme) fällig; dort gilt
+die Trennung von isolierten Nachweisen, zwingenden Livenachweisen und Ausrollen.
+Belege tragen den Produkt-Quellhash gemäß `docs/linear-app.md`.
 Alle vier Eskalationswerte konkret ausfüllen. Bei Menscheneskalation sendet Symphony mit aktiviertem OpenClaw
 Ticketlink, Ursache, Versuche, Lösungsvorschlag, benötigte Entscheidung und
 Vorschlags-ID an den bereits gespeicherten normalen Kanal des gebundenen Agenten.

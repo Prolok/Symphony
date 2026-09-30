@@ -350,7 +350,8 @@ Nach bestätigtem Abschluss bereinigt der PO-Pfad den regulären Issue-Workspace
 der Abnahmecheckout bleibt separat. Reservierte Routine-Testworkspaces bleiben
 ausschließlich dem gebundenen Test-Cleanup vorbehalten.
 Rücksprünge aus `Yolo Review` nach BLOCKER oder Coding sowie direktes Fertig sind
-gesperrt. Betreiberpflichten warten dort quellengebunden mit `kind=wait`;
+gesperrt. Nur zwingende Livenachweise gemäß der
+[Abnahmeregel](#quellengebundener-betreiberauftrag) warten dort quellengebunden mit `kind=wait`;
 strategische Entscheidungen und auch für den Betreiber unzugängliche Rechte
 werden mit `kind=escalate` an den Menschen oder das konfigurierte
 [Testprojekt-Eskalationsziel](#eskalationsziel-in-testprojekten) übergeben.
@@ -590,8 +591,9 @@ Planung/Workpad halten Aktion, Rolle, Phase und Entscheidungsquelle oder technis
 Begründung fest. Finale Produkt-/Zielumgebungsabnahme gehört standardmäßig nach
 Merge in `Review`, bei Agentdelegation in `Yolo Review`; das Belegformat und die strikte Rückstellung späterer Pflichten
 regelt [symphony-workpad](../.codex/skills/symphony-workpad/SKILL.md).
-Bei Agentdelegation sind auch isolierte Symphony-, OpenClaw- und LinearBridge-Proben,
-Dienstwechsel und Paketaktivierung erst in `Yolo Review` fällig. Vor Merge bleiben
+Bei Agentdelegation sind isolierte Symphony-, OpenClaw- und LinearBridge-Proben
+und zwingende Echtsystem-Nachweise erst in `Yolo Review` fällig. Abnahme und
+Ausrollen trennen gemäß [Abnahmeregel](#quellengebundener-betreiberauftrag). Vor Merge bleiben
 Build, automatisierte Tests, technischer Review, Mergegates und gebundene
 Routinetests über `symphony_test` fällig. Ohne Delegation gilt die bisherige
 Betreiberübergabe für frühe Nachweise und die finale Abnahme in `Review`.
@@ -641,6 +643,29 @@ Betreiberübernahme oder erfolgreiche externe Aktion erfinden.
 
 ### Quellengebundener Betreiberauftrag
 
+**Abnahmeregel:** Standard sind isolierte Nachweise: automatisierte Tests,
+isolierte Testinstanzen, Kopien des echten Zustands, Testprojekte und echte
+Host-Builds in Wegwerfumgebungen. Auch Live-Szenarien im Testprojekt zählen dazu,
+wenn sie ohne Neustart der Hauptinstanz laufen. Ein Livenachweis am Echtsystem
+ist nur zwingend, wenn das Verhalten ohne Echtsystem nicht belastbar prüfbar ist
+und ein Irrtum Datenverlust, ein Sicherheitsproblem oder einen Betriebsausfall
+bedeuten würde, oder wenn Tilo ihn im Ticket ausdrücklich verlangt. Jeden solchen
+Nachweis im Ticket mit Begründung als zwingend kennzeichnen; Workpad und Auftrag
+erhalten diese Quelle und den konkreten Prüfumfang. Fehlende Testbereitstellung
+allein macht einen isoliert prüfbaren Fall nicht zum zwingenden Echtsystem-Nachweis.
+
+Ausrollen ist Betrieb und keine Abnahmebedingung: Main-Update/-Neustart,
+Paketaktivierung, Laden der Livekonfiguration und erste echte Inbetriebnahme.
+Offene Ausrollschritte im Übergabe-Workpad unter `### Ausrollschritte` für das
+nächste Wartungsfenster führen, später automatisch über MyOpenClaw. Sie bleiben
+außerhalb von `### Validierung`, verhindern weder Abnahme noch `kind=handoff`
+nach `Review` und erzeugen keinen Auftrag mit `kind=wait`. Livefehler danach werden neue Tickets.
+Ältere ausschließlich als Abnahme geführte Ausrollpflichten mit erhaltener Quelle
+und kurzer Begründung dorthin umordnen, ohne einen Ausführungsbeleg zu behaupten.
+Ein überholter reiner Ausrollauftrag wird aus dem aktiven Auftragsblock entfernt;
+bisherigen Auftrag und Ergebnis als lesbaren Verlauf erhalten. Ausdrückliche
+Echtsystem-Prüfaufträge bleiben gemäß der Ausnahme bindend.
+
 Wird nach ausgeführter Zwischenarbeit eine neue Betreiberpflicht fällig, hält der
 Worker sie im einen Workpad unter `### Betreiberauftrag` zusätzlich in genau einem
 Block fest. Dieser Beleg macht die neue Arbeit auch bei unverändertem Titel,
@@ -679,8 +704,9 @@ beobachtbar und startbar. Bei unverändertem Signal werden fehlgeschlagene
 Berichte frühestens nach fünf Minuten erneut versucht; ein neues Signal erlaubt
 einen sofortigen Versuch. Warnlogs erscheinen je Ticket und Grund höchstens
 einmal in fünf Minuten. Nach Korrektur wird das Ticket erneut beobachtet.
-In der finalen Abnahme beendet
-`kind=wait` einen offenen Betreiberauftrag selbst ohne Abhängigkeit bei unverändertem
+In der finalen Abnahme dient dieser Auftrag ausschließlich einem zwingenden
+Livenachweis, für den nach erlaubter Diagnose, Nacharbeit und autorisierter Prüfung
+kein autonomer Fortsetzungsweg bleibt. `kind=wait` beendet den Lauf selbst ohne Abhängigkeit bei unverändertem
 Status und Agentdelegation. Der Wartebericht nennt den Digest des normalisierten
 Sechs-Felder-Auftrags. Pai bestätigt den aktuellen Auftrag als konfigurierter
 delegierter App-Benutzer mit genau einem Kommentar dieser Form:
@@ -749,12 +775,12 @@ Runtime-Regressionen prüfen zusätzlich den tatsächlichen Workpad-/AgentRunner
 
 | Eingabe | Erwartete Einordnung und Fortsetzung |
 | --- | --- |
-| Lokales Plugin-/Dienstpaket und technische Tests grün, finale Installation nach Merge | Technische Pipeline bis Review; offene finale Abnahme übernehmen. Kein Betriebswechsel vor Merge und kein behaupteter Live-Erfolg. |
-| Delegiertes Ticket, Test-Checkliste geschlossen, Live-/Host-Probe offen | Vor Merge `; fällig: Yolo Review` offen lassen; Handoff nach `Merge (AI)` und nach Merge in `Yolo Review`. Keine frühe BLOCKER-Übergabe. |
+| Lokales Plugin-/Dienstpaket und isolierte Abnahme grün, einzig Ausrollen offen | Offenen Ausrollschritt für das Wartungsfenster außerhalb der Abnahme führen; Handoff nach `Review`, kein `kind=wait` und kein behaupteter Live-Erfolg. |
+| Delegiertes Ticket, Test-Checkliste geschlossen, zwingende Echtsystem-Prüfung oder isolierte Integrationsprobe offen | Vor Merge `; fällig: Yolo Review` mit Begründung offen lassen; Handoff nach `Merge (AI)` und nach Merge in `Yolo Review`. Keine frühe BLOCKER-Übergabe. |
 | Dasselbe Ticket ohne Agentdelegation | Frühe Betreiberprobe bleibt nach bisherigem Vertrag fällig; bei fehlendem Beleg konkrete BLOCKER-Übergabe. Finale Abnahme in `Review`. |
 | Workpad-, Log-, Fixture- oder reiner Autocommit-Stand ändert sich ohne Produktdelta | Produkt-Quellhash und positiver Betreiberbeleg bleiben gültig; keine neue Übergabe. |
 | Produktdatei ändert sich, andere Prüfbereiche bleiben unverändert | Neuer Produkt-Quellhash; nur die vom Delta betroffene Prüfung erneut anfordern, übrige Belege mit Geltungsbereich erhalten. |
-| Agent hat finale Zielumgebungsabnahme ohne frühe Nutzerentscheidung in Test eingeplant | Quelle prüfen, begründet nach Review korrigieren, Nachweis offen erhalten und regulär wiederaufnehmen. |
+| Agent hat finale isolierte Integrationsabnahme ohne frühe Nutzerentscheidung in Test eingeplant | Quelle prüfen, begründet nach Review korrigieren, Nachweis offen erhalten und regulär wiederaufnehmen. |
 | Notwendige Testdatenbank/Buildabhängigkeit fehlt | Technisches Gate bleibt offen; zulässige Diagnose/Startwege nutzen, sonst konkrete Betreiberübergabe. Keine Umetikettierung als finale Betriebsabnahme. |
 | In Review fehlt autorisierte Bereitstellung | Offene Review-Abnahme mit Standbezug und benötigter Aktion übergeben; kein Rücksprung zum ungemergten Testauftrag. |
 | Betreiber bereits festgelegt, Abnahme erst in Merge fällig | Keine erneute Zuständigkeitsfrage; Aktion/Phase übernehmen, aktuelle lokale Phase abschließen, Nachweis offen lassen. |

@@ -38,14 +38,19 @@ Die allgemeinen Abnahmepflichten und technischen Vor-Merge-Gates bleiben erhalte
    Belege mit Quelle, Stand und Geltungsbereich übernehmen; nur entwertete,
    fehlgeschlagene oder abhängige Prüfungen wiederholen. Kein pauschales
    `make all` und keine unbedingte Szenariomatrix allein wegen Schlussabnahme.
-   Lokale Fixtures sind kein Livebeleg; ausdrücklich geforderte reale
-   Integrations-/End-to-End-Nachweise bleiben fällig.
+   Isolierte Nachweise sind der Abnahmestandard gemäß
+   [Yolo Review](../../../WORKFLOW_YOLO_AGENT.md#yolo-review-gemeinsame-fachliche-schlussabnahme).
+   Nur nach dieser Regel mit Begründung als zwingend gekennzeichnete reale
+   Integrations-/End-to-End-Nachweise bleiben am Echtsystem fällig.
+   Ausrollschritte getrennt im Übergabe-Workpad für das Wartungsfenster führen;
+   sie sperren die Abnahme nicht und erzeugen keinen Betreiber-Warteauftrag.
 
 ## Live-Szenarien nach Bedarf
 
-Nur wenn Auftrag oder betroffener Produktpfad reale Integrationsbelege verlangen,
+Nur wenn Auftrag oder betroffener Produktpfad zusätzliche Integrationsbelege verlangen,
 die passenden bestehenden Szenarien wählen. Auswahl und nicht abgedeckte
-Anforderungen begründen. Details und Grenzen stehen in `docs/linear-app.md`,
+Anforderungen begründen. Live-Szenarien im Testprojekt zählen als isolierte Nachweise,
+sofern sie ohne Neustart der Hauptinstanz laufen. Details und Grenzen stehen in `docs/linear-app.md`,
 Abschnitt „Isolierter Testbetrieb“.
 
 | Auslöser | Szenario im `scripts/test-instance-run` | Erwartetes beobachtbares Ergebnis / Grenze |
@@ -79,7 +84,7 @@ Belege dürfen mit ihrer Grenze übernommen werden; kein Ausbau des Testsystems.
    Der Betreiber stellt diese Voraussetzungen nach `docs/linear-app.md`,
    „Betreiberbeleg und Einrichtung“, bereit; der berechtigte Prüfer führt den
    freigegebenen Lauf aus und bewertet ihn. Lokale grüne Tests ersetzen weder
-   diese Einrichtung noch einen erforderlichen Aktivierungsbeleg.
+   diese Einrichtung noch einen nach der Abnahmeregel zwingenden Echtsystem-Beleg.
    Private Envdateien, externe Checkouts und Hauptbetrieb sind kein Workerpfad.
 2. Rufe den Runner mit `--checkout <dieser-checkout> --source-mode merged`,
    `--test-instance <freigegebener-name>`,
@@ -142,11 +147,10 @@ mit stabilen Operationsschlüsseln erfassen. Abnahmesperrende Fixes mit
 `blocks_origins=true` verknüpfen und `kind=wait` mit lesbarem Bericht und
 strukturiertem Prüf-/Lernbeleg abschließen; Ursprung bleibt in `Yolo Review`.
 Nach Merge sämtlicher Folgefixes gemeinsam prüfen und Vorgänger zuerst nach
-`Review` übergeben. Fällige Betreiberaktionen (Main-Update/-Neustart,
-Live-Aktivierung, Live-/Host-Messung, isoliertes Deployment) als quellengebundenen
-Auftrag mit `resume_state: Yolo Review` festhalten und mit `kind=wait` abschließen,
-auch ohne Abhängigkeit; Pai bestätigt mit aktuellem Auftrags-Digest, Ergebnis und
-Beleg. `kind=escalate` nur für strategische Produktentscheidungen oder Zugang/Rechte,
+`Review` übergeben. Für zwingende Livenachweise gilt der
+[Betreiber-Warteweg](../../../WORKFLOW_YOLO_AGENT.md#yolo-review-gemeinsame-fachliche-schlussabnahme)
+mit aktuellem Auftrags-Digest, Ergebnis und Beleg.
+`kind=escalate` nur für strategische Produktentscheidungen oder Zugang/Rechte,
 die weder Agent noch Betreiber erhalten können. Die Eskalation belässt den Status,
 entfernt die Delegation und übergibt Frage und Empfehlung sichtbar an den Menschen.
 Mit [Testprojekt-Opt-in](../../../docs/linear-app.md#eskalationsziel-in-testprojekten)

@@ -29,6 +29,65 @@ defmodule SymphonyElixir.YoloAgentTest do
     end)
   end
 
+  test "the PO prompt separates isolated acceptance, mandatory live evidence and rollout" do
+    prompt = File.read!("WORKFLOW_YOLO_AGENT.md") |> String.replace(~r/\s+/, " ")
+
+    assert prompt =~ "Abgenommen wird mit isolierten Nachweisen"
+    assert prompt =~ "ohne Echtsystem nicht belastbar prüfbar"
+    assert prompt =~ "und ein Irrtum Datenverlust, ein Sicherheitsproblem oder einen Betriebsausfall"
+    assert prompt =~ "oder wenn Tilo ihn im Ticket ausdrücklich verlangt"
+    assert prompt =~ "mit Begründung als zwingend kennzeichnen"
+    assert prompt =~ "Ausrollen ist Betrieb und keine Abnahmebedingung"
+    assert prompt =~ "Main-Update/-Neustart, Paketaktivierung, Laden der Livekonfiguration und erste echte Inbetriebnahme"
+    assert prompt =~ "`### Ausrollschritte`"
+    assert prompt =~ "kein Grund für `kind=wait`"
+    assert prompt =~ "Nur zwingende Livenachweise"
+    assert prompt =~ "`resume_state: Yolo Review`"
+    assert prompt =~ "Auftrags-Digest"
+    refute prompt =~ "Fällige Betreiberaktionen wie Main-Update"
+    refute prompt =~ "Live-/Host-/Zielumgebungs- und isolierte Integrationsnachweise aus dem Workpad"
+    assert length(String.split(prompt, "Ein Livenachweis am Echtsystem ist nur zwingend")) == 2
+
+    [_, delivery] = String.split(prompt, "## Zustellung und seltene Eskalation", parts: 2)
+    assert delivery =~ "#yolo-review-gemeinsame-fachliche-schlussabnahme"
+    assert delivery =~ "Finale Abnahmen aus dem Workpad"
+
+    for section <- ["Eingangsgruppe: Backlog, Todo und Definiert", "Neue Folge-Tickets"] do
+      [_, body] = String.split(prompt, "## " <> section, parts: 2)
+      body = body |> String.split("## ", parts: 2) |> hd()
+      assert body =~ "isolierte"
+      assert body =~ "#yolo-review-gemeinsame-fachliche-schlussabnahme"
+    end
+  end
+
+  test "review, planning and ticket templates refer to the same acceptance policy" do
+    skill = File.read!(".codex/skills/sym-yolo-review/SKILL.md") |> String.replace(~r/\s+/, " ")
+    assert skill =~ "als zwingend gekennzeichnete reale Integrations-/End-to-End-Nachweise"
+    assert skill =~ "Live-Szenarien im Testprojekt zählen als isolierte Nachweise"
+    assert skill =~ "ohne Neustart der Hauptinstanz"
+    refute skill =~ "Fällige Betreiberaktionen (Main-Update/-Neustart"
+
+    for path <- ["WORKFLOW.md", "WORKFLOW_DIALOG.md", ".codex/skills/symphony-planning/SKILL.md"] do
+      text = File.read!(path)
+      assert text =~ "#quellengebundener-betreiberauftrag"
+      assert text =~ "Ausroll"
+      assert text =~ "isolierte"
+    end
+
+    workpad = File.read!(".codex/skills/symphony-workpad/SKILL.md")
+    assert workpad =~ "#quellengebundener-betreiberauftrag"
+    assert workpad =~ "Ausrollschritte` für das Wartungsfenster"
+    assert workpad =~ "außerhalb der Abnahmecheckliste"
+
+    doc = File.read!("docs/linear-app.md") |> String.replace(~r/\s+/, " ")
+    refute doc =~ "Dienstwechsel und Paketaktivierung erst in `Yolo Review` fällig"
+    refute doc =~ "Betreiberpflichten warten dort quellengebunden"
+    assert doc =~ "ohne Echtsystem nicht belastbar prüfbar"
+    assert doc =~ "mit Begründung als zwingend"
+    assert doc =~ "### Ausrollschritte"
+    assert doc =~ "Livefehler danach werden neue Tickets"
+  end
+
   test "agent configuration is optional and independent of the start switch", %{root: root} do
     for yolo <- [false, true], value <- [nil, "", "   ", "  Pai  "] do
       Application.put_env(:symphony_elixir, :yolo, yolo)

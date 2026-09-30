@@ -732,7 +732,7 @@ defmodule SymphonyElixir.YoloActionsTest do
     cases = [
       {:delegation, "Backlog", "Agent bei Anlage: zunächst Backlog; keine Umsetzung aus reiner Anlage ableiten."},
       {:routine, "Planung", "Routinefrage im Scope: Reihenfolge der isolierten Paketprüfungen wählen."},
-      {:early_acceptance, "BLOCKER", "Agentenplan verlangt finale Installation vor Merge; keine frühe Nutzerfreigabe vorgeschrieben."},
+      {:early_acceptance, "BLOCKER", "Agentenplan verlangt isolierte Integrationsabnahme vor Merge; keine frühe Nutzerfreigabe vorgeschrieben."},
       {:strategy, "BLOCKER", "Zielkonflikt außerhalb des delegierten Scopes: neues Produkt statt Paketkorrektur."},
       {:access, "BLOCKER", "Notwendige Testdatenbank unerreichbar; erlaubter Startpfad und gebundener Testaufruf scheitern ohne Betreiberrecht."},
       {:stop, "Backlog", "Mensch aktuell: Stopp, dieses Ticket nicht aktivieren."}
@@ -746,7 +746,7 @@ defmodule SymphonyElixir.YoloActionsTest do
 
       initial =
         "## Symphony Workpad\n\n### Validierung\n- [x] Isolierter Pakettest grün; Stand: abc1234\n" <>
-          "- [ ] Betreiber: finale Installation; Quelle: Agentenplan ohne Nutzerentscheidung; fällig: #{due}\n" <>
+          "- [ ] Betreiber: isolierte Integrationsabnahme; Quelle: Agentenplan ohne Nutzerentscheidung; fällig: #{due}\n" <>
           if(scenario == :access, do: "- [ ] Notwendige Testdatenbank bereitstellen; Quelle: Integrationstest benötigt DB; fällig: Test (AI)\n", else: "")
 
       change(&%{&1 | issues: %{source.id => source}, workpads: %{source.id => initial}, calls: []})
@@ -781,7 +781,7 @@ defmodule SymphonyElixir.YoloActionsTest do
             assert :ok = Completion.invoke(%{"issue_id" => source.id, "result" => report}, opts())
 
           :early_acceptance ->
-            report = "Phasenkorrektur: reine Agentenfrist ersetzt gemäß WORKFLOW-Phasenpflichten; finale Installation erst am gemergten Stand."
+            report = "Phasenkorrektur: reine Agentenfrist ersetzt gemäß WORKFLOW-Phasenpflichten; isolierte Integrationsabnahme erst am gemergten Stand."
             corrected = String.replace(initial, "fällig: Test (AI)", "fällig: Review") <> "\n### Entscheidung\n" <> report
             assert :ok = opts()[:workpad].(source.id, corrected)
             assert :ok = guarded_po_update(source, "Test (AI)")
@@ -824,7 +824,7 @@ defmodule SymphonyElixir.YoloActionsTest do
       actual = db().issues[source.id]
       body = db().workpads[source.id]
       assert body =~ "- [x] Isolierter Pakettest grün; Stand: abc1234"
-      assert body =~ "- [ ] Betreiber: finale Installation"
+      assert body =~ "- [ ] Betreiber: isolierte Integrationsabnahme"
       assert body =~ "Quelle: Agentenplan ohne Nutzerentscheidung"
 
       case scenario do
@@ -1026,26 +1026,35 @@ defmodule SymphonyElixir.YoloActionsTest do
     assert length(writes("YoloUpdate")) == 1
   end
 
-  test "external acceptance waits in Yolo Review while a BLOCKER handoff ends agent ownership", %{issues: [issue | _]} do
+  test "mandatory external acceptance stays open while an escalation ends agent ownership", %{issues: [issue | _]} do
     for state <- ["Yolo Review", "BLOCKER"] do
       source = %{issue | state: state}
 
       original =
         "## Symphony Workpad\n\nExisting evidence\n\n### Validierung\n" <>
           "- [x] Technische Tests grün; Stand: abc1234\n" <>
-          "- [ ] Betreiber: finale Installation; Quelle: Phasenvertrag; fällig: Review\n"
+          "- [ ] Zwingender Livenachweis: Lease-Übernahme am Echtsystem; Quelle: ohne Echtsystem nicht belastbar prüfbar, Irrtum riskiert Datenverlust; fällig: Yolo Review\n"
 
       change(&%{&1 | issues: %{source.id => source}, workpads: %{source.id => original}})
 
       group([source], fn ->
         {:ok, record} = Store.read("incoming")
         :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
-        evidence = Map.put(ReviewFixture.evidence(), "limitations", ["Finale Installation am gemergten Stand fehlt; autorisierte Betreiberbereitstellung erforderlich."])
+        evidence = Map.put(ReviewFixture.evidence(), "limitations", ["Zwingender Livenachweis zur Lease-Übernahme fehlt; erforderlicher Zugriff ist auch für den Betreiber nicht erhältlich."])
         kind = if state == "Yolo Review", do: "escalate", else: "handoff"
-        escalation = %{"cause" => "Installation fehlt", "attempts" => "Lokale Tests bestanden", "proposal" => "Gemergten Stand bereitstellen", "decision" => "Bereitstellung bestätigen"}
+
+        escalation = %{
+          "cause" => "Erforderlicher Zugriff nicht erhältlich",
+          "attempts" => "Isolierte Tests und Betreiberzugänge geprüft",
+          "proposal" => "Zugriff für zwingende Lease-Prüfung ermöglichen",
+          "decision" => "Zugriff ermöglichen?"
+        }
 
         assert :ok =
-                 handoff(%{"kind" => kind, "issue_id" => source.id, "report" => "Tests checked; open fix PRO-99. Finale Installation offen.", "review" => evidence, "escalation" => escalation}, opts())
+                 handoff(
+                   %{"kind" => kind, "issue_id" => source.id, "report" => "Tests checked; open fix PRO-99. Zwingender Livenachweis offen.", "review" => evidence, "escalation" => escalation},
+                   opts()
+                 )
       end)
 
       assert db().issues[source.id].delegate_id == nil
@@ -1054,27 +1063,27 @@ defmodule SymphonyElixir.YoloActionsTest do
 
       if state == "Yolo Review" do
         assert [%{body: note}] = db().escalation_comments[source.id]
-        assert note =~ "Frage: Bereitstellung bestätigen"
-        assert note =~ "Empfehlung: Gemergten Stand bereitstellen"
+        assert note =~ "Frage: Zugriff ermöglichen?"
+        assert note =~ "Empfehlung: Zugriff für zwingende Lease-Prüfung ermöglichen"
       end
 
       assert db().workpads[source.id] =~ "Existing evidence"
       assert db().workpads[source.id] =~ "open fix PRO-99"
-      assert db().workpads[source.id] =~ "Gemergten Stand bereitstellen"
+      assert db().workpads[source.id] =~ "Zugriff für zwingende Lease-Prüfung ermöglichen"
       assert db().workpads[source.id] =~ original
       assert SymphonyElixir.Workpad.section_checklist_status(db().workpads[source.id], "Validierung", "Review") == :open
     end
   end
 
-  test "a current operator duty permits waiting in Yolo Review without a dependency", %{issues: [issue | _]} do
+  test "a mandatory live check permits waiting in Yolo Review without a dependency", %{issues: [issue | _]} do
     source = %{issue | state: "Yolo Review", blocked_by: [], relations_complete: true}
 
     duty = %{
       "version" => 1,
-      "action" => "Hauptinstanz neu starten",
+      "action" => "Zwingenden Livenachweis der Lease-Übernahme am Echtsystem ausführen; ohne Echtsystem nicht belastbar prüfbar, Irrtum riskiert Datenverlust",
       "head_sha" => String.duplicate("a", 40),
       "source_sha256" => String.duplicate("b", 64),
-      "expected" => "Start und Messung belegen",
+      "expected" => "Lease-Übernahme ohne doppelte Schreibausführung quellengebunden belegen",
       "resume_state" => "Yolo Review"
     }
 
@@ -1140,10 +1149,10 @@ defmodule SymphonyElixir.YoloActionsTest do
 
       duty = %{
         "version" => 1,
-        "action" => "Hauptinstanz neu starten",
+        "action" => "Zwingenden Livenachweis der Lease-Übernahme am Echtsystem ausführen; Quelle: ausdrückliche Ticketanforderung von Tilo",
         "head_sha" => String.duplicate("a", 40),
         "source_sha256" => String.duplicate("b", 64),
-        "expected" => "Start und Messung belegen",
+        "expected" => "Lease-Übernahme ohne doppelte Schreibausführung quellengebunden belegen",
         "resume_state" => "Yolo Review"
       }
 

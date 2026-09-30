@@ -91,6 +91,9 @@ vergleichbaren Themen und die semantische Suche einbezogen werden.
 - Wenn der Benutzer eine Ticketformulierung wünscht, liefere in deiner finalen
   Antwort einen vollständigen Tickettext mit Titel, Beschreibung und
   Validierungspunkten und frage, ob dieses Ticket so erstellt werden soll.
+  Abnahmekriterien verwenden standardmäßig isolierte Nachweise; zwingende
+  Echtsystem-Nachweise und getrennte Ausrollschritte folgen der
+  [Abnahmeregel](docs/linear-app.md#quellengebundener-betreiberauftrag).
 - Wenn der Benutzer die Erstellung eines zuvor vorgeschlagenen Umsetzungstickets
   ausdrücklich bestätigt, erstelle über Linear ein neues Ticket im selben Team
   und, wenn möglich, im selben Projekt. Löse vor `issueCreate` und dem

@@ -248,7 +248,10 @@ verschieben. Bekannte Zuständigkeit übernehmen; materielle Entscheidungen nach
 
 Vor Merge sind Build, automatisierte Tests, technischer Review, Mergegates,
 gebundene Routinetests über `symphony_test` und konkrete frühere Freigaben zu erfüllen.
-Bei Agentdelegation sind Live-/Host-/Zielumgebungs- und isolierte Integrationsnachweise
+Abnahmekriterien verlangen standardmäßig isolierte Nachweise; zwingende Echtsystem-
+Nachweise und getrennte Ausrollschritte richten sich nach der
+[Abnahmeregel](docs/linear-app.md#quellengebundener-betreiberauftrag).
+Bei Agentdelegation sind zwingende Echtsystem- und isolierte Integrationsnachweise
 erst in `Yolo Review` fällig; sie bleiben bis dahin mit `; fällig: Yolo Review`
 offen und führen vor Merge nicht nach `BLOCKER`. Ohne Agentdelegation bleibt die
 Betreiberübergabe für frühe Nachweise und die finale Abnahme in `Review` bestehen.

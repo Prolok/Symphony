@@ -28,6 +28,9 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
 - `### Plan` ist eine hierarchische Checkliste konkreter Umsetzungsschritte.
 - Der Plan enthält explizit Entwicklung/Änderung und automatisierte Tests.
 - `### Validierung` ist eine Checkliste der geplanten Nachweise.
+- Abnahmekriterien verlangen standardmäßig isolierte Nachweise. Echtsystem-Pflichten
+  nur gemäß [Abnahmeregel](../../../docs/linear-app.md#quellengebundener-betreiberauftrag)
+  als zwingend mit Begründung führen; Ausrollschritte getrennt von der Abnahme planen.
 - Ticketseitige `Validation`-, `Test Plan`- oder `Testing`-Abschnitte werden
   verpflichtend übernommen.
 - Bei App-Dateien oder App-Verhalten passende Runtime-Validierung einplanen.
@@ -35,7 +38,7 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
   Betreiber), fälliger Phase und konkreter Entscheidungsquelle/technischer
   Begründung gemäß `WORKFLOW.md`, „Phasenpflichten und Betreiberübergaben“,
   zuordnen. Agentenfristen sind keine Nutzerentscheidung; finale Produktabnahme
-  standardmäßig nach Merge in `Review`; bei Agentdelegation Live-/Host- und isolierte
+  standardmäßig nach Merge in `Review`; bei Agentdelegation zwingende Echtsystem- und isolierte
   Integrationsnachweise mit `; fällig: Yolo Review` offen führen. Frühe technische
   Gates bleiben erhalten.
   Bereits festgelegte Zuständigkeit übernehmen, nicht erneut erfragen. Bekannte spätere Betreiberpflichten

@@ -617,12 +617,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         )
 
       {:maintenance_interrupt, generation} ->
-        if SymphonyElixir.Maintenance.interrupt_current?(generation) do
-          send_message(port, %{"id" => "maintenance-interrupt", "method" => "turn/interrupt", "params" => %{"threadId" => metadata.thread_id, "turnId" => metadata.turn_id}})
-          stop_port(port)
-          exit(:maintenance_interrupt)
-        else
+        if metadata[:maintenance_interrupt_generation] do
           receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, metadata)
+        else
+          context = {timeout_ms, pending_line, tool_executor, auto_approve_requests}
+          request_maintenance_interrupt(port, on_message, context, metadata, generation)
         end
 
       {^port, {:exit_status, status}} ->
@@ -631,6 +630,36 @@ defmodule SymphonyElixir.Codex.AppServer do
       timeout_ms ->
         {:error, :turn_timeout}
     end
+  end
+
+  defp request_maintenance_interrupt(port, on_message, context, metadata, generation) do
+    {timeout_ms, pending_line, tool_executor, auto_approve_requests} = context
+
+    if SymphonyElixir.Maintenance.interrupt_current?(generation) do
+      metadata = Map.put(metadata, :maintenance_interrupt_generation, generation)
+      emit_message(on_message, :maintenance_interrupt_pending, %{generation: generation}, metadata)
+
+      try do
+        send_message(port, %{"id" => "maintenance-interrupt", "method" => "turn/interrupt", "params" => %{"threadId" => metadata.thread_id, "turnId" => metadata.turn_id}})
+      rescue
+        ArgumentError -> :ok
+      end
+
+      await_maintenance_interruption(port, on_message, context, metadata)
+    else
+      emit_message(on_message, :maintenance_interrupt_rejected, %{generation: generation}, metadata)
+      receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, metadata)
+    end
+  end
+
+  defp await_maintenance_interruption(port, on_message, context, metadata) do
+    {timeout_ms, pending_line, tool_executor, auto_approve_requests} = context
+    result = receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, metadata)
+
+    # A timeout, request error or lost SSH transport cannot prove that the active
+    # turn stopped. Retain the worker reservation until its matching terminal event.
+    emit_message(on_message, :maintenance_interrupt_unconfirmed, %{reason: result}, metadata)
+    await_maintenance_interruption(port, on_message, {timeout_ms, "", tool_executor, auto_approve_requests}, metadata)
   end
 
   defp handle_incoming(
@@ -823,6 +852,12 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp active_turn_event?(_payload, _metadata), do: false
+
+  defp finish_turn(port, on_message, payload, raw, _tool_executor, _auto_approve_requests, %{maintenance_interrupt_generation: _} = metadata) do
+    emit_turn_event(on_message, :maintenance_interrupted, payload, raw, port, payload["params"], metadata)
+    stop_port(port)
+    exit(:maintenance_interrupt)
+  end
 
   defp finish_turn(port, on_message, payload, raw, tool_executor, auto_approve_requests, metadata) do
     status = get_in(payload, ["params", "turn", "status"])

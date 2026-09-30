@@ -381,6 +381,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update, issue_id)
+        updated_running_entry = reconcile_maintenance_interrupt_update(updated_running_entry, update)
 
         state =
           state
@@ -481,6 +482,16 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
   end
+
+  defp reconcile_maintenance_interrupt_update(%{maintenance_interrupt_requested: generation} = entry, %{event: :maintenance_interrupt_rejected, generation: generation}) do
+    Map.delete(entry, :maintenance_interrupt_requested)
+  end
+
+  defp reconcile_maintenance_interrupt_update(entry, %{event: :maintenance_interrupt_pending}) do
+    Map.put(entry, :maintenance_interrupt_pending, true)
+  end
+
+  defp reconcile_maintenance_interrupt_update(entry, _update), do: entry
 
   defp dispatch_due_retry(state, issue_id, retry_token) do
     case retry_attempt_state(state, issue_id, retry_token) do
@@ -1157,8 +1168,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
     elapsed_ms = stall_elapsed_ms(running_entry, now)
+    interruption_pending? = running_entry[:maintenance_interrupt_pending] == true
 
-    if manual_in_progress_bootstrap_running_entry?(running_entry) or
+    if manual_in_progress_bootstrap_running_entry?(running_entry) or interruption_pending? or
          Map.get(running_entry, :codex_turn_completed, false) or
          not is_nil(Map.get(running_entry, :exit_finalize_token)) or
          not Process.alive?(running_entry.pid) do
@@ -2426,6 +2438,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     if Map.get(entry, :run_mode) == :regular and Maintenance.interruptible?(phase) and
          entry.issue.state == phase and is_binary(entry[:codex_app_server_pid]) and
+         entry[:maintenance_interrupt_pending] != true and
          entry[:maintenance_interrupt_requested] != generation and maintenance_check_due?(entry, generation) do
       check = %{generation: generation, source: entry.issue, next_at_ms: System.monotonic_time(:millisecond) + 300_000}
       entry = Map.put(entry, :maintenance_deadline_check, check)

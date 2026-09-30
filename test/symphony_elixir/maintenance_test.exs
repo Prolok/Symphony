@@ -393,6 +393,60 @@ defmodule SymphonyElixir.MaintenanceTest do
     assert_receive {:interrupt_allowed, false}
   end
 
+  test "a worker rejection makes the same deadline generation eligible for a later retry" do
+    current = issue("In Arbeit (AI)")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [current])
+    assert {:ok, control} = Maintenance.update(%{"enabled" => true, "reason" => "Update", "deadline_seconds" => 300})
+    expire_deadline()
+    entry = %{issue: current, pid: self(), run_mode: :regular, codex_app_server_pid: "synthetic", identifier: current.identifier}
+    state = %Orchestrator.State{running: %{current.id => entry}, codex_totals: %{}}
+    assert {:noreply, requested} = Orchestrator.handle_info({:maintenance_deadline, control.generation}, state)
+    assert_receive {:maintenance_interrupt, generation}
+    rejection = %{event: :maintenance_interrupt_rejected, generation: generation, timestamp: DateTime.utc_now()}
+    assert {:noreply, rejected} = Orchestrator.handle_info({:codex_worker_update, current.id, rejection}, requested)
+    refute rejected.running[current.id][:maintenance_interrupt_requested]
+    assert {:noreply, throttled} = Orchestrator.handle_info({:maintenance_deadline, generation}, rejected)
+    refute_receive {:maintenance_interrupt, _}, 10
+    due = put_in(throttled.running[current.id].maintenance_deadline_check.next_at_ms, System.monotonic_time(:millisecond) - 1)
+    assert {:noreply, retried} = Orchestrator.handle_info({:maintenance_deadline, generation}, due)
+    assert_receive {:maintenance_interrupt, ^generation}
+    assert retried.running[current.id].maintenance_interrupt_requested == generation
+    stale = %{rejection | generation: "obsolete"}
+    assert {:noreply, retained} = Orchestrator.handle_info({:codex_worker_update, current.id, stale}, retried)
+    assert retained.running[current.id].maintenance_interrupt_requested == generation
+  end
+
+  test "a pending interruption stays running even after the normal stall limit" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", codex_stall_timeout_ms: 1_000)
+    current = issue("In Arbeit (AI)")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [current])
+    orchestrator = start_supervised!({Orchestrator, name: :maintenance_pending, initial_poll?: false})
+    assert {:ok, worker} = WorkerCapacity.start_child(nil, current.state, &wait/0)
+    stale = DateTime.add(DateTime.utc_now(), -5, :second)
+
+    entry = %{
+      issue: current,
+      pid: worker,
+      ref: Process.monitor(worker),
+      run_mode: :regular,
+      identifier: current.identifier,
+      codex_app_server_pid: "synthetic",
+      last_codex_timestamp: stale,
+      started_at: stale
+    }
+
+    :sys.replace_state(orchestrator, fn state -> %{state | running: %{current.id => entry}, claimed: MapSet.new([current.id])} end)
+    assert {:ok, control} = Maintenance.update(%{"enabled" => true, "reason" => "Update"})
+    send(orchestrator, {:codex_worker_update, current.id, %{event: :maintenance_interrupt_pending, generation: control.generation, timestamp: stale}})
+    send(orchestrator, :tick)
+    state = :sys.get_state(orchestrator)
+    assert state.running[current.id].maintenance_interrupt_pending
+    assert state.retry_attempts == %{}
+    assert Process.alive?(worker)
+    refute Orchestrator.snapshot(orchestrator, 1_000).maintenance.idle
+    send(worker, :stop)
+  end
+
   test "an unresolved deadline status is read once across ten ticks and a changed source wakes it" do
     current = issue("In Arbeit (AI)")
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
@@ -420,9 +474,9 @@ defmodule SymphonyElixir.MaintenanceTest do
     assert interrupted.running[current.id].maintenance_interrupt_requested == generation
   end
 
-  for host <- [nil, "synthetic-ssh"] do
-    @tag host: host
-    test "app-server interruption stops the child and preserves changes on #{host || "local"}", %{host: host} do
+  for {host, disconnected?} <- [{nil, false}, {"synthetic-ssh", false}, {"synthetic-ssh", true}] do
+    @tag host: host, disconnected?: disconnected?
+    test "app-server waits for confirmed interruption on #{host || "local"} (disconnected: #{disconnected?})", %{host: host, disconnected?: disconnected?} do
       root = Path.dirname(Workflow.workflow_file_path())
       workspace = Path.join(root, "workspaces/PRO-1")
       File.mkdir_p!(workspace)
@@ -430,10 +484,13 @@ defmodule SymphonyElixir.MaintenanceTest do
       File.write!(dirty, "uncommitted work")
       binary = Path.join(root, "fake-codex")
       trace = Path.join(root, "trace")
+      interrupt_waiting = Path.join(root, "interrupt-waiting")
+      release_interrupt = Path.join(root, "release-interrupt")
+      on_exit(fn -> File.write(release_interrupt, "release") end)
 
       File.write!(binary, """
       #!/usr/bin/env python3
-      import json, os, sys
+      import json, os, sys, time
       for line in sys.stdin:
           request = json.loads(line)
           with open(#{inspect(trace)}, 'a') as f:
@@ -442,6 +499,14 @@ defmodule SymphonyElixir.MaintenanceTest do
           if method == 'initialize': result = {}
           elif method == 'thread/start': result = {'thread': {'id': 'thread'}}
           elif method == 'turn/start': result = {'turn': {'id': 'turn'}}
+          elif method == 'turn/interrupt':
+              open(#{inspect(interrupt_waiting)}, 'w').close()
+              print(json.dumps({'id': request['id'], 'result': {}}), flush=True)
+              print(json.dumps({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': 'child', 'status': 'interrupted'}}}), flush=True)
+              if #{if disconnected?, do: "True", else: "False"}: sys.exit(0)
+              while not os.path.exists(#{inspect(release_interrupt)}): time.sleep(0.01)
+              print(json.dumps({'method': 'turn/completed', 'params': {'threadId': 'thread', 'turn': {'id': 'turn', 'status': 'interrupted'}}}), flush=True)
+              continue
           else: continue
           print(json.dumps({'id': request['id'], 'result': result}), flush=True)
       """)
@@ -452,6 +517,7 @@ defmodule SymphonyElixir.MaintenanceTest do
         tracker_kind: "memory",
         workspace_root: Path.dirname(workspace),
         codex_command: "#{binary} app-server",
+        codex_turn_timeout_ms: 500,
         poll_interval_ms: 3_600_000
       ]
 
@@ -470,8 +536,8 @@ defmodule SymphonyElixir.MaintenanceTest do
 
       parent = self()
 
-      pid =
-        spawn(fn ->
+      {:ok, pid} =
+        WorkerCapacity.start_child(nil, current.state, fn ->
           WriteContext.with_context(%{issue_id: current.id, phase: current.state}, fn ->
             {:ok, session} = AppServer.start_session(workspace, worker_host: host)
             send(parent, {:session, session.metadata.codex_app_server_pid})
@@ -484,11 +550,35 @@ defmodule SymphonyElixir.MaintenanceTest do
       assert_receive {:event, %{event: :session_started}}, 3_000
       assert {:ok, control} = Maintenance.update(%{"enabled" => true, "reason" => "Update", "deadline_seconds" => 300})
       expire_deadline()
+      Application.put_env(:symphony_elixir, :memory_tracker_state_error, :transient_unavailable)
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_state_error) end)
       send(pid, {:maintenance_interrupt, control.generation})
-      assert_receive {:DOWN, ^ref, :process, ^pid, :maintenance_interrupt}, 3_000
+      assert_receive {:event, %{event: :maintenance_interrupt_rejected, generation: generation}}, 1_000
+      assert generation == control.generation
+      refute File.exists?(interrupt_waiting)
+      Application.delete_env(:symphony_elixir, :memory_tracker_state_error)
+      send(pid, {:maintenance_interrupt, control.generation})
+      eventually(fn -> File.exists?(interrupt_waiting) end)
+      assert_receive {:event, %{event: :maintenance_interrupt_pending}}, 1_000
+      assert_receive {:event, %{event: :maintenance_interrupt_unconfirmed}}, 1_000
+      refute_receive {:DOWN, ^ref, :process, ^pid, _}, 100
+      refute Maintenance.project(%{running: []}, true).idle
+
+      if disconnected? do
+        eventually(fn -> elem(System.cmd("kill", ["-0", os_pid], stderr_to_stdout: true), 1) != 0 end)
+        assert Process.alive?(pid)
+        refute Maintenance.project(%{running: []}, true).idle
+        Process.exit(pid, :kill)
+        assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, 1_000
+      else
+        File.write!(release_interrupt, "release")
+        assert_receive {:DOWN, ^ref, :process, ^pid, :maintenance_interrupt}, 3_000
+      end
+
       eventually(fn -> elem(System.cmd("kill", ["-0", os_pid], stderr_to_stdout: true), 1) != 0 end)
       assert File.read!(trace) =~ "turn/interrupt"
       assert File.read!(dirty) == "uncommitted work"
+      eventually(fn -> Maintenance.project(%{running: []}, true).idle end)
     end
   end
 

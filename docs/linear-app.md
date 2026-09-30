@@ -970,6 +970,11 @@ Review oder Test (AI) bei unverändertem, frisch bestätigtem Linear-Status kont
 unterbrochen. Workspace, offene Änderungen und Review-Aufenthalt bleiben erhalten.
 Merge (AI), Yolo Review, BLOCKER, Dialog-/Bootstrap-Läufe und externe PO-Aufträge
 werden nie durch die Frist beendet. Sie können den Leerlauf verzögern.
+Der Lauf bleibt bis zum bestätigten Ende seines aktiven Codex-Turns reserviert;
+eine Interrupt-Antwort allein, ein Timeout oder ein Verbindungsabbruch belegt
+keinen abgeschlossenen Abbruch. Der normale Stall-Neustart gibt einen solchen
+Lauf nicht frei. Vorübergehend abgewiesene Fristanforderungen werden mit dem
+begrenzten Statusprüfintervall erneut geprüft.
 
 Der modellfreie Wächter wartet auf **`maintenance.enabled == true` und
 `maintenance.idle == true`** in `/api/v1/state`. `draining` bleibt wahr, solange

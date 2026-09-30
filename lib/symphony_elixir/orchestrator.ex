@@ -259,7 +259,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info(:run_poll_cycle, state) do
     previous = state
-    state = state |> refresh_runtime_config() |> maybe_dispatch() |> maybe_interrupt_maintenance_workers() |> scan_running_comments()
+
+    state =
+      state
+      |> refresh_runtime_config()
+      |> maybe_dispatch()
+      |> maybe_interrupt_maintenance_workers()
+      |> scan_running_comments()
+
     state = maybe_touch_activity_for_state_change(previous, state)
     state = if poll_task(state), do: state, else: finish_poll_cycle(state)
     notify_dashboard()

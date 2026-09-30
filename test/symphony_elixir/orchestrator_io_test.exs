@@ -1,7 +1,6 @@
 defmodule SymphonyElixir.OrchestratorIOTest do
   use SymphonyElixir.TestSupport
-  alias SymphonyElixir.ProjectContext
-  alias SymphonyElixir.{Maintenance, WorkerCapacity}
+  alias SymphonyElixir.{Maintenance, ProjectContext, WorkerCapacity}
   alias SymphonyElixir.Yolo.{Coordinator, Delivery, Store}
 
   setup tags do
@@ -316,7 +315,14 @@ defmodule SymphonyElixir.OrchestratorIOTest do
           end
         end
 
-        opts = [dependencies: &{:ok, &1}, scan: fn _ -> {:ok, %{"current" => %{}, "versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}} end, runner: runner]
+        opts = [
+          dependencies: &{:ok, &1},
+          scan: fn _ ->
+            {:ok, %{"current" => %{}, "versions" => %{}, "last_successful_scan" => "now", "scan_error" => nil}}
+          end,
+          runner: runner
+        ]
+
         resumed = Coordinator.tick(deferred, issues, opts)
         assert %{pid: worker} = resumed.yolo_runs[group]
         on_exit(fn -> Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker) end)

@@ -1331,6 +1331,42 @@ defmodule SymphonyElixir.YoloActionsTest do
     end
   end
 
+  test "trusted BLOCKER handoff stops when status changes after its report", %{issues: [issue | _], context: context} do
+    ProjectContext.bind(trusted_escalation_context(context))
+    source = %{issue | state: "BLOCKER", delegate_id: @trusted, assignee_id: "second-human"}
+    change(&%{&1 | issues: %{source.id => source}})
+    escalation = %{"cause" => "Zugang fehlt", "attempts" => "Geprüft", "proposal" => "Zugang einrichten", "decision" => "Zugang freigeben?"}
+    options = opts()
+    write = options[:workpad]
+
+    options =
+      Keyword.merge(options,
+        workpad: fn id, body ->
+          assert :ok = write.(id, body)
+          change(&%{&1 | issues: Map.put(&1.issues, id, %{source | state: "Yolo Review"})})
+          :ok
+        end,
+        escalation_comment: fn _, _ -> flunk("changed status must prevent the decision request") end,
+        escalation_route: fn _, _ -> flunk("changed status must not resolve a human route") end,
+        escalation_send: fn _, _, _ -> flunk("changed status must not send") end
+      )
+
+    group([source], fn ->
+      {:ok, record} = Store.read("incoming")
+      :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
+
+      assert {:error, :yolo_handoff_not_ready} =
+               handoff(%{"kind" => "handoff", "issue_id" => source.id, "report" => "Zugang offen", "escalation" => escalation}, options)
+
+      {:ok, unfinished} = Store.read("incoming")
+      refute get_in(unfinished, ["attempt", "completed", source.id])
+    end)
+
+    assert writes("YoloUpdate") == []
+    assert db().escalation_comments == %{}
+    assert db().issues[source.id] == %{source | state: "Yolo Review"}
+  end
+
   test "trusted BLOCKER handoff rejects missing details, invalid recipients and unconfirmed comments", %{issues: [issue | _], context: context} do
     trusted = trusted_escalation_context(context)
     ProjectContext.bind(trusted)

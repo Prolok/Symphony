@@ -547,14 +547,14 @@ defmodule SymphonyElixir.TestRun do
 
       "arch_red" ->
         common <>
-          "Führe zuerst einen roten Prüfbefehl bis zum Merge-BLOCKER architecture_check_failed, dokumentiere ihn im Workpad, korrigiere den Prüfbefehl und führe danach bis zum Merge fort. Begründe die Vertragsänderung im PR."
+          "Führe zuerst einen roten Prüfbefehl bis zu symphony_merge Exit 10 mit architecture_check_failed. Dokumentiere den Merge-Gate-Befund im Workpad und korrigiere den Prüfbefehl in Merge (AI), ohne nach BLOCKER zu wechseln. Begründe die Vertragsänderung im PR; durchlaufe die regulären erneuten Prüfungen samt Test (AI) bei Dateiänderungen bis zum Merge."
 
       "arch_justified" ->
         common <> "Ändere eine Architekturregel und begründe sie mit neuem/geändertem ADR oder vollständig ausgefülltem PR-Abschnitt ## Architekturänderung; belege die Kennzeichnung und den Merge."
 
       "arch_unjustified" ->
         common <>
-          "Ändere eine Architekturregel zunächst ohne ADR und ohne PR-Begründung bis zum Merge-BLOCKER architecture_change_unjustified. Dokumentiere den Befund, ergänze die Begründung und führe bis zum Merge fort."
+          "Ändere eine Architekturregel zunächst ohne ADR und PR-Begründung bis zu symphony_merge Exit 10 mit architecture_change_unjustified. Dokumentiere den Merge-Gate-Befund im Workpad und ergänze die Begründung in Merge (AI), ohne nach BLOCKER zu wechseln. Durchlaufe die regulären erneuten Prüfungen samt Test (AI) bei Dateiänderungen bis zum Merge."
     end
   end
 
@@ -695,13 +695,12 @@ defmodule SymphonyElixir.TestRun do
   defp architecture_failure_confirmed?(plan, fixture, scenario) do
     reason = if scenario == "arch_red", do: "architecture_check_failed", else: "architecture_change_unjustified"
 
-    with {:ok, %{"source" => source, "issue_id" => id, "head" => head, "reason" => ^reason}} <-
-           DurableState.read(architecture_failure_path(plan, fixture["id"])),
-         true <- source == plan["source"] and id == fixture["id"] and valid_sha?(head),
-         {:ok, history} <- Client.fetch_issue_state_history(fixture["id"]) do
-      Enum.any?(history, &(get_in(&1, ["state", "name"]) == "BLOCKER"))
-    else
-      _ -> false
+    case DurableState.read(architecture_failure_path(plan, fixture["id"])) do
+      {:ok, %{"source" => source, "issue_id" => id, "head" => head, "reason" => ^reason}} ->
+        source == plan["source"] and id == fixture["id"] and valid_sha?(head)
+
+      _ ->
+        false
     end
   end
 

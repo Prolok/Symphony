@@ -1546,31 +1546,33 @@ defmodule SymphonyElixir.TestRunTest do
     refute TestRun.architecture_change_marked?("arch_green", %{}, merge, [])
   end
 
-  test "architecture routines require a merged PR diff, a matching marker, and observed red gates", ctx do
-    {context, config, request} = routine_context(ctx)
-    git!(context.root, ["remote", "add", "origin", "https://github.com/Prolok/symphony-test.git"])
-    bin = Path.join(ctx.root, "fake-gh-architecture")
-    File.mkdir_p!(bin)
-    list_response = Path.join(bin, "list.json")
-    view_response = Path.join(bin, "view.json")
-    view_failure = Path.join(bin, "view-failure")
-    gh = Path.join(bin, "gh")
+  for scenario <- ~w(arch_green arch_red arch_justified arch_unjustified) do
+    @tag architecture_scenario: scenario
+    test "architecture routine #{scenario} requires a merged PR diff, a matching marker, and observed red gates", ctx do
+      scenario = ctx.architecture_scenario
+      {context, config, request} = routine_context(ctx)
+      git!(context.root, ["remote", "add", "origin", "https://github.com/Prolok/symphony-test.git"])
+      bin = Path.join(ctx.root, "fake-gh-architecture")
+      File.mkdir_p!(bin)
+      list_response = Path.join(bin, "list.json")
+      view_response = Path.join(bin, "view.json")
+      view_failure = Path.join(bin, "view-failure")
+      gh = Path.join(bin, "gh")
 
-    File.write!(gh, "#!/bin/sh\nif [ \"$2\" = view ]; then\n  if [ -f '#{view_failure}' ]; then exit 1; fi\n  cat '#{view_response}'\nelse\n  cat '#{list_response}'\nfi\n")
-    File.chmod!(gh, 0o755)
-    previous = System.fetch_env!("PATH")
-    System.put_env("PATH", bin <> ":" <> previous)
-    on_exit(fn -> System.put_env("PATH", previous) end)
+      File.write!(gh, "#!/bin/sh\nif [ \"$2\" = view ]; then\n  if [ -f '#{view_failure}' ]; then exit 1; fi\n  cat '#{view_response}'\nelse\n  cat '#{list_response}'\nfi\n")
+      File.chmod!(gh, 0o755)
+      previous = System.fetch_env!("PATH")
+      System.put_env("PATH", bin <> ":" <> previous)
+      on_exit(fn -> System.put_env("PATH", previous) end)
 
-    base = String.duplicate("a", 40)
-    head = String.duplicate("b", 40)
-    url = "https://github.com/Prolok/symphony-test/pull/1"
-    contract = "docs/architecture/contract.json"
-    rule = "docs/architecture/rules.md"
-    merge = %{"state" => "MERGED", "mergeCommit" => %{"oid" => head}, "headRefOid" => head, "url" => url}
-    File.write!(list_response, Jason.encode!([merge]))
+      base = String.duplicate("a", 40)
+      head = String.duplicate("b", 40)
+      url = "https://github.com/Prolok/symphony-test/pull/1"
+      contract = "docs/architecture/contract.json"
+      rule = "docs/architecture/rules.md"
+      merge = %{"state" => "MERGED", "mergeCommit" => %{"oid" => head}, "headRefOid" => head, "url" => url}
+      File.write!(list_response, Jason.encode!([merge]))
 
-    for scenario <- ~w(arch_green arch_red arch_justified arch_unjustified) do
       request = %{request | "run_id" => scenario, "scenario" => scenario}
       job = routine_job(config, request)
       plan = %{"instance" => "routine", "run_id" => scenario, "scenario" => scenario, "source" => ctx.plan["source"]}
@@ -1612,23 +1614,27 @@ defmodule SymphonyElixir.TestRunTest do
       end
 
       if scenario in ~w(arch_red arch_unjustified) do
+        history = Enum.map(["Todo (AI)", "Planung (AI)", "Merge (AI)", "Review"], &%{"state" => %{"name" => &1}})
+
+        Agent.update(ctx.source_agent, fn state ->
+          Map.update(state, :histories, %{fixture["id"] => history}, &Map.put(&1, fixture["id"], history))
+        end)
+
         assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
         reason = if scenario == "arch_red", do: "architecture_check_failed", else: "architecture_change_unjustified"
+        wrong_reason = if scenario == "arch_red", do: "architecture_change_unjustified", else: "architecture_check_failed"
+        path = Path.join([job["directory"], "architecture", fixture["id"] <> ".json"])
+        :ok = DurableState.write(path, %{"source" => plan["source"], "issue_id" => fixture["id"], "head" => base, "reason" => wrong_reason})
+        assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
 
         ProjectContext.with_context(context, fn ->
           assert :ok =
                    RoutineTest.record_architecture_failure(
                      fixture["id"],
                      fixture["identifier"],
-                     head,
+                     base,
                      {:error, {:bound_merge_incomplete, 10, reason <> ": gate"}}
                    )
-        end)
-
-        assert {:ok, %{"fixtures" => [%{"complete" => false}]}} = stage.("probe")
-
-        Agent.update(ctx.source_agent, fn state ->
-          Map.update(state, :histories, %{fixture["id"] => [%{"state" => %{"name" => "BLOCKER"}}]}, &Map.put(&1, fixture["id"], [%{"state" => %{"name" => "BLOCKER"}}]))
         end)
       end
 

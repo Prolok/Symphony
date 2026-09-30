@@ -161,9 +161,12 @@ Bei blockierender Abhängigkeit nennt `kind=wait` stattdessen die Abhängigkeit
 als Wartegrund, auch wenn ein Auftrag im Workpad steht; ein Digest entfällt.
 `kind=escalate` ist ausschließlich für strategische Produktentscheidungen oder
 Zugang/Rechte zulässig, die weder Agent noch Betreiber erhalten können. Eine echte
-Eskalation belässt den Status, entfernt die Agentdelegation, weist den konfigurierten
-Menschen allein zu und zeigt Frage und Empfehlung im Ticket. Menschliche
-Neudelegation durch einen gleichgestellten Linear-Akteur gilt als Entscheidung
+Eskalation belässt den Status, entfernt die Agentdelegation, weist standardmäßig den
+konfigurierten Menschen allein zu und zeigt Frage und Empfehlung im Ticket. Mit
+[Testprojekt-Opt-in](docs/linear-app.md#eskalationsziel-in-testprojekten) bleibt der
+Assignee erhalten, ausschließlich der verifizierte Trusted Agent wird adressiert;
+die OpenClaw-Benachrichtigung entfällt. Diese Ausnahme gilt für `kind=escalate`
+auch in `BLOCKER`. Die Neudelegation durch einen gleichgestellten Linear-Akteur gilt als Entscheidung
 und weckt den nächsten Lauf.
 
 Prüfe den dokumentierten gemergten Stand anhand der Anforderungen aller
@@ -306,7 +309,7 @@ sondern übergibt Ursache, Versuche, Vorschlag und benötigte Entscheidung.
 Live-/Host-/Zielumgebungs- und isolierte Integrationsnachweise aus dem Workpad
 sind bei Delegation erst hier in `Yolo Review` fällig; Belege tragen den
 Produkt-Quellhash gemäß `docs/linear-app.md`.
-Alle vier Werte konkret ausfüllen. Bei aktiviertem OpenClaw sendet Symphony
+Alle vier Werte konkret ausfüllen. Ohne Testprojekt-Opt-in sendet Symphony bei aktiviertem OpenClaw
 Ticketlink, Ursache, Versuche, Lösungsvorschlag, benötigte Entscheidung und
 Vorschlags-ID an den bereits gespeicherten normalen Kanal des gebundenen Agenten.
 Routineberichte werden nicht versandt. Ein unklarer Versand bleibt journalisiert

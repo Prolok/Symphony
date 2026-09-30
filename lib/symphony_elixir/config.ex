@@ -203,6 +203,7 @@ defmodule SymphonyElixir.Config do
     |> bridge_binding(tracker.openclaw_linear_bridge)
     |> advisory_binding(tracker.advisory_agent_ids)
     |> advisory_binding(tracker.trusted_agent_ids)
+    |> escalation_binding(tracker.escalation_trusted_agent_id)
     |> hop_binding(tracker.agent_hop_limit)
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
@@ -217,6 +218,9 @@ defmodule SymphonyElixir.Config do
 
   defp hop_binding(binding, 10), do: binding
   defp hop_binding(binding, limit), do: {binding, limit}
+
+  defp escalation_binding(binding, nil), do: binding
+  defp escalation_binding(binding, id), do: {binding, {:escalation_trusted_agent, id}}
 
   @spec settings!() :: Schema.t()
   def settings! do
@@ -382,6 +386,9 @@ defmodule SymphonyElixir.Config do
   @spec openclaw_yolo_agent() :: String.t() | nil
   def openclaw_yolo_agent, do: settings!().tracker.openclaw_yolo_agent
 
+  @spec escalation_trusted_agent_id() :: String.t() | nil
+  def escalation_trusted_agent_id, do: settings!().tracker.escalation_trusted_agent_id
+
   @spec yolo_agent_id() :: String.t() | nil
   def yolo_agent_id do
     case ProjectContext.current() do
@@ -447,7 +454,18 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_semantics(settings) do
-    with :ok <- validate_openclaw(settings.tracker), do: validate_tracker_semantics(settings)
+    with :ok <- validate_escalation_target(settings.tracker),
+         :ok <- validate_openclaw(settings.tracker) do
+      validate_tracker_semantics(settings)
+    end
+  end
+
+  defp validate_escalation_target(%{escalation_trusted_agent_id: nil}), do: :ok
+
+  defp validate_escalation_target(tracker) do
+    if tracker.escalation_trusted_agent_id in tracker.trusted_agent_ids,
+      do: :ok,
+      else: {:error, :linear_escalation_trusted_agent_not_trusted}
   end
 
   defp validate_openclaw(%{openclaw_yolo_agent: nil}), do: :ok

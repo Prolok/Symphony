@@ -351,6 +351,9 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   Gleiche dauerhafte Zustellfehler erhalten Abstände von 5 bis 15 Minuten;
   ein neuer Fehlergrund zunächst 30 Sekunden. Linear wird nur bei Fälligkeit gelesen. Neue Relay-Epoche,
   Neustart oder wieder verfügbare Normalroute erlauben sofortige Prüfung.
+  Testprojekte können Eskalationen ausschließlich an einen verifizierten Trusted
+  Agent richten; Assignee bleibt erhalten, OpenClaw-Benachrichtigungen bleiben
+  stumm: [Projekt-Opt-in](docs/linear-app.md#eskalationsziel-in-testprojekten).
 - Jedes Projekt hat ein eigenes Codex-Home mit genau seiner Trust-Freigabe
   (bei Git-Worktrees für den Git-common-root). Abweichungen der erzeugten
   `config.toml` oder der geprüften Repository-Skills blockieren den
@@ -538,7 +541,7 @@ bleiben wirksam; ein Review-Skip ersetzt keinen Betreiberbeleg.
 | `Merge (AI)` | Ja | Merge-Ablauf mit `symphony-land` ausführen; automatische Commits sind hier zulässig. Wenn Pull, Konfliktlösung oder andere Merge-Dateiänderungen neue Änderungen erzeugen oder übernehmen, nach `Test (AI)` zurückspringen. Wenn `Requires Manual Review` ohne gültiges GitHub-Approval blockiert oder der aktuelle Linear-Labelstand nicht verifizierbar ist, nach `BLOCKER` verschieben. | Bei Agentdelegation `Yolo Review`, sonst `Review`; bei Merge-Dateiänderungen `Test (AI)`; bei fehlendem gültigem Manual-Review-Approval oder nicht verifizierbarem Labelstand `BLOCKER` |
 | `BLOCKER` | PO-Sonderlauf bei Agentdelegation | Der delegierte Betreiberagent bearbeitet fällige Hindernisse. Gleiche Ursache binnen 24 Stunden führt ohne zweiten Agentenlauf zur menschlichen Eskalation. Ohne Delegation auf Entblockung warten. | Nach belegter Entblockung regulär fortsetzen |
 | `Abbruch (AI)` | Ja | Laufende Arbeit sofort abbrechen und Cleanup ausführen. | `Abgebrochen` |
-| `Yolo Review` | PO-Sonderlauf | Schlussabnahme agentendelegierter gemergter Tickets samt Folgefixkette nach `WORKFLOW_YOLO_AGENT.md`; Betreiberpflichten warten quellengebunden auf Pai-Bestätigung, echte Eskalationen entziehen die Delegation und übergeben an den Menschen; kein regulärer Codingstart, nur geprüfter Abschluss nach `Review`. | Bei Abnahme `Review` mit entfernter Delegation; bei Eskalation weiterhin `Yolo Review` ohne Delegation |
+| `Yolo Review` | PO-Sonderlauf | Schlussabnahme agentendelegierter gemergter Tickets samt Folgefixkette nach `WORKFLOW_YOLO_AGENT.md`; Betreiberpflichten warten quellengebunden auf Pai-Bestätigung, echte Eskalationen entziehen die Delegation und übergeben an das konfigurierte Eskalationsziel (Standard: Mensch); kein regulärer Codingstart, nur geprüfter Abschluss nach `Review`. | Bei Abnahme `Review` mit entfernter Delegation; bei Eskalation weiterhin `Yolo Review` ohne Delegation |
 | `Review` | Nein | Terminaler Übergabestatus nach dem Merge; keine weitere automatische Aktion, Verschieben nach `Fertig` durch einen gleichgestellten Linear-Akteur. | - |
 | `Fertig` | Nein | Terminaler Status; keine weitere Aktion erforderlich. | - |
 | `Abgebrochen` | Nein | Terminaler Status nach explizitem Abbruch; keine weitere Aktion erforderlich. | - |

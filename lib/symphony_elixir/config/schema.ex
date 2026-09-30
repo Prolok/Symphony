@@ -72,6 +72,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:yolo_agent, :string)
       field(:advisory_agent_ids, {:array, :string}, default: [])
       field(:trusted_agent_ids, {:array, :string}, default: [])
+      field(:escalation_trusted_agent_id, :string)
       field(:agent_hop_limit, :integer, default: 10)
       field(:openclaw_yolo_agent, :string)
       field(:openclaw_linear_bridge, :map)
@@ -88,12 +89,13 @@ defmodule SymphonyElixir.Config.Schema do
 
       attrs = Map.put(attrs, "advisory_agent_ids", advisory_ids(Map.get(attrs, "advisory_agent_ids", SymphonyElixir.ProjectContext.env("LINEAR_ADVISORY_AGENT_IDS"))))
       attrs = Map.put(attrs, "trusted_agent_ids", trusted_ids(Map.get(attrs, "trusted_agent_ids", SymphonyElixir.ProjectContext.env("LINEAR_TRUSTED_AGENT_IDS"))))
+      attrs = Map.put(attrs, "escalation_trusted_agent_id", escalation_id(Map.get(attrs, "escalation_trusted_agent_id", SymphonyElixir.ProjectContext.env("LINEAR_ESCALATION_TRUSTED_AGENT_ID"))))
       {attrs, bridge_error} = lifecycle_bridge(attrs)
 
       schema
       |> cast(
         attrs,
-        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent advisory_agent_ids trusted_agent_ids agent_hop_limit openclaw_yolo_agent openclaw_linear_bridge active_states terminal_states)a,
+        ~w(kind endpoint auth_mode app relay project_slug team_key assignee yolo_agent advisory_agent_ids trusted_agent_ids escalation_trusted_agent_id agent_hop_limit openclaw_yolo_agent openclaw_linear_bridge active_states terminal_states)a,
         empty_values: []
       )
       |> validate_bridge_source(bridge_error)
@@ -106,6 +108,9 @@ defmodule SymphonyElixir.Config.Schema do
       end)
       |> validate_change(:trusted_agent_ids, fn field, ids ->
         if length(ids) <= 20 and Enum.all?(ids, &match?({:ok, _}, Ecto.UUID.cast(&1))), do: [], else: [{field, "must contain at most 20 app-user UUIDs"}]
+      end)
+      |> validate_change(:escalation_trusted_agent_id, fn field, id ->
+        if match?({:ok, _}, Ecto.UUID.cast(id)), do: [], else: [{field, "must be one trusted app-user UUID"}]
       end)
       |> validate_number(:agent_hop_limit, greater_than: 0)
     end
@@ -146,6 +151,17 @@ defmodule SymphonyElixir.Config.Schema do
         invalid -> invalid
       end
     end
+
+    defp escalation_id("$" <> name), do: escalation_id(SymphonyElixir.ProjectContext.env(name))
+
+    defp escalation_id(value) when is_binary(value) do
+      case value |> String.trim() |> String.downcase() do
+        "" -> nil
+        id -> id
+      end
+    end
+
+    defp escalation_id(value), do: value
   end
 
   defmodule Polling do

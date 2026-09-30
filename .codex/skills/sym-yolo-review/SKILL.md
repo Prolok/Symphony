@@ -149,6 +149,9 @@ auch ohne Abhängigkeit; Pai bestätigt mit aktuellem Auftrags-Digest, Ergebnis 
 Beleg. `kind=escalate` nur für strategische Produktentscheidungen oder Zugang/Rechte,
 die weder Agent noch Betreiber erhalten können. Die Eskalation belässt den Status,
 entfernt die Delegation und übergibt Frage und Empfehlung sichtbar an den Menschen.
+Mit [Testprojekt-Opt-in](../../../docs/linear-app.md#eskalationsziel-in-testprojekten)
+bleibt der Assignee erhalten; ausschließlich der verifizierte Trusted Agent wird
+adressiert und die OpenClaw-Benachrichtigung entfällt.
 Neudelegation durch den konfigurierten Menschen oder einen verifizierten
 gelisteten Agenten ist dessen gleichgestellte Linear-Entscheidung.
 `review_contract.binding` unverändert übernehmen. Neue Anforderungen außerhalb

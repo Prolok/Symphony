@@ -194,7 +194,8 @@ defmodule SymphonyElixir.ProjectContext do
   defp accept_refreshed_context({:ok, %{workflow: workflow, env: env}}, %{workflow: workflow, env: env} = context), do: context
 
   defp accept_refreshed_context({:ok, updated}, context) do
-    keys = ~w(auth_mode app relay assignee yolo_agent advisory_agent_ids trusted_agent_ids agent_hop_limit openclaw_yolo_agent openclaw_linear_bridge endpoint kind project_slug team_key)a
+    keys =
+      ~w(auth_mode app relay assignee yolo_agent advisory_agent_ids trusted_agent_ids escalation_trusted_agent_id agent_hop_limit openclaw_yolo_agent openclaw_linear_bridge endpoint kind project_slug team_key)a
 
     if Map.take(updated.settings.tracker, keys) == Map.take(context.settings.tracker, keys) and
          updated.settings.workspace.root == context.settings.workspace.root and

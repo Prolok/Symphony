@@ -678,10 +678,59 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     refute_receive :review_started
   end
 
-  test "trusted app redelegation restarts an ended delivery once after escalation", %{issues: [issue | _], context: context} do
-    tracker = %{context.settings.tracker | trusted_agent_ids: ["pai-app"]}
+  test "trusted escalation prevents coordinator route retries of existing human notifications", %{issues: [issue | _], context: context} do
+    agent = "b57e9f80-53ce-4d96-9180-370f03d60d16"
+    tracker = %{context.settings.tracker | trusted_agent_ids: [agent], openclaw_yolo_agent: "po"}
     context = %{context | settings: %{context.settings | tracker: tracker}, trusted_binding: CommentVersion.digest([tracker.app, tracker.trusted_agent_ids])}
     ProjectContext.bind(context)
+    issue = %{issue | state: "Yolo Review", delegate_id: nil, url: "https://linear.app/test/PRO-1"}
+    proposal = %{"escalation" => %{"cause" => "Route fehlt", "attempts" => "Geprüft", "proposal" => "Route prüfen", "decision" => "Freigeben?"}}
+    assert {:error, :route_missing} = Escalation.notify(issue, proposal, escalation_route: fn _, _ -> {:error, :route_missing} end)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    state =
+      tick(state, [issue],
+        escalation_route: fn _, _ ->
+          send(self(), :human_route_retried)
+          {:error, :route_missing}
+        end,
+        fetch: fn _ ->
+          send(self(), :human_retry_fetched)
+          {:ok, [issue]}
+        end,
+        start: fn _, _ -> flunk("withdrawn delegation must not start work") end
+      )
+
+    assert_receive :human_route_retried
+    assert_receive :human_retry_fetched
+    assert {:ok, before} = Store.read("escalation:" <> issue.id)
+    ProjectContext.bind(put_in(context.settings.tracker.escalation_trusted_agent_id, agent))
+
+    options = [
+      escalation_route: fn _, _ -> flunk("pending human routes must stay suppressed") end,
+      escalation_send: fn _, _, _ -> flunk("pending human messages must stay suppressed") end,
+      fetch: fn _ -> flunk("suppressed retries must not fetch Linear") end,
+      start: fn _, _ -> flunk("withdrawn delegation must not start work") end
+    ]
+
+    stopped = Enum.reduce(1..10, state, fn _, acc -> tick(acc, [issue], options) end)
+    assert stopped.yolo_retries.notifications == %{}
+    assert {:ok, ^before} = Store.read("escalation:" <> issue.id)
+  end
+
+  test "trusted app redelegation restarts an ended delivery once after escalation", %{issues: [issue | _], context: context} do
+    agent = "b57e9f80-53ce-4d96-9180-370f03d60d16"
+
+    tracker = %{
+      context.settings.tracker
+      | trusted_agent_ids: [agent],
+        escalation_trusted_agent_id: agent,
+        openclaw_yolo_agent: "po"
+    }
+
+    context = %{context | yolo_agent_id: agent, settings: %{context.settings | tracker: tracker}, trusted_binding: CommentVersion.digest([tracker.app, tracker.trusted_agent_ids])}
+    ProjectContext.bind(context)
+    issue = %{issue | delegate_id: agent}
     state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
 
     baseline = %{
@@ -695,24 +744,25 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       "botActor" => nil
     }
 
-    withdrawn = %{baseline | "id" => "escalated", "createdAt" => "2026-09-24T12:03:00Z", "fromDelegate" => %{"id" => "pai"}}
+    withdrawn = %{baseline | "id" => "escalated", "createdAt" => "2026-09-24T12:03:00Z", "fromDelegate" => %{"id" => agent}}
 
     redelegated = %{
       baseline
       | "id" => "pai-redelegated",
         "createdAt" => "2026-09-24T12:04:00Z",
-        "toDelegate" => %{"id" => "pai"},
-        "actor" => %{"id" => "pai-app", "app" => true}
+        "toDelegate" => %{"id" => agent},
+        "actor" => %{"id" => agent, "app" => true}
     }
 
     event = fn position -> %{"generation" => "relay", "position" => position, "event_id" => "event-#{position}"} end
     Process.put(:history_nodes, [baseline])
     Process.put(:review_issue, %{issue | relay_event: event.(1)})
+    Process.put(:session_nodes, [])
 
     opts = [
       scan: &scan/1,
       history: fn _ -> {:ok, Process.get(:history_nodes)} end,
-      sessions: fn _ -> {:ok, []} end,
+      sessions: fn _ -> {:ok, Process.get(:session_nodes)} end,
       start: fn group, _ ->
         complete_observation(group, Process.get(:review_issue), scan: &scan/1)
         send(self(), :review_started)
@@ -726,14 +776,65 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     tick(state, [issue], opts)
     refute_receive :review_started
 
-    tick(state, [%{issue | delegate_id: nil, relay_event: event.(2)}], opts)
+    proposal = %{"escalation" => %{"cause" => "Frage", "attempts" => "Geprüft", "proposal" => "A", "decision" => "A?"}}
+    profile = "https://linear.app/test/profiles/pai"
+
+    escalation_opts = [
+      query: fn _, _ ->
+        user = %{"id" => agent, "app" => true, "active" => true, "isMentionable" => true, "url" => profile, "organization" => %{"id" => tracker.app["workspace_id"]}}
+        {:ok, %{"data" => %{"users" => %{"nodes" => [user], "pageInfo" => %{"hasNextPage" => false}}}}}
+      end,
+      comments: fn _ -> {:ok, Process.get(:escalation_notes, [])} end,
+      escalation_comment: fn _, body ->
+        Process.put(:escalation_notes, [%{body: body}])
+        :ok
+      end,
+      escalation_route: fn _, _ -> flunk("trusted target must not notify the human") end,
+      escalation_send: fn _, _, _ -> flunk("trusted target must not send") end
+    ]
+
+    assert :ok =
+             Escalation.handover(issue, proposal, escalation_opts, fn original, input, _ ->
+               assert input == %{delegateId: nil}
+               Process.put(:escalated_issue, %{original | delegate_id: nil})
+               :ok
+             end)
+
+    assert :ok = Escalation.notify(issue, proposal, escalation_opts)
+    assert [%{body: body}] = Process.get(:escalation_notes)
+    assert body =~ profile
+    assert body =~ agent
+    refute body =~ "human"
+    escalated = Process.get(:escalated_issue)
+    assert escalated.assignee_id == issue.assignee_id
+    assert escalated.state == issue.state
+    Process.put(:history_nodes, [withdrawn, baseline])
+
+    mention_session = %{
+      "id" => "mention",
+      "createdAt" => "2026-09-24T12:03:01Z",
+      "appUser" => %{"id" => agent},
+      "issue" => %{"id" => issue.id},
+      "sourceComment" => %{"id" => "escalation-note"},
+      "comment" => %{"id" => "mention-root", "issue" => %{"id" => issue.id}, "isArtificialAgentSessionRoot" => true}
+    }
+
+    Process.put(:session_nodes, [mention_session])
+    tick(state, [%{escalated | relay_event: event.(2)}], opts)
     refute_receive :review_started
+    # Even with a delegated snapshot, a mention session is no delegation impulse.
+    tick(state, [%{issue | relay_event: event.(2)}], opts)
+    refute_receive :review_started
+    assert {:ok, observed} = Store.read("incoming")
+    assert observed["impulses"][issue.id]["reason"] == "no_relevant_history"
 
     Process.put(:history_nodes, [redelegated, withdrawn, baseline])
     issue = %{issue | relay_event: event.(3)}
     Process.put(:review_issue, issue)
     tick(%Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}, [issue], opts)
     assert_receive :review_started
+    assert {:ok, observed} = Store.read("incoming")
+    assert observed["impulses"][issue.id]["reason"] == "delegated_again"
     for _ <- 1..3, do: tick(state, [issue], opts)
     refute_receive :review_started
   end

@@ -1115,8 +1115,8 @@ gebundenes Workflow-Ticket im Dummy-Projekt. Sie verlangen einen Kandidaten mit
 Architekturvertrag und belegen grüne bzw. rote Prüfung sowie begründete bzw.
 zunächst unbegründete Regeländerung samt Korrektur und Merge im Workpad.
 Die Auswertung gleicht die Architekturpfade mit dem gemergten PR-Diff ab;
-rote Fälle benötigen zusätzlich einen gebundenen Fehlerbeleg des Merge-Aufrufs
-und einen beobachteten `BLOCKER`-Status.
+rote Fälle benötigen zusätzlich einen an Quelle, Issue, Head und Grund gebundenen
+Fehlerbeleg des Merge-Aufrufs; ein `BLOCKER`-Status ist dafür nicht erforderlich.
 Diese Teilprüfungen ersetzen keinen geforderten Test-/Merge-Nachweis.
 
 Ein Live-Lauf verlangt identischen HEAD/Quellhash von Kandidat und tatsächlich

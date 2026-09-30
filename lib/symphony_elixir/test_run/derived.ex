@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.TestRun.Derived do
   @moduledoc "Run-owned aggregation/follow-up fixtures; their IDs never authorize implementation workers."
   alias SymphonyElixir.{Config, ProjectContext, Projects, TestInstance}
-  alias SymphonyElixir.Linear.{Description, DurableState, IssueLease}
-  alias SymphonyElixir.Yolo.{API, Operations, Relations}
+  alias SymphonyElixir.Linear.{DurableState, IssueLease}
+  alias SymphonyElixir.Yolo.{API, FixContract, Operations, Relations}
 
   @spec allowed?(map()) :: boolean()
   def allowed?(request) do
@@ -135,7 +135,7 @@ defmodule SymphonyElixir.TestRun.Derived do
 
     same =
       issue["id"] == input["id"] and issue["title"] == input["title"] and
-        Description.equivalent?(input["description"], issue["description"]) and
+        FixContract.equivalent?(input["description"], issue["description"]) and
         get_in(issue, ["project", "id"]) == input["projectId"] and get_in(issue, ["team", "id"]) == input["teamId"] and
         get_in(issue, ["assignee", "id"]) == input["assigneeId"] and get_in(issue, ["delegate", "id"]) == input["delegateId"] and
         get_in(issue, ["state", "id"]) == input["stateId"]

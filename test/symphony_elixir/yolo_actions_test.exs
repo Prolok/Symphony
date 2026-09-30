@@ -4,7 +4,7 @@ defmodule SymphonyElixir.YoloActionsTest do
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{ActionScope, ActionTool, Admission, API, Followup, GeneratedLabel, Handoff, Operations}
   alias SymphonyElixir.Yolo.{Completion, Coordinator, Group, Relations, ReviewContract, Runner, Scope, Store}
-  alias SymphonyElixir.Yolo.{Delivery, Observation}
+  alias SymphonyElixir.Yolo.{Delivery, FixContract, Observation}
   alias SymphonyElixir.YoloReviewFixture, as: ReviewFixture
 
   @trusted "b57e9f80-53ce-4d96-9180-370f03d60d16"
@@ -107,6 +107,17 @@ defmodule SymphonyElixir.YoloActionsTest do
   end
 
   defp respond("YoloCreatedIssue", _, %{"id" => id}), do: ok("issues", connection(if(db().created[id], do: [db().created[id]], else: [])))
+
+  defp respond("YoloLegacyFixLabels", _, %{"id" => id}) do
+    labels = Enum.map(db().created[id]["labelIds"] || [], &%{"id" => &1, "name" => "symphony-generated"})
+    ok("issue", %{"labels" => connection(labels)})
+  end
+
+  defp respond("YoloProjectFixes", _, %{"id" => project}) do
+    tickets = Enum.filter(Map.values(db().created), &(&1["projectId"] == project))
+    ok("project", %{"issues" => connection(tickets)})
+  end
+
   defp respond("YoloCreatedHistory", _, _), do: ok("issue", %{"history" => connection(db().history)})
 
   defp respond("YoloCreatedLabels", _, %{"id" => id}), do: ok("issue", %{"labels" => connection(Enum.map(db().created[id]["labelIds"], &%{"id" => &1}))})
@@ -207,8 +218,8 @@ defmodule SymphonyElixir.YoloActionsTest do
     ]
   end
 
-  defp args(issues, kind \\ "aggregate"),
-    do: %{
+  defp args(issues, kind \\ "aggregate") do
+    request = %{
       "kind" => kind,
       "origin_ids" => Enum.map(issues, & &1.id),
       "operation_key" => "finding-one",
@@ -217,11 +228,281 @@ defmodule SymphonyElixir.YoloActionsTest do
       "validation" => "- [ ] Behaviour checked"
     }
 
+    if kind == "followup" do
+      Map.merge(request, %{
+        "followup_type" => "fix",
+        "component" => "yolo/followup",
+        "prevention" => %{"kind" => "test", "change" => "Add a regression for the observed behaviour", "validation" => "The test fails before the fix and passes after it"}
+      })
+    else
+      request
+    end
+  end
+
   defp group(issues, fun), do: Scope.with_scope("incoming", issues, "run", fun, workspace: Process.get(:review_workspace))
 
   defp handoff(args, options), do: Handoff.invoke(Map.put_new(args, "review", ReviewFixture.evidence()), options)
   defp writes(name), do: Enum.filter(db().calls, &(elem(&1, 0) == name))
   defp relation(from, to), do: %{"id" => "#{from}:#{to}", "type" => "blocks", "issue" => %{"id" => from}, "relatedIssue" => %{"id" => to}}
+
+  test "new fix creation requires prevention before reserving or creating an issue", %{issues: [issue | _]} do
+    request = args([issue], "followup") |> Map.delete("prevention")
+
+    group([issue], fn ->
+      assert {:error, :yolo_fix_prevention_required} = Followup.invoke(request, opts())
+      assert {:ok, []} = Operations.pending([issue.id])
+      assert writes("YoloCreate") == []
+    end)
+  end
+
+  test "provenance retains exact contract bytes and existing Markdown equivalence", %{issues: [source | _]} do
+    suffix = FixContract.description(args([source], "followup"))
+    assert FixContract.equivalent?("Text.\n- a" <> suffix, "Text.\n\n* a" <> suffix)
+    refute FixContract.equivalent?("Text" <> suffix, "Text" <> String.replace(suffix, "yolo/followup", "other/component"))
+    refute FixContract.equivalent?("Text" <> suffix, "Text")
+    refute FixContract.equivalent?("Text" <> suffix, "Changed" <> suffix)
+    assert FixContract.equivalent?("Text" <> suffix <> "\n\nLater.\n- a", "Text" <> suffix <> "\n\nLater.\n\n* a")
+    refute FixContract.equivalent?("Text" <> suffix <> "\n\nLater.", "Text" <> suffix <> "\n\nChanged later.")
+    assert FixContract.equivalent?(nil, nil)
+    refute FixContract.equivalent?(nil, "Text")
+    schema = ActionTool.tool_spec()["inputSchema"]["properties"]
+    assert schema["followup_type"]["enum"] == ~w(fix consolidation new_requirement)
+    assert schema["prevention"]["required"] == ~w(kind change validation)
+    assert schema["consolidation"]["properties"]["net_code_target"]["maximum"] == 0
+  end
+
+  defp consolidate(request) do
+    Map.merge(request, %{
+      "followup_type" => "consolidation",
+      "consolidation" => %{
+        "cause" => "Repeated gap in shared implementation",
+        "cleanup" => "Replace duplicate logic with one module",
+        "fixes" => "Correct the observed failure",
+        "net_code_target" => 0
+      }
+    })
+  end
+
+  for yolo <- [false, true], prevention <- ["test", "lint"], type <- ["fix", "consolidation"] do
+    test "#{type} with #{prevention} supports wait without architecture or prereview, yolo=#{yolo}", ctx do
+      ProjectContext.bind(%{ctx.context | yolo: unquote(yolo)})
+      source = %{hd(ctx.issues) | state: "Yolo Review"}
+      change(&%{&1 | issues: %{source.id => source}})
+      refute File.exists?(Path.join(ctx.workspace.path, "docs/architecture/contract.json"))
+      refute File.exists?(Path.join(ctx.workspace.path, ".codex/skills/sym-prereview/SKILL.md"))
+      request = args([source], "followup") |> Map.put("blocks_origins", true) |> put_in(["prevention", "kind"], unquote(prevention))
+      request = if unquote(type) == "consolidation", do: consolidate(request), else: request
+      finding = hd(ReviewFixture.findings()) |> Map.put("followup_operation_key", request["operation_key"])
+
+      Scope.with_scope(
+        "review",
+        [source],
+        "run",
+        fn ->
+          {:ok, record} = Store.read("review")
+          :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [source.id]}))
+          assert {:ok, created} = Followup.invoke(request, opts())
+          assert db().created[created["id"]]["delegate"]["id"] == "pai"
+          assert db().created[created["id"]]["assignee"]["id"] == "human"
+          assert db().relations == [relation(created["id"], source.id) |> Map.put("id", hd(db().relations)["id"])]
+          waiting = %{source | blocked_by: [%{id: created["id"], state: "Backlog"}]}
+          change(&%{&1 | issues: %{source.id => waiting}})
+          evidence = Map.put(ReviewFixture.evidence(), "findings", [finding])
+          assert :ok = Handoff.invoke(%{"kind" => "wait", "issue_id" => source.id, "report" => "Waiting for fix", "review" => evidence}, opts())
+          assert db().issues[source.id].state == "Yolo Review"
+          assert db().issues[source.id].delegate_id == "pai"
+        end,
+        workspace: ctx.workspace
+      )
+    end
+  end
+
+  for journal <- [true, false], origin_is_fix <- [true, false] do
+    test "second fix requires consolidation with journal=#{journal}, origin_is_fix=#{origin_is_fix}", ctx do
+      source = %{hd(ctx.issues) | state: "Yolo Review"}
+      other = %{Enum.at(ctx.issues, 1) | state: "Yolo Review"}
+      change(&%{&1 | issues: %{source.id => source, other.id => other}})
+      first = args([source], "followup") |> put_in(["prevention", "change"], "Test `the shared module` before merge")
+      group([source], fn -> assert {:ok, _} = Followup.invoke(first, opts()) end)
+      [{fix_id, fix}] = Map.to_list(db().created)
+      prior = %{source | id: fix_id, description: fix["description"]}
+      next = if unquote(origin_is_fix), do: prior, else: other
+      change(&%{&1 | issues: Map.put(&1.issues, next.id, next)})
+
+      if Enum.member?([false], unquote(journal)) do
+        {:ok, [intent]} = Operations.related([source.id])
+        File.rm!(Operations.path(intent["key"]))
+      end
+
+      request = args([next], "followup") |> Map.put("operation_key", "second")
+      # Changing the component must not hide a direct follow-up chain.
+      request = if unquote(origin_is_fix), do: Map.put(request, "component", "another/component"), else: request
+
+      Scope.with_scope(
+        "review",
+        [next],
+        "run",
+        fn ->
+          assert {:error, :yolo_consolidation_required} = Followup.invoke(request, opts())
+          assert {:ok, []} = Operations.pending([next.id])
+          assert length(writes("YoloCreate")) == 1
+          assert {:ok, created} = Followup.invoke(consolidate(request), opts())
+          assert db().created[created["id"]]["description"] =~ "net_code_target"
+          assert length(writes("YoloCreate")) == 2
+        end,
+        workspace: ctx.workspace
+      )
+    end
+  end
+
+  test "new requirements and aggregates do not count as fixes, even with the same component", ctx do
+    source = %{hd(ctx.issues) | state: "Yolo Review"}
+    change(&%{&1 | issues: %{source.id => source}})
+    requirement = args([source], "followup") |> Map.put("followup_type", "new_requirement")
+    group([source], fn -> assert {:ok, _} = Followup.invoke(requirement, opts()) end)
+    group([source], fn -> assert {:ok, _} = Followup.invoke(args([source]), opts()) end)
+    source = %{source | state: "Yolo Review"}
+    change(&%{&1 | issues: %{source.id => source}})
+
+    Scope.with_scope(
+      "review",
+      [source],
+      "run",
+      fn ->
+        assert {:ok, _} = Followup.invoke(Map.put(args([source], "followup"), "operation_key", "actual-fix"), opts())
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "remote fix provenance survives a later description section without a local journal", ctx do
+    source = %{hd(ctx.issues) | state: "Yolo Review"}
+    change(&%{&1 | issues: %{source.id => source}})
+    group([source], fn -> assert {:ok, _} = Followup.invoke(args([source], "followup"), opts()) end)
+    [{fix_id, fix}] = Map.to_list(db().created)
+    description = fix["description"] <> "\n\n## Ergänzung\n\nBestätigte fachliche Präzisierung."
+    prior = %{source | id: fix_id, description: description}
+    change(&%{&1 | issues: %{prior.id => prior}, created: put_in(&1.created, [fix_id, "description"], description)})
+    {:ok, [intent]} = Operations.related([source.id])
+    File.rm!(Operations.path(intent["key"]))
+    request = args([prior], "followup") |> Map.put("component", "another/component")
+
+    Scope.with_scope(
+      "review",
+      [prior],
+      "run",
+      fn ->
+        assert {:error, :yolo_consolidation_required} = Followup.invoke(request, opts())
+        assert length(writes("YoloCreate")) == 1
+        assert {:ok, _} = Followup.invoke(consolidate(request), opts())
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "an aggregate's copied origin contract is not its own fix provenance", ctx do
+    [source, other | _] = ctx.issues
+    source = %{source | description: "Copied requirement" <> FixContract.description(args([source], "followup"))}
+    change(&%{&1 | issues: Map.put(&1.issues, source.id, source)})
+    group([source], fn -> assert {:ok, _} = Followup.invoke(args([source]), opts()) end)
+    other = %{other | state: "Yolo Review"}
+    change(&%{&1 | issues: Map.put(&1.issues, other.id, other)})
+
+    Scope.with_scope(
+      "review",
+      [other],
+      "run",
+      fn ->
+        assert {:ok, _} = Followup.invoke(args([other], "followup"), opts())
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
+  test "malformed prevention and consolidation do not reserve an operation; missing local skill permits a test", %{issues: [source | _], root: root} do
+    request = args([source], "followup")
+
+    group([source], fn ->
+      for invalid <- [nil, %{}, %{"kind" => "test", "change" => "", "validation" => "run"}, %{"kind" => "unknown", "change" => "test", "validation" => "run"}] do
+        assert {:error, :yolo_fix_prevention_required} = Followup.invoke(Map.put(request, "prevention", invalid), opts())
+      end
+
+      assert {:error, :yolo_followup_type_required} = Followup.invoke(Map.delete(request, "followup_type"), opts())
+      assert {:error, :yolo_fix_component_required} = Followup.invoke(Map.put(request, "component", ""), opts())
+      assert {:error, :yolo_fix_requires_test_or_rule} = Followup.invoke(put_in(request, ["prevention", "kind"], "prereview"), opts())
+
+      for invalid <- [nil, %{}, %{"cause" => "repeat", "cleanup" => "replace", "fixes" => "failure", "net_code_target" => 1}] do
+        assert {:error, :yolo_consolidation_required} = Followup.invoke(Map.put(consolidate(request), "consolidation", invalid), opts())
+      end
+
+      assert {:error, :yolo_requirement_cannot_block_acceptance} = Followup.invoke(Map.merge(request, %{"followup_type" => "new_requirement", "blocks_origins" => true}), opts())
+      assert {:ok, []} = Operations.pending([source.id])
+      assert {:ok, _} = Followup.invoke(request, opts())
+    end)
+
+    path = Path.join(root, ".codex/skills/sym-prereview/SKILL.md")
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "Existing checklist")
+
+    WriteContext.with_context(%{issue_id: source.id}, fn ->
+      active = %{source | state: "Test (AI)"}
+      change(&%{&1 | issues: %{source.id => active}})
+      assert {:ok, _} = Followup.invoke(request |> Map.put("operation_key", "local-check") |> put_in(["prevention", "kind"], "prereview"), opts())
+    end)
+  end
+
+  test "legacy reserved followup resumes unchanged and counts when it is the next origin", ctx do
+    source = %{hd(ctx.issues) | state: "Yolo Review"}
+    change(&%{&1 | issues: %{source.id => source}})
+    request = args([source], "followup") |> Map.drop(~w(followup_type component prevention)) |> Map.put("blocks_origins", true)
+    key = "followup:#{source.id}:#{request["operation_key"]}"
+    assert :ok = Operations.run(key, request, fn _ -> :ok end)
+
+    group([source], fn ->
+      change(&%{&1 | fail: "YoloCreate"})
+      assert {:error, :response_lost} = Followup.invoke(request, opts())
+      change(&%{&1 | fail: nil})
+      assert {:ok, fix} = Followup.invoke(request, opts())
+      assert {:ok, ^fix} = Followup.invoke(request, opts())
+      File.rm!(Operations.path(key))
+      prior = %{source | id: fix["id"], description: db().created[fix["id"]]["description"]}
+      change(&%{&1 | issues: %{prior.id => prior}})
+
+      Scope.with_scope(
+        "review",
+        [prior],
+        "run2",
+        fn ->
+          assert {:error, :yolo_consolidation_required} = Followup.invoke(args([prior], "followup"), opts())
+        end,
+        workspace: ctx.workspace
+      )
+
+      assert length(writes("YoloCreate")) == 1
+    end)
+  end
+
+  test "remote chain lookup failure remains retryable without a pending creation", ctx do
+    source = %{hd(ctx.issues) | state: "Yolo Review"}
+    change(&%{&1 | issues: %{source.id => source}})
+
+    failing =
+      Keyword.put(opts(), :query, fn document, variables ->
+        if document =~ "YoloProjectFixes", do: {:error, :offline}, else: query(document, variables)
+      end)
+
+    Scope.with_scope(
+      "review",
+      [source],
+      "run",
+      fn ->
+        assert {:error, :offline} = Followup.invoke(args([source], "followup"), failing)
+        assert {:ok, []} = Operations.pending([source.id])
+        assert {:ok, _} = Followup.invoke(args([source], "followup"), opts())
+      end,
+      workspace: ctx.workspace
+    )
+  end
 
   test "relay-stamped review handoff checks fresh blockers without a dependency exception", %{issues: [issue, blocker | _], workspace: workspace} do
     review = %{issue | state: "Yolo Review", last_comment_signal: %{relay_epoch: "current"}}
@@ -951,6 +1232,8 @@ defmodule SymphonyElixir.YoloActionsTest do
           followup =
             Map.merge(args([source], "followup"), %{
               "operation_key" => finding["followup_operation_key"],
+              "followup_type" => if(finding["category"] == "new_requirement", do: "new_requirement", else: "consolidation"),
+              "consolidation" => %{"cause" => "Repeated acceptance gap", "cleanup" => "Replace faulty implementation", "fixes" => finding["expected"], "net_code_target" => 0},
               "blocks_origins" => finding["category"] != "new_requirement",
               "title" => finding["action"],
               "description" => Jason.encode!(finding),

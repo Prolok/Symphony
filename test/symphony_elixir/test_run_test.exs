@@ -2001,6 +2001,7 @@ defmodule SymphonyElixir.TestRunTest do
       assert length(members) == if(scenario == "po_aggregation", do: 3, else: 1)
       assert Enum.all?(members, &(&1["test_delegate_id"] == "fixture-agent"))
       assert Enum.all?(members, &String.contains?(&1["description"], "po-proof-fixture-run.md"))
+      if scenario == "po_followup", do: assert(hd(members)["description"] =~ "followup_type=consolidation")
       System.put_env("SYMPHONY_TEST_RUN_STAGE", "run")
       assert {:ok, bound} = TestRun.bind_contexts(contexts)
       bound_context = Enum.find(bound, &(&1.name == context.name))

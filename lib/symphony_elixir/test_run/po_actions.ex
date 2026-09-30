@@ -30,7 +30,7 @@ defmodule SymphonyElixir.TestRun.PoActions do
 
   def fixture(%{"initial_state" => "Yolo Review"} = fixture, %{"scenario" => "po_followup"} = plan) do
     description =
-      "Fachlich prüfen, ob docs/po-proof-#{plan["run_id"]}.md im gemergten Checkout die Bedienung des Dummy-Projekts erklärt. Datei tatsächlich prüfen. Bei fehlender Dokumentation genau ein verknüpftes Fix-Ticket mit Anforderungen und Validierung über symphony_yolo_action anlegen. blocks_origins=true verwenden: Folgefix blockiert Ursprung als echte Linear-Relation. Anschließend kind=wait mit Prüf-/Lernbeleg; Ursprung und Delegation in Yolo Review erhalten. Der begrenzte Test endet bei bestätigter Anlage und Warteentscheidung; keine Quelländerung oder Implementierung des Fixes."
+      "Fachlich prüfen, ob docs/po-proof-#{plan["run_id"]}.md im gemergten Checkout die Bedienung des Dummy-Projekts erklärt. Datei tatsächlich prüfen. Bei fehlender Dokumentation genau ein verknüpftes Fix-Ticket mit Anforderungen und Validierung über symphony_yolo_action anlegen. component=po-proof und prevention mit einem konkreten Dokumentationsprüftest und dessen Nachweis angeben. followup_type=fix beim Erstfix; bei einem Vorfix gemäß Kettenregel followup_type=consolidation mit vollständigem consolidation-Auftrag wählen. Das Journal früherer Routineläufe bleibt dafür maßgeblich. blocks_origins=true verwenden: Folgefix blockiert Ursprung als echte Linear-Relation. Anschließend kind=wait mit Prüf-/Lernbeleg; Ursprung und Delegation in Yolo Review erhalten. Der begrenzte Test endet bei bestätigter Anlage und Warteentscheidung; keine Quelländerung oder Implementierung des Fixes."
 
     Map.merge(fixture, %{"po_followup" => true, "po_handoff" => true, "description" => description})
   end

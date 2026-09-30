@@ -101,9 +101,17 @@ defmodule SymphonyElixir.Yolo.ReviewContract do
     Enum.any?(operations, fn operation ->
       operation["request"]["operation_key"] == finding["followup_operation_key"] and operation["done"] == true and
         operation["request"]["kind"] == "followup" and id in (operation["request"]["origin_ids"] || []) and
-        (finding["category"] == "new_requirement" or operation["request"]["blocks_origins"] == true)
+        (finding["category"] == "new_requirement" or operation["request"]["blocks_origins"] == true) and
+        matching_type?(finding, operation["request"])
     end)
   end
+
+  defp matching_type?(finding, %{"followup_type" => type}) do
+    if finding["category"] == "new_requirement", do: type == "new_requirement", else: type in ~w(fix consolidation)
+  end
+
+  # Journaled legacy follow-ups remain valid evidence for their original review.
+  defp matching_type?(_, _), do: true
 
   defp texts?(value, keys), do: Enum.all?(keys, &text?(value[&1]))
   defp text?(value), do: is_binary(value) and String.trim(value) != ""

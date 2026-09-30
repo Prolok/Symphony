@@ -168,12 +168,12 @@ defmodule SymphonyElixir.Projects do
   def handle_info(message, state), do: {:noreply, receive_snapshot(message, state)}
 
   defp globally_idle?(snapshots, now_ms) do
-    snapshots != [] and
-      Enum.all?(snapshots, fn snapshot ->
-        is_map(snapshot) and snapshot.running == [] and snapshot.retrying == [] and
-          Map.get(snapshot, :waiting, []) == [] and snapshot.idle_shutdown_ms > 0 and
-          get_in(snapshot, [:polling, :checking?]) == false
-      end) and
+    # A completed live check contains a response for every configured project.
+    Enum.all?(snapshots, fn snapshot ->
+      is_map(snapshot) and snapshot.running == [] and snapshot.retrying == [] and
+        Map.get(snapshot, :waiting, []) == [] and snapshot.idle_shutdown_ms > 0 and
+        get_in(snapshot, [:polling, :checking?]) == false
+    end) and
       now_ms - Enum.max(Enum.map(snapshots, & &1.last_activity_at_ms)) >=
         Enum.max(Enum.map(snapshots, & &1.idle_shutdown_ms))
   end

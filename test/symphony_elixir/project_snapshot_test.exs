@@ -121,8 +121,28 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     assert result.codex_totals.total_tokens == 0
   end
 
+  test "background retries discover projects that start after an absent observation" do
+    contexts = contexts()
+    pid = start_supervised!({Projects, contexts: contexts, name: __MODULE__})
+    initial_timer = :sys.get_state(pid).projects[hd(contexts).id].timer
+
+    await_snapshot(
+      pid,
+      fn result ->
+        assert result.partial
+        :sys.get_state(pid).projects[hd(contexts).id].timer != initial_timer
+      end,
+      150
+    )
+
+    Enum.each(contexts, &start_server/1)
+    Enum.each(receive_requests(contexts), &reply/1)
+    assert length(await_snapshot(pid, &(not &1.partial)).running) == 2
+  end
+
   test "an unsuccessful reply is a visible project error while other projects remain available" do
-    {pid, _clock, contexts} = start_aggregator()
+    parent = self()
+    {pid, _clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
     pending = receive_requests(contexts)
     {_id, from} = hd(pending)
     GenServer.reply(from, :unavailable)
@@ -132,6 +152,16 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     assert hd(result.project_statuses).error == "snapshot_error"
     assert hd(result.project_statuses).observed_at == nil
     assert List.last(result.project_statuses).status == :fresh
+
+    send(pid, :check_idle)
+    Orchestrator.snapshot(pid, 1_000)
+    refute_receive {:snapshot_requested, _, _}, 20
+    [{_id, failed}, healthy] = receive_requests(contexts)
+    GenServer.reply(failed, :unavailable)
+    reply_idle(healthy)
+    await_idle_completion(pid)
+    assert Orchestrator.snapshot(pid, 1_000).partial
+    refute_receive :shutdown, 20
   end
 
   test "qualification remains based on every configured project in a partial snapshot" do
@@ -197,6 +227,22 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     assert issue.retry.due_at == deadline
   end
 
+  test "retries without a countdown preserve their explicit deadline as the cache ages" do
+    {pid, clock, contexts} = start_aggregator()
+    retry = %{issue_id: "retry-one", identifier: "PRO-3", due_at: ~U[2026-09-30 10:00:00Z]}
+
+    for {id, from} <- receive_requests(contexts) do
+      retries = if id == hd(contexts).id, do: [retry], else: []
+      GenServer.reply(from, %{snapshot(id) | running: [], retrying: retries})
+    end
+
+    initial = hd(await_snapshot(pid, &(length(&1.retrying) == 1)).retrying)
+    advance(clock, 20_000)
+    assert hd(Orchestrator.snapshot(pid, 1_000).retrying) == initial
+    assert initial.due_at == retry.due_at
+    refute Map.has_key?(initial, :due_in_ms)
+  end
+
   test "idle requests respect the interval since a delayed reply and still confirm shutdown" do
     parent = self()
     {pid, clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
@@ -260,8 +306,11 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     Orchestrator.snapshot(pid, 1_000)
     check = :sys.get_state(pid).idle_check
     assert check.started_at == nil
+    :sys.suspend(pid)
+    send(pid, {:start_idle_check, check.token})
     stop_supervised!(hd(contexts).id)
     start_server(hd(contexts))
+    :sys.resume(pid)
     assert Orchestrator.snapshot(pid, 1_000).partial
     assert :sys.get_state(pid).idle_check == nil
     send(pid, {:start_idle_check, check.token})
@@ -272,6 +321,23 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     refute_receive :shutdown, 20
     GenServer.reply(replacement, idle_snapshot("snapshot-one"))
     assert await_snapshot(pid, &(not &1.partial)).codex_totals.input_tokens == 11
+  end
+
+  test "foreign monitor messages and obsolete deadlines cannot finish a live idle check" do
+    parent = self()
+    {pid, clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
+    Enum.each(receive_requests(contexts), &reply_idle/1)
+    await_snapshot(pid, &(not &1.partial))
+    begin_idle_check(pid, clock)
+    pending = receive_requests(contexts)
+    check = :sys.get_state(pid).idle_check
+    send(pid, {:DOWN, make_ref(), :process, self(), :normal})
+    send(pid, {:idle_deadline, make_ref()})
+    Orchestrator.snapshot(pid, 1_000)
+    assert :sys.get_state(pid).idle_check == check
+    refute_receive :shutdown, 20
+    Enum.each(pending, &reply_idle/1)
+    assert_receive :shutdown, 1_000
   end
 
   test "normal timers coordinate staggered replies into a full live idle check" do
@@ -304,7 +370,7 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     pending = receive_requests(contexts)
     assert {:monitors, monitors} = Process.info(pid, :monitors)
     assert length(monitors) == 4
-    stop_supervised!(Projects)
+    GenServer.stop(pid)
     Enum.each(pending, &reply/1)
     refute Process.alive?(pid)
 
@@ -313,10 +379,31 @@ defmodule SymphonyElixir.ProjectSnapshotTest do
     end
   end
 
+  test "graceful shutdown cancels a live idle deadline and abandons its late replies" do
+    parent = self()
+    {pid, clock, contexts} = start_aggregator(contexts(), shutdown_fun: fn -> send(parent, :shutdown) end)
+    Enum.each(receive_requests(contexts), &reply_idle/1)
+    await_snapshot(pid, &(not &1.partial))
+    begin_idle_check(pid, clock)
+    pending = receive_requests(contexts)
+    timer = :sys.get_state(pid).idle_check.timer
+    assert is_integer(Process.read_timer(timer))
+    GenServer.stop(pid)
+    assert Process.read_timer(timer) == false
+    Enum.each(pending, &reply_idle/1)
+    refute_receive :shutdown, 20
+  end
+
   defp start_aggregator(contexts \\ contexts(), opts \\ []) do
     Enum.each(contexts, &start_server/1)
     clock = start_supervised!({Agent, fn -> System.monotonic_time(:millisecond) end})
-    pid = start_supervised!({Projects, Keyword.merge([contexts: contexts, name: __MODULE__, clock_fun: fn -> Agent.get(clock, & &1) end], opts)})
+
+    pid =
+      start_supervised!(
+        {Projects, Keyword.merge([contexts: contexts, name: __MODULE__, clock_fun: fn -> Agent.get(clock, & &1) end], opts)},
+        restart: :temporary
+      )
+
     {pid, clock, contexts}
   end
 

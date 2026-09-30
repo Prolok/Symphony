@@ -30,6 +30,42 @@ defmodule SymphonyElixir.MaintenanceTest do
     :ok
   end
 
+  test "an unavailable start arbiter blocks maintenance changes and a false idle signal" do
+    start_worker_capacity!([])
+    stop_supervised!(WorkerCapacity)
+    assert Maintenance.enabled?()
+    assert Maintenance.status().reason == "Startarbiter nicht verfügbar"
+    assert {:error, :maintenance_unavailable} = Maintenance.update(%{"enabled" => false})
+    assert {:error, :maintenance_unavailable} = Maintenance.register()
+    refute Maintenance.project(%{running: []}, true).idle
+    refute Maintenance.aggregate([%{maintenance: %{idle: true, generation: nil}}], true).idle
+  end
+
+  test "deadline subscribers receive the current generation once and ignore obsolete timer messages" do
+    start_worker_capacity!([])
+    assert :ok = Maintenance.register()
+    assert :ok = Maintenance.register()
+    assert {:ok, old} = Maintenance.update(%{"enabled" => true, "reason" => "First", "deadline_seconds" => 300})
+    assert_receive {:maintenance_changed, %{generation: old_generation}}
+    assert old_generation == old.generation
+    assert {:ok, _} = Maintenance.update(%{"enabled" => false})
+    assert_receive {:maintenance_changed, %{enabled: false}}
+    assert {:ok, current} = Maintenance.update(%{"enabled" => true, "reason" => "Second", "deadline_seconds" => 300})
+    assert_receive {:maintenance_changed, %{generation: current_generation}}
+    assert current_generation == current.generation
+    timer = :sys.get_state(WorkerCapacity).deadline_timer
+    send(WorkerCapacity, {:maintenance_deadline, old_generation})
+    assert :sys.get_state(WorkerCapacity).deadline_timer == timer
+    assert is_integer(Process.read_timer(timer))
+    refute_receive {:maintenance_deadline, _}, 10
+    expire_deadline()
+    send(WorkerCapacity, {:maintenance_deadline, current_generation})
+    assert_receive {:maintenance_deadline, ^current_generation}
+    assert :sys.get_state(WorkerCapacity).deadline_timer == nil
+    assert Maintenance.status().generation == current_generation
+    refute_receive {:maintenance_deadline, _}, 10
+  end
+
   test "real loopback HTTP command is idempotent, validates input and appears in API and dashboards" do
     orchestrator = start_supervised!({Orchestrator, name: :maintenance_http, initial_poll?: false})
     start_supervised!({HttpServer, port: 0, orchestrator: orchestrator})
@@ -256,6 +292,18 @@ defmodule SymphonyElixir.MaintenanceTest do
     assert failed.maintenance_error
     assert failed.retry_attempts["retry"] == retry
     refute Maintenance.project(%{running: []}, is_nil(failed.maintenance_error)).idle
+  end
+
+  test "corrupt encoded continuation hints cannot be consumed or overwritten" do
+    assert :ok = MaintenanceRecovery.put("wake", %{attempt: 2, identifier: "PRO-1"})
+    path = MaintenanceRecovery.path()
+    assert {:ok, record} = DurableState.read(path)
+    corrupt = %{record | "hints" => %{"wake" => "invalid-base64"}}
+    assert :ok = DurableState.write(path, corrupt)
+    assert {:error, :maintenance_recovery_corrupt} = MaintenanceRecovery.load()
+    assert {:error, :maintenance_recovery_corrupt} = MaintenanceRecovery.put("new", %{attempt: 0})
+    assert {:error, :maintenance_recovery_corrupt} = MaintenanceRecovery.delete("wake")
+    assert {:ok, ^corrupt} = DurableState.read(path)
   end
 
   test "PO maintenance does not consume impulses or record start failures" do

@@ -11,18 +11,18 @@ defmodule SymphonyElixir.Yolo.Operations do
     Path.join([Config.settings!().tracker.app["state_root"], "yolo-actions", identity, Digest.digest(key) <> ".json"])
   end
 
-  @spec run(String.t(), map(), (map() -> term())) :: term()
-  def run(key, request, callback) do
+  @spec run(String.t(), map(), (map() -> term()), (-> :ok | {:error, term()})) :: term()
+  def run(key, request, callback, before_new \\ fn -> :ok end) do
     IssueLease.with_journal_lock(path(key), fn ->
-      with {:ok, intent} <- load(key, request), do: callback.(intent)
+      with {:ok, intent} <- load(key, request, before_new), do: callback.(intent)
     end)
   end
 
-  defp load(key, request) do
+  defp load(key, request, before_new) do
     case DurableState.read(path(key)) do
       {:error, :enoent} ->
         intent = %{"key" => key, "request" => request, "issue_id" => Ecto.UUID.generate(), "done" => false}
-        with :ok <- save(intent), do: {:ok, intent}
+        with :ok <- before_new.(), :ok <- save(intent), do: {:ok, intent}
 
       {:ok, %{"key" => ^key, "request" => ^request} = intent} ->
         {:ok, intent}
@@ -72,15 +72,21 @@ defmodule SymphonyElixir.Yolo.Operations do
 
   @spec related([String.t()]) :: {:ok, [map()]} | {:error, term()}
   def related(ids) do
+    with {:ok, operations} <- all() do
+      {:ok,
+       Enum.filter(operations, fn intent ->
+         intent["issue_id"] in ids or Enum.any?(intent["request"]["origin_ids"] || [], &(&1 in ids))
+       end)}
+    end
+  end
+
+  @spec all() :: {:ok, [map()]} | {:error, term()}
+  def all do
     Path.wildcard(Path.join(Path.dirname(path("")), "*.json"))
     |> Enum.reduce_while({:ok, []}, fn file, {:ok, acc} ->
       case DurableState.read(file) do
-        {:ok, %{"request" => request} = intent} ->
-          match? = intent["issue_id"] in ids or Enum.any?(request["origin_ids"] || [], &(&1 in ids))
-          {:cont, {:ok, if(match?, do: [intent | acc], else: acc)}}
-
-        _ ->
-          {:halt, {:error, :yolo_operation_changed_or_corrupt}}
+        {:ok, %{"request" => request} = intent} when is_map(request) -> {:cont, {:ok, [intent | acc]}}
+        _ -> {:halt, {:error, :yolo_operation_changed_or_corrupt}}
       end
     end)
   end

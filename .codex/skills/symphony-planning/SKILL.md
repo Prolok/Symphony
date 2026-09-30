@@ -27,6 +27,8 @@ kommt aus `symphony-workpad`; Statusübergänge aus `WORKFLOW.md` bzw.
 
 - `### Plan` ist eine hierarchische Checkliste konkreter Umsetzungsschritte.
 - Der Plan enthält explizit Entwicklung/Änderung und automatisierte Tests.
+- Nur bei `docs/architecture/contract.json` Architekturplanung nach
+  `symphony-architecture` einbeziehen; ohne Vertrag ist sie nicht anwendbar.
 - `### Validierung` ist eine Checkliste der geplanten Nachweise.
 - Abnahmekriterien verlangen standardmäßig isolierte Nachweise. Echtsystem-Pflichten
   nur gemäß [Abnahmeregel](../../../docs/linear-app.md#quellengebundener-betreiberauftrag)

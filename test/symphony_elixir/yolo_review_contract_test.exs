@@ -76,6 +76,31 @@ defmodule SymphonyElixir.YoloReviewContractTest do
     %{root: root, context: context, workspace: workspace, issue: issue, db: db, opts: opts}
   end
 
+  test "a project without an architecture contract hands off without an architecture limitation", ctx do
+    refute File.exists?(Path.join(ctx.workspace.path, "docs/architecture/contract.json"))
+    refute File.exists?(Path.join(ctx.workspace.path, ".codex/skills/sym-prereview/SKILL.md"))
+
+    Scope.with_scope(
+      "review",
+      [ctx.issue],
+      "run",
+      fn ->
+        {:ok, record} = Store.read("review")
+        :ok = Store.write("review", Map.put(record, "attempt", %{"id" => "run", "members" => [ctx.issue.id]}))
+        evidence = Fixture.evidence()
+        assert evidence["limitations"] == []
+
+        assert :ok =
+                 Handoff.invoke(%{"kind" => "handoff", "issue_id" => ctx.issue.id, "report" => "Architekturabschnitt nicht anwendbar: kein Vertrag. Fachprüfung grün.", "review" => evidence}, ctx.opts)
+
+        assert %{issue: %{state: "Review", delegate_id: nil, assignee_id: "human"}, updates: 1} = Agent.get(ctx.db, & &1)
+        assert Agent.get(ctx.db, & &1.body) =~ "nicht anwendbar"
+        refute Agent.get(ctx.db, & &1.body) =~ "BLOCKER"
+      end,
+      workspace: ctx.workspace
+    )
+  end
+
   test "only the committed project skill at the bound checkout is accepted", ctx do
     assert %{"binding" => binding, "content" => content} = ReviewContract.load(ctx.workspace, "run")
     assert binding["project_id"] == ctx.context.id

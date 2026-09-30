@@ -470,6 +470,37 @@ defmodule SymphonyElixir.CoreTest do
     assert workflow =~ "die Review-Schleife gemäß Rundenbudget fortsetzen oder abschließen"
   end
 
+  test "global reuse, fix prevention and conditional architecture rules have one authoritative definition" do
+    workflow = File.read!("WORKFLOW.md")
+    yolo = File.read!("WORKFLOW_YOLO_AGENT.md")
+    planning = File.read!(".codex/skills/symphony-planning/SKILL.md")
+    architecture = File.read!(".codex/skills/symphony-architecture/SKILL.md")
+    prereview = File.read!(".codex/skills/symphony-prereview/SKILL.md")
+    review = File.read!(".codex/skills/symphony-review/SKILL.md")
+    assert length(Regex.scan(~r/Vor neuem Code vorhandene Implementierung/, workflow)) == 1
+    assert workflow =~ "Extraktion gehört zum Scope"
+    assert workflow =~ "Nettobilanz ohne Tests"
+    assert workflow =~ "Jeder Folgefix aus Test oder Schlussabnahme"
+    assert prereview =~ "mit globaler Selbstprüfung fortfahren"
+    refute prereview =~ "fehlende Datei im Workpad dokumentieren und stoppen"
+    assert prereview =~ "neue Duplikation"
+    assert review =~ "Ticketdaten nicht an den Review-Subagenten geben"
+    assert review =~ "Generischer Codeprüfauftrag"
+    assert planning =~ "ohne Vertrag ist sie nicht anwendbar"
+    assert architecture =~ "Im Plan betroffene Bausteine und einschlägige ADRs nennen"
+    assert architecture =~ "im selben Ticket"
+    assert architecture =~ "ADR verpflichtend"
+    assert yolo =~ "Ab dem zweiten Folgefix"
+    assert yolo =~ "Ursprung selbst ein Folgefix"
+    assert yolo =~ "Konsolidierung erhält Prävention und erlaubt weiterhin `wait`"
+    assert yolo =~ "vertraglichen Prüfbefehl am gemergten Stand grün"
+    for decision <- ["belassen", "nachsteuern", "per Folgeticket zurückführen"], do: assert(yolo =~ decision)
+    assert yolo =~ "ist dieser Architekturabschnitt nicht anwendbar"
+    assert yolo =~ "`limitations`, Eskalation oder BLOCKER daraus"
+    assert yolo =~ "`handoff` bleibt möglich"
+    refute yolo =~ "Weitere Findings dürfen die"
+  end
+
   test "AI phase completion contracts require closed checklists and merge evidence" do
     workflow = File.read!(Path.expand("../../WORKFLOW.md", __DIR__))
     prereview_skill = File.read!(Path.expand("../../.codex/skills/symphony-prereview/SKILL.md", __DIR__))

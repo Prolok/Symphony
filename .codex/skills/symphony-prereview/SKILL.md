@@ -11,14 +11,17 @@ Nur im Status `PreReview (AI)` verwenden.
 
 ## Ablauf
 
-- `<aktives-repo-root>/.codex/skills/sym-prereview/SKILL.md` vollständig lesen.
-- Projektprüfungen und ihre Reihenfolge aus dieser Checkliste übernehmen;
-  fehlende Datei im Workpad dokumentieren und stoppen.
+- `<aktives-repo-root>/.codex/skills/sym-prereview/SKILL.md` vollständig lesen,
+  sofern vorhanden, und Projektprüfungen/Reihenfolge übernehmen. Fehlt die
+  Datei, im Workpad dokumentieren und mit globaler Selbstprüfung fortfahren.
 - Den gesamten Ticketdiff gegen Zielbranch und Akzeptanzkriterien prüfen,
   einschließlich bereits committeter und offener Änderungen. Betroffene
   Produktpfade, relevante Schnittstellen und Fehlerfälle einbeziehen; die
   fachliche Selbstprüfung nicht auf die seit dem letzten Fix geänderten Zeilen
   beschränken.
+- Globale Arbeitsregeln aus `WORKFLOW.md` ausdrücklich prüfen: Wiederverwendung,
+  neue Duplikation, nötige Extraktion trotz kleinem Diff und Korrektur des
+  Vorgängercodes bei Folgefixes; deren Präventionsmaßnahme und Zeilenbilanz prüfen.
 - Passende Tests aus dem betroffenen Verhalten auswählen, auch unveränderte
   bestehende Tests. Fehlende Nachweise ausführen, vorhandene auf Gültigkeit für
   den aktuellen Stand prüfen. Fällige Pflichtgates erfüllen; eine Pflichtvollsuite

@@ -19,6 +19,33 @@ defmodule SymphonyElixir.Yolo.ActionTool do
           "title" => %{"type" => "string"},
           "description" => %{"type" => "string"},
           "validation" => %{"type" => "string"},
+          "followup_type" => %{
+            "type" => "string",
+            "enum" => ["fix", "consolidation", "new_requirement"],
+            "description" => "Required for new followups. Review requires consolidation after a prior fix in the chain or component."
+          },
+          "component" => %{"type" => "string", "description" => "Stable project component key for fixes, e.g. yolo/followup; reuse it across findings."},
+          "prevention" => %{
+            "type" => "object",
+            "additionalProperties" => false,
+            "required" => ["kind", "change", "validation"],
+            "properties" => %{
+              "kind" => %{"type" => "string", "enum" => ["test", "lint", "arch", "prereview"]},
+              "change" => %{"type" => "string", "description" => "Concrete measure that would have caught this error before merge."},
+              "validation" => %{"type" => "string", "description" => "How to prove the prevention works; prereview requires a local sym-prereview."}
+            }
+          },
+          "consolidation" => %{
+            "type" => "object",
+            "additionalProperties" => false,
+            "required" => ["cause", "cleanup", "fixes", "net_code_target"],
+            "properties" => %{
+              "cause" => %{"type" => "string"},
+              "cleanup" => %{"type" => "string"},
+              "fixes" => %{"type" => "string"},
+              "net_code_target" => %{"type" => "integer", "maximum" => 0, "description" => "Target net lines without tests; current error must also be fixed."}
+            }
+          },
           "blocks_origins" => %{"type" => "boolean", "description" => "The follow-up blocks acceptance of its origins; creates real directed Linear dependencies."},
           "blocked_by" => %{"type" => "array", "items" => %{"type" => "string"}},
           "issue_id" => %{"type" => "string"},

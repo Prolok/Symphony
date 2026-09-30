@@ -23,6 +23,9 @@ Nur im Status `Review (AI)` verwenden. Pull und der einmalige
   weiterreichen, wenn sie repo-spezifisch sind und keinen Linear-Issue-,
   Ticket-, Workpad- oder Workflow-Zusammenfassungskontext enthalten.
 - `### Review` pflegen, Details knapp in `### Verlauf`.
+- Hauptworker bewertet gemäß globalen Arbeitsregeln in `WORKFLOW.md` die
+  Folgefix-Zeilenbilanz ohne Tests, Begründung für Nettowachstum, Prävention
+  und dokumentierte Abweichungen. Diese Ticketdaten nicht an den Review-Subagenten geben.
 
 ## Rundenbudget
 
@@ -60,6 +63,9 @@ Nur im Status `Review (AI)` verwenden. Pull und der einmalige
   Akzeptanzkriterien ab.
 - Er bleibt strikt read-only und nimmt keine Datei-, Commit-, Workpad-, Linear-,
   Status- oder Subagent-Aktionen vor.
+- Generischer Codeprüfauftrag: vorhandene Wiederverwendung, neue Duplikation,
+  notwendige gemeinsame Extraktion und Fehlerkorrektur im vorhandenen Code
+  statt zusätzlicher Schichten ausdrücklich prüfen.
 - Er meldet `Findings:` nur für klar belegbare, reviewer-relevante Probleme
   oder Spezifikationsabweichungen gegen repo-lokale Specs, Dokumentation,
   `WORKFLOW.md`, Skills oder Code-Verträge. Keine Stil-Nits, Vermutungen,

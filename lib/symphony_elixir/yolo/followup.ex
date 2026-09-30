@@ -1,22 +1,25 @@
 defmodule SymphonyElixir.Yolo.Followup do
   @moduledoc "Durable creation and linking shared by regular workers and PO aggregation/follow-ups."
   alias SymphonyElixir.{Config, Tracker}
-  alias SymphonyElixir.Linear.{Description, TrustedAgents}
+  alias SymphonyElixir.Linear.{Description, IssueLease, TrustedAgents}
   alias SymphonyElixir.TestRun.Derived, as: Derived
-  alias SymphonyElixir.Yolo.{ActionScope, API, GeneratedLabel, Operations, Relations, Scope}
+  alias SymphonyElixir.Yolo.{ActionScope, API, FixContract, GeneratedLabel, Operations, Relations, Scope}
 
   @created_history "query YoloCreatedHistory($id: String!, $after: String) { issue(id: $id) { history(first: 100, after: $after) { nodes { id createdAt fromTitle toTitle updatedDescription fromAssigneeId toAssigneeId fromDelegate { id } toDelegate { id } fromStateId toStateId fromProjectId toProjectId fromTeamId toTeamId addedLabelIds removedLabelIds actor { id app } botActor { id } } pageInfo { hasNextPage endCursor } } } }"
 
   @spec invoke(map(), keyword()) :: {:ok, map()} | {:error, term()}
   def invoke(%{"kind" => kind, "origin_ids" => ids} = args, opts) when kind in ["aggregate", "followup"] and is_list(ids) do
-    request = Map.take(args, ~w(kind origin_ids operation_key title description validation blocked_by blocks_origins)) |> Map.update!("origin_ids", &Enum.sort(Enum.uniq(&1)))
+    request =
+      Map.take(args, ~w(kind origin_ids operation_key title description validation blocked_by blocks_origins followup_type component prevention consolidation))
+      |> Map.update!("origin_ids", &Enum.sort(Enum.uniq(&1)))
 
     with true <- Derived.allowed?(request),
          true <- valid_request?(args),
          true <- kind != "aggregate" or match?(%{"group" => "incoming"}, Scope.current()),
          :ok <- existing_aggregation(request) do
       operation = if kind == "aggregate", do: "aggregate:" <> Enum.join(request["origin_ids"], ":"), else: "followup:" <> Enum.join(request["origin_ids"], ":") <> ":" <> args["operation_key"]
-      Operations.run(operation, request, &resume(&1, opts))
+
+      run_operation(operation, request, opts)
     else
       {:error, _} = error -> error
       _ -> {:error, :invalid_yolo_followup}
@@ -24,6 +27,12 @@ defmodule SymphonyElixir.Yolo.Followup do
   end
 
   def invoke(_, _), do: {:error, :invalid_yolo_followup}
+
+  defp run_operation(operation, request, opts) do
+    IssueLease.with_journal_lock(Operations.path("followup-policy"), fn ->
+      Operations.run(operation, request, &resume(&1, opts), fn -> FixContract.validate(request, opts) end)
+    end)
+  end
 
   defp valid_request?(args) do
     strings = Enum.map(~w(operation_key title description validation), &args[&1])
@@ -148,7 +157,7 @@ defmodule SymphonyElixir.Yolo.Followup do
       "\n\n## Validierung\n\n" <>
       request["validation"] <>
       "\n\n## Ursprung\n\n" <>
-      Enum.map_join(issues, "\n", &"- [#{&1.identifier}](#{&1.url})") <> if(originals, do: "\n\n## Übernommene Anforderungen\n\n" <> originals, else: "")
+      Enum.map_join(issues, "\n", &"- [#{&1.identifier}](#{&1.url})") <> if(originals, do: "\n\n## Übernommene Anforderungen\n\n" <> originals, else: "") <> FixContract.description(request)
   end
 
   defp transfer(true, issues, id, opts), do: Relations.transfer(Enum.map(issues, & &1.id), id, opts)
@@ -194,7 +203,7 @@ defmodule SymphonyElixir.Yolo.Followup do
 
   defp verify_created(_, _, _, _), do: {:error, :yolo_created_issue_unconfirmed}
 
-  defp comparable?("description", expected, actual), do: Description.equivalent?(expected, actual)
+  defp comparable?("description", expected, actual), do: FixContract.equivalent?(expected, actual)
   defp comparable?(_, expected, actual), do: expected == actual
 
   defp verify_labels(created, input, changed, opts, recovery?) do

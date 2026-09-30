@@ -458,6 +458,16 @@ lesen.
 
 ### Globale Arbeitsregeln
 
+- Vor neuem Code vorhandene Implementierung suchen und nutzen oder erweitern.
+  Gleichartige Logik in eine gemeinsame Klasse/ein Modul extrahieren, auch im
+  berührten Bestand, wenn sonst eine weitere Kopie entsteht. Minimaler Diff
+  rechtfertigt weder Duplikation noch überschrittene Größenbudgets; nötige
+  Extraktion gehört zum Scope. Ausdrückliche Ticketvorgaben gehen vor;
+  Abweichungen kurz im Workpad begründen. PreReview und Review prüfen dies.
+- Folgefixes korrigieren oder ersetzen zuerst den fehlerhaften Vorgängercode.
+  Im Workpad hinzugefügte/entfernte Zeilen und Nettobilanz ohne Tests nennen;
+  Nettowachstum kurz begründen und in Review bewerten.
+
 - In Umsetzung und PreReview `make check` plus änderungsbezogene Tests nutzen;
   Review-Fixes gezielt nachweisen. Die vollständige Suite (`make all`) läuft
   regulär in `Test (AI)`. Relevante Änderungen/Rebases oder Fehler erfordern
@@ -475,6 +485,12 @@ lesen.
   Bei journalisierter Wiederaufnahme dürfen nur nach der Anlage durch passende,
   vollständig gelesene Linear-Historie belegte menschliche Feldänderungen vom
   Sollstand abweichen; unbelegte Abweichungen bleiben Fehler und belegte erhalten.
+- Jeder Folgefix aus Test oder Schlussabnahme enthält die Maßnahme, die den
+  Fehler vor Merge gefunden hätte: vorrangig automatischer Test oder Lint-/
+  `check:arch`-Regel, sonst konkreter Punkt in repo-lokaler `sym-prereview`.
+  Bestehende Prüfpunkte schärfen/ersetzen, Überholtes entfernen; kompakt halten.
+  Ohne diesen Skill Test/Prüfregel verwenden. Werkzeugfelder und Wiederaufnahme:
+  [Folgefix-Vertrag](docs/linear-app.md#folgefix-vertrag).
 - Nutze den blocked-access escape hatch nur für echte externe Blocker (fehlende erforderliche Tools/Auth), nachdem dokumentierte Fallbacks ausgeschöpft wurden.
 
 ### Turn-Abschlussvertrag für aktive AI-Status

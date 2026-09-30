@@ -421,6 +421,42 @@ Die Einstufung verwendet bekannte Fehlerkennungen und strukturierte Client-Fehle
 Freitext aus Fehlerdetails, etwa Titel- oder Beschreibungsfragmente, zählt nicht.
 Unbekannte Gründe erhalten den Backoff für dauerhafte Fehler.
 
+#### Folgefix-Vertrag
+
+Neue `symphony_yolo_action(kind=followup)`-Aufträge nennen `followup_type`:
+`fix`, `consolidation` oder `new_requirement`. Fixes führen eine stabile,
+projektbezogene `component`-Kennung (Kleinbuchstaben/Ziffern und `_ . / -`)
+und `prevention: {kind, change, validation}`. `kind` ist `test`, `lint`, `arch`
+oder `prereview`; Maßnahme und Nachweis müssen konkret sein. `prereview`
+setzt die lokale `.codex/skills/sym-prereview/SKILL.md` voraus, Test/Prüfregel
+funktionieren ohne diesen Skill und ohne Architekturvertrag. Anforderungen
+an Prävention und Wiederverwendung stehen maßgeblich in `WORKFLOW.md`.
+
+In der delegierten YOLO-Schlussabnahme verlangt ein bereits bestätigter Fix
+in derselben Kette oder für dieselbe Komponente `followup_type=consolidation`.
+Das Werkzeug prüft das projektgebundene Journal und vollständig paginierte
+Projekt-Tickets mit gespeichertem Folgefix-Vertrag, einschließlich archivierter
+Tickets. Auch der Ursprung selbst als Folgefix und ältere blockierende
+Followup-Journaloperationen zählen. Alte Ursprungstickets ohne Metadaten werden
+über Herkunftsabschnitt, Generated-Label und ausgehende Blockierkante erkannt.
+`symphony-generated` allein ist kein Fixbeleg.
+Eine Konsolidierung führt zusätzlich `consolidation: {cause, cleanup, fixes,
+net_code_target}`: wiederholte Ursache, Bausteinbereinigung, aktueller Fehler
+und ganzzahliges Nettoziel <= 0 ohne Tests. Sie nutzt denselben Anlage-/Linkpfad
+und dieselbe Warteentscheidung. `new_requirement` darf keine Abnahme blockieren.
+
+Der Vertrag wird vor Reservierung einer neuen Operation geprüft; abgewiesene
+Aufträge lassen sich mit demselben Schlüssel korrigieren. Journalisierte
+Altoperationen werden mit ihrem unveränderten Auftrag weitergeführt, ohne
+nachträglich neue Pflichtfelder zu verlangen. Neue Herkunft/Fixart/Prävention
+stehen im Abschnitt `## Symphony Folgefix` der erzeugten Beschreibung; damit
+bleibt die Erkennung auch nach Wechsel des ausführenden Rechners möglich.
+Spätere Beschreibungsabschnitte erhalten diesen Beleg; in Aggregationen
+übernommene Ursprungstexte gelten nicht als eigene Fixherkunft.
+Anlagen desselben Projekts werden während Prüfung und Anlage serialisiert;
+dies ist keine globale Mehrrechner-Sperrgarantie. Keine neue Freigabe und
+keine Architekturvoraussetzung im regulären Worker- oder Entwicklerablauf.
+
 #### Eskalationsziel in Testprojekten
 
 Reine Testprojekte können in `.symphony/.env` oder `.symphony/.env.local`

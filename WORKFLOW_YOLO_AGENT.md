@@ -214,6 +214,14 @@ und Belegen, Findings, Einschränkungen (einschließlich nicht ausgeführter Pr�
 und Folgeentscheidung. Abnahmesperrende Mängel und fehlende Pflichtbelege verhindern den Abschluss.
 Neue Anforderungen außerhalb des vereinbarten Ziels können begründet ausgelagert werden.
 
+Prüfe neue Duplikation und bei Folgefixes die Prävention gemäß globalen
+Arbeitsregeln in `WORKFLOW.md`. Nur mit `docs/architecture/contract.json`:
+vertraglichen Prüfbefehl am gemergten Stand grün nachweisen und jede
+gekennzeichnete Architekturänderung mit `symphony-architecture` als **belassen**,
+**nachsteuern** oder **per Folgeticket zurückführen** bewerten. Ohne Vertrag
+ist dieser Architekturabschnitt nicht anwendbar: kein `failed`, keine
+`limitations`, Eskalation oder BLOCKER daraus; `handoff` bleibt möglich.
+
 Pro Finding Reproduktion, Ist-/Sollverhalten und Beleg festhalten. Beantworte mit
 Begründung: War es mit damaligem Wissen kostengünstig in PreReview erkennbar?
 Ordne Ursache und Folgemaßnahme ein:
@@ -271,8 +279,13 @@ demselben Paar; Herkunft bleibt auch im Ticket verlinkt. Keine Gegenkante,
 kein Text als Relationsersatz.
 Nach bestätigter Anlage und Verknüpfung `kind=wait` mit Prüf-/Lernbeleg aufrufen;
 Ursprung und Delegation bleiben in `Yolo Review`. Sobald auch der Fix dort ankommt,
-prüft der nächste Lauf die gesamte Kette erneut. Weitere Findings dürfen die
-Kette verlängern. Ein neuer Anforderungsscope (`new_requirement`) darf ohne
+prüft der nächste Lauf die gesamte Kette erneut. Ab dem zweiten Folgefix
+derselben Kette oder desselben Bausteins statt eines weiteren Patches ein
+Konsolidierungsticket über denselben Followup-Weg anlegen: wiederholte Ursache,
+Bausteinbereinigung, Behebung des aktuellen Fehlers und Ziel netto gleich viel
+oder weniger Code ohne Tests. Ursprung selbst ein Folgefix zählt bereits als
+erster Fix. Konsolidierung erhält Prävention und erlaubt weiterhin `wait`.
+Ein neuer Anforderungsscope (`new_requirement`) darf ohne
 Abnahmesperre ausgelagert werden, mit konkreter Begründung.
 
 Erst nach bestandenen Prüfungen, erledigten Pflichtnachweisen und abgeschlossenen
@@ -286,7 +299,9 @@ konfigurierten Menschen, unabhängig von `--yolo`. Ohne Agentenkonfiguration
 entstehen sie ohne diese Zuweisungen; keine Agentidentität erfinden.
 Nutze für Anlage und Verknüpfung `symphony_yolo_action` mit `kind=followup`,
 `origin_ids`, dauerhaft gleichem `operation_key`, vollständiger `description`
-und `validation`; `blocked_by` nennt vorausgehende Issue-IDs. Verwende für
+und `validation` sowie Fixart/Prävention nach dem
+[Folgefix-Vertrag](docs/linear-app.md#folgefix-vertrag);
+`blocked_by` nennt vorausgehende Issue-IDs. Verwende für
 Aggregation `kind=aggregate`. Abnahmekriterien verwenden standardmäßig isolierte
 Nachweise gemäß [Yolo Review](#yolo-review-gemeinsame-fachliche-schlussabnahme).
 Der Laufkontext enthält bereits protokollierte

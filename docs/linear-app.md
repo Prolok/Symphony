@@ -419,7 +419,8 @@ sein. Eine ungültige UUID, fehlende Mitgliedschaft oder veraltete Trust-Bindung
 sperrt die Eskalation mit einem eindeutigen Konfigurations-/Verifikationsfehler;
 es gibt keinen Rückfall auf den Menschen. Änderungen verlangen einen Neustart.
 
-Mit Opt-in entfernt `kind=escalate` nur die Delegation; Status und vorhandener
+Mit Opt-in entfernen `kind=escalate`, die BLOCKER-Übergabe mit `kind=handoff`
+und die automatische 24-Stunden-Schleifenbremse nur die Delegation; Status und vorhandener
 menschlicher Assignee bleiben erhalten. „Entscheidung benötigt“ adressiert
 ausschließlich den Trusted Agent über seine Linear-Profil-Erwähnung, bei einer
 ausdrücklich nicht erwähnbaren App über deren UUID. Der Workpad-Übergabebericht
@@ -428,6 +429,9 @@ nennt ausschließlich dessen UUID. OpenClaw-Benachrichtigungen einschließlich a
 Die Erwähnung startet keine Arbeit. Erst die Neudelegation durch einen
 gleichgestellten Linear-Akteur weckt den bestehenden `delegated_again`-Pfad.
 Assignee-Scope, normale Abnahme-Handoffs und andere Projekte bleiben unverändert.
+BLOCKER-Übergaben benötigen vollständige `escalation`-Werte; die Bremse liefert
+diese aus Ursache und bisherigem Versuch. Der Agentenvertrag steht zentral in
+[WORKFLOW_YOLO_AGENT.md](../WORKFLOW_YOLO_AGENT.md#blocker).
 
 ### Verwaiste PO-Checkouts
 

@@ -22,12 +22,12 @@ Delegation keine Selbstautorisierung.
 
 Routinefragen, Reihenfolge, Prüfstrategie und im Scope lösbare Fehler autonom
 entscheiden bzw. in die passende reguläre Phase zurückführen; Annahme/Entscheidung
-knapp im Workpad belegen. Menschliche Eskalation nur für eine notwendige
+knapp im Workpad belegen. Eskalation nur für eine notwendige
 strategische Entscheidung außerhalb des delegierten Ziels/Scopes oder eine nach
 Nutzung zulässiger Möglichkeiten autonom unlösbare externe Voraussetzung.
 Vorhandene Rechte prüfen/nutzen, keine zusätzlichen Rechte selbst vergeben oder
 Zugriffskontrollen umgehen. Ursache, versuchte Lösung, Empfehlung und genau
-benötigte menschliche Aktion dokumentieren. Regulärer Abschlussbericht und
+benötigte Entscheidung dokumentieren. Regulärer Abschlussbericht und
 menschliche Schlussübergabe bleiben erforderlich; Coding-Scope erteilt keine
 pauschale Deployment- oder Rechteänderungsfreigabe. Planung, PreReview,
 unabhängiger technischer Review, Test, sicherer Merge und ausdrücklich geforderte
@@ -53,7 +53,7 @@ YOLO-/Skip-Behandlung.
   danach keinen zweiten Abschlussaufruf senden. Ein
   normaler Sitzungsabschluss allein bestätigt keine Bearbeitung.
   Offene Anlageoperationen sperren die Bestätigung und den Sammelabschluss;
-  nimm sie mit demselben Auftrag wieder auf. Eine belegte menschliche
+  nimm sie mit demselben Auftrag wieder auf. Eine belegte
   BLOCKER-Übergabe oder Eskalation unter Erhalt von Yolo Review bleibt mit
   dokumentierten offenen Operationen möglich; sie bestätigt keinen Anlageerfolg.
   Journalisierte Aggregationsursprünge können dafür im Eingangslauf bereits
@@ -130,11 +130,23 @@ weiterreichen. Die Agentdelegation während eigener Nacharbeit erhalten.
 Ein [quellengebundener Betreiberauftrag](docs/linear-app.md#quellengebundener-betreiberauftrag)
 im Workpad bezeichnet die neue Pflicht; er ersetzt weder ihre Autorisierung noch
 einen Ausführungs-/Abnahmebeleg. Bereits ausgeführte Aktionen nicht wiederholen.
-Nur an der Eskalationsgrenze des Laufvertrags Ursache/Versuche/Empfehlung und
-menschliche Aktion übergeben, den konfigurierten ersten menschlichen Assignee
-setzen und die Agentdelegation entfernen. Der Status bleibt `BLOCKER`, solange
-die Ursache besteht. Diese Übergabe beendet die Betreuung und das Warten der
-Schlussabnahme darauf.
+Nur an der Eskalationsgrenze des Laufvertrags mit `kind=handoff` (auch
+`kind=escalate` zulässig) und tatsächlichem `report` übergeben. `escalation`
+enthält konkrete `cause`, `attempts`, `proposal` und `decision`.
+Gleiche Ursache binnen 24 Stunden löst die automatische Schleifenbremse aus,
+ohne zweiten Agentenlauf. Beide Wege entfernen die Agentdelegation und setzen
+standardmäßig den ersten konfigurierten menschlichen Assignee; der Status bleibt
+`BLOCKER`, solange die Ursache besteht. Die Übergabe beendet die Betreuung und
+das Warten der Schlussabnahme darauf.
+
+Mit [Testprojekt-Opt-in](docs/linear-app.md#eskalationsziel-in-testprojekten)
+richten diese BLOCKER-Übergaben und `kind=escalate` in `Yolo Review` die sichtbare
+Entscheidungsanfrage ausschließlich an den verifizierten Trusted Agent.
+Assignee und Status bleiben erhalten, nur die Delegation wird entfernt;
+OpenClaw-Benachrichtigungen entfallen. Alle vier Eskalationswerte sind erforderlich;
+fehlende Angaben oder unbestätigte Übergaben sperren den Abschluss, ohne Rückfall
+auf den Menschen. Die Neudelegation durch einen gleichgestellten Linear-Akteur
+gilt als Entscheidung und weckt den nächsten Lauf.
 
 ## Yolo Review: gemeinsame fachliche Schlussabnahme
 
@@ -161,13 +173,9 @@ Bei blockierender Abhängigkeit nennt `kind=wait` stattdessen die Abhängigkeit
 als Wartegrund, auch wenn ein Auftrag im Workpad steht; ein Digest entfällt.
 `kind=escalate` ist ausschließlich für strategische Produktentscheidungen oder
 Zugang/Rechte zulässig, die weder Agent noch Betreiber erhalten können. Eine echte
-Eskalation belässt den Status, entfernt die Agentdelegation, weist standardmäßig den
-konfigurierten Menschen allein zu und zeigt Frage und Empfehlung im Ticket. Mit
-[Testprojekt-Opt-in](docs/linear-app.md#eskalationsziel-in-testprojekten) bleibt der
-Assignee erhalten, ausschließlich der verifizierte Trusted Agent wird adressiert;
-die OpenClaw-Benachrichtigung entfällt. Diese Ausnahme gilt für `kind=escalate`
-auch in `BLOCKER`. Die Neudelegation durch einen gleichgestellten Linear-Akteur gilt als Entscheidung
-und weckt den nächsten Lauf.
+Eskalation belässt `Yolo Review` und zeigt Frage und Empfehlung im Ticket.
+Empfänger, Delegationsentzug, Testprojekt-Ausnahme und Neudelegation richten sich
+nach [BLOCKER](#blocker).
 
 Prüfe den dokumentierten gemergten Stand anhand der Anforderungen aller
 Review-Mitglieder und ihres gemeinsamen End-to-End-Verhaltens. Verbindlicher
@@ -266,12 +274,13 @@ keine Ersatzanlage nach unklarem Schreibausgang. Der Aggregationspfad überträg
 Abhängigkeiten und schließt Ursprünge erst nach bestätigten Links; das neue
 Ticket bleibt für die folgende Eingangsentscheidung im Backlog.
 
-Für erfolgreiche Schlussabnahme und BLOCKER-Übergaben `kind=handoff` mit `issue_id` und tatsächlichem
+Für erfolgreiche Schlussabnahme `kind=handoff` mit `issue_id` und tatsächlichem
 `report` nutzen. Das Tool erhält das Workpad, prüft den Eingang frisch und
-setzt den Menschen mit leerer Delegation. Es bestätigt zugleich das Mitglied;
-Bei einem externen BLOCKER hält das Tool auch offene Anlageoperationen mit ihren
+setzt den Menschen mit leerer Delegation. Es bestätigt zugleich das Mitglied.
+Für BLOCKER-Übergaben gilt der [BLOCKER-Vertrag](#blocker).
+Dabei hält das Tool auch offene Anlageoperationen mit ihren
 reservierten IDs im Bericht fest; diese sind nicht abgeschlossen und verlangen
-menschlichen Abgleich. Offene Operationen sperren weiterhin die Review-Übergabe
+Abgleich durch das Eskalationsziel. Offene Operationen sperren weiterhin die Review-Übergabe
 und den Start ihrer unvollständig angelegten Zieltickets.
 Nach erfolgreicher Übergabe keinen weiteren Kommentarcheckpoint für dessen
 beendete Betreuung verlangen. Fehler nie als erfolgreichen Abschluss melden.
@@ -301,15 +310,12 @@ bestätigte Entscheidungen und neuere Zustellungen bleiben erhalten. Voraussetzu
 [kontrollierte Aufgabe](docs/openclaw-yolo.md#kontrollierte-aufgabe-unterbrochener-aufträge).
 Keine Ersatzanlage oder eigene Neuzustellung durch den Agenten.
 
-Für diese echten Eskalationen `kind=escalate` (in `Yolo Review`) bzw. die bestehende
-BLOCKER-Übergabe mit `escalation: {cause, attempts, proposal, decision}` verwenden.
-In `BLOCKER` übernimmt der delegierte Agent die fällige Betreiberarbeit. Enthält
-das Journal bereits einen eigenen Lauf zur selben Ursache, wiederholt er sie nicht,
-sondern übergibt Ursache, Versuche, Vorschlag und benötigte Entscheidung.
+Für echte Eskalationen `kind=escalate` in `Yolo Review` bzw. die
+[BLOCKER-Übergabe](#blocker) verwenden.
 Live-/Host-/Zielumgebungs- und isolierte Integrationsnachweise aus dem Workpad
 sind bei Delegation erst hier in `Yolo Review` fällig; Belege tragen den
 Produkt-Quellhash gemäß `docs/linear-app.md`.
-Alle vier Werte konkret ausfüllen. Ohne Testprojekt-Opt-in sendet Symphony bei aktiviertem OpenClaw
+Alle vier Eskalationswerte konkret ausfüllen. Bei Menscheneskalation sendet Symphony mit aktiviertem OpenClaw
 Ticketlink, Ursache, Versuche, Lösungsvorschlag, benötigte Entscheidung und
 Vorschlags-ID an den bereits gespeicherten normalen Kanal des gebundenen Agenten.
 Routineberichte werden nicht versandt. Ein unklarer Versand bleibt journalisiert

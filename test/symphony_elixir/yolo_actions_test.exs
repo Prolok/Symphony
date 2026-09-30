@@ -1254,11 +1254,35 @@ defmodule SymphonyElixir.YoloActionsTest do
 
       group([source], fn ->
         {:ok, record} = Store.read("incoming")
-        :ok = Store.write("incoming", Map.put(record, "attempt", %{"members" => [source.id]}))
+        :ok = Store.write("incoming", Map.put(record, "attempt", %{"id" => "run", "members" => [source.id]}))
+        assert :ok = Operations.run("trusted-pending", args([source], "followup"), fn _ -> :ok end)
+        assert {:ok, [pending]} = Operations.pending([source.id])
+        assert {:error, {:yolo_operations_pending, _}} = Completion.verify_operations([source])
         args = %{"kind" => "escalate", "issue_id" => source.id, "report" => "Entscheidung offen", "escalation" => escalation, "review" => ReviewFixture.evidence()}
         assert :ok = Handoff.invoke(args, options)
         {:ok, completed} = Store.read("incoming")
         assert get_in(completed, ["attempt", "completed", source.id])
+        assert {:ok, [^pending]} = Operations.pending([source.id])
+        assert :ok = Completion.verify_operations([db().issues[source.id]])
+
+        if state == "BLOCKER" do
+          handed_off = db().issues[source.id]
+
+          for assignee <- [nil, "outside-human"] do
+            changed = %{handed_off | assignee_id: assignee}
+            assert {:error, {:yolo_operations_pending, _}} = Completion.verify_operations([changed])
+          end
+
+          trusted = ProjectContext.current()
+          unverified = %{trusted | trusted_binding: nil}
+          without_opt_in = put_in(trusted.settings.tracker.escalation_trusted_agent_id, nil)
+
+          for rejected <- [unverified, without_opt_in] do
+            ProjectContext.with_context(rejected, fn ->
+              assert {:error, {:yolo_operations_pending, _}} = Completion.verify_operations([handed_off])
+            end)
+          end
+        end
       end)
 
       assert [{"YoloUpdate", %{"input" => %{"delegateId" => nil} = input}}] = writes("YoloUpdate")

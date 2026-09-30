@@ -522,7 +522,7 @@ defmodule SymphonyElixir.LinearAppAuthTest do
         )
       end)
 
-    assert_receive {:verifying, worker}
+    assert_receive {:verifying, worker}, 1_000
     System.put_env(ctx.tracker.app["client_secret_env"], "rotated-synthetic-secret")
     send(worker, :continue)
     assert {:error, :linear_app_identity_unavailable} = Task.await(task)

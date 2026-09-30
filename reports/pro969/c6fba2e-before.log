@@ -1,0 +1,132 @@
+Running ExUnit with seed: 874329, max_cases: 20
+
+PRO-969 before: %{
+  caller: #PID<0.628.0>,
+  process: [
+    current_stacktrace: [
+      {SymphonyElixir.OrchestratorIOTest, :"-__ex_unit_setup_1/1-fun-8-", 4,
+       [file: ~c"test/symphony_elixir/orchestrator_io_test.exs", line: 46]},
+      {SymphonyElixir.Linear.RateLimit, :request, 3,
+       [file: ~c"lib/symphony_elixir/linear/rate_limit.ex", line: 33]},
+      {SymphonyElixir.Linear.AppAuth, :timed_request, 4,
+       [file: ~c"lib/symphony_elixir/linear/app_auth.ex", line: 395]},
+      {SymphonyElixir.Linear.AppAuth, :redacted_request, 4,
+       [file: ~c"lib/symphony_elixir/linear/app_auth.ex", line: 307]},
+      {SymphonyElixir.Linear.AppAuth, :business_request, 5,
+       [file: ~c"lib/symphony_elixir/linear/app_auth.ex", line: 163]},
+      {SymphonyElixir.Linear.AppAuth, :request, 4,
+       [file: ~c"lib/symphony_elixir/linear/app_auth.ex", line: 146]},
+      {SymphonyElixir.Linear.Client, :graphql, 3,
+       [file: ~c"lib/symphony_elixir/linear/client.ex", line: 829]},
+      {SymphonyElixir.Linear.Client, :comment_scan_signal, 1,
+       [file: ~c"lib/symphony_elixir/linear/client.ex", line: 778]},
+      {SymphonyElixir.Linear.Client, :scan_issue_comments, 1,
+       [file: ~c"lib/symphony_elixir/linear/client.ex", line: 735]},
+      {SymphonyElixir.Linear.CommentInbox, :scan_due, 4,
+       [file: ~c"lib/symphony_elixir/linear/comment_inbox.ex", line: 124]},
+      {SymphonyElixir.Linear.CommentInbox, :scan_attempt_state, 6,
+       [file: ~c"lib/symphony_elixir/linear/comment_inbox.ex", line: 68]},
+      {SymphonyElixir.Linear.CommentInbox, :scan_with_busy_retry, 5,
+       [file: ~c"lib/symphony_elixir/linear/comment_inbox.ex", line: 46]},
+      {SymphonyElixir.Linear.IssueLease, :"-with_journal_lock/4-fun-1-", 2,
+       [file: ~c"lib/symphony_elixir/linear/issue_lease.ex", line: 75]},
+      {SymphonyElixir.Linear.IssueLease, :hold, 6,
+       [file: ~c"lib/symphony_elixir/linear/issue_lease.ex", line: 116]},
+      {SymphonyElixir.Linear.WriteContext, :with_context, 2,
+       [file: ~c"lib/symphony_elixir/linear/write_context.ex", line: 33]},
+      {SymphonyElixir.CommentCheckpoint, :scan, 2,
+       [file: ~c"lib/symphony_elixir/comment_checkpoint.ex", line: 34]},
+      {SymphonyElixir.Yolo.Observation, :observe, 4,
+       [file: ~c"lib/symphony_elixir/yolo/observation.ex", line: 63]},
+      {SymphonyElixir.Yolo.Observation, :"-capture_members/5-fun-0-", 6,
+       [file: ~c"lib/symphony_elixir/yolo/observation.ex", line: 26]},
+      {Enumerable.List, :reduce, 3, [file: ~c"lib/enum.ex", line: 5023]},
+      {Enum, :reduce_while, 3, [file: ~c"lib/enum.ex", line: 2574]}
+    ],
+    message_queue_len: 25,
+    messages: [
+      {:EXIT, #Port<0.40>, :normal},
+      {:EXIT, #Port<0.42>, :normal},
+      :run_poll_cycle,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      :tick,
+      {:codex_worker_update, "worker",
+       %{
+         timestamp: ~U[2026-09-30 20:15:46.212221Z],
+         session_id: "thread-turn",
+         event: :turn_completed
+       }},
+      {:"$gen_call",
+       {#PID<0.623.0>,
+        [:alias | #Reference<0.0.79747.3480876096.4249944067.178463>]},
+       :snapshot}
+    ]
+  ],
+  orchestrator: #PID<0.628.0>,
+  duration_ms: 2001
+}
+PRO-969 after release: %{
+  retry: %{
+    "worker" => %{
+      error: "stalled for 2350ms without codex activity",
+      identifier: "PRO-999",
+      timer_ref: #Reference<0.3480876096.4249878529.182367>,
+      workspace_path: nil,
+      recovered_turn_context: nil,
+      review_stay: false,
+      delegate_id: nil,
+      worker_host: nil,
+      codex_token_checkpoint: %{
+        cached_input_tokens: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        thread_id: "thread-turn"
+      },
+      completion_pending: false,
+      capacity_wait: false,
+      review_subagent_call_ids: MapSet.new([]),
+      review_subagent_ids: MapSet.new([]),
+      retry_token: #Reference<0.3480876096.4249878529.182366>,
+      attempt: 1,
+      access_blocked: false,
+      due_at_ms: -576460737838
+    }
+  },
+  worker_alive: false
+}
+
+
+  1) test project answers snapshots and processes completion while a PO comment scan waits (SymphonyElixir.OrchestratorIOTest)
+     test/symphony_elixir/orchestrator_io_test.exs:93
+     Expected truthy, got false
+     code: assert is_map(snapshot)
+     arguments:
+
+         # 1
+         :timeout
+
+     stacktrace:
+       test/symphony_elixir/orchestrator_io_test.exs:116: (test)
+
+
+Finished in 2.6 seconds (0.00s async, 2.6s sync)
+1 test, 1 failure

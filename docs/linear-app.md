@@ -67,6 +67,18 @@ abgebrochener Projektprozess gibt die von ihm gestarteten Worker und Plätze fre
 Nach erfolgreichem Kandidatenabruf zeigen Terminal und Web-Dashboard ausführbare,
 kapazitätsbedingt wartende Tickets getrennt von echten Fehlerrückläufen. `:worker_capacity`
 erscheint dabei nicht als Fehler.
+Pro Projekt läuft höchstens ein YOLO-Takt im bestehenden TaskSupervisor.
+Weitere Poll-Signale bündeln einen Folgetakt mit dem jüngsten Projektkontext.
+Reguläre Kandidaten werden auch bei gebündelten Folgepolls nach jedem
+abgeschlossenen Takt verarbeitet. Recovery kann eigene Reservierungen erneut
+übernehmen; aktive Worker und PO-Gruppen bleiben gegen Doppelstarts geschützt.
+Starts und Kapazitätsentscheidungen bleiben im Orchestrator; Ergebnisse
+aktualisieren nur den zugehörigen YOLO-Zustand und erhalten neuere Worker-Ereignisse.
+Die AgentHop-Warmprüfung bleibt über Taskwechsel erhalten; ein Neustart prüft
+den gemeinsamen Journalstand erneut.
+Kontextwechsel und Projektende beenden ausstehende Takte. Ein abgeschlossener
+Codex-Turn bleibt bis zur Folgesession bzw. normalen Finalisierung von der
+Stall-Prüfung ausgenommen; eine neue Session aktiviert sie wieder.
 Der Gesamt-Snapshot liest die unabhängig gesammelten letzten Projektantworten;
 ein synchroner Linear-Aufruf im Projekt-Takt blockiert weder API noch Dashboard.
 Nach jeder Antwort folgt frühestens eine Sekunde später die nächste Abfrage;

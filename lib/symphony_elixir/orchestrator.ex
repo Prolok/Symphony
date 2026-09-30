@@ -162,7 +162,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def terminate(_reason, %State{external_poll: true, running: running, comment_scans: scans, yolo_runs: yolo_runs}) do
+  def terminate(_reason, %State{external_poll: true, running: running, comment_scans: scans, yolo_runs: yolo_runs} = state) do
+    stop_yolo_tick(poll_task(state))
     YoloCoordinator.stop(yolo_runs)
     stop_comment_scans(scans)
 
@@ -171,12 +172,20 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
-  def terminate(_reason, %State{comment_scans: scans, yolo_runs: yolo_runs}) do
+  def terminate(_reason, %State{comment_scans: scans, yolo_runs: yolo_runs} = state) do
+    stop_yolo_tick(poll_task(state))
     YoloCoordinator.stop(yolo_runs)
     stop_comment_scans(scans)
   end
 
   def terminate(_reason, _state), do: :ok
+
+  defp stop_yolo_tick(nil), do: :ok
+
+  defp stop_yolo_tick(task) do
+    Process.demonitor(task.ref, [:flush])
+    Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, task.pid)
+  end
 
   defp stop_comment_scans(scans) do
     Enum.each(scans, fn {_id, pid} -> Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, pid) end)
@@ -184,25 +193,28 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def handle_info({:project_poll, context}, state) do
+    task = poll_task(state)
+
+    state =
+      if task && task.context != context do
+        stop_yolo_tick(poll_task(state))
+        %{state | poll_check_in_progress: false}
+      else
+        state
+      end
+
     :ok = SymphonyElixir.ProjectContext.bind(context)
     handle_info(:tick, state)
   end
 
+  def handle_info(:tick, %{poll_check_in_progress: progress} = state) when progress not in [nil, false] do
+    state = state |> drain_worker_updates() |> reconcile_stalled_running_issues()
+    {:noreply, coalesce_poll(state)}
+  end
+
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
       when is_reference(tick_token) do
-    state = refresh_runtime_config(state)
-
-    state = %{
-      state
-      | poll_check_in_progress: true,
-        next_poll_due_at_ms: nil,
-        tick_timer_ref: nil,
-        tick_token: nil
-    }
-
-    notify_dashboard()
-    :ok = schedule_poll_cycle_start()
-    {:noreply, state}
+    handle_info(:tick, %{state | tick_timer_ref: nil, tick_token: nil})
   end
 
   def handle_info({:tick, _tick_token}, state), do: {:noreply, state}
@@ -223,23 +235,40 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  def handle_info(:run_poll_cycle, %{poll_check_in_progress: %{ref: _}} = state),
+    do: {:noreply, coalesce_poll(state)}
+
   def handle_info(:run_poll_cycle, state) do
-    state = refresh_runtime_config(state)
-    previous_state = state
-    state = maybe_dispatch(state)
-    state = scan_running_comments(state)
-    state = maybe_touch_activity_for_state_change(previous_state, state)
-    state = maybe_request_idle_shutdown(state)
+    previous = state
+    state = state |> refresh_runtime_config() |> maybe_dispatch() |> scan_running_comments()
+    state = maybe_touch_activity_for_state_change(previous, state)
+    state = if poll_task(state), do: state, else: finish_poll_cycle(state)
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  def handle_info({ref, result}, %{poll_check_in_progress: %{ref: ref} = task} = state) do
+    Process.demonitor(ref, [:flush])
+    state = %{state | poll_check_in_progress: %{pending?: task.pending?}}
 
     state =
-      if state.shutdown_requested or state.external_poll do
-        state
+      if task.context == SymphonyElixir.ProjectContext.current() do
+        state = integrate_yolo_tick(state, task, result)
+        dispatch_candidates(state, task.issues)
       else
-        schedule_tick(state, next_poll_delay_ms(state))
+        coalesce_poll(state)
       end
 
-    state = %{state | poll_check_in_progress: false}
+    state = state |> scan_running_comments() |> finish_poll_cycle()
+    notify_dashboard()
+    {:noreply, state}
+  end
 
+  def handle_info({ref, _stale_result}, state) when is_reference(ref), do: {:noreply, state}
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{poll_check_in_progress: %{ref: ref}} = state) do
+    Logger.warning("YOLO poll task exited project_root=#{project_root()} reason=#{inspect(reason)}")
+    state = finish_poll_cycle(state)
     notify_dashboard()
     {:noreply, state}
   end
@@ -437,13 +466,11 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
-      state = YoloCoordinator.tick(state, issues)
-      state = reconcile_idle_review_stays(state, issues)
-      {state, issues} = reconcile_observed_completed_states(state, issues)
-      state = retain_visible_dialog_observations(state, issues)
-
-      state = if available_slots(state) > 0, do: choose_issues(state, issues), else: state
-      refresh_waiting_issues(state, issues)
+      if is_binary(Config.yolo_agent_id()) or map_size(state.yolo_runs) > 0 do
+        start_yolo_tick(state, issues)
+      else
+        state |> YoloCoordinator.tick(issues) |> dispatch_candidates(issues)
+      end
     else
       {:error, :missing_linear_scope} ->
         Logger.error("Configure exactly one Linear scope using tracker.project_slug/tracker.team_key or LINEAR_PROJECT_SLUG/LINEAR_TEAM_KEY")
@@ -487,8 +514,145 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp poll_task(%{poll_check_in_progress: %{ref: _} = task}), do: task
+  defp poll_task(_state), do: nil
+
+  defp poll_pending?(%{poll_check_in_progress: %{pending?: true}}), do: true
+  defp poll_pending?(_state), do: false
+
+  defp coalesce_poll(state) do
+    progress = if is_map(state.poll_check_in_progress), do: state.poll_check_in_progress, else: %{}
+    %{state | poll_check_in_progress: Map.put(progress, :pending?, true)}
+  end
+
+  defp yolo_start_busy?(state, group, members, recovering?) do
+    ids = MapSet.new(members, & &1.id)
+
+    Enum.any?(state.yolo_runs, fn {name, run} ->
+      is_pid(run.pid) and Process.alive?(run.pid) and (name == group or Enum.any?(run.ids, &MapSet.member?(ids, &1)))
+    end) or
+      Enum.any?(members, fn member ->
+        Map.has_key?(state.running, member.id) or
+          if recovering?,
+            do: Map.has_key?(state.retry_attempts, member.id),
+            else: MapSet.member?(state.claimed, member.id)
+      end)
+  end
+
+  defp valid_yolo_start?(nil, _token), do: false
+
+  defp valid_yolo_start?(task, token) do
+    task.token == token and task.context == SymphonyElixir.ProjectContext.current()
+  end
+
+  defp start_yolo_tick(state, issues) do
+    context = SymphonyElixir.ProjectContext.current()
+    recipient = self()
+    token = make_ref()
+
+    callback = fn -> run_yolo_tick(state, issues, context, recipient, token) end
+    task = Task.Supervisor.async_nolink(SymphonyElixir.TaskSupervisor, callback)
+
+    %{state | poll_check_in_progress: %{pid: task.pid, ref: task.ref, token: token, context: context, issues: issues, baseline: state, pending?: poll_pending?(state)}}
+  end
+
+  defp run_yolo_tick(state, issues, context, recipient, token) do
+    start = fn group, members, callback, opts ->
+      event = opts[:initial_event] || %{}
+      recovering? = opts[:recovering] == true
+      message = {:start_yolo_group, token, group, members, callback, event, recovering?}
+      GenServer.call(recipient, message, :infinity)
+    end
+
+    SymphonyElixir.ProjectContext.with_context(context, fn ->
+      YoloCoordinator.tick(state, issues, recipient: recipient, start_group: start)
+    end)
+  end
+
+  defp merge_yolo_event(run, nil, _previous), do: run
+
+  defp merge_yolo_event(run, current, previous) do
+    if current.pid == run.pid do
+      changed = Map.reject(current.event, fn {key, value} -> previous && previous.event[key] == value end)
+      %{run | event: Map.merge(run.event, changed)}
+    else
+      run
+    end
+  end
+
+  defp integrate_yolo_tick(state, task, result) do
+    runs =
+      Map.new(result.yolo_runs, fn {group, run} ->
+        current = state.yolo_runs[group]
+        previous = task.baseline.yolo_runs[group]
+
+        {group, merge_yolo_event(run, current, previous)}
+      end)
+
+    recorded = state.yolo_runs |> Enum.flat_map(fn {_, run} -> run.ids end) |> MapSet.new()
+    removed = MapSet.difference(MapSet.union(task.baseline.claimed, recorded), result.claimed)
+    added = MapSet.difference(result.claimed, task.baseline.claimed)
+    retained = MapSet.intersection(state.claimed, MapSet.new(Map.keys(state.running) ++ Map.keys(state.retry_attempts)))
+
+    claimed =
+      state.claimed
+      |> MapSet.difference(removed)
+      |> MapSet.union(added)
+      |> MapSet.union(retained)
+
+    limit =
+      if result.max_concurrent_agents == task.baseline.max_concurrent_agents,
+        do: state.max_concurrent_agents,
+        else: result.max_concurrent_agents
+
+    %{
+      state
+      | yolo_runs: runs,
+        yolo_marker_cache: result.yolo_marker_cache,
+        yolo_retries: result.yolo_retries,
+        claimed: claimed,
+        max_concurrent_agents: limit
+    }
+    |> then(&maybe_touch_activity_for_state_change(task.baseline, &1))
+  end
+
+  defp dispatch_candidates(state, issues) do
+    state = reconcile_idle_review_stays(state, issues)
+    {state, issues} = reconcile_observed_completed_states(state, issues)
+    state = retain_visible_dialog_observations(state, issues)
+    state = if available_slots(state) > 0, do: choose_issues(state, issues), else: state
+    refresh_waiting_issues(state, issues)
+  end
+
+  defp finish_poll_cycle(state) do
+    pending? = poll_pending?(state)
+    state = state |> Map.put(:poll_check_in_progress, false) |> maybe_request_idle_shutdown()
+
+    cond do
+      state.shutdown_requested ->
+        state
+
+      pending? ->
+        send(self(), :tick)
+        state
+
+      state.external_poll ->
+        state
+
+      true ->
+        schedule_tick(state, next_poll_delay_ms(state))
+    end
+  end
+
+  defp project_root do
+    case SymphonyElixir.ProjectContext.current() do
+      nil -> RuntimePaths.workflow_dir()
+      context -> context.root
+    end
+  end
+
   defp reconcile_running_issues(%State{} = state) do
-    state = reconcile_stalled_running_issues(state)
+    state = state |> drain_worker_updates() |> reconcile_stalled_running_issues()
     running_ids = Map.keys(state.running)
 
     if running_ids == [] do
@@ -927,6 +1091,16 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp drain_worker_updates(state) do
+    receive do
+      {:codex_worker_update, _id, _update} = message ->
+        {:noreply, state} = handle_info(message, state)
+        drain_worker_updates(state)
+    after
+      0 -> state
+    end
+  end
+
   defp reconcile_stalled_running_issues(%State{} = state) do
     timeout_ms = Config.settings!().codex.stall_timeout_ms
 
@@ -949,7 +1123,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
     elapsed_ms = stall_elapsed_ms(running_entry, now)
 
-    if manual_in_progress_bootstrap_running_entry?(running_entry) do
+    if manual_in_progress_bootstrap_running_entry?(running_entry) or
+         Map.get(running_entry, :codex_turn_completed, false) or
+         not is_nil(Map.get(running_entry, :exit_finalize_token)) or
+         not Process.alive?(running_entry.pid) do
       state
     else
       restart_stalled_codex_issue(state, issue_id, running_entry, elapsed_ms, timeout_ms)
@@ -3024,11 +3201,31 @@ defmodule SymphonyElixir.Orchestrator do
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
-         checking?: state.poll_check_in_progress == true,
+         checking?: state.poll_check_in_progress not in [nil, false],
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
          poll_interval_ms: state.poll_interval_ms
        }
      }, state}
+  end
+
+  def handle_call({:start_yolo_group, token, group, members, callback, event, recovering?}, _from, state) do
+    task = poll_task(state)
+    valid? = valid_yolo_start?(task, token)
+    busy? = yolo_start_busy?(state, group, members, recovering?)
+
+    if valid? and not busy? and (recovering? or available_slots(state) > 0) do
+      result = YoloCoordinator.start_worker(state, group, callback, recovering?)
+
+      state =
+        case result do
+          {:ok, pid} -> YoloCoordinator.record_start(state, group, members, pid, event)
+          _ -> state
+        end
+
+      {:reply, result, state}
+    else
+      {:reply, {:error, :capacity}, state}
+    end
   end
 
   def handle_call({:stop_test_fixture, id}, _from, state) do
@@ -3044,8 +3241,14 @@ defmodule SymphonyElixir.Orchestrator do
     state = resume_access_blocked_retries(state)
     now_ms = System.monotonic_time(:millisecond)
     already_due? = is_integer(state.next_poll_due_at_ms) and state.next_poll_due_at_ms <= now_ms
-    coalesced = state.poll_check_in_progress == true or already_due?
-    state = if coalesced, do: state, else: schedule_tick(state, 0)
+    coalesced = state.poll_check_in_progress not in [nil, false] or already_due?
+
+    state =
+      cond do
+        poll_task(state) -> coalesce_poll(state)
+        coalesced -> state
+        true -> schedule_tick(state, 0)
+      end
 
     {:reply,
      %{
@@ -3071,6 +3274,10 @@ defmodule SymphonyElixir.Orchestrator do
         acc
     end)
   end
+
+  defp completed_turn_for_update(_entry, :turn_completed), do: true
+  defp completed_turn_for_update(_entry, :session_started), do: false
+  defp completed_turn_for_update(entry, _event), do: Map.get(entry, :codex_turn_completed, false)
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update, issue_id) do
     running_entry = align_codex_token_checkpoint(running_entry, update)
@@ -3129,6 +3336,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     {
       Map.merge(running_entry, %{
+        codex_turn_completed: completed_turn_for_update(running_entry, event),
         last_codex_timestamp: timestamp,
         last_codex_message: summarized_update,
         codex_event_sequence: next_event_sequence,

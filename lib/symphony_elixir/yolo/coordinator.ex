@@ -15,6 +15,15 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   @spec tick(map(), [map()], keyword()) :: map()
   def tick(state, issues, opts \\ []) do
+    {state, cache} =
+      AgentHop.with_cache(Map.get(state.yolo_retries, :agent_hops, %{}), fn ->
+        do_tick(state, issues, opts)
+      end)
+
+    put_in(state.yolo_retries[:agent_hops], cache)
+  end
+
+  defp do_tick(state, issues, opts) do
     SymphonyElixir.Yolo.OpenClaw.LinearBridge.Delivery.tick(opts)
     state = recover_external(state, opts)
     runs = state.yolo_runs |> reconcile(issues) |> refresh_external(issues, opts)
@@ -252,7 +261,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
       state
     else
       members = Enum.map(order["members"], fn member -> %{id: member["id"], identifier: member["identifier"], state: member["state"]} end)
-      recovery_opts = Keyword.put(opts, :recipient, self())
+      recovery_opts = Keyword.put_new(opts, :recipient, self())
       runner = fn _, _, _ -> OpenClaw.recover(order, recovery_opts) end
 
       event = %{
@@ -685,33 +694,42 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp start(state, group, members, issues, opts) do
     context = ProjectContext.current()
-    recipient = self()
+    recipient = Keyword.get(opts, :recipient, self())
     runner = Keyword.get(opts, :runner, fn name, members, all -> Runner.run(name, members, all, recipient: recipient) end)
     callback = fn -> ProjectContext.with_context(context, fn -> runner.(group, members, issues) end) end
 
-    start =
-      Keyword.get(opts, :start, fn name, fun ->
-        cond do
-          state.external_poll and opts[:recovering] -> SymphonyElixir.WorkerCapacity.recover_child("YOLO #{name}", fun)
-          state.external_poll -> SymphonyElixir.WorkerCapacity.start_child(nil, "YOLO #{name}", fun)
-          true -> Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fun)
-        end
-      end)
-
+    start = Keyword.get(opts, :start, fn name, fun -> start_worker(state, name, fun, opts[:recovering] == true) end)
+    start_group = Keyword.get(opts, :start_group, fn name, _members, fun, _opts -> start.(name, fun) end)
     prior_record = Store.read(group)
 
-    case start.(group, callback) do
+    case start_group.(group, members, callback, opts) do
       {:ok, pid} ->
-        %{
-          state
-          | yolo_runs: Map.put(state.yolo_runs, group, %{pid: pid, ids: Enum.map(members, & &1.id), issues: members, started_at: DateTime.utc_now(), event: Keyword.get(opts, :initial_event, %{})}),
-            claimed: MapSet.union(state.claimed, MapSet.new(members, & &1.id)),
-            last_activity_at_ms: System.monotonic_time(:millisecond)
-        }
+        record_start(state, group, members, pid, Keyword.get(opts, :initial_event, %{}))
 
       {:error, reason} ->
         handle_start_failure(state, group, members, opts, prior_record, reason)
     end
+  end
+
+  @doc false
+  @spec start_worker(map(), String.t(), (-> term()), boolean()) :: {:ok, pid()} | {:error, term()}
+  def start_worker(state, name, callback, recovering?) do
+    cond do
+      state.external_poll and recovering? -> SymphonyElixir.WorkerCapacity.recover_child("YOLO #{name}", callback)
+      state.external_poll -> SymphonyElixir.WorkerCapacity.start_child(nil, "YOLO #{name}", callback)
+      true -> Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, callback)
+    end
+  end
+
+  @doc false
+  @spec record_start(map(), String.t(), [map()], pid(), map()) :: map()
+  def record_start(state, group, members, pid, event) do
+    %{
+      state
+      | yolo_runs: Map.put(state.yolo_runs, group, %{pid: pid, ids: Enum.map(members, & &1.id), issues: members, started_at: DateTime.utc_now(), event: event}),
+        claimed: MapSet.union(state.claimed, MapSet.new(members, & &1.id)),
+        last_activity_at_ms: System.monotonic_time(:millisecond)
+    }
   end
 
   defp handle_start_failure(state, group, members, opts, prior_record, reason) do

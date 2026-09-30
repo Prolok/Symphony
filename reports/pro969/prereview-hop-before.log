@@ -1,0 +1,20 @@
+Compiling 2 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 608092, max_cases: 20
+Excluding tags: [:test]
+Including tags: [location: {"test/symphony_elixir/yolo_runtime_test.exs", 2111}]
+
+
+
+  1) test successive PO tasks retain warm hop checks while a restarted coordinator checks again (SymphonyElixir.YoloRuntimeTest)
+     test/symphony_elixir/yolo_runtime_test.exs:2111
+     Assertion with == failed
+     code:  assert Enum.count(paths, &String.contains?(&1, "agent-hops")) == length(reviews)
+     left:  27
+     right: 3
+     stacktrace:
+       test/symphony_elixir/yolo_runtime_test.exs:2130: (test)
+
+
+Finished in 5.6 seconds (0.00s async, 5.6s sync)
+1 test, 1 failure (193 excluded)

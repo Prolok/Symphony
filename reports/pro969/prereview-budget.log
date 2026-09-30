@@ -1,0 +1,23 @@
+Compiling 2 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 412602, max_cases: 20
+
+...thirty-minute relay cold active=5 requests=%{read: 10, write: 8, comments: 32, token: 2, identity: 2, receipt: 8, advisory: 1, assignees: 4}
+Linear budget summary workspace_id=one active=5 requests=214 operations=%{"LoadWorkpadUpdate" => 30, "SymphonyAdvisoryAgents" => 2, "SymphonyCommentScanSignal" => 18, "SymphonyLinearIssueComments" => 68, "SymphonyLinearIssuesById" => 25, "SymphonyReceipt" => 30, "SymphonyWorkspacePoll" => 2, "YoloBlockers" => 9, "anonymous" => 30}
+Linear budget summary workspace_id=two active=5 requests=1 operations=%{"WaitTarget" => 1}
+thirty-minute relay budget active=5 requests=215 attributed=%{{"one", "Review (AI)", "LoadWorkpadUpdate"} => 4, {"one", "Merge (AI)", "anonymous"} => 4, {"one", "YOLO review", "SymphonyLinearIssueComments"} => 18, {"one", "po_review", "SymphonyLinearIssuesById"} => 2, {"one", "Planung (AI)", "anonymous"} => 6, {"one", "In Arbeit (AI)", "SymphonyReceipt"} => 4, {"one", "Merge (AI)", "SymphonyReceipt"} => 4, {"one", "background", "SymphonyLinearIssuesById"} => 16, {"one", "YOLO review", "SymphonyCommentScanSignal"} => 18, {"one", "Merge (AI)", "LoadWorkpadUpdate"} => 4, {"one", "PreReview (AI)", "SymphonyLinearIssueComments"} => 7, {"one", "po_incoming", "SymphonyLinearIssuesById"} => 2, {"one", "Merge (AI)", "SymphonyLinearIssueComments"} => 5, {"two", "background", "WaitTarget"} => 1, {"one", "Test (AI)", "anonymous"} => 6, {"one", "In Arbeit (AI)", "LoadWorkpadUpdate"} => 4, {"one", "Planung (AI)", "SymphonyReceipt"} => 6, {"one", "Planung (AI)", "LoadWorkpadUpdate"} => 6, {"one", "Planung (AI)", "SymphonyLinearIssueComments"} => 6, {"one", "Review (AI)", "SymphonyLinearIssueComments"} => 5, {"one", "Test (AI)", "SymphonyReceipt"} => 6, {"one", "YOLO review", "YoloBlockers"} => 9, {"one", "PreReview (AI)", "LoadWorkpadUpdate"} => 6, {"one", "PreReview (AI)", "anonymous"} => 6, {"one", "Review (AI)", "anonymous"} => 4, {"one", "PreReview (AI)", "SymphonyReceipt"} => 6, {"one", "background", "SymphonyAdvisoryAgents"} => 2, {"one", "Review (AI)", "SymphonyReceipt"} => 4, {"one", "background", "SymphonyLinearIssueComments"} => 15, {"one", "In Arbeit (AI)", "SymphonyLinearIssueComments"} => 5, {"one", "background", "SymphonyWorkspacePoll"} => 2, {"one", "Test (AI)", "LoadWorkpadUpdate"} => 6, {"one", "BLOCKER", "SymphonyLinearIssuesById"} => 2, {"one", "Test (AI)", "SymphonyLinearIssueComments"} => 7, {"one", "YOLO review", "SymphonyLinearIssuesById"} => 3, {"one", "In Arbeit (AI)", "anonymous"} => 4}
+.relay budget three_projects cold=%{read: 1, comments: 3, token: 3, identity: 3, assignees: 2} warm=%{} total=0
+........relay budget idle cold=%{read: 1, token: 1, identity: 1, assignees: 2} warm=%{} total=0
+.thirty-minute relay cold active=0 requests=%{read: 2, token: 2, identity: 2, assignees: 4}
+Linear budget summary workspace_id=one active=0 requests=14 operations=%{"SymphonyLinearIssueComments" => 8, "SymphonyLinearIssuesById" => 6}
+Linear budget summary workspace_id=two active=0 requests=1 operations=%{"WaitTarget" => 1}
+thirty-minute relay budget active=0 requests=15 attributed=%{{"one", "background", "SymphonyLinearIssueComments"} => 8, {"one", "background", "SymphonyLinearIssuesById"} => 6, {"two", "background", "WaitTarget"} => 1}
+..thirty-minute relay cold active=0 requests=%{read: 2, token: 2, identity: 2, assignees: 4}
+Linear budget summary workspace_id=one active=0 requests=20 operations=%{"SymphonyLinearIssueComments" => 14, "SymphonyLinearIssuesById" => 6}
+Linear budget summary workspace_id=two active=0 requests=6 operations=%{"WaitTarget" => 6}
+thirty-minute relay budget active=0 requests=26 attributed=%{{"one", "background", "SymphonyLinearIssueComments"} => 14, {"one", "background", "SymphonyLinearIssuesById"} => 6, {"two", "background", "WaitTarget"} => 6}
+.relay budget two_workspaces cold=%{read: 2, comments: 3, token: 3, identity: 3, assignees: 4} warm=%{} total=0
+..relay budget active cold=%{read: 1, comments: 1, token: 1, identity: 1, assignees: 2} warm=%{} total=0
+.
+Finished in 185.1 seconds (0.00s async, 185.1s sync)
+19 tests, 0 failures

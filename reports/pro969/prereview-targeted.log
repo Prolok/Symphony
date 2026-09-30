@@ -1,0 +1,23 @@
+Compiling 2 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 31035, max_cases: 20
+
+PRO-924 after: Blocked SymphonyLinearPoll 20 parallel HTTP/aggregate readers max_elapsed_ms=12 age_ms=10115
+...PRO-969 after: snapshot_elapsed_ms=0 blocked_scan_ms=2146 no_stall_retry=true
+...Traceback (most recent call last):
+  File "/Users/tr/QuantHub/Symphony-worktrees/PRO-969/priv/linear_app/issue_lease.py", line 15, in <module>
+    print("locked", flush=True)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/tr/QuantHub/Symphony-worktrees/PRO-969/priv/linear_app/issue_lease.py", line 20, in <module>
+    print("unavailable", flush=True)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+BrokenPipeError: [Errno 32] Broken pipe
+.............................................................................................................................................................................................................PRO-969 hop cache: tasks=10 members=3 initial_locks=3 changed_source_locks=1 restart_locks=3
+.................................................................
+Finished in 160.2 seconds (0.00s async, 160.2s sync)
+276 tests, 0 failures

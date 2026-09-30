@@ -1,0 +1,24 @@
+Compiling 2 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 13885, max_cases: 20
+Excluding tags: [:test]
+Including tags: [location: "test/symphony_elixir/orchestrator_io_test.exs", location: "test/symphony_elixir/project_snapshot_test.exs", location: "test/symphony_elixir/orchestrator_status_test.exs", location: "test/symphony_elixir/yolo_runtime_test.exs", location: "test/symphony_elixir/project_snapshot_linear_test.exs", location: "test/symphony_elixir/comment_polling_test.exs", location: "test/symphony_elixir/retry_refresh_test.exs", location: "test/symphony_elixir/worker_capacity_test.exs", location: "test/symphony_elixir/project_runtime_test.exs", location: {"test/symphony_elixir/core_test.exs", 5327}]
+
+PRO-924 after: Blocked SymphonyLinearPoll 20 parallel HTTP/aggregate readers max_elapsed_ms=12 age_ms=10164
+.............Traceback (most recent call last):
+  File "/Users/tr/QuantHub/Symphony-worktrees/PRO-969/priv/linear_app/issue_lease.py", line 15, in <module>
+    print("locked", flush=True)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^
+BrokenPipeError: [Errno 32] Broken pipe
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/tr/QuantHub/Symphony-worktrees/PRO-969/priv/linear_app/issue_lease.py", line 20, in <module>
+    print("unavailable", flush=True)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+BrokenPipeError: [Errno 32] Broken pipe
+.PRO-969 after: snapshot_elapsed_ms=1 blocked_scan_ms=2250 no_stall_retry=true
+..........................................................................................................................................................................................................................................................................................................................
+Finished in 181.1 seconds (0.00s async, 181.1s sync)
+328 tests, 0 failures (231 excluded)

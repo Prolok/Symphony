@@ -225,7 +225,7 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
     ProjectContext.with_context(context, fn ->
       assert {:ok, [issue]} = Tracker.fetch_issue_states_by_ids([node["id"]])
-      assert {:ok, [old]} = Tracker.fetch_issue_comments(issue.id)
+      assert {:ok, [old]} = IssueReadCache.comments(issue.id)
       current = old.body <> "\nAktuelle Ergänzung aus Linear.\n"
       Agent.update(comments, &put_in(&1, [issue.id, "body"], current))
       assert {:ok, [^old]} = Tracker.fetch_issue_comments(issue.id)

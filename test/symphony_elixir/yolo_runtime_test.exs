@@ -1994,6 +1994,15 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, false} = Escalation.pending(ready.id)
   end
 
+  test "background dependency cleanup preserves other projects and active legacy entries", %{issues: [issue | _], context: context} do
+    active = %{issue | state: "In Arbeit (AI)"}
+
+    retained = %{{context.id, issue.id} => :active, {"other-project", "gone"} => :foreign, :metadata => :keep}
+    cache = Map.merge(retained, %{{context.id, "gone"} => :stale, {:wait_report, issue.id, "PRI-1"} => :report})
+
+    assert {:ok, [^active], ^retained} = Yolo.Dependencies.refresh_background([active], cache, [])
+  end
+
   test "foreground refresh loads fresh blockers for a relay-stamped review issue", %{issues: [issue | _]} do
     review = %{
       issue

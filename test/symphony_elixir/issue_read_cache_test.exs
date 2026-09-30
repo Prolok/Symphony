@@ -3,6 +3,7 @@ defmodule SymphonyElixir.IssueReadCacheTest do
 
   alias SymphonyElixir.Linear.{Budget, Client, IssueReadCache}
   alias SymphonyElixir.ProjectContext
+  alias SymphonyElixir.Yolo.Dependencies
 
   defp relay_settings do
     settings = put_in(Config.settings!().tracker.relay, %{})
@@ -59,6 +60,46 @@ defmodule SymphonyElixir.IssueReadCacheTest do
     assert Agent.get(count, & &1) == 2
     assert {:ok, [^linear_issue]} = IssueReadCache.fetch(["issue"], Keyword.put(opts, :relay, fn _, _ -> {:error, :relay_issue_incomplete} end))
     assert Agent.get(count, & &1) == 3
+  end
+
+  test "unavailable relay bindings require verification on every read and preserve failures" do
+    context = %ProjectContext{id: "unavailable-binding", settings: relay_settings()}
+
+    verify = fn ->
+      send(self(), :binding_verified)
+      :ok
+    end
+
+    ProjectContext.with_context(context, fn ->
+      for _ <- 1..2, do: assert(:ok = IssueReadCache.verify_binding(:agent, verify))
+      assert_receive :binding_verified
+      assert_receive :binding_verified
+      assert {:error, :unverified_agent} = IssueReadCache.verify_binding(:agent, fn -> {:error, :unverified_agent} end)
+    end)
+  end
+
+  test "incomplete dependency reads fall back to fresh relations while read failures stay closed" do
+    issue = %Issue{id: "issue", relations_complete: false, blocked_by: []}
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+      assert (payload[:query] || payload["query"]) =~ "YoloBlockers"
+      send(self(), :fresh_blocker_query)
+
+      relation = %{
+        "id" => "blocking-relation",
+        "type" => "blocks",
+        "issue" => %{"id" => "fix", "identifier" => "PRO-1", "state" => %{"name" => "Test (AI)", "type" => "started"}}
+      }
+
+      {:ok, %{status: 200, body: %{"data" => %{"issue" => %{"inverseRelations" => %{"nodes" => [relation], "pageInfo" => %{"hasNextPage" => false}}}}}}}
+    end)
+
+    assert {:ok, [%{id: "fix", state: "Test (AI)", state_type: "started"}]} =
+             Dependencies.blockers(issue.id, fetch_linear: fn _ -> {:ok, [issue]} end)
+
+    assert_receive :fresh_blocker_query
+    assert {:error, :linear_fetch_failed} = Dependencies.blockers(issue.id, fetch_linear: fn _ -> {:error, :linear_fetch_failed} end)
+    refute_receive :fresh_blocker_query
   end
 
   test "a confirmed local update invalidates the old relay epoch until hydration catches up" do

@@ -50,11 +50,6 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
     end)
   end
 
-  defp ready?(%ProjectContext{settings: %{tracker: %{relay: relay}}} = context, id) when not is_nil(relay),
-    do: match?({:ok, _}, ProjectPoller.comment_epoch(context, id))
-
-  defp ready?(_, _), do: false
-
   @spec verify_binding(term(), (-> :ok | {:error, term()})) :: :ok | {:error, term()}
   def verify_binding(binding, verify) do
     serialized({:binding, binding}, fn -> verify_binding_serialized(binding, verify) end)
@@ -64,13 +59,15 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
     context = ProjectContext.current()
     id = WriteContext.current()["issue_id"]
 
-    if ready?(context, id) do
-      case ProjectPoller.comment_epoch(context, id) do
-        {:ok, {generation, _, _}} -> verify_ready_binding(context, id, generation, binding, verify)
-        _ -> verify.()
-      end
-    else
-      verify.()
+    case context do
+      %ProjectContext{settings: %{tracker: %{relay: relay}}} when not is_nil(relay) ->
+        case ProjectPoller.comment_epoch(context, id) do
+          {:ok, {generation, _, _}} -> verify_ready_binding(context, id, generation, binding, verify)
+          _ -> verify.()
+        end
+
+      _ ->
+        verify.()
     end
   end
 

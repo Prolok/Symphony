@@ -269,6 +269,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, comments} = Memory.fetch_issue_comments("issue-1")
     assert Enum.find(comments, &(&1.id == "comment-1")).body == "updated body"
     assert Enum.find(comments, &(&1.id == "comment-2")).body == "other"
+    assert {:ok, ["updated body", "other"]} = Memory.fetch_issue_comment_bodies("issue-1")
 
     assert {:error, :comment_not_found} = Memory.update_comment("missing", "new body")
 

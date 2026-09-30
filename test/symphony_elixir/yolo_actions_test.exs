@@ -1276,8 +1276,9 @@ defmodule SymphonyElixir.YoloActionsTest do
           trusted = ProjectContext.current()
           unverified = %{trusted | trusted_binding: nil}
           without_opt_in = put_in(trusted.settings.tracker.escalation_trusted_agent_id, nil)
+          missing_assignees = %{trusted | assignee_ids: nil}
 
-          for rejected <- [unverified, without_opt_in] do
+          for rejected <- [unverified, without_opt_in, missing_assignees] do
             ProjectContext.with_context(rejected, fn ->
               assert {:error, {:yolo_operations_pending, _}} = Completion.verify_operations([handed_off])
             end)

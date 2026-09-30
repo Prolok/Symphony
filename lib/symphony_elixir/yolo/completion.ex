@@ -107,18 +107,15 @@ defmodule SymphonyElixir.Yolo.Completion do
   end
 
   defp handed_off_owner?(issue) do
-    case Config.settings() do
-      {:ok, %{tracker: %{escalation_trusted_agent_id: nil}}} ->
+    case Config.escalation_trusted_agent_id() do
+      nil ->
         is_binary(Config.human_handoff_id()) and issue.assignee_id == Config.human_handoff_id()
 
-      {:ok, %{tracker: %{escalation_trusted_agent_id: id}}} ->
+      id ->
         case ProjectContext.current() do
           %{assignee_ids: ids} when is_list(ids) -> id in TrustedAgents.ids() and issue.assignee_id in ids
           _ -> false
         end
-
-      _ ->
-        false
     end
   end
 

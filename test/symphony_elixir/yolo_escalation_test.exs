@@ -178,6 +178,7 @@ defmodule SymphonyElixir.YoloEscalationTest do
           &put_in(&1, ["organization", "id"], "foreign"),
           &Map.put(&1, "id", "other"),
           &Map.put(&1, "url", nil),
+          &Map.put(&1, "url", "http://linear.app/test/profiles/pai"),
           &Map.put(&1, "isMentionable", nil)
         ] do
       options = [query: recipient_query(context, change), comments: fn _ -> flunk("invalid recipient must not write") end]
@@ -190,6 +191,35 @@ defmodule SymphonyElixir.YoloEscalationTest do
 
     assert {:error, :yolo_response_incomplete} =
              Escalation.recipient(query: fn _, _ -> {:ok, %{"errors" => [%{"message" => "partial"}]}} end)
+  end
+
+  test "default escalation rejects a missing human binding and unconfirmed handover responses", %{context: context, issue: issue} do
+    ProjectContext.bind(%{context | human_handoff_id: nil})
+    assert {:error, :yolo_escalation_handoff_unconfirmed} = Escalation.owner([])
+    missing_owner_options = [comments: fn _ -> flunk("missing owner must not write") end]
+
+    assert {:error, :yolo_escalation_handoff_unconfirmed} =
+             Escalation.handover(issue, request(), missing_owner_options, fn _, _, _ -> flunk("missing owner update") end)
+
+    ProjectContext.bind(context)
+
+    options = [
+      comments: fn _ -> {:ok, Process.get(:unconfirmed_notes, [])} end,
+      escalation_comment: fn _, body ->
+        Process.put(:unconfirmed_notes, [%{body: body}])
+        :ok
+      end
+    ]
+
+    assert {:error, :yolo_escalation_handoff_unconfirmed} =
+             Escalation.handover(issue, request(), options, fn _, input, _ ->
+               assert input == %{assigneeId: "human", delegateId: nil}
+               {:ok, %{"success" => false}}
+             end)
+
+    assert [%{body: body}] = Process.get(:unconfirmed_notes)
+    assert body =~ "Entscheidung benötigt"
+    refute body =~ "Trusted Agent"
   end
 
   test "trusted opt-in suppresses configured OpenClaw and old pending messages without changing their journal", %{context: context, issue: issue} do

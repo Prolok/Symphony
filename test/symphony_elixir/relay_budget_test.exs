@@ -2,9 +2,10 @@ defmodule SymphonyElixir.RelayBudgetTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.Codex.{CommentTool, DynamicTool, MCPServer}
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller, Relay, Tracker, WorkerCapacity}
-  alias SymphonyElixir.Linear.{Budget, IssueLease, IssueReadCache, WriteContext}
+  alias SymphonyElixir.Linear.{Budget, CommentVersion, IssueLease, IssueReadCache, WriteContext}
   alias SymphonyElixir.RelayFixture, as: Server
-  alias SymphonyElixir.Yolo.{ActionScope, Coordinator, Dependencies, Escalation, Operations, Runner, Scope}
+  alias SymphonyElixir.Yolo.{ActionScope, BlockerBrake, Coordinator, Dependencies, Escalation, Operations}
+  alias SymphonyElixir.Yolo.{Runner, Scope}
 
   test "the actual five-second timer fetches an available event then stays Linear-free on warm ticks" do
     root = Path.dirname(Workflow.workflow_file_path())
@@ -254,6 +255,59 @@ defmodule SymphonyElixir.RelayBudgetTest do
 
       assert {:ok, []} = SymphonyElixir.WaitMarker.workpad_markers(issue, [])
       assert Agent.get(counts, & &1) == %{}
+    end)
+  end
+
+  test "trusted BLOCKER brake confirms a lost update response before the relay echo" do
+    {context, node, linear, _comments, _counts} = mutable_read_fixture()
+    trusted = "b57e9f80-53ce-4d96-9180-370f03d60d16"
+    tracker = %{context.settings.tracker | trusted_agent_ids: [trusted], escalation_trusted_agent_id: trusted}
+
+    context = %{
+      context
+      | yolo_agent_id: trusted,
+        settings: %{context.settings | tracker: tracker},
+        trusted_binding: CommentVersion.digest([tracker.app, tracker.trusted_agent_ids])
+    }
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, [cached]} = Tracker.fetch_issue_states_by_ids([node["id"]])
+      Agent.update(linear, &Map.merge(&1, %{"state" => %{"name" => "BLOCKER"}, "delegate" => %{"id" => trusted}}))
+      assert {:ok, [issue]} = Tracker.fetch_issue_states_by_ids([node["id"]], force_full: true)
+      assert issue.state == "BLOCKER"
+      assert {:ok, [stale]} = Tracker.fetch_issue_states_by_ids([issue.id])
+      assert stale.state == cached.state and stale.delegate_id == cached.delegate_id
+      Process.put(:brake_note, [])
+      body = "## Symphony Workpad\n\n### Validierung\n\n- [ ] Betreiber prüft Hostzugang; fällig: Yolo Review\n"
+
+      opts = [
+        now: fn -> 1_000 end,
+        workpad_comments: fn _ -> {:ok, [%{id: "workpad", body: body}]} end,
+        workpad_write: fn _, _ -> :ok end,
+        comments: fn _ -> {:ok, Process.get(:brake_note)} end,
+        escalation_comment: fn _, note ->
+          Process.put(:brake_note, [%{body: note}])
+          :ok
+        end,
+        query: fn query, variables ->
+          if query =~ "YoloEscalationRecipient" do
+            user = %{"id" => trusted, "app" => true, "active" => true, "isMentionable" => false, "organization" => %{"id" => tracker.app["workspace_id"]}}
+            {:ok, %{"data" => %{"users" => %{"nodes" => [user], "pageInfo" => %{"hasNextPage" => false}}}}}
+          else
+            assert query =~ "YoloUpdate"
+            assert variables.input == %{delegateId: nil}
+            Agent.update(linear, &Map.put(&1, "delegate", nil))
+            {:error, :response_lost}
+          end
+        end
+      ]
+
+      assert :ok = BlockerBrake.reserve([issue], "first-run", opts)
+      assert {:ok, []} = BlockerBrake.check([issue], opts)
+      assert {:ok, [fresh]} = Tracker.fetch_issue_states_by_ids([issue.id], force_full: true)
+      assert fresh.delegate_id == nil
+      assert fresh.assignee_id == issue.assignee_id
+      assert fresh.state == "BLOCKER"
     end)
   end
 

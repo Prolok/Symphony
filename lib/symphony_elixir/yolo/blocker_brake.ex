@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
   require Logger
   alias SymphonyElixir.{Config, Tracker, Workpad}
   alias SymphonyElixir.Linear.{DurableState, IssueLease}
-  alias SymphonyElixir.Yolo.{API, Escalation}
+  alias SymphonyElixir.Yolo.{API, Escalation, Store}
 
   @window_ms 86_400_000
 
@@ -33,14 +33,17 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
   end
 
   defp reserve_issue(issue, run_id, opts) do
-    with {:ok, cause} <- cause(issue, opts) do
-      update(issue.id, &put_entry(&1, cause, run_id, now(opts)))
+    with {:ok, cause} <- cause(issue, opts),
+         {:ok, generation} <- delegation_generation(issue.id) do
+      update(issue.id, &put_entry(&1, cause, run_id, now(opts), generation))
     end
   end
 
-  defp put_entry(record, cause, run_id, timestamp) do
+  defp put_entry(record, cause, run_id, timestamp, generation) do
     entries = Enum.reject(record["entries"] || [], &(&1["run_id"] == run_id))
-    %{"entries" => [%{"hash" => digest(cause), "cause" => cause, "run_id" => run_id, "at" => timestamp} | entries]}
+    entry = %{"hash" => digest(cause), "cause" => cause, "run_id" => run_id, "at" => timestamp}
+    entry = if is_integer(generation), do: Map.put(entry, "delegation_generation", generation), else: entry
+    %{"entries" => [entry | entries]}
   end
 
   @spec release([map()], String.t()) :: :ok | {:error, term()}
@@ -57,23 +60,46 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
 
   defp check_issue(issue, opts) do
     with {:ok, cause} <- cause(issue, opts),
-         {:ok, record} <- read(issue.id) do
-      same = Enum.find(record["entries"] || [], &(&1["hash"] == digest(cause) and (now(opts) - &1["at"]) in 0..@window_ms))
+         {:ok, record} <- read(issue.id),
+         {:ok, generation} <- delegation_generation(issue.id) do
+      same = Enum.find(record["entries"] || [], &(&1["hash"] == digest(cause) and (now(opts) - &1["at"]) in 0..@window_ms and not new_decision?(&1, generation)))
       if same, do: handoff(issue, cause, same, opts), else: :run
     end
   end
 
-  defp handoff(issue, cause, first, opts) do
-    human = Config.human_handoff_id()
+  defp new_decision?(_, nil), do: false
+  defp new_decision?(entry, generation), do: generation > (entry["delegation_generation"] || 0)
 
+  defp delegation_generation(id) do
+    if is_nil(Config.escalation_trusted_agent_id()) do
+      {:ok, nil}
+    else
+      with {:ok, record} <- Store.read("blocker") do
+        {:ok, get_in(record, ["impulses", id, "delegation_generation"]) || 0}
+      end
+    end
+  end
+
+  defp handoff(issue, cause, first, opts) do
+    with {:ok, recipient} <- Escalation.recipient(opts) do
+      details = escalation_details(issue, cause, first, recipient, opts)
+      handoff_to_recipient(issue, details, recipient, opts)
+    end
+  end
+
+  defp escalation_details(issue, cause, first, recipient, opts) do
     defaults = %{
       "cause" => cause,
       "attempts" => "PO-Lauf #{first["run_id"]} zur selben Ursache; erneuter BLOCKER binnen 24 Stunden",
       "proposal" => "Ausstehende Betreiberaktion aus dem letzten Workpad-Lauf prüfen und Hindernis beheben.",
-      "decision" => "Mensch bestätigt Zugang/Freigabe oder die konkrete Fortsetzung nach Behebung."
+      "decision" => "#{if recipient, do: "Trusted Agent", else: "Mensch"} bestätigt Zugang/Freigabe oder die konkrete Fortsetzung nach Behebung."
     }
 
-    details = Map.merge(defaults, last_escalation(issue, opts))
+    Map.merge(defaults, last_escalation(issue, opts))
+  end
+
+  defp handoff_to_recipient(issue, details, nil, opts) do
+    human = Config.human_handoff_id()
 
     with true <- is_binary(human),
          :ok <- note(issue, details, opts),
@@ -85,6 +111,24 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
     else
       {:error, _} = error -> error
       _ -> {:error, :blocker_brake_handoff_unconfirmed}
+    end
+  end
+
+  defp handoff_to_recipient(issue, details, %{}, opts) do
+    with {:ok, owner} <- Escalation.owner(opts),
+         :ok <- note(issue, details, opts, " " <> owner),
+         :ok <- Escalation.handover(issue, %{"escalation" => details}, opts, &trusted_update/3) do
+      :handed_off
+    end
+  end
+
+  defp trusted_update(issue, input, opts) do
+    result = API.update(issue.id, input, opts)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
+
+    case fetch.([issue.id]) do
+      {:ok, [%{state: "BLOCKER", delegate_id: nil, assignee_id: assignee}]} when assignee == issue.assignee_id -> :ok
+      _ -> if(result == :ok, do: {:error, :blocker_brake_handoff_unconfirmed}, else: result)
     end
   end
 
@@ -117,10 +161,10 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
     :ok
   end
 
-  defp note(issue, details, opts) do
+  defp note(issue, details, opts, owner \\ "") do
     fetch = Keyword.get(opts, :workpad_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comments(&1, force_full: true)))
     write = Keyword.get(opts, :workpad_write, Keyword.get(opts, :workpad, &Workpad.update_tracker_workpad/2))
-    entry = "BLOCKER-Schleifenbremse: Ursache #{details["cause"]}; Versuche #{details["attempts"]}; Vorschlag #{details["proposal"]}; Entscheidung #{details["decision"]}."
+    entry = "BLOCKER-Schleifenbremse: Ursache #{details["cause"]}; Versuche #{details["attempts"]}; Vorschlag #{details["proposal"]}; Entscheidung #{details["decision"]}." <> owner
 
     with {:ok, comments} <- fetch.(issue.id),
          {:ok, workpad} <- Workpad.find_comment(comments) do

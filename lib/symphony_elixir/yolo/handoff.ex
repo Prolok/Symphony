@@ -65,7 +65,28 @@ defmodule SymphonyElixir.Yolo.Handoff do
     end
   end
 
-  defp decide(issue, args, report, opts) do
+  defp decide(%{state: "BLOCKER"} = issue, %{"kind" => "handoff"} = args, report, opts) do
+    if is_nil(Config.escalation_trusted_agent_id()) do
+      human_handoff(issue, args, report, opts)
+    else
+      with :ok <- Escalation.validate(args),
+           :ok <- attempt_available(issue.id),
+           :ok <- report(issue, report, "handoff", opts),
+           {:ok, [fresh]} <- ActionScope.sources([issue.id], opts),
+           true <- fresh.state == issue.state,
+           :ok <- Escalation.handover(fresh, args, opts, &update/3),
+           :ok <- Completion.invoke(%{"issue_id" => issue.id, "result" => report}, Keyword.put(opts, :handoff_completed, true)) do
+        maybe_escalate(issue, args, opts)
+      else
+        {:error, _} = error -> error
+        _ -> {:error, :yolo_handoff_not_ready}
+      end
+    end
+  end
+
+  defp decide(issue, args, report, opts), do: human_handoff(issue, args, report, opts)
+
+  defp human_handoff(issue, args, report, opts) do
     with :ok <- acceptance(issue, args, opts),
          :ok <- attempt_available(issue.id),
          human when is_binary(human) <- Config.human_handoff_id(),
@@ -211,6 +232,9 @@ defmodule SymphonyElixir.Yolo.Handoff do
           {:ok, "Betreiberpflicht offen; Agentdelegation und Status bleiben bestehen. Auftrags-Digest: `#{digest}`."}
 
         {"escalate", _} ->
+          Escalation.owner(opts)
+
+        {"handoff", _} when issue.state == "BLOCKER" ->
           Escalation.owner(opts)
 
         _ ->

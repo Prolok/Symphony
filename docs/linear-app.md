@@ -780,10 +780,14 @@ Für delegierte `BLOCKER`-Tickets journalisiert Symphony vor der PO-Zustellung
 den SHA-256 der offenen Betreiberaktion im Workpad oder der strukturierten
 `escalation`. Erscheint dieselbe Ursache innerhalb von 24 Stunden erneut,
 erfolgt kein weiterer PO-Lauf: Das Ticket bleibt in `BLOCKER`, die Delegation
-endet, der erste konfigurierte Mensch übernimmt, das Workpad erhält Ursache,
-Versuche, Vorschlag und Entscheidung. Der bestehende OpenClaw-Kanal erhält
-genau einen korrelierten Eskalationsversuch; ein unklarer Versand wird nicht
-blind wiederholt. Eine andere Ursache oder ein neues Zeitfenster erlaubt Arbeit.
+endet, das Workpad erhält Ursache, Versuche, Vorschlag und Entscheidung.
+Empfänger, Assignee und Benachrichtigung richten sich nach dem
+[BLOCKER-Vertrag](../WORKFLOW_YOLO_AGENT.md#blocker), einschließlich Testprojekt-Opt-in.
+Bei Menscheneskalation erhält der bestehende OpenClaw-Kanal genau einen
+korrelierten Eskalationsversuch; ein unklarer Versand wird nicht blind wiederholt.
+Eine andere Ursache oder ein neues Zeitfenster erlaubt Arbeit. Mit Opt-in erlaubt
+auch eine belegte Neudelegation nach diesem Vertrag einen neuen Versuch;
+die nächste automatische Wiederholung zur selben Ursache bleibt gebremst.
 
 `Wartet auf: <IDENT>` darf mehrfach als eigene Zeile in Beschreibung oder Workpad
 stehen. Die Kennung muss ein Ticket in einem anderen gebundenen Workspace

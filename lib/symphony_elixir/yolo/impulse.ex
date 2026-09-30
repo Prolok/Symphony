@@ -59,6 +59,7 @@ defmodule SymphonyElixir.Yolo.Impulse do
     reasons = recent |> Enum.reverse() |> Enum.flat_map(&reasons(&1, issue)) |> Enum.uniq()
     reasons = if(new_sessions != [] and issue.delegate_id == Config.yolo_agent_id(), do: Enum.uniq(["delegated_again" | reasons]), else: reasons)
     generation = if(is_map(prior), do: prior["generation"], else: 0) || 0
+    generation = generation + if(reasons == [], do: 0, else: 1)
 
     %{
       "relay" => event,
@@ -67,9 +68,17 @@ defmodule SymphonyElixir.Yolo.Impulse do
       "session_head_ids" => head_session_ids(agent_sessions),
       "agent_input_ids" => input_ids(recent, &TrustedAgents.trusted?(&1, TrustedAgents.ids())),
       "human_input_ids" => input_ids(recent, &TrustedAgents.human_or_trusted?(&1, [])),
-      "generation" => generation + if(reasons == [], do: 0, else: 1),
+      "generation" => generation,
+      "delegation_generation" => if("delegated_again" in reasons, do: generation, else: last_delegation_generation(prior)),
       "reason" => if(reasons == [], do: "no_relevant_history", else: Enum.join(reasons, ","))
     }
+  end
+
+  defp last_delegation_generation(nil), do: 0
+
+  defp last_delegation_generation(prior) do
+    prior["delegation_generation"] ||
+      if("delegated_again" in String.split(prior["reason"] || "", ","), do: prior["generation"] || 0, else: 0)
   end
 
   defp head_id([]), do: nil

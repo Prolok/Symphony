@@ -147,6 +147,8 @@ OpenClaw-Benachrichtigungen entfallen. Alle vier Eskalationswerte sind erforderl
 fehlende Angaben oder unbestätigte Übergaben sperren den Abschluss, ohne Rückfall
 auf den Menschen. Die Neudelegation durch einen gleichgestellten Linear-Akteur
 gilt als Entscheidung und weckt den nächsten Lauf.
+Eine solche Neudelegation erlaubt einen neuen Versuch auch bei gleicher Ursache
+innerhalb von 24 Stunden; eine erneute automatische Wiederholung bleibt gebremst.
 
 ## Yolo Review: gemeinsame fachliche Schlussabnahme
 

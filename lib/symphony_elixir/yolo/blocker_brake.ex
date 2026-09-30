@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
   require Logger
   alias SymphonyElixir.{Config, Tracker, Workpad}
   alias SymphonyElixir.Linear.{DurableState, IssueLease}
-  alias SymphonyElixir.Yolo.{API, Escalation}
+  alias SymphonyElixir.Yolo.{API, Escalation, Store}
 
   @window_ms 86_400_000
 
@@ -33,14 +33,17 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
   end
 
   defp reserve_issue(issue, run_id, opts) do
-    with {:ok, cause} <- cause(issue, opts) do
-      update(issue.id, &put_entry(&1, cause, run_id, now(opts)))
+    with {:ok, cause} <- cause(issue, opts),
+         {:ok, generation} <- delegation_generation(issue.id) do
+      update(issue.id, &put_entry(&1, cause, run_id, now(opts), generation))
     end
   end
 
-  defp put_entry(record, cause, run_id, timestamp) do
+  defp put_entry(record, cause, run_id, timestamp, generation) do
     entries = Enum.reject(record["entries"] || [], &(&1["run_id"] == run_id))
-    %{"entries" => [%{"hash" => digest(cause), "cause" => cause, "run_id" => run_id, "at" => timestamp} | entries]}
+    entry = %{"hash" => digest(cause), "cause" => cause, "run_id" => run_id, "at" => timestamp}
+    entry = if is_integer(generation), do: Map.put(entry, "delegation_generation", generation), else: entry
+    %{"entries" => [entry | entries]}
   end
 
   @spec release([map()], String.t()) :: :ok | {:error, term()}
@@ -57,9 +60,23 @@ defmodule SymphonyElixir.Yolo.BlockerBrake do
 
   defp check_issue(issue, opts) do
     with {:ok, cause} <- cause(issue, opts),
-         {:ok, record} <- read(issue.id) do
-      same = Enum.find(record["entries"] || [], &(&1["hash"] == digest(cause) and (now(opts) - &1["at"]) in 0..@window_ms))
+         {:ok, record} <- read(issue.id),
+         {:ok, generation} <- delegation_generation(issue.id) do
+      same = Enum.find(record["entries"] || [], &(&1["hash"] == digest(cause) and (now(opts) - &1["at"]) in 0..@window_ms and not new_decision?(&1, generation)))
       if same, do: handoff(issue, cause, same, opts), else: :run
+    end
+  end
+
+  defp new_decision?(_, nil), do: false
+  defp new_decision?(entry, generation), do: generation > (entry["delegation_generation"] || 0)
+
+  defp delegation_generation(id) do
+    if is_nil(Config.escalation_trusted_agent_id()) do
+      {:ok, nil}
+    else
+      with {:ok, record} <- Store.read("blocker") do
+        {:ok, get_in(record, ["impulses", id, "delegation_generation"]) || 0}
+      end
     end
   end
 

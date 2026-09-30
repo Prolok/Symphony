@@ -175,6 +175,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     for _ <- 1..10, do: assert({:ok, ^resumed} = Impulse.observe([issue], resumed, replay_opts))
     assert {:ok, replayed} = Impulse.observe([%{issue | relay_event: event.(3)}], resumed, opts)
     assert Impulse.generations(replayed)[issue.id] == 1
+    assert get_in(replayed, ["impulses", issue.id, "delegation_generation"]) == 1
 
     explicit = root.("explicit") |> Map.put("toDelegate", %{"id" => "pai"})
     together = Keyword.put(opts, :history, fn _ -> {:ok, [explicit, root.("merged")]} end)
@@ -202,6 +203,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     assert {:ok, replayed} = Impulse.observe([%{issue | relay_event: event.(3)}], observed, opts)
     assert Impulse.generations(replayed)[issue.id] == 1
+    assert get_in(replayed, ["impulses", issue.id, "delegation_generation"]) == 1
   end
 
   test "a visible withdrawal waits for redelegation and an unchanged issue stays quiet", %{issues: [issue | _]} do
@@ -408,6 +410,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       assert {:ok, record} = history_observe([%{issue | relay_event: event.(2)}], baseline, history: history_page)
 
       assert Impulse.generations(record)[issue.id] == expected
+      assert get_in(record, ["impulses", issue.id, "delegation_generation"]) == 0
     end
   end
 
@@ -424,10 +427,12 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert {:ok, accepted} = history_observe([issue], prior, history: fn _ -> {:ok, [change, base]} end)
     assert get_in(accepted, ["impulses", issue.id, "reason"]) == "human_priority_raised"
     assert get_in(accepted, ["impulses", issue.id, "agent_input_ids"]) == ["change"]
+    assert get_in(accepted, ["impulses", issue.id, "delegation_generation"]) == 0
 
     other = put_in(change, ["actor", "id"], "foreign-app")
     assert {:ok, ignored} = history_observe([issue], prior, history: fn _ -> {:ok, [other, base]} end)
     assert Impulse.generations(ignored)[issue.id] == 0
+    assert get_in(ignored, ["impulses", issue.id, "delegation_generation"]) == 0
 
     delegation = change |> Map.merge(%{"fromPriority" => nil, "toPriority" => nil, "toDelegate" => %{"id" => "pai"}})
     assert {:ok, delegated} = history_observe([issue], prior, history: fn _ -> {:ok, [delegation, base]} end)
@@ -3434,6 +3439,89 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     assert tick(state, [issue], options).yolo_runs == %{}
     assert_receive :trusted_brake_note
     assert Process.get(:brake_body) =~ "PO-Lauf previous"
+  end
+
+  for {actor, app?} <- [{"human", false}, {@trusted, true}] do
+    test "trusted BLOCKER resumes after redelegation by #{actor}, survives noise and brakes the next repeat", %{issues: [issue | _], context: context} do
+      {context, issue, options} = trusted_brake_fixture(context, issue)
+      event = fn n -> %{"generation" => "relay", "position" => n, "event_id" => "event-#{n}"} end
+      issue = %{issue | relay_event: event.(1)}
+      base = %{"id" => "base", "createdAt" => "2026-09-30T12:00:00Z"}
+      Process.put(:brake_history, [base])
+
+      options =
+        Keyword.merge(options,
+          history: fn _ -> {:ok, Process.get(:brake_history)} end,
+          sessions: fn _ -> {:ok, []} end,
+          scan: fn _ -> {:ok, Map.put(inbox(), "current", %{})} end,
+          start: fn "blocker", callback ->
+            assert {:error, :resume_probe} = callback.()
+            {:ok, self()}
+          end,
+          runner: fn "blocker", members, all ->
+            run_group(
+              "blocker",
+              members,
+              all,
+              Keyword.merge(options,
+                fetch: fn _ -> {:ok, members} end,
+                lease: fn _, callback -> callback.() end,
+                workspace: fn "blocker", _ ->
+                  send(self(), :resumed_runner)
+                  {:error, :resume_probe}
+                end
+              )
+            )
+          end
+        )
+
+      assert :ok = BlockerBrake.reserve([issue], "previous", options)
+      assert :ok = Journal.write(%{"id" => "previous", "group" => "blocker", "members" => [%{"id" => issue.id}], "state" => "completed"})
+      state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+      assert tick(state, [issue], options).yolo_runs == %{}
+      assert_receive :trusted_brake_note
+
+      restored = Map.merge(base, %{"id" => "restored", "fromDelegate" => nil, "toDelegate" => %{"id" => @trusted}, "actor" => %{"id" => unquote(actor), "app" => unquote(app?)}})
+      Process.put(:brake_history, [restored, base])
+      {:ok, record} = Store.read("blocker")
+      assert {:ok, resumed} = Impulse.observe([%{issue | relay_event: event.(2)}], record, options)
+      assert get_in(resumed, ["impulses", issue.id, "reason"]) == "delegated_again"
+      issue = %{issue | relay_event: event.(3)}
+      assert {:ok, noisy} = Impulse.observe([issue], resumed, options)
+      assert get_in(noisy, ["impulses", issue.id, "reason"]) == "no_relevant_history"
+      assert :ok = Store.write("blocker", noisy)
+      assert {:ok, [^issue]} = BlockerBrake.check([issue], options)
+      assert Map.has_key?(tick(state, [issue], options).yolo_runs, "blocker")
+      assert_receive :resumed_runner
+      refute_receive :trusted_brake_note, 20
+
+      body = Process.get(:brake_body)
+      restart_options = Keyword.put(options, :workpad_comments, fn _ -> {:ok, [%{id: "workpad", body: body}]} end)
+      restarted = Task.async(fn -> ProjectContext.with_context(context, fn -> BlockerBrake.check([issue], restart_options) end) end)
+      assert {:ok, [^issue]} = Task.await(restarted)
+
+      assert :ok = BlockerBrake.reserve([issue], "decision-run", options)
+      assert {:ok, []} = BlockerBrake.check([issue], options)
+      refute_receive :trusted_brake_note, 20
+      assert Process.get(:brake_body) =~ "PO-Lauf decision-run"
+      assert :ok = BlockerBrake.release([issue], "decision-run")
+      assert {:ok, [^issue]} = BlockerBrake.check([issue], options)
+
+      standard = %{context.settings.tracker | escalation_trusted_agent_id: nil, openclaw_yolo_agent: nil}
+      ProjectContext.bind(%{context | settings: %{context.settings | tracker: standard}})
+
+      standard_options =
+        Keyword.merge(options,
+          query: fn document, vars ->
+            assert document =~ "YoloUpdate"
+            assert vars.input == %{assigneeId: "human", delegateId: nil}
+            {:ok, %{"data" => %{"issueUpdate" => %{"success" => true, "issue" => %{"id" => issue.id}}}}}
+          end,
+          fetch: fn _ -> {:ok, [%{issue | assignee_id: "human", delegate_id: nil}]} end
+        )
+
+      assert {:ok, []} = BlockerBrake.check([issue], standard_options)
+    end
   end
 
   test "same BLOCKER cause hands off without a second run and sends one escalation across retries", %{issues: [issue | _], context: context} do

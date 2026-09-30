@@ -64,6 +64,44 @@ defmodule SymphonyElixir.CommentPollingTest do
     assert {:ok, _} = RateLimit.request(target_app, write, budget_kind: :write)
   end
 
+  test "shared ready-relay scans suppress safety reads under critical budget but preserve events and forced scans" do
+    settings = Config.settings!()
+    app = Map.put(settings.tracker.app, "workspace_id", "shared-scan-#{System.unique_integer([:positive])}")
+    settings = settings |> put_in([Access.key(:tracker), Access.key(:app)], app) |> put_in([Access.key(:tracker), Access.key(:relay)], %{})
+    settings = %{settings | tracker: %{settings.tracker | advisory_agent_ids: [], trusted_agent_ids: []}}
+    context = %ProjectContext{settings: settings}
+    issue = %Issue{id: "issue", identifier: "PRO-1", state: "In Arbeit (AI)"}
+    {:ok, reads} = Agent.start_link(fn -> 0 end)
+    {:ok, clock} = Agent.start_link(fn -> 0 end)
+    {:ok, epoch} = Agent.start_link(fn -> 1 end)
+
+    fetch = fn ->
+      Agent.update(reads, &(&1 + 1))
+      {:ok, []}
+    end
+
+    opts = [
+      relay_comment_epoch: fn _, _ -> {:ok, {"generation", 1, Agent.get(epoch, & &1)}} end,
+      background_now: fn -> Agent.get(clock, & &1) end,
+      fetch: fetch,
+      fetch_after_signal: fn _ -> fetch.() end
+    ]
+
+    ProjectContext.with_context(context, fn ->
+      assert {:ok, _} = CommentCheckpoint.scan(issue, opts)
+      Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "999"})
+      assert Budget.low?(app)
+      Agent.update(clock, fn _ -> 3_600_000 end)
+      assert {:ok, _} = CommentCheckpoint.scan(issue, opts)
+      assert Agent.get(reads, & &1) == 1
+      Agent.update(epoch, &(&1 + 1))
+      assert {:ok, _} = CommentCheckpoint.scan(issue, opts)
+      assert Agent.get(reads, & &1) == 2
+      assert {:ok, _} = CommentCheckpoint.scan(issue, Keyword.put(opts, :force_full, true))
+      assert Agent.get(reads, & &1) == 3
+    end)
+  end
+
   test "real orchestrator tasks respect due time, interval reloads and scan cleanup" do
     app = Config.settings!().tracker.app
     Budget.record(app, :read, %{"x-ratelimit-requests-limit" => "5000", "x-ratelimit-requests-remaining" => "5000"})

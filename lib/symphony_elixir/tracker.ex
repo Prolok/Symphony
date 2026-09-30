@@ -4,6 +4,7 @@ defmodule SymphonyElixir.Tracker do
   """
 
   alias SymphonyElixir.{Config, ProjectContext, ProjectPoller}
+  alias SymphonyElixir.Linear.IssueReadCache
 
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
@@ -36,9 +37,11 @@ defmodule SymphonyElixir.Tracker do
     adapter().fetch_issues_by_states(states)
   end
 
-  @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids) do
-    adapter().fetch_issue_states_by_ids(issue_ids)
+  @spec fetch_issue_states_by_ids([String.t()], keyword()) :: {:ok, [term()]} | {:error, term()}
+  def fetch_issue_states_by_ids(issue_ids, opts \\ []) do
+    if adapter() == SymphonyElixir.Linear.Adapter,
+      do: IssueReadCache.fetch(issue_ids, opts),
+      else: adapter().fetch_issue_states_by_ids(issue_ids)
   end
 
   @spec fetch_issue_state_history(String.t()) :: {:ok, [map()]} | {:error, term()}
@@ -51,14 +54,16 @@ defmodule SymphonyElixir.Tracker do
     adapter().fetch_issue_by_identifier(identifier)
   end
 
-  @spec fetch_issue_comments(String.t()) :: {:ok, [map()]} | {:error, term()}
-  def fetch_issue_comments(issue_id) when is_binary(issue_id) do
-    adapter().fetch_issue_comments(issue_id)
+  @spec fetch_issue_comments(String.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_issue_comments(issue_id, opts \\ []) when is_binary(issue_id) do
+    if adapter() == SymphonyElixir.Linear.Adapter,
+      do: IssueReadCache.comments(issue_id, opts),
+      else: adapter().fetch_issue_comments(issue_id)
   end
 
-  @spec fetch_issue_comment_bodies(String.t()) :: {:ok, [String.t()]} | {:error, term()}
-  def fetch_issue_comment_bodies(issue_id) when is_binary(issue_id) do
-    adapter().fetch_issue_comment_bodies(issue_id)
+  @spec fetch_issue_comment_bodies(String.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def fetch_issue_comment_bodies(issue_id, opts \\ []) when is_binary(issue_id) do
+    with {:ok, comments} <- fetch_issue_comments(issue_id, opts), do: {:ok, Enum.map(comments, & &1.body)}
   end
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}

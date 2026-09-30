@@ -80,7 +80,7 @@ defmodule SymphonyElixir.CommentCheckpointTest do
     parent = self()
 
     SymphonyElixir.TestSupport.stub_linear_client(fn payload, headers ->
-      send(parent, {:query, payload["query"]})
+      if self() == parent, do: send(parent, {:query, payload["query"]})
       request(payload, headers)
     end)
 

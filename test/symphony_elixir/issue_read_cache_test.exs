@@ -3,6 +3,7 @@ defmodule SymphonyElixir.IssueReadCacheTest do
 
   alias SymphonyElixir.Linear.{Budget, Client, IssueReadCache}
   alias SymphonyElixir.ProjectContext
+  alias SymphonyElixir.Yolo.Dependencies
 
   defp relay_settings do
     settings = put_in(Config.settings!().tracker.relay, %{})
@@ -59,6 +60,46 @@ defmodule SymphonyElixir.IssueReadCacheTest do
     assert Agent.get(count, & &1) == 2
     assert {:ok, [^linear_issue]} = IssueReadCache.fetch(["issue"], Keyword.put(opts, :relay, fn _, _ -> {:error, :relay_issue_incomplete} end))
     assert Agent.get(count, & &1) == 3
+  end
+
+  test "unavailable relay bindings require verification on every read and preserve failures" do
+    context = %ProjectContext{id: "unavailable-binding", settings: relay_settings()}
+
+    verify = fn ->
+      send(self(), :binding_verified)
+      :ok
+    end
+
+    ProjectContext.with_context(context, fn ->
+      for _ <- 1..2, do: assert(:ok = IssueReadCache.verify_binding(:agent, verify))
+      assert_receive :binding_verified
+      assert_receive :binding_verified
+      assert {:error, :unverified_agent} = IssueReadCache.verify_binding(:agent, fn -> {:error, :unverified_agent} end)
+    end)
+  end
+
+  test "incomplete dependency reads fall back to fresh relations while read failures stay closed" do
+    issue = %Issue{id: "issue", relations_complete: false, blocked_by: []}
+
+    SymphonyElixir.TestSupport.stub_linear_client(fn payload, _ ->
+      assert (payload[:query] || payload["query"]) =~ "YoloBlockers"
+      send(self(), :fresh_blocker_query)
+
+      relation = %{
+        "id" => "blocking-relation",
+        "type" => "blocks",
+        "issue" => %{"id" => "fix", "identifier" => "PRO-1", "state" => %{"name" => "Test (AI)", "type" => "started"}}
+      }
+
+      {:ok, %{status: 200, body: %{"data" => %{"issue" => %{"inverseRelations" => %{"nodes" => [relation], "pageInfo" => %{"hasNextPage" => false}}}}}}}
+    end)
+
+    assert {:ok, [%{id: "fix", state: "Test (AI)", state_type: "started"}]} =
+             Dependencies.blockers(issue.id, fetch_linear: fn _ -> {:ok, [issue]} end)
+
+    assert_receive :fresh_blocker_query
+    assert {:error, :linear_fetch_failed} = Dependencies.blockers(issue.id, fetch_linear: fn _ -> {:error, :linear_fetch_failed} end)
+    refute_receive :fresh_blocker_query
   end
 
   test "a confirmed local update invalidates the old relay epoch until hydration catches up" do
@@ -183,5 +224,44 @@ defmodule SymphonyElixir.IssueReadCacheTest do
     assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :now, 0))
     assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :now, 1))
     assert Agent.get(calls, & &1.linear) == 2
+  end
+
+  test "parallel bound reads share verification and a forced action read bypasses the warm epoch" do
+    context = %ProjectContext{id: "parallel-#{System.unique_integer([:positive])}", settings: relay_settings()}
+    issue = %Issue{id: "issue", state: "In Arbeit (AI)", assignee_id: "human", blocked_by: []}
+    {:ok, source} = Agent.start_link(fn -> %{reads: 0, issue: issue} end)
+
+    linear = fn _ ->
+      Process.sleep(10)
+      Agent.get_and_update(source, fn state -> {{:ok, [state.issue]}, %{state | reads: state.reads + 1}} end)
+    end
+
+    opts = [context: context, relay: fn _, _ -> {:ok, [{{"generation", 1}, issue}]} end, fetch_linear: linear, now: 0]
+    tasks = for _ <- 1..5, do: Task.async(fn -> IssueReadCache.fetch([issue.id], opts) end)
+    for task <- tasks, do: assert({:ok, [^issue]} = Task.await(task))
+    assert Agent.get(source, & &1.reads) == 1
+    changed = %{issue | state: "BLOCKER"}
+    Agent.update(source, &%{&1 | issue: changed})
+    assert {:ok, [^issue]} = IssueReadCache.fetch([issue.id], opts)
+    assert {:ok, [^changed]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :force_full, true))
+    assert Agent.get(source, & &1.reads) == 2
+  end
+
+  test "changing the app or local execution binding never reuses an old verification" do
+    context = %ProjectContext{id: "binding-#{System.unique_integer([:positive])}", settings: relay_settings(), assignee_ids: ["human"]}
+    issue = %Issue{id: "issue", state: "In Arbeit (AI)", assignee_id: "human", blocked_by: []}
+    {:ok, reads} = Agent.start_link(fn -> 0 end)
+
+    linear = fn _ ->
+      Agent.update(reads, &(&1 + 1))
+      {:ok, [issue]}
+    end
+
+    opts = [context: context, relay: fn _, _ -> {:ok, [{{"generation", 1}, issue}]} end, fetch_linear: linear, now: 0]
+    assert {:ok, [_]} = IssueReadCache.fetch([issue.id], opts)
+    changed = put_in(context.settings.tracker.app["user_id"], "another-app")
+    assert {:ok, [_]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :context, changed))
+    assert {:ok, [_]} = IssueReadCache.fetch([issue.id], Keyword.put(opts, :context, %{context | assignee_ids: ["another-human"]}))
+    assert Agent.get(reads, & &1) == 3
   end
 end

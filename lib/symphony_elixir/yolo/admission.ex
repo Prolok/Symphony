@@ -24,7 +24,8 @@ defmodule SymphonyElixir.Yolo.Admission do
   end
 
   defp prepare_locked(issue, opts) do
-    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+    opts = Keyword.put(opts, :force_full, true)
+    fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
     query = Keyword.get(opts, :query, &Client.graphql/2)
 
     with {:ok, [current]} <- fetch.([issue.id]),

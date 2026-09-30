@@ -106,7 +106,7 @@ defmodule SymphonyElixir.Yolo.Escalation do
     suffix = "\n\nFrage: #{decision}\nEmpfehlung: #{proposal}"
     body = prefix <> if(recipient, do: "\n\n" <> recipient_line(recipient), else: "") <> suffix
     matches = note_matcher(body, prefix, suffix, recipient)
-    fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1)
+    fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments(&1, force_full: true))
     create = Keyword.get(opts, :escalation_comment, &Tracker.create_comment/2)
 
     with {:ok, comments} <- fetch.(issue.id), do: ensure_note(comments, issue.id, body, matches, fetch, create)

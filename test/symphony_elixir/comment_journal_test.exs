@@ -21,6 +21,24 @@ defmodule SymphonyElixir.CommentJournalTest do
     assert output =~ "pending recovery and true issue exclusion passed"
   end
 
+  test "output epochs are issue-scoped and survive indexing without including pending receipts", %{binding: binding} do
+    Process.put(:remote_comments, %{})
+    assert {:ok, empty} = CommentJournal.output_epoch(binding, "issue")
+    assert {:ok, _} = CommentJournal.execute(binding, variable_create("own", "Arbeitsstand"), &graphql_request/1)
+    assert {:ok, epoch} = CommentJournal.output_epoch(binding, "issue")
+    refute epoch == empty
+    assert {:ok, _} = CommentJournal.snapshot(binding)
+    assert {:ok, ^epoch} = CommentJournal.output_epoch(binding, "issue")
+
+    other = put_in(variable_create("other", "Anderes Ticket"), ["variables", "input", "issueId"], "other")
+    assert {:ok, _} = CommentJournal.execute(binding, other, &graphql_request/1)
+    assert {:ok, ^epoch} = CommentJournal.output_epoch(binding, "issue")
+    assert {:ok, other_epoch} = CommentJournal.output_epoch(binding, "other")
+    refute other_epoch == empty
+    assert {:error, :offline} = CommentJournal.execute(binding, variable_create("pending", "Offen"), fn _ -> {:error, :offline} end)
+    assert {:ok, ^epoch} = CommentJournal.output_epoch(binding, "issue")
+  end
+
   test "closed old receipts move to the archive while own classification and recovery survive", %{binding: binding} do
     Process.put(:remote_comments, %{})
     payload = put_in(variable_create("old-own", ~s({"text":"Archivtext"})), ["variables", "input", "parentId"], "parent")

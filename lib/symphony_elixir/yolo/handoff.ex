@@ -133,7 +133,7 @@ defmodule SymphonyElixir.Yolo.Handoff do
          {:ok, [fresh]} <- Dependencies.refresh([issue], opts),
          true <- Dependencies.unblocked?(fresh),
          :ok <- MergeReadiness.check(issue),
-         {:ok, comments} <- Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1).(issue.id),
+         {:ok, comments} <- Keyword.get(opts, :comments, &Tracker.fetch_issue_comments(&1, force_full: true)).(issue.id),
          {:ok, workpad} <- Workpad.find_comment(comments),
          true <- Workpad.merge_handoff_status(comments) == :ready or TestRun.review_fixture?(issue.id),
          :closed <- Workpad.section_checklist_status(workpad.body, "Validierung", "Yolo Review") do
@@ -157,7 +157,7 @@ defmodule SymphonyElixir.Yolo.Handoff do
       expected = if Map.has_key?(input, :stateId), do: "Review", else: issue.state
       expected_assignee = Map.get(input, :assigneeId, issue.assignee_id)
       result = API.update(issue.id, input, opts)
-      fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
+      fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids(&1, force_full: true))
 
       case fetch.([issue.id]) do
         {:ok, [%{delegate_id: nil, assignee_id: human, state: state}]}
@@ -199,7 +199,7 @@ defmodule SymphonyElixir.Yolo.Handoff do
   end
 
   defp report(issue, report, kind, opts, wait_reason \\ nil) do
-    fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments/1)
+    fetch = Keyword.get(opts, :comments, &Tracker.fetch_issue_comments(&1, force_full: true))
     write = Keyword.get(opts, :workpad, &Workpad.update_tracker_workpad/2)
 
     owner_result =

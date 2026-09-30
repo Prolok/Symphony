@@ -299,7 +299,8 @@ defmodule SymphonyElixir.RelayMeasurementTest do
 
     log =
       capture_log(fn ->
-        assert ^response = RateLimit.request(binding, fn -> response end, budget_kind: :candidates)
+        context = %{"phase" => "Test (AI)", "run_id" => "run", "tool_call_id" => "call", "query" => private_value}
+        assert ^response = RateLimit.request(binding, fn -> response end, budget_kind: :candidates, context: context)
         assert {:error, {:linear_app_rate_limited, _}} = RateLimit.request(binding, fn -> flunk("suppressed request reached transport") end)
       end)
 
@@ -307,6 +308,7 @@ defmodule SymphonyElixir.RelayMeasurementTest do
     refute log =~ private_value
     assert_received {:measurement, %{requests: 1, duration_ms: duration}, metadata}
     assert %{workspace_id: "measurement", kind: :candidates, headers: headers} = metadata
+    assert metadata.context == %{"phase" => "Test (AI)", "run_id" => "run", "tool_call_id" => "call"}
     assert duration >= 0
     assert headers["x-complexity"] == "17"
     refute Map.has_key?(headers, "authorization")

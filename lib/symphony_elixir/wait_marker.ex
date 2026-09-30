@@ -15,7 +15,7 @@ defmodule SymphonyElixir.WaitMarker do
 
   @spec workpad_markers(map(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
   def workpad_markers(issue, opts) do
-    comments = Keyword.get(opts, :wait_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comment_bodies/1))
+    comments = Keyword.get(opts, :wait_comments, Keyword.get(opts, :comments, &Tracker.fetch_issue_comment_bodies(&1, opts)))
 
     with {:ok, bodies} <- comments.(issue.id) do
       workpads = bodies |> Enum.map(&comment_body/1) |> Enum.filter(&(is_binary(&1) and String.starts_with?(&1, Workpad.marker())))
@@ -141,7 +141,7 @@ defmodule SymphonyElixir.WaitMarker do
     waiting = targets |> Enum.reject(&merged?/1) |> Enum.map_join(", ", & &1.identifier)
     note = "Wartemarker offen: #{waiting}; Ticket nach Backlog zurückgegeben."
 
-    with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id) do
+    with {:ok, comments} <- Tracker.fetch_issue_comments(issue.id, force_full: true) do
       case Workpad.find_comment(comments) do
         {:ok, workpad} -> write_wait_note(issue, workpad.body, note)
         {:error, :workpad_comment_not_found} -> create_wait_workpad(issue, note)
@@ -344,7 +344,7 @@ defmodule SymphonyElixir.WaitMarker do
 
   defp report_workpad(issue, identifier, reason, opts) do
     note = "Wartemarker-Fehler #{identifier}: #{inspect(reason)}; gebundene Zielkennung prüfen."
-    comments = Keyword.get(opts, :report_comments, &Tracker.fetch_issue_comments/1)
+    comments = Keyword.get(opts, :report_comments, &Tracker.fetch_issue_comments(&1, force_full: true))
 
     with {:ok, found} <- comments.(issue.id) do
       write_error_workpad(issue, note, Workpad.find_comment(found))

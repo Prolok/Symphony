@@ -1,0 +1,9 @@
+Compiling 2 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 82366, max_cases: 20
+Excluding tags: [:test]
+Including tags: [location: {"test/symphony_elixir/yolo_runtime_test.exs", 2119}, location: {"test/symphony_elixir/yolo_runtime_test.exs", 2101}]
+
+..
+Finished in 7.6 seconds (0.00s async, 7.6s sync)
+2 tests, 0 failures (192 excluded)

@@ -1,0 +1,8 @@
+Compiling 2 files (.ex)
+Generated symphony_elixir app
+Running ExUnit with seed: 586669, max_cases: 20
+
+...PRO-969 after: snapshot_elapsed_ms=0 blocked_scan_ms=2146 no_stall_retry=true
+........
+Finished in 5.6 seconds (0.00s async, 5.6s sync)
+11 tests, 0 failures

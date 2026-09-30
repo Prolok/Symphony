@@ -322,7 +322,8 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   nach [WORKFLOW_YOLO_AGENT.md](WORKFLOW_YOLO_AGENT.md), dessen Delegationsfreigabe
   im Ticketscope sowie Mehrticket-/Statusvertrag und der an den versionierten
   Projekt-Skill gebundenen Schlussabnahme mit Prüf-/Lernbeleg. Die folgende Statustabelle und ihre Turn-Grenzen
-  gelten weiterhin für reguläre Einzelläufe.
+  gelten weiterhin für reguläre Einzelläufe. PO-Beobachtung blockiert weder
+  Projekt-Snapshots noch Worker-Ereignisse; Folgepolls werden gebündelt.
   Optional wählt `OPENCLAW_YOLO_AGENT` ausschließlich deren PO-Ausführungsweg;
   ohne Wert erfolgen keine OpenClaw-Zugriffe. Aktivierung verlangt den separaten
   Live-Nachweis, Standardgates bleiben unabhängig; [Vertrag](docs/openclaw-yolo.md).

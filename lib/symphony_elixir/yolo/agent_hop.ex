@@ -7,6 +7,20 @@ defmodule SymphonyElixir.Yolo.AgentHop do
 
   @window_ms 86_400_000
 
+  @doc false
+  @spec with_cache(map(), (-> result)) :: {result, map()} when result: var
+  def with_cache(cache, callback) do
+    Enum.each(cache, fn {path, held?} -> Process.put({__MODULE__, path}, held?) end)
+    result = callback.()
+
+    cache =
+      for {{__MODULE__, path}, held?} <- Process.get(), into: %{} do
+        {path, held?}
+      end
+
+    {result, cache}
+  end
+
   @doc "Apply the per-issue limit across PO groups with an atomic durable record."
   @spec gate_durable(map(), map(), keyword()) :: {:ok, map(), MapSet.t()} | {:error, term()}
   def gate_durable(record, observations, opts) do

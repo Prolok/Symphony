@@ -50,11 +50,19 @@ defmodule SymphonyElixir.YoloRuntimeTest do
   defp hop_lock_calls(fun) do
     parent = self()
     tracer = spawn(fn -> hop_lock_trace(parent, []) end)
-    :erlang.trace_pattern({IssueLease, :with_journal_lock, 2}, true, [:local])
+    :erlang.trace_pattern({IssueLease, :with_journal_lock, 4}, true, [:local])
     :erlang.trace(self(), true, [:call, {:tracer, tracer}])
 
     try do
       result = fun.()
+      delivered = :erlang.trace_delivered(self())
+
+      receive do
+        {:trace_delivered, _, ^delivered} -> :ok
+      after
+        1_000 -> flunk("hop lock traces did not drain")
+      end
+
       send(tracer, :flush)
 
       paths =
@@ -67,7 +75,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
       {result, paths}
     after
       :erlang.trace(self(), false, [:call])
-      :erlang.trace_pattern({IssueLease, :with_journal_lock, 2}, false, [:local])
+      :erlang.trace_pattern({IssueLease, :with_journal_lock, 4}, false, [:local])
       send(tracer, :stop)
     end
   end
@@ -2106,6 +2114,39 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     {_, paths} = hop_lock_calls(fn -> Enum.reduce(1..10, state, fn _, current -> tick(current, reviews, opts) end) end)
     assert Enum.filter(paths, &String.contains?(&1, "agent-hops")) == []
     assert {:error, :enoent} = File.ls(counter_dir)
+  end
+
+  test "successive PO tasks retain warm hop checks while a restarted coordinator checks again", %{issues: issues, context: context} do
+    context = put_in(context.settings.tracker.trusted_agent_ids, [@trusted])
+    reviews = Enum.map(issues, &%{&1 | state: "Yolo Review", blocked_by: [], relations_complete: true})
+    initial = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    opts = [scan: &scan/1, wait_comments: fn _ -> {:ok, []} end, start: fn _, _ -> {:error, :capacity} end]
+
+    run = fn state, members, tick_opts ->
+      Task.async(fn ->
+        ProjectContext.with_context(context, fn -> hop_lock_calls(fn -> tick(state, members, tick_opts) end) end)
+      end)
+      |> Task.await()
+    end
+
+    {state, paths} =
+      Enum.reduce(1..10, {initial, []}, fn _, {state, paths} ->
+        {next, calls} = run.(state, reviews, opts)
+        {next, paths ++ calls}
+      end)
+
+    assert Enum.count(paths, &String.contains?(&1, "agent-hops")) == length(reviews)
+
+    [first | rest] = reviews
+    edited = [%{first | last_comment_signal: %{relay_epoch: "new-agent-source"}} | rest]
+    version = %{"key" => "new-agent-source", "origin" => "agent", "status" => "recognized", "deleted" => false}
+    changed_opts = Keyword.put(opts, :scan, fn _ -> {:ok, inbox(%{"new-agent-source" => version})} end)
+    {_, changed} = run.(state, edited, changed_opts)
+    assert Enum.count(changed, &String.contains?(&1, "agent-hops")) == 1
+
+    {_, restarted} = run.(initial, reviews, opts)
+    assert Enum.count(restarted, &String.contains?(&1, "agent-hops")) == length(reviews)
+    IO.puts("PRO-969 hop cache: tasks=10 members=3 initial_locks=3 changed_source_locks=1 restart_locks=3")
   end
 
   test "coordinator uses fallback without relay despite a stale relay epoch", %{issues: [issue | _]} do

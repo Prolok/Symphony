@@ -962,6 +962,8 @@ defmodule SymphonyElixir.ExtensionsTest do
              "service" => SymphonyElixir.TestInstance.public_info() |> Jason.encode!() |> Jason.decode!(),
              "relay" => %{},
              "projects" => [],
+             "project_statuses" => [],
+             "partial" => false,
              "generated_at" => state_payload["generated_at"],
              "counts" => %{"running" => 1, "reserved" => 0, "reserved_slots" => 0, "retrying" => 1},
              "running" => [
@@ -1318,6 +1320,47 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
     assert html =~ "Snapshot unavailable"
     assert html =~ "snapshot_unavailable"
+  end
+
+  test "API and dashboard show project age and partial errors even without tickets" do
+    name = Module.concat(__MODULE__, :ProjectAgeOrchestrator)
+    project = %{id: "project-one", name: "Empty", root: "/projects/empty", status: :fresh, age_ms: 0, observed_at: "2026-09-30T09:00:00Z", error: nil}
+    snapshot = Map.merge(static_snapshot(), %{projects: ["Empty"], project_statuses: [project], partial: false, running: [], retrying: []})
+    pid = start_supervised!({StaticOrchestrator, name: name, snapshot: snapshot})
+    start_test_endpoint(orchestrator: name, snapshot_timeout_ms: 50)
+    {:ok, view, _html} = live(build_conn(), "/")
+
+    stale = %{snapshot | project_statuses: [%{project | status: :stale, age_ms: 12_345}]}
+    :sys.replace_state(pid, &Keyword.put(&1, :snapshot, stale))
+    # A runtime tick must refresh age even when every project is blocked and no
+    # successful snapshot can trigger an observability update.
+    send(view.pid, :runtime_tick)
+    assert_eventually(fn -> render(view) =~ "veraltet" and render(view) =~ "12 s" end)
+    payload = get(build_conn(), "/api/v1/state") |> json_response(200)
+    assert payload["projects"] == ["Empty"]
+
+    assert hd(payload["project_statuses"]) == %{
+             "id" => "project-one",
+             "name" => "Empty",
+             "root" => "/projects/empty",
+             "status" => "stale",
+             "age_ms" => 12_345,
+             "observed_at" => project.observed_at,
+             "error" => nil
+           }
+
+    refute payload["partial"]
+
+    expired_project = %{project | status: :unavailable, age_ms: 300_000, error: "snapshot_expired"}
+    expired = %{stale | project_statuses: [expired_project], partial: true}
+    :sys.replace_state(pid, &Keyword.put(&1, :snapshot, expired))
+    send(view.pid, :runtime_tick)
+    assert_eventually(fn -> render(view) =~ "Teilstand" and render(view) =~ "snapshot_expired" and render(view) =~ "300 s" end)
+    refute render(view) =~ "Snapshot unavailable"
+    payload = get(build_conn(), "/api/v1/state") |> json_response(200)
+    assert payload["partial"]
+    assert hd(payload["project_statuses"])["error"] == "snapshot_expired"
+    assert payload["running"] == []
   end
 
   test "dashboard and API show capacity waiting separately from retry errors" do

@@ -26,7 +26,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   @impl true
   def handle_info(:runtime_tick, socket) do
     schedule_runtime_tick()
-    {:noreply, assign(socket, :now, DateTime.utc_now())}
+    {:noreply, socket |> assign(:payload, load_payload()) |> assign(:now, DateTime.utc_now())}
   end
 
   @impl true
@@ -79,6 +79,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </p>
         </section>
       <% else %>
+        <section :if={@payload[:partial] || Enum.any?(@payload[:project_statuses] || [], &(&1.status != :fresh))} class="error-card">
+          <h2 :if={@payload[:partial]}>Teilstand: nicht verfügbare Projekte fehlen in Zeilen und Summen</h2>
+          <p :for={project <- @payload[:project_statuses] || []} :if={project.status != :fresh}>
+            <strong>Projekt <%= project.name %>:</strong>
+            <%= if project.status == :stale, do: "veraltet", else: "Fehler #{project.error}" %>,
+            Alter <%= if is_integer(project.age_ms), do: "#{div(project.age_ms, 1_000)} s", else: "unbekannt" %>
+          </p>
+        </section>
         <section :if={@payload[:relay] not in [nil, %{}]} class="section-card">
           <h2>LinearRelay</h2>
           <article :for={{workspace, relay} <- @payload.relay}>

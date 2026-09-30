@@ -5,6 +5,11 @@ defmodule SymphonyElixir.Projects do
   alias SymphonyElixir.{EnvFile, Orchestrator, ProjectContext}
   alias SymphonyElixir.Linear.Client
 
+  @snapshot_interval_ms 1_000
+  @fresh_ms 2_000
+  @expired_ms 300_000
+  @idle_timeout_ms 1_000
+
   @spec configured() :: [ProjectContext.t()]
   def configured, do: Application.get_env(:symphony_elixir, :project_contexts, [])
 
@@ -61,73 +66,259 @@ defmodule SymphonyElixir.Projects do
   def server(context), do: {:via, Registry, {SymphonyElixir.ProjectRegistry, context.id}}
 
   @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: Orchestrator)
+  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, Orchestrator))
 
   @impl true
   def init(opts) do
-    Process.send_after(self(), :check_idle, 1_000)
-    {:ok, Keyword.fetch!(opts, :contexts)}
+    state = %{
+      contexts: Keyword.fetch!(opts, :contexts),
+      projects: %{},
+      idle_check: nil,
+      clock: Keyword.get(opts, :clock_fun, fn -> System.monotonic_time(:millisecond) end),
+      shutdown: Keyword.get(opts, :shutdown_fun, fn -> Task.start(fn -> Application.stop(:symphony_elixir) end) end)
+    }
+
+    Process.send_after(self(), :check_idle, @snapshot_interval_ms)
+    {:ok, reconcile_projects(state)}
   end
 
   @impl true
-  def handle_info(:check_idle, contexts) do
-    snapshots = contexts |> project_snapshots(1_000) |> Enum.map(&elem(&1, 1))
-
-    if globally_idle?(snapshots) do
-      Task.start(fn -> Application.stop(:symphony_elixir) end)
-    else
-      Process.send_after(self(), :check_idle, 1_000)
-    end
-
-    {:noreply, contexts}
+  def terminate(_reason, state) do
+    Enum.each(state.projects, fn {_, entry} -> release_project(entry) end)
+    if state.idle_check, do: Process.cancel_timer(state.idle_check.timer)
   end
 
-  defp globally_idle?(snapshots) do
-    Enum.all?(snapshots, &(is_map(&1) and &1.running == [] and &1.retrying == [] and Map.get(&1, :waiting, []) == [] and &1.idle_shutdown_ms > 0)) and
-      System.monotonic_time(:millisecond) - Enum.max(Enum.map(snapshots, & &1.last_activity_at_ms)) >=
+  @impl true
+  def handle_info(:check_idle, state) do
+    state = reconcile_projects(state)
+
+    if state.idle_check == nil and map_size(state.projects) > 0 and
+         Enum.all?(state.projects, fn {_, entry} -> entry.pid != nil and entry.request == nil end) do
+      token = make_ref()
+      timer = Process.send_after(self(), {:idle_deadline, token}, @idle_timeout_ms)
+      check = %{token: token, timer: timer, started_at: state.clock.(), pending: MapSet.new(Map.keys(state.projects)), snapshots: []}
+      state = %{state | idle_check: check}
+      projects = Map.new(state.projects, fn {id, entry} -> {id, request_snapshot(entry)} end)
+      {:noreply, %{state | projects: projects}}
+    else
+      if state.idle_check == nil, do: schedule_idle_check()
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:idle_deadline, token}, %{idle_check: %{token: token}} = state) do
+    {:noreply, finish_idle_check(state, false)}
+  end
+
+  def handle_info({:idle_deadline, _token}, state), do: {:noreply, state}
+
+  def handle_info({:refresh_snapshot, id, token}, state) do
+    state = reconcile_projects(state)
+
+    projects =
+      case state.projects[id] do
+        %{timer: {_, ^token}, request: nil, pid: pid} = entry when is_pid(pid) ->
+          Map.put(state.projects, id, request_snapshot(entry))
+
+        %{timer: {_, ^token}} = entry ->
+          Map.put(state.projects, id, schedule_snapshot(%{entry | timer: nil}, id))
+
+        _ ->
+          state.projects
+      end
+
+    {:noreply, %{state | projects: projects}}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, _reason} = message, state) do
+    case Enum.find(state.projects, fn {_, entry} -> entry.monitor == ref end) do
+      {id, entry} ->
+        release_project(entry)
+        entry = new_project(nil) |> Map.put(:error, "process_unavailable") |> schedule_snapshot(id)
+        {:noreply, %{state | projects: Map.put(state.projects, id, entry)}}
+
+      nil ->
+        {:noreply, receive_snapshot(message, state)}
+    end
+  end
+
+  def handle_info(message, state), do: {:noreply, receive_snapshot(message, state)}
+
+  defp globally_idle?(snapshots, now_ms) do
+    snapshots != [] and
+      Enum.all?(snapshots, fn snapshot ->
+        is_map(snapshot) and snapshot.running == [] and snapshot.retrying == [] and
+          Map.get(snapshot, :waiting, []) == [] and snapshot.idle_shutdown_ms > 0 and
+          get_in(snapshot, [:polling, :checking?]) == false
+      end) and
+      now_ms - Enum.max(Enum.map(snapshots, & &1.last_activity_at_ms)) >=
         Enum.max(Enum.map(snapshots, & &1.idle_shutdown_ms))
   end
 
   @impl true
-  def handle_call(:snapshot, _from, contexts) do
-    snapshots = project_snapshots(contexts, 10_000)
+  def handle_call(:snapshot, _from, state) do
+    state = reconcile_projects(state)
+    now_ms = state.clock.()
+    statuses = Enum.map(state.contexts, &project_status(&1, state.projects[&1.id], now_ms))
 
-    if Enum.all?(snapshots, fn {_, snapshot} -> is_map(snapshot) end) do
-      result = %{
-        projects: Enum.map(contexts, & &1.name),
-        running: entries(snapshots, :running),
-        retrying: entries(snapshots, :retrying),
-        waiting: entries(snapshots, :waiting),
-        codex_totals: totals(snapshots),
-        rate_limits: snapshots |> Enum.map(fn {_, s} -> s.rate_limits end) |> Enum.find(&(not is_nil(&1))),
-        polling: SymphonyElixir.ProjectPoller.polling()
+    snapshots =
+      state.contexts
+      |> Enum.zip(statuses)
+      |> Enum.reject(fn {_, status} -> status.status == :unavailable end)
+      |> Enum.map(fn {context, _} -> {context, state.projects[context.id].snapshot} end)
+
+    result = %{
+      projects: Enum.map(state.contexts, & &1.name),
+      project_statuses: statuses,
+      partial: Enum.any?(statuses, &(&1.status == :unavailable)),
+      running: entries(snapshots, :running, state.contexts),
+      retrying: entries(snapshots, :retrying, state.contexts),
+      waiting: entries(snapshots, :waiting, state.contexts),
+      codex_totals: totals(snapshots),
+      rate_limits: snapshots |> Enum.map(fn {_, s} -> s.rate_limits end) |> Enum.find(&(not is_nil(&1))),
+      polling: SymphonyElixir.ProjectPoller.polling()
+    }
+
+    {:reply, result, state}
+  end
+
+  def handle_call(:request_refresh, _from, state) do
+    SymphonyElixir.ProjectPoller.refresh()
+    Enum.each(state.contexts, &GenServer.cast(server(&1), :request_refresh))
+    result = %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll", "reconcile"]}
+    {:reply, result, state}
+  end
+
+  defp reconcile_projects(state) do
+    projects =
+      Map.new(state.contexts, fn context ->
+        pid = GenServer.whereis(server(context))
+        pid = if is_pid(pid) and Process.alive?(pid), do: pid
+        {context.id, reconcile_project(state.projects[context.id], pid, context.id)}
+      end)
+
+    changed? = Enum.any?(projects, fn {id, entry} -> state.projects[id] && state.projects[id].pid != entry.pid end)
+    state = if changed? and state.idle_check, do: finish_idle_check(state, false), else: state
+    %{state | projects: projects}
+  end
+
+  defp reconcile_project(%{pid: pid} = previous, pid, _id), do: previous
+
+  defp reconcile_project(previous, pid, id) do
+    if previous, do: release_project(previous)
+    entry = new_project(pid)
+    if pid, do: request_snapshot(entry), else: schedule_snapshot(entry, id)
+  end
+
+  defp new_project(pid) do
+    %{
+      pid: pid,
+      monitor: if(pid, do: Process.monitor(pid)),
+      request: nil,
+      timer: nil,
+      snapshot: nil,
+      observed_at: nil,
+      observed_at_ms: nil,
+      error: if(pid, do: "snapshot_pending", else: "process_unavailable")
+    }
+  end
+
+  defp request_snapshot(entry) do
+    cancel_snapshot_timer(entry)
+    %{entry | request: :gen_server.send_request(entry.pid, :snapshot), timer: nil}
+  end
+
+  defp schedule_snapshot(entry, id) do
+    token = make_ref()
+    timer = Process.send_after(self(), {:refresh_snapshot, id, token}, @snapshot_interval_ms)
+    %{entry | timer: {timer, token}}
+  end
+
+  defp cancel_snapshot_timer(%{timer: {ref, _}}), do: Process.cancel_timer(ref)
+  defp cancel_snapshot_timer(_entry), do: :ok
+
+  defp release_project(entry) do
+    cancel_snapshot_timer(entry)
+    if entry.monitor, do: Process.demonitor(entry.monitor, [:flush])
+    # receive_response/2 abandons a pending request and deactivates its reply alias.
+    if entry.request, do: :gen_server.receive_response(entry.request, 0)
+  end
+
+  defp receive_snapshot(message, state) do
+    Enum.reduce_while(state.projects, state, fn
+      {_id, %{request: nil}}, acc ->
+        {:cont, acc}
+
+      {id, entry}, acc ->
+        case :gen_server.check_response(message, entry.request) do
+          :no_reply -> {:cont, acc}
+          {:reply, snapshot} when is_map(snapshot) -> {:halt, record_snapshot(acc, id, entry, snapshot)}
+          _error -> {:halt, record_snapshot(acc, id, entry, nil)}
+        end
+    end)
+  end
+
+  defp record_snapshot(state, id, entry, snapshot) do
+    now_ms = state.clock.()
+
+    entry =
+      %{
+        entry
+        | request: nil,
+          snapshot: snapshot,
+          error: if(snapshot, do: nil, else: "snapshot_error"),
+          observed_at: if(snapshot, do: DateTime.utc_now() |> DateTime.to_iso8601()),
+          observed_at_ms: if(snapshot, do: now_ms)
       }
+      |> schedule_snapshot(id)
 
-      {:reply, result, contexts}
+    state = %{state | projects: Map.put(state.projects, id, entry)}
+    SymphonyElixirWeb.ObservabilityPubSub.broadcast_update()
+    record_idle_response(state, id, snapshot, now_ms)
+  end
+
+  defp record_idle_response(%{idle_check: nil} = state, _id, _snapshot, _now_ms), do: state
+
+  defp record_idle_response(state, id, snapshot, now_ms) do
+    check = state.idle_check
+    check = %{check | pending: MapSet.delete(check.pending, id), snapshots: [snapshot | check.snapshots]}
+    state = %{state | idle_check: check}
+
+    if MapSet.size(check.pending) == 0 do
+      same_processes? =
+        Enum.all?(state.contexts, fn context ->
+          pid = state.projects[context.id].pid
+          is_pid(pid) and Process.alive?(pid) and GenServer.whereis(server(context)) == pid
+        end)
+
+      within_deadline? = now_ms - check.started_at < @idle_timeout_ms
+      idle? = same_processes? and within_deadline? and globally_idle?(check.snapshots, now_ms)
+      finish_idle_check(state, idle?)
     else
-      {:reply, :unavailable, contexts}
+      state
     end
   end
 
-  def handle_call(:request_refresh, _from, contexts) do
-    SymphonyElixir.ProjectPoller.refresh()
-    Enum.each(contexts, &GenServer.cast(server(&1), :request_refresh))
-    result = %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll", "reconcile"]}
-    {:reply, result, contexts}
+  defp finish_idle_check(state, idle?) do
+    Process.cancel_timer(state.idle_check.timer)
+    if idle?, do: state.shutdown.(), else: schedule_idle_check()
+    %{state | idle_check: nil}
   end
 
-  defp project_snapshots(contexts, timeout) do
-    contexts
-    |> Task.async_stream(&Orchestrator.snapshot(server(&1), timeout),
-      max_concurrency: max(length(contexts), 1),
-      timeout: timeout + 100,
-      on_timeout: :kill_task
-    )
-    |> Enum.zip(contexts)
-    |> Enum.map(fn
-      {{:ok, snapshot}, context} -> {context, snapshot}
-      {{:exit, _reason}, context} -> {context, :unavailable}
-    end)
+  defp schedule_idle_check, do: Process.send_after(self(), :check_idle, @snapshot_interval_ms)
+
+  defp project_status(context, entry, now_ms) do
+    age_ms = if entry.observed_at_ms, do: max(now_ms - entry.observed_at_ms, 0)
+
+    {status, error} =
+      cond do
+        entry.error -> {:unavailable, entry.error}
+        age_ms >= @expired_ms -> {:unavailable, "snapshot_expired"}
+        age_ms > @fresh_ms -> {:stale, nil}
+        true -> {:fresh, nil}
+      end
+
+    %{id: context.id, name: context.name, root: context.root, status: status, observed_at: entry.observed_at, age_ms: age_ms, error: error}
   end
 
   defp load_contexts(roots, workflow, env, code_root) do
@@ -139,14 +330,14 @@ defmodule SymphonyElixir.Projects do
     end)
   end
 
-  defp entries(snapshots, key) do
+  defp entries(snapshots, key, contexts) do
     Enum.flat_map(snapshots, fn {context, snapshot} ->
       Enum.map(
         Map.get(snapshot, key, []),
         fn entry ->
           Map.merge(entry, %{
             project: context.name,
-            project_qualifier: qualifier(context, snapshots),
+            project_qualifier: qualifier(context, contexts),
             project_root: context.root,
             workspace_id: context.settings.tracker.app["workspace_id"],
             workspace_path: entry[:workspace_path] || Path.join(context.settings.workspace.root, entry.identifier)
@@ -156,11 +347,12 @@ defmodule SymphonyElixir.Projects do
     end)
   end
 
-  defp qualifier(context, snapshots) do
-    if Enum.count(snapshots, fn {project, _} -> project.name == context.name end) > 1, do: context.root, else: context.name
+  defp qualifier(context, contexts) do
+    if Enum.count(contexts, &(&1.name == context.name)) > 1, do: context.root, else: context.name
   end
 
   defp totals(snapshots) do
-    Enum.reduce(snapshots, %{}, fn {_, snapshot}, acc -> Map.merge(acc, snapshot.codex_totals, fn _, a, b -> a + b end) end)
+    empty = %{input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    Enum.reduce(snapshots, empty, fn {_, snapshot}, acc -> Map.merge(acc, snapshot.codex_totals, fn _, a, b -> a + b end) end)
   end
 end

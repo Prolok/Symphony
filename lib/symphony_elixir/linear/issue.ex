@@ -68,4 +68,20 @@ defmodule SymphonyElixir.Linear.Issue do
   def label_names(%__MODULE__{labels: labels}) do
     labels
   end
+
+  @doc "Canonical dependency order: relations by ID, then wait markers; all content is retained."
+  @spec normalize_blockers([map()]) :: [map()]
+  def normalize_blockers(blockers) do
+    Enum.sort_by(blockers, &{Map.get(&1, :marker, false) == true, Map.get(&1, :id), &1})
+  end
+
+  @spec normalize_dependencies(t()) :: t()
+  def normalize_dependencies(issue), do: %{issue | blocked_by: normalize_blockers(issue.blocked_by)}
+
+  @doc "Restore JSON dependency keys without discarding marker metadata or changing historical order."
+  @spec restore_blockers([map()]) :: [map()]
+  def restore_blockers(blockers) do
+    fields = Map.new([:id, :identifier, :state, :state_type, :marker, :workspace_id, :context_id, :error], &{Atom.to_string(&1), &1})
+    Enum.map(blockers, fn blocker -> Map.new(blocker, fn {key, value} -> {Map.get(fields, key, key), value} end) end)
+  end
 end

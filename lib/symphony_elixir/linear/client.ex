@@ -1740,6 +1740,7 @@ defmodule SymphonyElixir.Linear.Client do
       _ ->
         []
     end)
+    |> Issue.normalize_blockers()
   end
 
   defp extract_blockers(_), do: []

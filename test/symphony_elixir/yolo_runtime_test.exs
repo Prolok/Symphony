@@ -45,6 +45,232 @@ defmodule SymphonyElixir.YoloRuntimeTest do
     %{context: context, root: root, issues: issues}
   end
 
+  @tag :blocker_order
+  test "first review planning launches with unsorted Linear blockers", %{issues: [issue | _], root: root, context: context} do
+    init_review_git(root, context)
+    issue = unsorted_review(issue)
+    opts = real_dependency_start_opts(issue)
+
+    assert {:error, :session_reached} = Yolo.Runner.run("review", [issue], [issue], opts)
+    assert_receive :review_session_started
+    assert Process.get(:fresh_blocker_pages) == [nil, "next", nil, "next"]
+  end
+
+  @tag :blocker_order
+  test "due review retry launches from a persisted unsorted dependency snapshot", %{issues: [issue | _], root: root, context: context} do
+    init_review_git(root, context)
+    snapshot_issue = unsorted_review(issue)
+    # Stale Relay cannot make this member ready without the saved snapshot.
+    relay = put_in(snapshot_issue.blocked_by, Enum.map(snapshot_issue.blocked_by, &%{&1 | state: "Test (AI)", state_type: "started"}))
+    assert {:ok, observations, _} = Observation.capture([snapshot_issue], %{}, scan: &scan/1)
+    assert {:ok, record} = Store.read("review")
+
+    assert :ok =
+             Store.write(
+               "review",
+               Map.merge(record, %{
+                 "retry_at" => System.system_time(:millisecond) - 1,
+                 "relay_signals" => %{relay.id => Observation.relay_signal(relay)},
+                 "dependency_snapshot" => %{relay.id => snapshot_issue.blocked_by},
+                 "observations" => observations
+               })
+             )
+
+    assert {:ok, saved} = Store.read("review")
+    assert Enum.map(saved["dependency_snapshot"][relay.id], & &1["id"]) == ["z-blocker", "a-blocker"]
+    opts = real_dependency_start_opts(snapshot_issue)
+    opts = Keyword.put(opts, :fetch, fn _ -> {:ok, [%{relay | blocked_by: []}]} end)
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+
+    Coordinator.tick(state, [relay],
+      wait_comments: fn _ -> flunk("retry must reuse the saved dependency snapshot") end,
+      scan: fn _ -> flunk("retry must reuse the saved observation") end,
+      runner: fn group, members, project -> Yolo.Runner.run(group, members, project, opts) end,
+      start: fn "review", callback ->
+        assert {:error, :session_reached} = callback.()
+        {:error, :session_reached}
+      end
+    )
+
+    assert_receive :review_session_started
+    assert Process.get(:fresh_blocker_pages) == [nil, "next", nil, "next"]
+  end
+
+  defp unsorted_review(issue) do
+    blockers = for id <- ["z-blocker", "a-blocker"], do: %{id: id, identifier: id, state: "Review", state_type: "completed"}
+    %{issue | state: "Yolo Review", blocked_by: blockers, relations_complete: true, last_comment_signal: %{relay_epoch: "current"}}
+  end
+
+  test "canonical blockers preserve duplicates and marker metadata on all dependency paths", %{issues: [issue | _]} do
+    alias SymphonyElixir.Linear.Issue
+    issue = unsorted_review(issue)
+    marker = %{id: "0-marker", identifier: "PRO-100", state: "Review", marker: true, context_id: "foreign", workspace_id: "workspace"}
+    second_marker = %{marker | id: "1-marker", identifier: "PRO-101"}
+    mixed = [second_marker, hd(issue.blocked_by), marker, List.last(issue.blocked_by), hd(issue.blocked_by)]
+    canonical = Issue.normalize_blockers(mixed)
+    assert Enum.map(canonical, & &1.id) == ["a-blocker", "z-blocker", "z-blocker", "0-marker", "1-marker"]
+    assert Enum.take(canonical, -2) == [marker, second_marker]
+    assert mixed |> Jason.encode!() |> Jason.decode!() |> Issue.restore_blockers() |> Issue.normalize_blockers() == canonical
+
+    relations =
+      for blocker <- issue.blocked_by,
+          do: %{"type" => "blocks", "issue" => %{"id" => blocker.id, "identifier" => blocker.identifier, "state" => %{"name" => blocker.state, "type" => blocker.state_type}}}
+
+    normalized = Client.normalize_issue_for_test(%{"id" => issue.id, "inverseRelations" => %{"nodes" => relations}})
+    assert Enum.map(normalized.blocked_by, & &1.id) == ["a-blocker", "z-blocker"]
+
+    issue = %{issue | description: "Wartet auf: PRO-101\nWartet auf: PRO-100"}
+
+    opts = [
+      relay_background: true,
+      query: fn _, _ -> flunk("complete Relay blockers need no lookup") end,
+      wait_comments: fn _ -> {:ok, []} end,
+      resolve: fn
+        "PRO-100", _ -> {:ok, marker}
+        "PRO-101", _ -> {:ok, second_marker}
+      end
+    ]
+
+    assert {:ok, [fresh]} = Yolo.Dependencies.refresh([issue], opts)
+    assert {:ok, [background], _} = Yolo.Dependencies.refresh_background([issue], %{}, opts)
+    assert fresh.blocked_by == background.blocked_by
+    assert Enum.map(fresh.blocked_by, & &1.id) == ["a-blocker", "z-blocker", "0-marker", "1-marker"]
+
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    tick(state, [fresh], scan: &scan/1, start: fn _, _ -> {:error, :fixture_nonstart} end)
+    assert {:ok, saved} = Store.read("review")
+    assert Enum.map(saved["dependency_snapshot"][issue.id], & &1["id"]) == ["a-blocker", "z-blocker", "0-marker", "1-marker"]
+    saved = put_in(saved["dependency_snapshot"][issue.id], mixed |> Jason.encode!() |> Jason.decode!())
+    saved = Map.put(saved, "retry_at", System.system_time(:millisecond) - 1)
+    assert :ok = Store.write("review", saved)
+
+    Coordinator.tick(state, [fresh],
+      scan: fn _ -> flunk("retry must reuse observations") end,
+      wait_comments: fn _ -> flunk("retry must restore markers") end,
+      start_group: fn "review", [member], _, _ ->
+        assert member.blocked_by == canonical
+        send(self(), :restored_marker_snapshot)
+        {:error, :fixture_nonstart}
+      end
+    )
+
+    assert_receive :restored_marker_snapshot
+  end
+
+  test "blocker reordering preserves current and snapshot-backed legacy decisions", %{issues: [issue | _]} do
+    alias SymphonyElixir.Linear.Issue
+    alias SymphonyElixir.Relay.Store, as: Digest
+    alias SymphonyElixir.Yolo.Delivery
+    issue = unsorted_review(issue)
+    reordered = Issue.normalize_dependencies(issue)
+    assert Observation.relay_signal(issue) == Observation.relay_signal(reordered)
+    assert {:ok, observations, fingerprint} = Observation.capture([issue], %{}, scan: &scan/1)
+    assert {:ok, same, ^fingerprint} = Observation.capture([reordered], observations, scan: fn _ -> flunk("order alone must not scan") end)
+    assert Delivery.pending([reordered], same, %{"observations" => observations, "processed" => fingerprint}) == []
+
+    legacy_issue = issue |> Map.take([:id, :title, :description, :state, :assignee_id, :delegate_id, :blocked_by, :project_id, :team_id]) |> Map.put(:labels, [])
+    legacy_issue = Map.put(legacy_issue, :blocked_by, Enum.map(issue.blocked_by, &Map.delete(&1, :state_type)))
+    legacy = %{issue.id => %{"signal" => "old", "semantic" => Digest.digest({legacy_issue, []})}}
+    assert {:ok, record} = Store.read("review")
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    opts = [scan: &scan/1, wait_comments: fn _ -> {:ok, []} end, start: fn _, _ -> flunk("unchanged legacy completion must remain decided") end]
+
+    for retry_at <- [nil, System.system_time(:millisecond) + 30_000] do
+      legacy_record =
+        Map.merge(record, %{
+          "observations" => legacy,
+          "processed" => Observation.fingerprint(legacy),
+          "dependency_snapshot" => %{issue.id => issue.blocked_by},
+          "retry_at" => retry_at,
+          "relay_signals" => %{issue.id => Observation.relay_signal(reordered)}
+        })
+
+      assert :ok = Store.write("review", legacy_record)
+      Coordinator.tick(state, [reordered], opts)
+      assert {:ok, migrated} = Store.read("review")
+      assert Delivery.pending([reordered], same, migrated) == []
+      assert migrated["decisions"][issue.id] == same[issue.id]["semantic"]
+    end
+
+    assert {:ok, migrated} = Store.read("review")
+
+    changed_blockers = [%{hd(reordered.blocked_by) | state: "Fertig"} | tl(reordered.blocked_by)]
+    capture_opts = [scan: &scan/1, legacy_dependency_snapshot: %{issue.id => issue.blocked_by}]
+
+    for changed <- [%{reordered | title: "changed"}, %{reordered | blocked_by: changed_blockers}] do
+      assert {:ok, next, next_fingerprint} = Observation.capture([changed], same, capture_opts)
+      refute next_fingerprint == fingerprint
+      refute Observation.relay_signal(changed) == Observation.relay_signal(reordered)
+      legacy_record = %{"observations" => legacy, "processed" => Observation.fingerprint(legacy)}
+      assert Delivery.pending([changed], next, Delivery.migrate(legacy_record, next)) == [changed]
+      assert Delivery.pending([changed], next, migrated) == [changed]
+    end
+  end
+
+  test "fresh blocker changes still prevent the real review start", %{issues: [issue | _], root: root, context: context} do
+    init_review_git(root, context)
+    issue = unsorted_review(issue)
+
+    for change <- [:state, :content] do
+      changed =
+        if change == :state,
+          do: put_in(issue.blocked_by, Enum.map(issue.blocked_by, &%{&1 | state: "Fertig"})),
+          else: put_in(issue.blocked_by, Enum.map(issue.blocked_by, &%{&1 | identifier: "different"}))
+
+      opts = real_dependency_start_opts(changed)
+
+      opts =
+        Keyword.merge(opts,
+          fetch: fn _ -> {:ok, [issue]} end,
+          project: fn -> {:ok, [issue]} end,
+          session: fn _, _, _, _ -> flunk("changed blockers must not launch") end
+        )
+
+      assert {:error, :yolo_launch_changed} = Yolo.Runner.run("review", [issue], [issue], opts)
+      refute_receive :review_session_started
+    end
+  end
+
+  defp real_dependency_start_opts(issue) do
+    Process.put(:final_start_check, false)
+    Process.put(:fresh_blocker_pages, [])
+
+    query = fn document, variables ->
+      assert document =~ "YoloBlockers"
+      assert variables.id == issue.id
+      assert Process.get(:final_start_check), "background/retry must not read complete Relay blockers"
+      Process.put(:fresh_blocker_pages, Process.get(:fresh_blocker_pages) ++ [variables.after])
+      blocker = if is_nil(variables.after), do: hd(issue.blocked_by), else: List.last(issue.blocked_by)
+
+      relation = %{
+        "id" => "relation-#{blocker.id}",
+        "type" => "blocks",
+        "issue" => %{"id" => blocker.id, "identifier" => blocker.identifier, "state" => %{"name" => blocker.state, "type" => blocker.state_type}}
+      }
+
+      page = %{"nodes" => [relation], "pageInfo" => %{"hasNextPage" => is_nil(variables.after), "endCursor" => "next"}}
+      {:ok, %{"data" => %{"issue" => %{"inverseRelations" => page}}}}
+    end
+
+    [
+      relay_background: true,
+      query: query,
+      wait_comments: fn _ -> {:ok, []} end,
+      fetch: fn _ -> {:ok, [issue]} end,
+      project: fn -> {:ok, [issue]} end,
+      lease: fn _, callback -> callback.() end,
+      scan: &scan/1,
+      checkpoint: fn _ ->
+        Process.put(:final_start_check, true)
+        {:ok, %{inputs: []}}
+      end,
+      session: fn _, _, _, _ ->
+        send(self(), :review_session_started)
+        {:error, :session_reached}
+      end
+    ]
+  end
+
   defp tick(state, issues, opts), do: Coordinator.tick(state, issues, Keyword.put_new(opts, :dependencies, &{:ok, &1}))
 
   defp hop_lock_calls(fun) do
@@ -2191,7 +2417,7 @@ defmodule SymphonyElixir.YoloRuntimeTest do
 
     described = %{review | description: "Wartet auf: PRI-2"}
     assert {:ok, [%{blocked_by: targets}], _cache} = Yolo.Dependencies.refresh_background([described], cache, opts)
-    assert Enum.map(targets, & &1.identifier) == ["PRI-2", "PRI-1"]
+    assert Enum.map(targets, & &1.identifier) == ["PRI-1", "PRI-2"]
   end
 
   test "a later dependency failure retries through the shared comment reader", %{issues: [first, second | _]} do

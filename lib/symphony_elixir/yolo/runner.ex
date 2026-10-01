@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   require Logger
   alias SymphonyElixir.Codex.AppServer, as: AppServer
   alias SymphonyElixir.{CommentCheckpoint, Config, ProjectContext, RuntimePaths, Tracker}
-  alias SymphonyElixir.Linear.{Client, IssueLease, YoloAgent}
+  alias SymphonyElixir.Linear.{Client, Issue, IssueLease, YoloAgent}
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
   alias SymphonyElixir.Yolo.{Group, Impulse, Observation, OpenClaw, Operations}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
@@ -131,6 +131,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   end
 
   defp run_locked(group, issues, project_issues, run_id, record, opts) do
+    opts = Keyword.put(opts, :legacy_dependency_snapshot, record["dependency_snapshot"])
     fetch = Keyword.get(opts, :fetch, &Tracker.fetch_issue_states_by_ids/1)
     retry? = tentative_retry?(record)
 
@@ -185,7 +186,7 @@ defmodule SymphonyElixir.Yolo.Runner do
 
     Enum.map(fresh, fn issue ->
       case scheduled[issue.id] do
-        %{blocked_by: blockers} when is_list(blockers) -> %{issue | blocked_by: blockers}
+        %{blocked_by: blockers} when is_list(blockers) -> %{issue | blocked_by: Issue.normalize_blockers(blockers)}
         _ -> issue
       end
     end)
@@ -459,7 +460,7 @@ defmodule SymphonyElixir.Yolo.Runner do
          {:ok, fresh} <- fetch.(Enum.map(issues, & &1.id)),
          fresh = with_relay_epochs(fresh, issues),
          {:ok, fresh} <- Dependencies.refresh(fresh, opts),
-         true <- Enum.sort_by(fresh, & &1.id) == Enum.sort_by(issues, & &1.id),
+         true <- normalized_members(fresh) == normalized_members(issues),
          true <- Enum.all?(fresh, &Dependencies.dispatchable?/1),
          true <- Enum.all?(fresh, &(Group.name(&1) == group and Admission.eligible?(&1) and not Admission.needed?(&1))) do
       :ok
@@ -468,6 +469,8 @@ defmodule SymphonyElixir.Yolo.Runner do
       _ -> {:error, :yolo_launch_changed}
     end
   end
+
+  defp normalized_members(issues), do: issues |> Enum.map(&Issue.normalize_dependencies/1) |> Enum.sort_by(& &1.id)
 
   defp current_project("review", members, expected, opts) do
     fetch = Keyword.get(opts, :project, &Client.fetch_candidate_issues/0)

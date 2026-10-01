@@ -288,7 +288,12 @@ dauerhaft gezählt; auch ein identischer freier Endstand erlaubt genau eine neue
 Nach einem Gruppenfehler bleibt die vollständige Beobachtung auch ohne
 erfolgreichen PO-Start erhalten. Unveränderte Relay-Signale lösen während des
 Cooldowns keine ticketbezogenen Linear-Lesezugriffe aus. Wiederholungen verwenden
-den zuletzt vollständig gelesenen Abhängigkeitsstand.
+den zuletzt vollständig gelesenen Abhängigkeitsstand. Relationsblocker werden
+nach ID geordnet, Wartemarker folgen danach. Reine Umsortierung ändert weder
+den fachlichen Beobachtungsstand noch den Startvergleich; auch unsortierte
+gespeicherte Retry-Snapshots werden normalisiert. Bereits bestätigte Entscheidungen
+bleiben erhalten. Für ältere reihenfolgeabhängige Entscheidungsdigests wird die
+gespeicherte Blocker-Reihenfolge nur bei nachweislich gleichen Inhalten verwendet.
 
 Bei einer noch offenen Zustellentscheidung bleibt der vorherige Beobachtungsstand
 als Vergleichsbasis erhalten; der neue vollständige Stand wird für Wiederholungen

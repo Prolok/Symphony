@@ -59,6 +59,8 @@ agent:
   max_concurrent_agents: 10
   max_turns: 20
 codex:
+  # sym-codex --observer übergibt SYM_CODEX_MODEL über --config model="…";
+  # das globale CLI-Flag --model wird von codex app-server nicht übernommen.
   command: >-
     common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)";
     if [ -z "$common_dir" ]; then

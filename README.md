@@ -122,6 +122,10 @@ Ursprungsticket nach `Umsetzungsticket erstellt` verschieben.
    `service_tier`; interaktive/manuelle Starts übergeben stattdessen
    `SYM_CODEX_HUMAN_SERVICE_TIER`.
 
+   Observer-Starts übergeben `SYM_CODEX_MODEL` als `--config model="…"`,
+   damit der App-Server das Workflow-Modell statt des global konfigurierten
+   Codex-Modells verwendet. Interaktive/manuelle Starts verwenden `--model`.
+
    `SYM_MAXIMUM_REVIEW_ITERATIONS=3` in derselben Root-`.env` begrenzt die
    Reviewrunden pro Aufenthalt in `Review (AI)`, einschließlich Erst-Review.
    Es gilt dieselbe Präzedenz; erlaubt sind positive Ganzzahlen, ungültige

@@ -565,6 +565,8 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     refute payload["observation"]["abort_acknowledged"]
     assert payload["observation"]["terminal"] == Map.put(original_end, "kind", "gateway")
     assert payload["observation"]["retirement"] == Map.drop(retirement, ~w(retained_inputs original_wait session_history))
+    schema = File.read!("docs/contracts/linearbridge-lifecycle-v1.schema.json") |> Jason.decode!()
+    assert payload["observation"]["retirement"]["stop_basis"] in get_in(schema, ["$defs", "retirement", "properties", "stop_basis", "enum"])
   end
 
   test "invalid or incomplete journal membership is never silently normalized" do

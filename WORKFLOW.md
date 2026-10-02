@@ -369,7 +369,8 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   bleiben gesperrt. Secrets bleiben aus öffentlicher Umgebung und Prompts
   ausgeschlossen; private Envdateien sind kein Agentenzugriffspfad.
 - Der lokale [Wartungsmodus](docs/linear-app.md#wartungsmodus-update-und-neustart)
-  sperrt dienstweit neue Starts; laufende Arbeit wird regulär beendet. Ein Neustart
+  sperrt dienstweit neue Starts; reguläre Codex-Arbeit pausiert nach dem aktuellen
+  Turn mit gesichertem Fortsetzungskontext, geschützte Läufe enden regulär. Ein Neustart
   ist erst bei `maintenance.enabled && maintenance.idle` zulässig. Nach vollständigem
   Dienstneustart ist der Modus aus und zurückgestellte Arbeit wird frisch geprüft.
 - Eine gemeinsame Dienstinstanz pro Benutzer; ein konkurrierender Start endet

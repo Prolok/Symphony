@@ -498,6 +498,10 @@ defmodule SymphonyElixir.Orchestrator do
     Map.put(entry, :maintenance_interrupt_pending, true)
   end
 
+  defp reconcile_maintenance_interrupt_update(entry, %{event: :session_started}) do
+    Map.delete(entry, :maintenance_interrupt_pending)
+  end
+
   defp reconcile_maintenance_interrupt_update(entry, _update), do: entry
 
   defp dispatch_due_retry(state, issue_id, retry_token) do
@@ -2473,6 +2477,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maintenance_check_due?(_entry, _generation), do: true
 
+  defp maintenance_turn_pause?(%{pid: pid, dispatch_issue: dispatch} = entry, fresh, pid, control, generation) do
+    running_entry_run_mode(entry) == :regular and Maintenance.interruptible?(dispatch.state) and
+      Maintenance.interruptible?(fresh.state) and control.enabled and control.generation == generation
+  end
+
+  defp maintenance_turn_pause?(_entry, _fresh, _pid, _control, _generation), do: false
+
   defp maintenance_interruption_hint(entry, phase) do
     %{
       attempt: normalize_retry_attempt(entry[:retry_attempt]),
@@ -3362,6 +3373,24 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
+  def handle_call({:maintenance_turn_completed, %Issue{} = fresh, generation}, {pid, _}, state) do
+    control = Maintenance.status()
+    entry = state.running[fresh.id]
+
+    if maintenance_turn_pause?(entry, fresh, pid, control, generation) do
+      hint = maintenance_interruption_hint(entry, entry.dispatch_issue.state)
+      hint = reconcile_interrupted_retry(fresh, hint)
+      hint = Map.merge(hint, %{interrupted_state: fresh.state, review_stay: running_review_stay?(entry) and fresh.state == entry.dispatch_issue.state})
+
+      case MaintenanceRecovery.put(fresh.id, hint) do
+        :ok -> {:reply, :ok, %{state | maintenance_error: nil}}
+        {:error, reason} -> {:reply, {:error, reason}, %{state | maintenance_error: reason}}
+      end
+    else
+      {:reply, :continue, state}
+    end
+  end
+
   def handle_call(:snapshot, _from, state) do
     state = refresh_runtime_config(state)
     state = restore_maintenance_retries(state)

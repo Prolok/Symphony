@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.Yolo.Coordinator do
   @moduledoc "PO scheduling inside the existing project orchestrator and shared capacity."
   require Logger
-  alias SymphonyElixir.{Config, ProjectContext, Tracker, Workpad}
+  alias SymphonyElixir.{Config, Maintenance, ProjectContext, Tracker, Workpad}
   alias SymphonyElixir.Linear.{Issue, YoloAgent}
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
   alias SymphonyElixir.Yolo.{AgentHop, Escalation, Group, Impulse, Observation, Operations}
@@ -752,6 +752,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   @spec entries(map()) :: [map()]
   def entries(runs) do
+    runs = reservation_runs(runs)
+
     Enum.flat_map(runs, fn {group, run} ->
       Enum.map(run.issues, fn issue ->
         entry = %{
@@ -777,6 +779,41 @@ defmodule SymphonyElixir.Yolo.Coordinator do
         external_entry(entry, run, issue)
       end)
     end)
+  end
+
+  defp reservation_runs(runs) do
+    case Journal.pending() do
+      {:ok, orders} -> Enum.reduce(orders, runs, &add_reservation_run/2)
+      _ -> runs
+    end
+  end
+
+  defp add_reservation_run(order, runs) do
+    run = runs[order["group"]] || orphan_reservation_run(order)
+    if run, do: Map.put(runs, order["group"], reservation_run(run, order)), else: runs
+  end
+
+  defp orphan_reservation_run(%{"writable" => false} = order) do
+    %{
+      pid: nil,
+      issues: Enum.map(order["members"], &%{id: &1["id"], identifier: &1["identifier"], state: &1["state"]}),
+      started_at: DateTime.utc_now(),
+      event: %{
+        external: OpenClaw.observation(order),
+        session_id: order["session_id"],
+        workspace_path: order["workspace"]
+      }
+    }
+  end
+
+  defp orphan_reservation_run(_order), do: nil
+
+  defp reservation_run(run, order) do
+    if get_in(run, [:event, :external, :run_id]) == order["id"] do
+      put_in(run.event.external[:maintenance_blocking], Maintenance.reservation_blocks?(order))
+    else
+      run
+    end
   end
 
   defp external_entry(entry, run, issue) do

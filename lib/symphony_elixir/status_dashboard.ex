@@ -377,6 +377,7 @@ defmodule SymphonyElixir.StatusDashboard do
            project_link_lines,
            mode_lines,
            format_maintenance_lines(snapshot, terminal_columns_override || terminal_columns()),
+           format_reservation_lines(running, terminal_columns_override || terminal_columns()),
            project_refresh_line,
            format_project_status_lines(snapshot),
            colorize("├─ Running", @ansi_bold),
@@ -421,6 +422,15 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_maintenance_lines(%{maintenance: %{enabled: false}}, _columns), do: ["│ Normalbetrieb"]
   defp format_maintenance_lines(_, _columns), do: []
+
+  defp format_reservation_lines(running, columns) do
+    running
+    |> Enum.filter(&(get_in(&1, [:external, :maintenance_blocking]) == false))
+    |> Enum.flat_map(fn entry ->
+      ["│ #{entry.identifier}: Platz reserviert", "│   blockiert Wartungsleerlauf nicht"]
+    end)
+    |> Enum.map(&truncate_plain(&1, max(columns, 4)))
+  end
 
   defp format_project_status_lines(snapshot) do
     partial = if Map.get(snapshot, :partial, false), do: [colorize("│ Teilstand: nicht verfügbare Projekte fehlen in Zeilen und Summen", @ansi_red)], else: []

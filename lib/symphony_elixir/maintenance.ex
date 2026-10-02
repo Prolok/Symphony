@@ -50,7 +50,7 @@ defmodule SymphonyElixir.Maintenance do
   @spec project(map(), boolean()) :: map()
   def project(snapshot, persistence_ok?) do
     control = status()
-    idle = control.enabled and control.drained and persistence_ok? and snapshot.running == [] and external_idle?()
+    idle = control.enabled and control.drained and persistence_ok? and Enum.all?(snapshot.running, &(get_in(&1, [:external, :maintenance_blocking]) == false)) and external_idle?()
     control |> Map.drop([:drained, :deadline_ms, :deadline_seconds]) |> Map.merge(%{idle: idle, draining: control.enabled and not idle})
   end
 
@@ -73,11 +73,15 @@ defmodule SymphonyElixir.Maintenance do
     :exit, _ -> {:error, :maintenance_unavailable}
   end
 
-  defp external_idle? do
-    if SymphonyElixir.ProjectContext.current() do
-      Journal.pending() == {:ok, []}
-    else
-      true
+  @doc "Read-only reservations retain capacity; active workers are checked separately."
+  @spec reservation_blocks?(map()) :: boolean()
+  def reservation_blocks?(order), do: order["writable"] != false
+
+  @spec external_idle?() :: boolean()
+  def external_idle? do
+    case Journal.pending() do
+      {:ok, orders} -> Enum.all?(orders, &(not reservation_blocks?(&1)))
+      _ -> false
     end
   end
 

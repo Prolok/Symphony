@@ -2,7 +2,7 @@ defmodule SymphonyElixir.WorkerCapacity do
   @moduledoc "Atomically starts workers within service-wide and SSH-host capacity limits."
   use GenServer
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.ProjectContext
+  alias SymphonyElixir.{Maintenance, ProjectContext}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -56,7 +56,8 @@ defmodule SymphonyElixir.WorkerCapacity do
 
   @impl true
   def handle_call(:maintenance, _from, state) do
-    drained = map_size(state.workers) == 0 and pending_bindings(state.contexts) == {:ok, MapSet.new()}
+    drained = maintenance_drained?(state)
+
     {:reply, Map.put(state.maintenance, :drained, drained), state}
   end
 
@@ -194,11 +195,33 @@ defmodule SymphonyElixir.WorkerCapacity do
     end
   end
 
+  defp maintenance_drained?(state) do
+    case pending_orders(state.contexts) do
+      {:ok, orders} ->
+        Enum.all?(Map.values(orders), &(not Maintenance.reservation_blocks?(&1))) and
+          Enum.all?(state.workers, fn {pid, _} -> read_only_binding?(orders[state.bindings[pid]]) end)
+
+      _ ->
+        false
+    end
+  end
+
+  defp read_only_binding?(nil), do: false
+  defp read_only_binding?(order), do: not Maintenance.reservation_blocks?(order)
+
   defp pending_bindings(contexts) do
-    Enum.reduce_while(contexts, {:ok, MapSet.new()}, fn context, {:ok, acc} ->
+    with {:ok, orders} <- pending_orders(contexts), do: {:ok, MapSet.new(Map.keys(orders))}
+  end
+
+  defp pending_orders(contexts) do
+    Enum.reduce_while(contexts, {:ok, %{}}, fn context, {:ok, acc} ->
       case ProjectContext.with_context(context, &Journal.pending/0) do
-        {:ok, orders} -> {:cont, {:ok, Enum.reduce(orders, acc, &MapSet.put(&2, {context.id, "yolo " <> &1["group"]}))}}
-        error -> {:halt, error}
+        {:ok, orders} ->
+          bindings = Map.new(orders, &{{context.id, "yolo " <> &1["group"]}, &1})
+          {:cont, {:ok, Map.merge(acc, bindings)}}
+
+        error ->
+          {:halt, error}
       end
     end)
   end

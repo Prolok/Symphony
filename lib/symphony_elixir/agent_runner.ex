@@ -18,6 +18,7 @@ defmodule SymphonyElixir.AgentRunner do
     Config,
     Dialog,
     Linear.Issue,
+    Maintenance,
     PromptBuilder,
     RuntimePaths,
     Tracker,
@@ -694,6 +695,7 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, session} ->
         run_context = %{
           app_session: session,
+          started_phase: issue.state,
           workspace: workspace,
           codex_update_recipient: turn_context.codex_update_recipient,
           opts: review_run_opts(session, turn_context.opts),
@@ -748,6 +750,8 @@ defmodule SymphonyElixir.AgentRunner do
   defp handle_turn_result({:ok, turn_session}, turn_context, issue, turn_number) do
     Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{turn_context.workspace} turn=#{turn_number}/#{turn_context.max_turns}")
 
+    turn_context = Map.put(turn_context, :completed_session_id, turn_session[:session_id])
+
     issue
     |> continue_with_issue?(
       turn_context.issue_state_fetcher,
@@ -785,7 +789,56 @@ defmodule SymphonyElixir.AgentRunner do
     handle_run_error(reason, issue, turn_context)
   end
 
-  defp continue_turn(
+  defp continue_turn(result, context, turn_number, outcome, continuation_message, max_turns_message) do
+    refreshed = maintenance_issue(result)
+    control = Maintenance.status()
+
+    if pause_after_turn?(refreshed, context, control) do
+      case pause_completed_turn(context, refreshed, control.generation) do
+        :ok -> exit(:maintenance_interrupt)
+        :continue -> advance_turn(result, context, turn_number, outcome, continuation_message, max_turns_message)
+      end
+    else
+      advance_turn(result, context, turn_number, outcome, continuation_message, max_turns_message)
+    end
+  end
+
+  defp maintenance_issue({:continue, issue}), do: issue
+  defp maintenance_issue({:continue, issue, _}), do: issue
+  defp maintenance_issue({:done, issue}), do: issue
+  defp maintenance_issue(_), do: nil
+
+  defp pause_after_turn?(nil, _context, _control), do: false
+
+  defp pause_after_turn?(issue, context, control) do
+    is_pid(context.codex_update_recipient) and control.enabled and
+      Maintenance.interruptible?(context.started_phase) and Maintenance.interruptible?(issue.state)
+  end
+
+  defp pause_completed_turn(context, issue, generation) do
+    request = {:maintenance_turn_completed, issue, generation}
+
+    case GenServer.call(context.codex_update_recipient, request, :infinity) do
+      {:error, reason} ->
+        Logger.error("Maintenance continuation persistence failed: #{issue_context(issue)} session_id=#{context[:completed_session_id] || "unknown"} reason=#{inspect(reason)}")
+        update = %{event: :maintenance_interrupt_pending, timestamp: DateTime.utc_now()}
+        send_codex_update(context.codex_update_recipient, issue, update)
+        Process.sleep(1_000)
+        pause_completed_turn(context, issue, generation)
+
+      :continue ->
+        current = Maintenance.status()
+
+        if current.enabled and current.generation != generation,
+          do: pause_completed_turn(context, issue, current.generation),
+          else: :continue
+
+      :ok ->
+        :ok
+    end
+  end
+
+  defp advance_turn(
          {:continue, refreshed_issue, {:incomplete_phase, reason} = previous_turn_outcome},
          turn_context,
          turn_number,
@@ -801,7 +854,7 @@ defmodule SymphonyElixir.AgentRunner do
     do_run_codex_turns(turn_context, refreshed_issue, turn_number + 1, previous_turn_outcome)
   end
 
-  defp continue_turn(
+  defp advance_turn(
          {:continue, refreshed_issue, {:incomplete_phase, reason}},
          turn_context,
          turn_number,
@@ -824,7 +877,7 @@ defmodule SymphonyElixir.AgentRunner do
     :ok
   end
 
-  defp continue_turn(
+  defp advance_turn(
          {:continue, refreshed_issue},
          turn_context,
          turn_number,
@@ -838,7 +891,7 @@ defmodule SymphonyElixir.AgentRunner do
     do_run_codex_turns(turn_context, refreshed_issue, turn_number + 1, previous_turn_outcome)
   end
 
-  defp continue_turn(
+  defp advance_turn(
          {:continue, refreshed_issue},
          turn_context,
          turn_number,
@@ -851,7 +904,7 @@ defmodule SymphonyElixir.AgentRunner do
     :ok
   end
 
-  defp continue_turn(
+  defp advance_turn(
          {:done, _refreshed_issue},
          _turn_context,
          _turn_number,
@@ -861,7 +914,7 @@ defmodule SymphonyElixir.AgentRunner do
        ),
        do: :ok
 
-  defp continue_turn(
+  defp advance_turn(
          {:error, reason},
          _turn_context,
          _turn_number,

@@ -391,7 +391,10 @@ den zum Versuch gehörenden Symphony-Store-Startfehler exakt
 `:linear_app_request_unavailable` oder
 `{:linear_api_request, :linear_app_request_unavailable}`. Dieser Fehler konnte
 im alten Startpfad nach dem Intent nur vor `adapter.submit` zurückgegeben werden.
-Sitzungs-/Zustellungs-/Completion-/Aktionsbelege schließen die Behandlung aus.
+Sitzungs-/Zustellungs-/Completionbelege und offene oder unklare Aktionsjournale
+schließen die Behandlung aus. Für abgeschlossene Altoperationen gilt dieselbe
+strikte `done=true`-Prüfung wie bei der automatischen Wiederaufnahme; fehlendes
+oder anderes `done` sowie unlesbare Journale bleiben sperrend.
 Ein allgemeiner Timeout oder ein fehlender Zustellmarker genügt nicht.
 
 Unmittelbar unter der Journal-/Gruppensperre wird `sessions.list` nach dem

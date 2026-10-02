@@ -151,6 +151,11 @@ class BridgeContractTests(unittest.TestCase):
         payload["observation"]["terminal"].update(startedAt=1, endedAt=2)
         shape(payload, SCHEMA["$defs"]["payload"])
         shape(wire(payload), SCHEMA["$defs"]["envelope"])
+        # Durable transcript evidence remains in the producer journal. Cache
+        # expiry never manufactures original terminal times in the wire payload.
+        payload["observation"]["terminal"] = None
+        shape(payload, SCHEMA["$defs"]["payload"])
+        shape(wire(payload), SCHEMA["$defs"]["envelope"])
         payload["observation"]["retirement"]["stop_basis"] = "unknown"
         self.assertRaises(ValueError, shape, payload, SCHEMA["$defs"]["payload"])
 

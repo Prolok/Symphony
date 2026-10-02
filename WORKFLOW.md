@@ -336,8 +336,9 @@ Ungültige Änderungen ersetzen keinen gültigen Projektkontext.
   wirksamem Schreibentzug und frischer Inaktivitäts-/Eingabeprüfung technisch
   aufgegeben werden; offene Arbeit wird regulär neu geplant, kein Erfolg fingiert.
   Wiederaufnahmen senden wiederholbare Abbrüche auch nach Ownerverlust erneut;
-  belegtes Originalende plus späterer beendeter Folgelauf erlaubt technische
-  Stilllegung nur mit frischer Inaktivität und leerer Eingabeseite; [Details](docs/openclaw-yolo.md).
+  belegtes Originalende (auch dauerhaft im vollständigen Transcript) plus späterer
+  beendeter Folgelauf erlaubt technische Stilllegung nur mit frischer Inaktivität;
+  wiederaufgenommene Aufträge verlangen eine vollständig leere Eingabeseite; [Details](docs/openclaw-yolo.md).
   Fehlende Endmarken alter Zustellungen werden nur aus passenden terminalen
   aktuellen oder archivierten OpenClaw-Aufträgen übernommen; ohne solchen Beleg
   bleibt die Gruppe reserviert.

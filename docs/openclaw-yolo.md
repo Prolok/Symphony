@@ -251,9 +251,19 @@ Originalprojektion die technische Stilllegung mit `stop_basis=terminal_original_
 `terminal` bleibt dabei leer. Weder Abbruchquittung noch fachlicher Erfolg werden
 erzeugt. Bei einem wiederaufgenommenen Auftrag darf ein abweichender `lastRunId`
 ebenfalls zur technischen Stilllegung führen (`stop_basis=terminal_original_before_followup`):
-Ein frisch abgefragter `agent.wait`-Endbeleg muss die exakte Original-ID und eigene
-plausible Start-/Endzeiten nennen. Der letzte Lauf muss selbst beendet sein und
-nach dem Originalende begonnen haben; die vollständige Eingabeseite muss leer sein.
+Die Originalend-Prüfung verwendet geordnet den korrelierten `agent.wait`-Endbeleg,
+die beendete Original-`lastRunId`-Projektion und zuletzt eine dauerhafte Originalantwort
+im vollständigen Transcript. Ein vorhandener Warte-Endbeleg verlangt eigene plausible
+Start-/Endzeiten; ein ungültiger Beleg wird nicht durch den Transcriptweg verdeckt.
+Ist der Wartecache verfallen, genügt genau eine terminale Originalantwort:
+Codex mit `__openclaw.runId`, `runTerminal=true` und bestehender Mirrorattestierung;
+CLI mit `idempotencyKey=cli-assistant:<Original-ID>` und `stopReason=stop/aborted`.
+Pausierte Segmentausgaben (`openclawStreamFallback.source=segment`), Yield- und
+Fehlerfortsetzungen zählen nicht. Der plausible Assistant-Zeitstempel muss strikt
+vor dem Start des bereits beendeten letzten Laufs liegen. Er wird nie als Original-
+Start-/Endzeit importiert; ohne Warte-Endbeleg bleibt `terminal` leer.
+Der letzte Lauf muss selbst beendet sein und nach dem Originalende begonnen haben;
+die vollständige Eingabeseite muss bei allen wiederaufgenommenen Aufträgen leer sein.
 Unklare oder überlappende Chronologie bleibt reserviert. Ohne passenden Originalendbeleg
 bleibt bei abweichendem letzten Lauf die echte Abbruchquittung erforderlich
 (`stop_basis=abort_acknowledged`).
@@ -266,14 +276,20 @@ mit plausiblen Zeitfeldern nennen. `hasActiveRun=false`, die vollständige leere
 `activeRunIds`-Menge, keine aktive Unterausführung und kein `inFlightRun`, `yielded`
 oder `pendingError` sind erforderlich. Ein anderer letzter Lauf wird nicht als
 Originalabschluss importiert. Aktive oder unklare Original-/Folgeläufe bleiben geschützt.
-Transcriptseiten sind kein Laufregister; maßgeblich sind die vollständigen
-Sitzungs- und Pending-Input-Felder, nicht die Anzahl sichtbarer Transcriptnachrichten.
+Transcriptseiten sind kein Laufregister; die vollständigen Sitzungs- und Pending-Input-
+Felder bleiben erforderlich. Für den dauerhaften Originalendbeleg muss zusätzlich die
+History vollständig sein: lokale Seite mit `offset=0` und passenden `totalMessages`
+oder hostseitiges `completeSnapshot=true` für CLI-Importe; stets `hasMore=false`, keine weitere Seite oder
+gekürzte Nachricht. Quellen am öffentlichen OpenClaw 2026.9.6/`eb377ac`:
+[CLI-Endantwort und Segmentgrenze](https://github.com/openclaw/openclaw/blob/eb377ac59e6c9fd6c7705028034812becf00271b/src/agents/cli-runner/cli-run-transcript.ts#L150),
+[Codex-Laufmarke](https://github.com/openclaw/openclaw/blob/eb377ac59e6c9fd6c7705028034812becf00271b/extensions/codex/src/app-server/transcript-mirror-attestation.ts#L71),
+[History-Vollständigkeit](https://github.com/openclaw/openclaw/blob/eb377ac59e6c9fd6c7705028034812becf00271b/src/gateway/server-methods/chat-history-handler.ts#L687).
 
 Die Eingabewarteschlange muss nach Gesamtzahl und Seitenkennung vollständig leer
 sein. Genau ein `interrupted` Eingang ist ebenfalls zulässig, wenn Lauf-ID und
 vollständiger Text exakt dem SHA-256 des ursprünglichen Symphony-Payloads entsprechen.
-Diese Ausnahme gilt für den Original-/Abbruchquittungspfad; der neue Folgelaufpfad
-verlangt eine vollständig leere Eingabeseite. Der Eingang enthält den bereits
+Diese Ausnahme gilt nur vor einer Wiederaufnahme im Original-/Abbruchquittungspfad;
+wiederaufgenommene Aufträge verlangen eine vollständig leere Eingabeseite. Der Eingang enthält den bereits
 bekannten Auftrag; dessen noch offene Arbeit
 wird aus frischen Tickets, Kommentaren und Aktionsjournalen neu geplant. Sein
 Hosteintrag bleibt erhalten, seine Kennung und Inhaltsbindung werden dokumentiert.

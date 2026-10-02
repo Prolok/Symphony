@@ -1631,6 +1631,192 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, ^reconciled} = Store.read("incoming")
   end
 
+  for format <- [:cli, :codex] do
+    @tag expired_wait: true, transcript_format: format
+    test "expired original wait retires from durable #{format} transcript before an ended followup", %{issues: issues, opts: opts, transcript_format: format} do
+      order = executed_order(issues, opts)
+      {:ok, decisions} = Store.read("incoming")
+      history = expired_wait_history(order, format)
+      response = %{"runId" => order["id"], "status" => "timeout"}
+
+      handler = fn
+        "sessions.abort", params ->
+          assert params == %{"key" => order["session_id"], "runId" => order["id"]}
+          %{"ok" => false, "status" => "no-active-run"}
+
+        "agent.wait", %{"runId" => id} ->
+          assert id == order["id"]
+          response
+
+        "chat.history", %{"sessionKey" => key} ->
+          assert key == order["session_id"]
+          history
+      end
+
+      assert {:error, :openclaw_interrupted_order_retired} =
+               OpenClaw.recover(order, transport: transport(handler), openclaw_wait: fn _ -> throw(:still_reserved) end)
+
+      assert {:ok, retired} = Journal.read("incoming")
+      assert retired["state"] == "retired"
+      assert retired["retirement"]["stop_basis"] == "terminal_original_before_followup"
+      assert retired["retirement"]["original_wait"] == response
+      assert retired["retirement"]["session_history"] == history
+      assert retired["retirement"]["history_sha256"] == OpenClaw.digest(Jason.encode!(history))
+      assert retired["retirement"]["session_end"] == Map.take(history["sessionInfo"], ~w(lastRunId status startedAt endedAt))
+      refute retired["terminal"]
+      refute retired["writable"]
+      refute retired["abort_acknowledged"]
+      refute Journal.receipt("incoming", order["session_id"])
+      refute Completion.ready?("incoming", issues)
+      assert {:ok, ^decisions} = Store.read("incoming")
+      assert {:ok, []} = Journal.pending()
+      assert :ok = Journal.member_available(hd(issues).id)
+      assert :ok = Delivery.reconcile("incoming")
+      assert {:ok, reconciled} = Store.read("incoming")
+      assert reconciled["deliveries"] == %{}
+      assert reconciled["attempt"] == decisions["attempt"]
+    end
+  end
+
+  for format <- [:cli, :codex] do
+    @tag transcript_format: format
+    test "durable #{format} original end keeps incomplete conflicting active and waiting cases reserved", %{issues: issues, opts: opts, transcript_format: format} do
+      order = fenced_order(issues, opts)
+      {:ok, order} = Journal.update(order, %{"abort_acknowledged" => false, "resumed" => true})
+      {:ok, decisions} = Store.read("incoming")
+      history = expired_wait_history(order, format)
+      reply = %{"runId" => order["id"], "status" => "timeout"}
+      record = Enum.at(history["messages"], 1)
+      replace = fn message -> put_in(history, ["messages", Access.at(1)], message) end
+
+      for bad <- [
+            Map.delete(history, "messages"),
+            Map.put(history, "messages", []),
+            replace.(Map.put(record, "__openclaw", "unknown")),
+            replace.(Map.put(record, "openclawStreamFallback", "unknown")),
+            replace.(Map.put(record, "__openclaw", %{"runId" => "foreign", "runTerminal" => true, "idempotencyKey" => "cli-assistant:foreign"})),
+            replace.(record |> Map.put("stopReason", "toolUse") |> put_in(["__openclaw", "runTerminal"], false)),
+            replace.(Map.put(record, "role", "user")),
+            Map.put(history, "messages", history["messages"] ++ [record]) |> Map.update!("totalMessages", &(&1 + 1)),
+            Map.put(history, "messages", history["messages"] ++ [Map.put(record, "stopReason", "toolUse")]) |> Map.update!("totalMessages", &(&1 + 1)),
+            replace.(Map.delete(record, "timestamp")),
+            replace.(Map.put(record, "timestamp", "1790947588356")),
+            replace.(Map.put(record, "timestamp", 0)),
+            replace.(Map.put(record, "timestamp", System.system_time(:millisecond) + 60_000)),
+            replace.(Map.put(record, "timestamp", history["sessionInfo"]["startedAt"])),
+            replace.(Map.put(record, "timestamp", history["sessionInfo"]["startedAt"] + 1)),
+            replace.(Map.put(record, "openclawStreamFallback", %{"source" => "segment", "itemId" => order["id"]})),
+            replace.(Map.put(record, "yielded", true)),
+            replace.(put_in(record, ["__openclaw", "pendingError"], true)),
+            replace.(put_in(record, ["__openclaw", "yielded"], "unknown")),
+            replace.(put_in(record, ["__openclaw", "truncated"], true)),
+            put_in(history, ["messages", Access.at(0), "__openclaw", "truncated"], true),
+            Map.put(history, "hasMore", true),
+            Map.put(history, "nextOffset", 1),
+            Map.put(history, "offset", 1),
+            history |> Map.delete("completeSnapshot") |> Map.delete("offset"),
+            history |> Map.delete("completeSnapshot") |> Map.put("totalMessages", 5),
+            Map.put(history, "truncated", true),
+            put_in(history, ["sessionInfo", "hasActiveRun"], true),
+            put_in(history, ["sessionInfo", "activeRunIds"], [order["id"]]),
+            put_in(history, ["sessionInfo", "lifecycleRunId"], order["id"]),
+            put_in(history, ["sessionInfo", "status"], "running"),
+            put_in(history, ["sessionInfo", "endedAt"], nil),
+            put_in(history, ["sessionInfo", "startedAt"], nil),
+            put_in(history, ["sessionInfo", "sessionId"], "foreign"),
+            Map.put(history, "sessionKey", "foreign"),
+            Map.put(history, "inFlightRun", %{"runId" => "followup"}),
+            Map.put(history, "pendingInputs", %{"items" => [%{"state" => "queued"}], "total" => 1}),
+            Map.put(history, "pendingInputs", %{"items" => [], "total" => 1}),
+            put_in(history, ["pendingInputs", "nextBefore"], 1),
+            put_in(history, ["pendingInputs", "nextCursor"], "next"),
+            put_in(history, ["pendingInputs", "hasMore"], true),
+            put_in(history, ["pendingInputs", "truncated"], true)
+          ] do
+        assert {:error, _} = Recovery.retire(order, {:ok, reply}, Gateway, interruption_history: fn _ -> {:ok, bad} end)
+        assert {:ok, ^order} = Journal.read("incoming")
+        assert {:ok, ^decisions} = Store.read("incoming")
+        assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+      end
+
+      for bad_reply <- [
+            Map.put(reply, "runId", "foreign"),
+            Map.put(reply, "status", "running"),
+            Map.put(reply, "startedAt", 1000),
+            Map.put(reply, "endedAt", 0),
+            Map.merge(reply, %{"status" => "ok", "startedAt" => 2000, "endedAt" => 1000}),
+            Map.merge(reply, %{"status" => "ok", "endedAt" => history["sessionInfo"]["startedAt"]}),
+            Map.put(reply, "yielded", true),
+            Map.put(reply, "pendingError", "unknown")
+          ] do
+        assert {:error, _} = Recovery.retire(order, {:ok, bad_reply}, Gateway, interruption_history: fn _ -> {:ok, history} end)
+        assert {:ok, ^order} = Journal.read("incoming")
+      end
+
+      {:ok, new_order} = Journal.update(order, %{"resumed" => false})
+      assert {:error, _} = Recovery.retire(new_order, {:ok, reply}, Gateway, interruption_history: fn _ -> {:ok, history} end)
+      assert {:ok, ^new_order} = Journal.read("incoming")
+    end
+  end
+
+  for variant <- [:cli_snapshot, :cli_aborted, :codex_commentary, :retained_wait] do
+    @tag durable_variant: variant
+    test "durable original evidence supports #{variant} without borrowing followup fields", %{issues: issues, opts: opts, durable_variant: variant} do
+      order = fenced_order(issues, opts)
+      {:ok, order} = Journal.update(order, %{"abort_acknowledged" => false, "resumed" => true})
+      history = expired_wait_history(order, if(variant == :codex_commentary, do: :codex, else: :cli))
+
+      history =
+        case variant do
+          :cli_snapshot ->
+            history |> Map.delete("offset") |> Map.put("totalMessages", 5)
+
+          :cli_aborted ->
+            put_in(history, ["messages", Access.at(1), "stopReason"], "aborted")
+
+          :codex_commentary ->
+            commentary = Enum.at(history["messages"], 1) |> update_in(["__openclaw"], &(&1 |> Map.delete("runTerminal") |> Map.put("id", "progress-message")))
+            history |> Map.put("messages", [commentary | history["messages"]]) |> Map.put("totalMessages", 5)
+
+          :retained_wait ->
+            Map.put(history, "messages", [])
+        end
+
+      response =
+        if variant == :retained_wait,
+          do: %{"runId" => order["id"], "status" => "ok", "startedAt" => 1_790_945_782_253, "endedAt" => 1_790_947_588_370},
+          else: %{"runId" => order["id"], "status" => "timeout"}
+
+      assert {:ok, retired} = Recovery.retire(order, {:ok, response}, Gateway, interruption_history: fn _ -> {:ok, history} end)
+      assert retired["retirement"]["stop_basis"] == "terminal_original_before_followup"
+      assert retired["retirement"]["original_wait"] == response
+      assert retired["retirement"]["session_history"] == history
+      assert retired["terminal"] == if(variant == :retained_wait, do: response, else: nil)
+    end
+  end
+
+  defp expired_wait_history(order, format) do
+    # Recorded 2026.9.6 metadata without message contents; bind the original to
+    # the isolated test order. Pagination/completeSnapshot follow the public
+    # chat.history contract (eb377ac), not the condensed ticket excerpt.
+    history =
+      File.read!(Path.expand("../fixtures/openclaw/expired-wait-followup.json", __DIR__))
+      |> String.replace("__SESSION_KEY__", order["session_id"])
+      |> String.replace("e62f9e24-a3ed-44d5-bff5-ffdcdd6288fe", order["id"])
+      |> Jason.decode!()
+
+    if format == :codex do
+      {_, sources} = terminal_evidence(order)
+      meta = Jason.decode!(sources[:sources]["source"])["messages"] |> hd() |> Map.fetch!("__openclaw")
+
+      history
+      |> Map.delete("completeSnapshot")
+      |> put_in(["messages", Access.at(1), "__openclaw"], meta)
+    else
+      history
+    end
+  end
+
   defp later_idle_history(order) do
     history = original_idle_history(order)
     info = Map.merge(history["sessionInfo"], %{"lastRunId" => "host-continuation", "startedAt" => 3000, "endedAt" => 4000})
@@ -2005,12 +2191,25 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
           flunk("the original must never be submitted again")
       end
 
-      assert {:error, :openclaw_interrupted_order_retired} = OpenClaw.recover(original, transport: transport(resumed))
+      cleared_input_opts =
+        if pending? do
+          pending_opts = [transport: transport(resumed), openclaw_wait: fn _ -> throw(:input_still_reserved) end]
+          assert catch_throw(OpenClaw.recover(original, pending_opts)) == :input_still_reserved
+          assert {:error, :openclaw_member_reserved} = Journal.member_available(completed.id)
+          assert {:ok, ^original_decisions} = Store.read("incoming")
+          [interruption_history: fn _ -> {:ok, Map.put(history, "pendingInputs", %{"items" => [], "total" => 0})} end]
+        else
+          []
+        end
+
+      assert {:error, :openclaw_interrupted_order_retired} =
+               OpenClaw.recover(original, [transport: transport(resumed)] ++ cleared_input_opts)
+
       {:ok, retired} = Journal.read("incoming")
       assert retired["state"] == "retired" and retired["id"] == original["id"]
       assert retired["retirement"]["last_run_id"] == "host-continuation"
       assert retired["retirement"]["attempt"] == original_decisions["attempt"]
-      assert length(retired["retirement"]["retained_inputs"]) == if(pending?, do: 1, else: 0)
+      assert retired["retirement"]["retained_inputs"] == []
       assert is_binary(retired["retirement"]["retired_at"])
 
       if ended_followup? do
@@ -2343,6 +2542,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       Map.delete(history, "hasMore"),
       Map.put(history, "offset", 1),
       Map.put(history, "totalMessages", 2),
+      history |> Map.put("totalMessages", 2) |> Map.put("completeSnapshot", true),
       Map.put(history, "sessionKey", "foreign"),
       Map.put(history, "sessionId", "replacement-session"),
       put_in(history, ["sessionInfo", "sessionId"], "replacement-session"),
@@ -2366,6 +2566,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       put_in(history, ["sessionInfo", "pendingError"], true),
       Map.put(history, "messages", [Map.delete(record, "__openclaw")]),
       Map.put(history, "messages", [put_in(record, ["__openclaw", "runTerminal"], false)]),
+      Map.put(history, "messages", [record |> put_in(["stopReason"], "stop") |> update_in(["__openclaw"], &(&1 |> Map.delete("runId") |> Map.put("idempotencyKey", "cli-assistant:" <> order["id"])))]),
       Map.put(history, "messages", [put_in(record, ["__openclaw", "runId"], "foreign")]),
       Map.put(history, "messages", [put_in(record, ["__openclaw", "mirrorOrigin"], "text")]),
       Map.put(history, "messages", [put_in(record, ["__openclaw", "mirrorIdentity"], nil)]),

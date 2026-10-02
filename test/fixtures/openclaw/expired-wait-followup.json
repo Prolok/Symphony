@@ -1,0 +1,52 @@
+{
+  "sessionKey": "__SESSION_KEY__",
+  "sessionId": "recorded-physical-session",
+  "offset": 0,
+  "hasMore": false,
+  "totalMessages": 4,
+  "completeSnapshot": true,
+  "sessionInfo": {
+    "key": "__SESSION_KEY__",
+    "sessionId": "recorded-physical-session",
+    "status": "done",
+    "lastRunId": "72382cbc-1865-4939-bdb0-a5b2c7cee107",
+    "startedAt": 1790947589135,
+    "endedAt": 1790947597427,
+    "runtimeMs": 8292,
+    "abortedLastRun": false,
+    "hasActiveRun": false,
+    "activeRunIds": [],
+    "lifecycleRunId": null
+  },
+  "pendingInputs": {"items": [], "total": 0},
+  "inFlightRun": null,
+  "messages": [
+    {
+      "role": "user",
+      "timestamp": 1790945782253,
+      "stopReason": null,
+      "__openclaw": {"idempotencyKey": "e62f9e24-a3ed-44d5-bff5-ffdcdd6288fe:user"}
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1790947588356,
+      "stopReason": "stop",
+      "__openclaw": {"idempotencyKey": "cli-assistant:e62f9e24-a3ed-44d5-bff5-ffdcdd6288fe"}
+    },
+    {
+      "role": "user",
+      "timestamp": 1790947590107,
+      "stopReason": null,
+      "__openclaw": {"importedFrom": "claude-cli", "turnBoundary": true}
+    },
+    {
+      "role": "assistant",
+      "timestamp": 1790947597413,
+      "stopReason": "stop",
+      "__openclaw": {
+        "idempotencyKey": "cli-assistant:72382cbc-1865-4939-bdb0-a5b2c7cee107",
+        "importedFrom": "claude-cli"
+      }
+    }
+  ]
+}

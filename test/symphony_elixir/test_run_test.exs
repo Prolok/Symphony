@@ -1298,8 +1298,10 @@ defmodule SymphonyElixir.TestRunTest do
       job = routine_job(config, request)
       task = Task.async(fn -> RoutineTest.run(job, [context], %{config | "timeout" => timeout}, runtime, self()) end)
       assert_receive {:probe_attempt, 1, probe}, 2_000
+      probe_ref = Process.monitor(probe)
       if ctx.retry_outcome == "cancelled", do: Process.send_after(task.pid, :cancel_test, 100)
-      assert {:ok, result} = Task.yield(task, 1_500)
+      assert_receive {:DOWN, ^probe_ref, :process, ^probe, _reason}, 1_500
+      result = Task.await(task, 5_000)
       assert result["status"] == "failed"
       assert result["error"] == ctx.retry_outcome
       assert result["cleanup"]

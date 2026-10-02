@@ -6,13 +6,17 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.Linear.WriteContext
   alias SymphonyElixir.Maintenance
 
-  def run(issue, _recipient, opts) do
+  def run(issue, recipient, opts) do
     WriteContext.with_context(%{issue_id: issue.id, phase: issue.state}, fn ->
       send(:persistent_term.get(:fixture_owner), {:started, issue.id, issue.state, self(), opts})
 
       receive do
         :finish ->
           :ok
+
+        {:finish_turn, current} ->
+          :ok = GenServer.call(recipient, {:maintenance_turn_completed, current, Maintenance.status().generation})
+          exit(:maintenance_interrupt)
 
         {:maintenance_interrupt, generation} ->
           true = Maintenance.interrupt_current?(generation)
@@ -28,8 +32,17 @@ Application.put_env(:symphony_elixir, :linear_rate_limit_root, Path.join(Path.di
 System.put_env("SYMPHONY_LINEAR_ENV_DIR", Path.join(Path.dirname(hd(System.argv())), ".symphony"))
 :persistent_term.put(:fixture_owner, self())
 
-alias SymphonyElixir.{HttpServer, Maintenance, MaintenanceRecovery, Orchestrator, Tracker, WorkerCapacity}
+alias SymphonyElixir.Config
+alias SymphonyElixir.HttpServer
+alias SymphonyElixir.Linear.DurableState
 alias SymphonyElixir.Linear.Issue
+alias SymphonyElixir.Maintenance
+alias SymphonyElixir.MaintenanceRecovery
+alias SymphonyElixir.Orchestrator
+alias SymphonyElixir.ProjectContext
+alias SymphonyElixir.Tracker
+alias SymphonyElixir.WorkerCapacity
+alias SymphonyElixir.Yolo.OpenClaw.Journal
 
 defmodule Cycle do
   def state do
@@ -63,6 +76,7 @@ active = %Issue{id: "active", identifier: "PRO-1", title: "Existing run", state:
 new = %Issue{id: "new", identifier: "PRO-2", title: "New candidate", state: "Test (AI)", assigned_to_worker: true}
 wake = %Issue{id: "wake", identifier: "PRO-3", title: "One-shot wake-up", state: "Review (AI)", assigned_to_worker: true}
 terminal = %Issue{id: "terminal", identifier: "PRO-4", title: "Finished while draining", state: "Fertig", assigned_to_worker: true}
+completed = %Issue{id: "completed", identifier: "PRO-11", title: "Completed turn", state: "In Arbeit (AI)", assigned_to_worker: true}
 
 interrupted =
   Enum.with_index(["Todo (AI)", "Planung (AI)", "In Arbeit (AI)", "PreReview (AI)", "Review (AI)", "Test (AI)"], 5)
@@ -70,9 +84,16 @@ interrupted =
     %Issue{id: "interrupted-#{n}", identifier: "PRO-#{n}", title: "Interrupted phase", state: phase, assigned_to_worker: true}
   end)
 
-Application.put_env(:symphony_elixir, :memory_tracker_issues, [active | interrupted])
+Application.put_env(:symphony_elixir, :memory_tracker_issues, [active, completed | interrupted])
 send(Orchestrator, :tick)
 {_, active_pid, _} = Cycle.started(active.id)
+{_, completed_pid, _} = Cycle.started(completed.id)
+completed_ref = Process.monitor(completed_pid)
+workspace = Path.join(Path.dirname(hd(System.argv())), "workspaces/PRO-11")
+File.mkdir_p!(workspace)
+dirty = Path.join(workspace, "pending.txt")
+File.write!(dirty, "open work across restart")
+send(Orchestrator, {:worker_runtime_info, completed.id, %{workspace_path: workspace, worker_host: nil}})
 
 interrupted_runs =
   Enum.map(interrupted, fn issue ->
@@ -91,7 +112,7 @@ interrupted_runs =
 end)
 
 # The tracker stops offering the active candidate and exposes a new one instead.
-Application.put_env(:symphony_elixir, :memory_tracker_issues, [active, new, wake, terminal] ++ interrupted)
+Application.put_env(:symphony_elixir, :memory_tracker_issues, [active, new, wake, terminal, completed] ++ interrupted)
 
 {:ok, %{status: 200}} =
   Req.post("http://127.0.0.1:#{HttpServer.bound_port()}/api/v1/maintenance",
@@ -120,6 +141,22 @@ send(Orchestrator, :tick)
 Cycle.wait(fn -> match?({:ok, %{"wake" => _}}, MaintenanceRecovery.load()) end)
 false = Cycle.state()["maintenance"]["idle"]
 
+# The real safe-point handler stores the new status before releasing its worker.
+completed = %{completed | state: "PreReview (AI)"}
+Application.put_env(:symphony_elixir, :memory_tracker_issues, [active, new, wake, terminal, completed] ++ interrupted)
+send(completed_pid, {:finish_turn, completed})
+
+receive do
+  {:DOWN, ^completed_ref, :process, ^completed_pid, :maintenance_interrupt} -> :ok
+after
+  2_000 -> raise("completed turn did not drain")
+end
+
+Cycle.wait(fn -> match?({:ok, %{"completed" => _}}, MaintenanceRecovery.load()) end)
+{:ok, completed_hints} = MaintenanceRecovery.load()
+"PreReview (AI)" = completed_hints[completed.id].interrupted_state
+^workspace = completed_hints[completed.id].workspace_path
+
 :sys.replace_state(WorkerCapacity, fn state ->
   put_in(state.maintenance.deadline_ms, System.monotonic_time(:millisecond) - 1)
 end)
@@ -134,7 +171,7 @@ Enum.each(interrupted_runs, fn {issue, pid, ref} ->
   end
 end)
 
-after_drain = [%{active | state: "Review"}, new, wake, terminal] ++ interrupted
+after_drain = [%{active | state: "Review"}, new, wake, terminal, completed] ++ interrupted
 Application.put_env(:symphony_elixir, :memory_tracker_issues, after_drain)
 send(active_pid, :finish)
 Cycle.wait(fn -> Cycle.state()["maintenance"]["idle"] == true end)
@@ -142,6 +179,17 @@ Cycle.wait(fn -> Cycle.state()["maintenance"]["idle"] == true end)
 true = Maintenance.enabled?()
 {:ok, hints} = MaintenanceRecovery.load()
 2 = hints[wake.id].attempt
+reservation_context = %ProjectContext{id: "restart-orphan", root: Path.dirname(hd(System.argv())), settings: Config.settings!()}
+reservation = %{"id" => "orphan", "group" => "review", "members" => [%{"id" => "reserved", "identifier" => "PRO-12", "state" => "Yolo Review"}], "state" => "cancel_pending", "writable" => false}
+
+reservation_bytes =
+  ProjectContext.with_context(reservation_context, fn ->
+    :ok = DurableState.write(Journal.path("review"), reservation)
+    File.read!(Journal.path("review"))
+  end)
+
+:ok = WorkerCapacity.configure([reservation_context])
+true = ProjectContext.with_context(reservation_context, fn -> Maintenance.project(%{running: []}, true).idle end)
 # The already running worker completed normally while dispatch stayed paused.
 receive do
   {:started, id, _, _, _} -> raise("new work during maintenance: #{id}")
@@ -167,9 +215,19 @@ end
 
 {:ok, _} = Application.ensure_all_started(:symphony_elixir)
 false = Maintenance.enabled?()
+:ok = WorkerCapacity.configure([reservation_context])
+
+ProjectContext.with_context(reservation_context, fn ->
+  {:ok, [^reservation]} = Journal.pending()
+  ^reservation_bytes = File.read!(Journal.path("review"))
+  {:error, :openclaw_member_reserved} = Journal.member_available("reserved")
+end)
+
 {"Review (AI)", wake_pid, wake_opts} = Cycle.started(wake.id)
 2 = wake_opts[:attempt]
 %{thread_id: "same-thread"} = wake_opts[:recovered_turn_context]
+{"PreReview (AI)", completed_resumed, _} = Cycle.started(completed.id)
+"open work across restart" = File.read!(dirty)
 
 resumed =
   Enum.map(interrupted, fn issue ->
@@ -183,7 +241,7 @@ send(Orchestrator, :tick)
 # Duplicate old messages and repeated polls cannot start either issue a second time.
 send(Orchestrator, {:retry_issue, wake.id, make_ref()})
 send(Orchestrator, :tick)
-Cycle.wait(fn -> map_size(:sys.get_state(Orchestrator).running) == 8 end)
+Cycle.wait(fn -> map_size(:sys.get_state(Orchestrator).running) == 9 end)
 {:ok, []} = Tracker.fetch_candidate_issues() |> then(fn {:ok, issues} -> {:ok, Enum.filter(issues, &(&1.id == "wake"))} end)
 Cycle.wait(fn -> MaintenanceRecovery.load() == {:ok, %{}} end)
 
@@ -195,6 +253,11 @@ end
 
 send(wake_pid, :finish)
 send(new_pid, :finish)
+send(completed_resumed, :finish)
 Enum.each(resumed, &send(&1, :finish))
+Cycle.wait(fn -> WorkerCapacity.count(nil) == 0 end)
+limited_context = put_in(reservation_context.settings.agent.max_concurrent_agents, 1)
+:ok = WorkerCapacity.configure([limited_context])
+{:error, :worker_capacity} = WorkerCapacity.start_child(nil, "Test (AI)", fn -> raise("reservation was released") end)
 :ok = Application.stop(:symphony_elixir)
 IO.puts("maintenance-restart: complete, no loss, no duplicate")

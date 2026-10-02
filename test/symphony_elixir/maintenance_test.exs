@@ -9,6 +9,7 @@ defmodule SymphonyElixir.MaintenanceTest do
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.WorkerCapacity
   alias SymphonyElixir.Yolo.Coordinator
+  alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -232,6 +233,136 @@ defmodule SymphonyElixir.MaintenanceTest do
       File.rm!(path)
       assert Maintenance.project(%{running: []}, true).idle
     end)
+  end
+
+  test "read-only orphan reservations allow idle without releasing members or capacity" do
+    root = Path.dirname(Workflow.workflow_file_path())
+    settings = put_in(Config.settings!().agent.max_concurrent_agents, 1)
+    context = %ProjectContext{id: "maintenance-orphan", root: root, settings: settings}
+    start_worker_capacity!(contexts: [context])
+    assert {:ok, _} = Maintenance.update(%{"enabled" => true, "reason" => "Update"})
+
+    ProjectContext.with_context(context, fn ->
+      path = Journal.path("review")
+      order = %{"id" => "orphan", "group" => "review", "members" => [%{"id" => "member", "identifier" => "PRO-1", "state" => "Yolo Review"}], "state" => "cancel_pending", "writable" => false}
+      assert :ok = DurableState.write(path, order)
+      bytes = File.read!(path)
+      assert Maintenance.project(%{running: []}, true).idle
+      assert Maintenance.status().drained
+      assert File.read!(path) == bytes
+      assert {:error, :openclaw_member_reserved} = Journal.member_available("member")
+      assert {:ok, _} = Maintenance.update(%{"enabled" => false})
+      assert {:error, :worker_capacity} = WorkerCapacity.start_child(nil, "Test (AI)", &wait/0)
+      assert File.read!(path) == bytes
+    end)
+  end
+
+  test "orphan reservations are visible in API and dashboards without duplicate attached rows" do
+    root = Path.dirname(Workflow.workflow_file_path())
+    context = %ProjectContext{id: "visible-orphan", root: root, settings: Config.settings!()}
+    assert :ok = WorkerCapacity.configure([context])
+    orchestrator = start_supervised!({Orchestrator, name: :visible_orphan, context: context, initial_poll?: false})
+    start_supervised!({HttpServer, port: 0, orchestrator: orchestrator})
+    order = %{"id" => "orphan", "group" => "review", "members" => [%{"id" => "member", "identifier" => "PRO-1", "state" => "Yolo Review"}], "state" => "cancel_pending", "writable" => false}
+
+    ProjectContext.with_context(context, fn -> assert :ok = DurableState.write(Journal.path("review"), order) end)
+    assert {:ok, _} = Maintenance.update(%{"enabled" => true, "reason" => "Update"})
+    url = "http://127.0.0.1:#{HttpServer.bound_port()}/api/v1/state"
+    payload = Req.get!(url).body
+    assert payload["maintenance"]["idle"]
+    assert payload["counts"] == %{"running" => 0, "reserved" => 1, "reserved_slots" => 1, "retrying" => 0}
+    assert [%{"external" => %{"reserved" => true, "maintenance_blocking" => false}}] = payload["running"]
+    assert Req.get!("http://127.0.0.1:#{HttpServer.bound_port()}/api/v1/PRO-1").body["status"] == "reserved"
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Blockiert den Wartungsleerlauf nicht"
+    assert html =~ "Platz reserviert"
+    snapshot = Orchestrator.snapshot(orchestrator, 1_000)
+    assert terminal(snapshot) =~ "blockiert Wartungsleerlauf nicht"
+
+    ProjectContext.with_context(context, fn ->
+      run = %{
+        pid: self(),
+        issues: [%{id: "member", identifier: "PRO-1", state: "Yolo Review"}],
+        started_at: DateTime.utc_now(),
+        event: %{external: OpenClaw.observation(order)}
+      }
+
+      assert [entry] = Coordinator.entries(%{"review" => run})
+      refute entry.external.maintenance_blocking
+      assert Maintenance.project(%{running: [entry]}, true).idle
+      assert {:ok, ^order} = Journal.read("review")
+    end)
+  end
+
+  test "writable and unknown orders block idle while read-only observers retain reservations" do
+    context = %ProjectContext{id: "active-order", root: Path.dirname(Workflow.workflow_file_path()), settings: Config.settings!()}
+    assert :ok = WorkerCapacity.configure([context])
+    assert {:ok, _} = Maintenance.update(%{"enabled" => true, "reason" => "Update"})
+
+    ProjectContext.with_context(context, fn ->
+      path = Journal.path("review")
+      order = %{"id" => "order", "group" => "review", "members" => [], "state" => "running"}
+
+      for writable <- [true, nil, "false"] do
+        assert :ok = DurableState.write(path, Map.put(order, "writable", writable))
+        refute Maintenance.project(%{running: []}, true).idle
+        refute Maintenance.status().drained
+      end
+
+      assert :ok = DurableState.write(path, Map.put(order, "writable", true))
+      assert {:ok, observer} = WorkerCapacity.recover_child("YOLO review", &wait/0)
+      refute Maintenance.project(%{running: []}, true).idle
+      assert Process.alive?(observer)
+      assert :ok = DurableState.write(path, Map.put(order, "writable", false))
+      assert Maintenance.project(%{running: []}, true).idle
+      assert Process.alive?(observer)
+      send(observer, :stop)
+      eventually(fn -> Maintenance.project(%{running: []}, true).idle end)
+    end)
+  end
+
+  test "completed review safe points retain context and reject obsolete generations or other workers" do
+    current = issue("Review (AI)")
+    assert {:ok, control} = Maintenance.update(%{"enabled" => true, "reason" => "Update"})
+
+    entry = %{
+      pid: self(),
+      issue: current,
+      dispatch_issue: current,
+      identifier: current.identifier,
+      run_mode: :regular,
+      retry_attempt: 2,
+      workspace_path: "preserved",
+      worker_host: "host",
+      recovered_turn_context: "captured review result",
+      review_subagent_call_ids: MapSet.new(["call"]),
+      review_subagent_ids: MapSet.new(["child"]),
+      session_id: "thread-turn",
+      codex_token_thread_id: "thread",
+      codex_last_reported_total_tokens: 123
+    }
+
+    state = %Orchestrator.State{running: %{current.id => entry}}
+    from = {self(), make_ref()}
+    stale_request = {:maintenance_turn_completed, current, "obsolete"}
+    assert {:reply, :continue, ^state} = Orchestrator.handle_call(stale_request, from, state)
+    request = {:maintenance_turn_completed, current, control.generation}
+    other = spawn(fn -> :ok end)
+    assert {:reply, :continue, ^state} = Orchestrator.handle_call(request, {other, make_ref()}, state)
+    assert MaintenanceRecovery.load() == {:ok, %{}}
+    assert {:reply, :ok, _} = Orchestrator.handle_call(request, from, state)
+    assert {:ok, hints} = MaintenanceRecovery.load()
+    hint = hints[current.id]
+    assert hint.review_stay
+    assert hint.attempt == 2
+    assert hint.worker_host == "host"
+    assert hint.recovered_turn_context == "captured review result"
+    assert hint.review_subagent_call_ids == MapSet.new(["call"])
+    assert hint.review_subagent_ids == MapSet.new(["child"])
+    assert hint.codex_token_checkpoint.thread_id == "thread"
+    assert hint.codex_token_checkpoint.total_tokens == 123
+    assert {:ok, _} = Maintenance.update(%{"enabled" => false})
+    assert {:reply, :continue, ^state} = Orchestrator.handle_call(request, from, state)
   end
 
   test "terminal maintenance lines fit the width and sanitize a multiline reason" do

@@ -962,9 +962,14 @@ curl --fail-with-body http://127.0.0.1:4000/api/v1/state
 ```
 
 Ab bestätigter Aktivierung werden keine neuen Worker-, Dialog-/Bootstrap-,
-PO-Eingangs-, Yolo-Review- oder BLOCKER-Läufe angenommen. Vorher angenommene Läufe
-beenden ihre Arbeit regulär; bereits angenommene externe Aufträge werden weiter
-beobachtet. Retries und offene Impulse werden erhalten. Wiederholung derselben
+PO-Eingangs-, Yolo-Review- oder BLOCKER-Läufe angenommen. Laufende reguläre
+Codex-Arbeitsläufe pausieren nach dem aktuellen Turn ohne Folgeturn, auch beim
+Wechsel in einen anderen aktiven AI-Status. Ihr Fortsetzungshinweis wird vor
+Workerfreigabe dauerhaft gesichert; Workspace, offene Änderungen und ein
+fortbestehender Review-Aufenthalt bleiben erhalten. Merge (AI), Yolo Review,
+BLOCKER, Dialog-/Bootstrap-Läufe und bereits angenommene externe PO-Aufträge
+beenden ihre Arbeit regulär und werden weiter beobachtet. Retries und offene
+Impulse werden erhalten. Wiederholung derselben
 Anforderung ändert weder Aktivierungszeit noch Frist. Ungültige Parameter ändern
 den Zustand nicht. Grund (1–2.000 Bytes), `requested_at` und optional `deadline_at`
 sind in API sowie Web-/Terminal-Dashboard sichtbar.
@@ -983,9 +988,13 @@ begrenzten Statusprüfintervall erneut geprüft.
 
 Der modellfreie Wächter wartet auf **`maintenance.enabled == true` und
 `maintenance.idle == true`** in `/api/v1/state`. `draining` bleibt wahr, solange
-laufende oder reservierte Arbeit, fehlende/frühere Projektantworten oder nicht
+laufende Arbeit, schreibfähige oder unklare Reservierungen, fehlende/frühere Projektantworten oder nicht
 lesbare dauerhafte Hinweise keinen sicheren Leerlauf erlauben. Wartende Kandidaten
 und erfolgreich gesicherte Retries verhindern den Wartungsleerlauf nicht.
+Schreibgesperrte OpenClaw-Altreservierungen (`writable=false`) ohne aktive
+Werkzeugbindung blockieren ihn ebenfalls nicht. Sie bleiben unverändert reserviert,
+sperren weiter Mitglieder und Kapazität und werden nach Neustart rekonstruiert;
+API und Dashboards kennzeichnen, dass sie den Wartungsleerlauf nicht blockieren.
 Keinen Neustart allein wegen Ablauf der Frist erzwingen.
 
 Nach diesem Signal den Dienst mit seinem regulären Stopverfahren beenden, im

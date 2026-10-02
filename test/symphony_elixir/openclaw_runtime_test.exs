@@ -1587,7 +1587,9 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     order = executed_order(issues, opts)
     start_worker_capacity!(contexts: [context])
     assert {:ok, _} = SymphonyElixir.Maintenance.update(%{"enabled" => true, "reason" => "synthetic retirement"})
-    refute SymphonyElixir.Maintenance.project(%{running: []}, true).idle
+    assert SymphonyElixir.Maintenance.project(%{running: []}, true).idle
+    assert {:ok, ^order} = Journal.read("incoming")
+    assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
     {:ok, decisions} = Store.read("incoming")
     history = later_idle_history(order)
     response = %{"runId" => order["id"], "status" => "ok", "startedAt" => 1000, "endedAt" => 2000, "source" => "original-wait"}

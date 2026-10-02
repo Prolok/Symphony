@@ -181,6 +181,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       </span>
                       <div :if={entry[:external]} class="detail-stack">
                         <strong :if={entry.external.reserved}>Altreservierung · Platz reserviert</strong>
+                        <span :if={entry.external[:maintenance_blocking] == false}>Blockiert den Wartungsleerlauf nicht</span>
                         <span>Ursprüngliche Gruppe: <%= entry.external.original_group %></span>
                         <span :if={entry.external.resumed}>Beobachter wiederaufgenommen</span>
                         <span :if={!entry.external.current_state_known}>Linear-Status unbekannt</span>

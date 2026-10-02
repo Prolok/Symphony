@@ -136,6 +136,24 @@ class BridgeContractTests(unittest.TestCase):
             self.assertEqual(binding["native"]["runId"], binding["order_id"])
             self.assertEqual(binding["native"]["sessionKey"], "agent:{}:symphony:{}:{}:{}".format(binding["openclaw_agent_id"], hashlib.sha256(binding["project_id"].encode()).hexdigest(), binding["group"], binding["order_id"]))
 
+    def test_retired_original_and_ended_followup_match_wire_schema(self):
+        payload = copy.deepcopy(self.completed)
+        payload["observation"].update(state="retired", writable=False, cancel_requested=True,
+                                      abort_acknowledged=False, retirement={
+            "kind": "fenced_interruption",
+            "stop_basis": "terminal_original_before_followup",
+            "retired_at": "2026-10-02T12:00:00Z",
+            "history_sha256": "f" * 64,
+            "physical_session_id": "physical-session",
+            "last_run_id": "host-followup",
+            "session_end": {"lastRunId": "host-followup", "status": "done", "startedAt": 3, "endedAt": 4},
+        })
+        payload["observation"]["terminal"].update(startedAt=1, endedAt=2)
+        shape(payload, SCHEMA["$defs"]["payload"])
+        shape(wire(payload), SCHEMA["$defs"]["envelope"])
+        payload["observation"]["retirement"]["stop_basis"] = "unknown"
+        self.assertRaises(ValueError, shape, payload, SCHEMA["$defs"]["payload"])
+
     def test_overlap_duplicate_stale_and_terminal_tombstone(self):
         for payload in (self.incoming, self.review):
             self.assertEqual(self.consumer.accept(wire(payload)), "stored")

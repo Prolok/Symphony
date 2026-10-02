@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
@@ -83,7 +84,8 @@ class OpenClawBoundaryTest(unittest.TestCase):
                 mock.patch.object(rpc.subprocess, "run", side_effect=AssertionError("no CLI fallback")):
             self.assertEqual(rpc.main(), 127)
 
-    def test_owner_secret_refs_and_diagnostics_at_child_process_boundary(self):
+    @contextmanager
+    def owner_package(self):
         # A disposable package with public SDK exports only; no host discovery.
         temp_root = REPO / 'tmp'
         temp_root.mkdir(exist_ok=True)
@@ -112,6 +114,10 @@ class OpenClawBoundaryTest(unittest.TestCase):
                 "if (process.env.FIXTURE_SCENARIO === 'import-error') throw new Error(fixture.expected);\n" +
                 '\n'.join(f'export const {name} = fixture.secretSdk.{name};'
                           for name in ('coerceSecretRef', 'resolveSecretRefValues')))
+            yield entry
+
+    def test_owner_secret_refs_and_diagnostics_at_child_process_boundary(self):
+        with self.owner_package() as entry:
             args = ['gateway', 'call', 'agents.list', '--params', '{}', '--json']
             for mode in ('token', 'password'):
                 for scenario in ('plaintext', 'environment', 'store', 'unresolved', 'missing', 'empty', 'blank',
@@ -135,6 +141,31 @@ class OpenClawBoundaryTest(unittest.TestCase):
                             self.assertEqual(result.returncode, 0 if stream else code)
                             self.assertTrue(result.stdout == expected, 'unexpected owner protocol output; suppressed')
                             self.assertTrue(result.stderr == b'', 'SDK diagnostics escaped; suppressed')
+
+    def test_recovered_abort_crosses_python_and_node_without_prior_submit(self):
+        rpc = load('openclaw-rpc.py')
+        node = rpc.shutil.which('node')
+        with self.owner_package() as entry:
+            log = entry.parent / 'requests.jsonl'
+            params = dict(key='original-session', runId='original')
+            args = ['gateway', 'call', 'sessions.abort', '--params', json.dumps(params), '--json']
+            env = dict(PATH=os.environ['PATH'], SYMPHONY_OPENCLAW_TEST_DENY='0',
+                       FIXTURE_SCENARIO='abort', FIXTURE_MODE='token', FIXTURE_REQUEST_LOG=str(log))
+            output = io.BytesIO()
+            with mock.patch.dict(os.environ, env, clear=True), \
+                    mock.patch.object(rpc.shutil, 'which', side_effect=lambda name: str(entry) if name == 'openclaw' else node), \
+                    mock.patch.object(rpc.sys, 'stdin', io.StringIO(json.dumps(args) + '\n')), \
+                    mock.patch.object(rpc.sys, 'stdout', io.TextIOWrapper(output)):
+                self.assertEqual(rpc.main(), 0)
+                self.assertEqual(json.loads(output.getvalue()), dict(ok=False, status='no-active-run'))
+            self.assertEqual([json.loads(line) for line in log.read_text().splitlines()],
+                             [dict(method='sessions.abort', params=params)])
+            log.unlink()
+            # Streaming helpers still need their original submission ownership.
+            result = subprocess.run(['node', str(REPO / 'scripts/openclaw-owner-rpc.mjs'), str(entry), '--stream'],
+                                    input=(json.dumps(args) + '\n').encode(), env=env, capture_output=True, timeout=5)
+            self.assertEqual(json.loads(result.stdout), dict(code=123, output=''))
+            self.assertFalse(log.exists())
 
     def test_abort_error_is_sanitized_correlated_and_preserves_retryability(self):
         rpc = load("openclaw-rpc.py")

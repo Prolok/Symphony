@@ -21,9 +21,9 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Transport do
   end
 
   defp dispatch(python, ["gateway", "call", method | _] = args, ports, opts) when method in ~w(agents.list agent agent.wait sessions.abort) do
-    # First lost-owner observation fences the journal. Later read-only polls may
-    # still obtain a real terminal/inactivity proof through the existing CLI.
-    if OwnerTransport.active?() and not (method == "agent.wait" and OwnerTransport.lost?()),
+    # Keep lost submission ownership fenced. Later reads and cancellation use
+    # a fresh one-shot connection; gateway authorization still decides the abort.
+    if OwnerTransport.active?() and not (method in ~w(agent.wait sessions.abort) and OwnerTransport.lost?()),
       do: OwnerTransport.command(python, args, ports, opts),
       else: invoke(python, args, ports, opts)
   end

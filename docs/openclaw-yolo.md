@@ -68,9 +68,12 @@ Bei Verbindungs-/Prozessverlust wird diese Besitzerbindung nicht neu aufgebaut.
 Die erste fehlgeschlagene Beobachtung entzieht die Schreibrechte; Reservierung
 und bestätigte Entscheidungen bleiben erhalten. Weitere lesende CLI-Abfragen
 dürfen einen tatsächlichen Originalabschluss samt Inaktivität/Eingaben belegen.
-Abbruch ohne ursprüngliche Verbindung bleibt ein sanitierter lokaler, wiederholbarer Fehler,
-keine Quittung. Neustart oder neue Verbindung verleihen keine rückwirkenden
-Abbruchrechte. Der bestehende Recoveryvertrag bleibt maßgeblich.
+Wiederholbare Abbruchanfragen erreichen bei der nächsten Beobachtung über eine
+frische einmalige Verbindung tatsächlich das Gateway, auch ohne vorherigen Submit
+dieses Prozesses. Sie binden ausschließlich den ursprünglichen Sitzungsschlüssel
+und die Originallauf-ID; Authentifizierung und Scope bleiben gleich. Der Host
+entscheidet über die Abbruchberechtigung. Die verlorene Submitbindung bleibt
+gesperrt; neue Verbindung und `no-active-run` sind keine Abbruchquittung.
 Öffentliche Verträge: [Gateway-SDK](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugin-sdk/gateway-runtime.ts),
 [schreibgeschützter Client](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/client.ts).
 SecretRef-Vertrag: [öffentlicher SDK-Export](https://github.com/openclaw/openclaw/blob/v2026.9.6/src/plugin-sdk/secret-ref-runtime.ts),
@@ -246,8 +249,14 @@ Sitzungszeiten gleichgesetzt. Symphony erhält beide unverändert (`terminal` un
 Ist der flüchtige Wartebeleg bereits verfallen, erlaubt dieselbe frische
 Originalprojektion die technische Stilllegung mit `stop_basis=terminal_original_history`;
 `terminal` bleibt dabei leer. Weder Abbruchquittung noch fachlicher Erfolg werden
-erzeugt. Ein anderer letzter Lauf erfüllt diese Ausnahme nicht: Ohne Originalende
-bleibt die echte Abbruchquittung erforderlich (`stop_basis=abort_acknowledged`).
+erzeugt. Bei einem wiederaufgenommenen Auftrag darf ein abweichender `lastRunId`
+ebenfalls zur technischen Stilllegung führen (`stop_basis=terminal_original_before_followup`):
+Ein frisch abgefragter `agent.wait`-Endbeleg muss die exakte Original-ID und eigene
+plausible Start-/Endzeiten nennen. Der letzte Lauf muss selbst beendet sein und
+nach dem Originalende begonnen haben; die vollständige Eingabeseite muss leer sein.
+Unklare oder überlappende Chronologie bleibt reserviert. Ohne passenden Originalendbeleg
+bleibt bei abweichendem letzten Lauf die echte Abbruchquittung erforderlich
+(`stop_basis=abort_acknowledged`).
 
 `agent.wait` muss entweder einen belegten
 Originalabschluss oder einen Timeout ohne Start-/End-/Yield-/Fehlerfortsetzungsbeleg
@@ -263,7 +272,9 @@ Sitzungs- und Pending-Input-Felder, nicht die Anzahl sichtbarer Transcriptnachri
 Die Eingabewarteschlange muss nach Gesamtzahl und Seitenkennung vollständig leer
 sein. Genau ein `interrupted` Eingang ist ebenfalls zulässig, wenn Lauf-ID und
 vollständiger Text exakt dem SHA-256 des ursprünglichen Symphony-Payloads entsprechen.
-Dieser Eingang enthält den bereits bekannten Auftrag; dessen noch offene Arbeit
+Diese Ausnahme gilt für den Original-/Abbruchquittungspfad; der neue Folgelaufpfad
+verlangt eine vollständig leere Eingabeseite. Der Eingang enthält den bereits
+bekannten Auftrag; dessen noch offene Arbeit
 wird aus frischen Tickets, Kommentaren und Aktionsjournalen neu geplant. Sein
 Hosteintrag bleibt erhalten, seine Kennung und Inhaltsbindung werden dokumentiert.
 Zusätzliche, wartende, fremde, ausgeblendete oder gekürzte Eingaben werden nicht
@@ -274,7 +285,9 @@ den exakten Inhaltsvergleich nicht als vollständiger Eingang akzeptiert.
 
 Unter der Journalsperre speichert Symphony `state=retired`, eigene Stilllegungszeit,
 Prüfhash, aktuelle Sitzungs-/Laufkennung, Eingabequittungen und den bisherigen
-Entscheidungsversuch. Ein vorhandener Original-Endbeleg bleibt erhalten; ohne ihn
+Entscheidungsversuch. Die abgefragten Antworten bleiben unverändert und getrennt als
+`retirement.original_wait` und `retirement.session_history` erhalten.
+Ein vorhandener Original-Endbeleg bleibt erhalten; ohne ihn
 bleibt `terminal` leer. Fremde Lauf-IDs oder Endzeiten werden niemals in das
 Original kopiert. `retired` liefert einen technischen Fehlerausgang und keine
 Produktfreigabe. Späte Antworten können diesen Zustand nicht wieder öffnen.

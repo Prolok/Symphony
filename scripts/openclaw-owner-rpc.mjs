@@ -1,4 +1,5 @@
 // Public SDK only. One normal local CLI connection owns one Symphony run.
+// One-shot recovery aborts use the same auth/scope, never restore submit ownership.
 // No pairing, identity creation, credential fallback, reconnect or broader scope.
 import { createRequire } from 'node:module';
 import { realpathSync } from 'node:fs';
@@ -77,6 +78,12 @@ export function ownerConnection(sdk, access, options = {}) {
   }
   async function request(method, params) {
     if (!['agents.list', 'agent', 'agent.wait', 'sessions.abort'].includes(method) || busy) return localError('owner_mismatch');
+    if (options.abortOnly) {
+      if (method !== 'sessions.abort' || !params || Object.keys(params).sort().join(',') !== 'key,runId'
+          || !['key', 'runId'].every(k => nonEmptyString(params[k]))) return localError('owner_mismatch');
+      // This target is for cancellation only. It grants no submit/wait rights.
+      owner ??= { id: params.runId, session: params.key };
+    }
     if (method === 'agent' && owner) return localError('owner_mismatch');
     if (['sessions.abort', 'agent.wait'].includes(method)) {
       if (!owner) return localError('owner_connection_lost');
@@ -136,17 +143,18 @@ export async function runTransport(packageEntry, options = {}) {
   const configSdk = await loadSdk('health');
   let access;
   try { access = await localAccess(sdk, configSdk, process.env, () => loadSdk('secret-ref-runtime')); } catch { access = null; }
-  const connection = ownerConnection(sdk, access, options);
+  let connection;
   const lines = createInterface({ input: process.stdin });
   try {
     for await (const line of lines) {
       const args = JSON.parse(line);
+      connection ??= ownerConnection(sdk, access, { ...options, abortOnly: !options.stream && args[2] === 'sessions.abort' });
       const reply = wireReply(args, await connection.request(args[2], JSON.parse(args[4])));
       if (options.stream) process.stdout.write(JSON.stringify(reply) + '\n');
       else { process.stdout.write(reply.output); return reply.code; }
     }
     return 0;
-  } finally { connection.close(); lines.close(); }
+  } finally { connection?.close(); lines.close(); }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

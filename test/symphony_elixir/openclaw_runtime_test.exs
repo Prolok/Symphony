@@ -1583,6 +1583,206 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert {:ok, []} = Journal.pending()
   end
 
+  test "recovered original and ended later run retire with separate unchanged evidence", %{issues: issues, opts: opts, context: context} do
+    order = executed_order(issues, opts)
+    start_worker_capacity!(contexts: [context])
+    assert {:ok, _} = SymphonyElixir.Maintenance.update(%{"enabled" => true, "reason" => "synthetic retirement"})
+    refute SymphonyElixir.Maintenance.project(%{running: []}, true).idle
+    {:ok, decisions} = Store.read("incoming")
+    history = later_idle_history(order)
+    response = %{"runId" => order["id"], "status" => "ok", "startedAt" => 1000, "endedAt" => 2000, "source" => "original-wait"}
+
+    handler = fn
+      "sessions.abort", params ->
+        assert params == %{"key" => order["session_id"], "runId" => order["id"]}
+        %{"ok" => false, "status" => "no-active-run"}
+
+      "agent.wait", %{"runId" => id} ->
+        assert id == order["id"]
+        response
+
+      "chat.history", %{"sessionKey" => key} ->
+        assert key == order["session_id"]
+        history
+    end
+
+    recovery = [transport: transport(handler), openclaw_wait: fn _ -> throw(:stranded) end]
+    assert {:error, :openclaw_interrupted_order_retired} = OpenClaw.recover(order, recovery)
+    assert {:ok, retired} = Journal.read("incoming")
+    assert retired["state"] == "retired"
+    assert retired["retirement"]["stop_basis"] == "terminal_original_before_followup"
+    assert retired["retirement"]["original_wait"] == response
+    assert retired["retirement"]["session_history"] == history
+    assert retired["terminal"] == Map.take(response, ~w(runId status startedAt endedAt))
+    refute retired["abort_acknowledged"]
+    refute retired["writable"]
+    refute Journal.receipt("incoming", order["session_id"])
+    assert {:ok, ^decisions} = Store.read("incoming")
+    refute Completion.ready?("incoming", issues)
+    assert {:ok, []} = Journal.pending()
+    assert SymphonyElixir.Maintenance.project(%{running: []}, true).idle
+    assert :ok = Journal.member_available(hd(issues).id)
+    assert {:error, :openclaw_interrupted_order_retired} = OpenClaw.recover(order, transport: fn _ -> flunk("already retired") end)
+    assert :ok = Delivery.reconcile("incoming")
+    assert {:ok, reconciled} = Store.read("incoming")
+    assert reconciled["deliveries"] == %{}
+    assert reconciled["attempt"] == decisions["attempt"]
+    assert :ok = Delivery.reconcile("incoming")
+    assert {:ok, ^reconciled} = Store.read("incoming")
+  end
+
+  defp later_idle_history(order) do
+    history = original_idle_history(order)
+    info = Map.merge(history["sessionInfo"], %{"lastRunId" => "host-continuation", "startedAt" => 3000, "endedAt" => 4000})
+
+    history
+    |> Map.put("sessionInfo", info)
+    |> put_in(["messages", Access.at(0), "__openclaw", "mirrorOrigin"], "claude-cli")
+  end
+
+  test "later-run retirement rejects every incomplete original end", %{issues: issues, opts: opts} do
+    order = fenced_order(issues, opts)
+    {:ok, order} = Journal.update(order, %{"abort_acknowledged" => false, "resumed" => true})
+    history = later_idle_history(order)
+    reply = %{"runId" => order["id"], "status" => "ok", "startedAt" => 1000, "endedAt" => 2000}
+
+    for response <- [
+          {:error, :openclaw_gateway_unavailable},
+          {:ok, %{"status" => "timeout"}},
+          {:ok, Map.delete(reply, "runId")},
+          {:ok, Map.put(reply, "runId", "host-continuation")},
+          {:ok, Map.delete(reply, "startedAt")},
+          {:ok, Map.delete(reply, "endedAt")},
+          {:ok, Map.put(reply, "startedAt", 0)},
+          {:ok, Map.put(reply, "startedAt", "1000")},
+          {:ok, Map.put(reply, "startedAt", 2001)},
+          {:ok, Map.put(reply, "endedAt", 2000.0)},
+          {:ok, Map.put(reply, "endedAt", System.system_time(:millisecond) + 60_000)},
+          {:ok, Map.put(reply, "status", "running")},
+          {:ok, Map.put(reply, "yielded", true)},
+          {:ok, Map.put(reply, "yielded", "unknown")},
+          {:ok, Map.put(reply, "pendingError", true)},
+          {:ok, Map.put(reply, "pendingError", %{"unresolved" => true})}
+        ] do
+      assert {:error, _} = Recovery.retire(order, response, Gateway, interruption_history: fn _ -> {:ok, history} end)
+      assert {:ok, ^order} = Journal.read("incoming")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    end
+  end
+
+  test "later-run retirement keeps active ambiguous or waiting sessions reserved", %{issues: issues, opts: opts} do
+    order = fenced_order(issues, opts)
+    {:ok, order} = Journal.update(order, %{"abort_acknowledged" => false, "resumed" => true})
+    history = later_idle_history(order)
+    response = {:ok, %{"runId" => order["id"], "status" => "ok", "startedAt" => 1000, "endedAt" => 2000}}
+    payload = File.read!(Path.join([ProjectContext.current().settings.workspace.root, "yolo-runs", order["id"], "request.md"]))
+
+    original_input = %{
+      "total" => 1,
+      "items" => [%{"id" => "original-input", "runId" => order["id"], "state" => "interrupted", "acceptedAt" => 1000, "message" => %{"role" => "user", "content" => payload}}]
+    }
+
+    for bad <- [
+          put_in(history, ["sessionInfo", "lastRunId"], nil),
+          put_in(history, ["sessionInfo", "lastRunId"], ""),
+          put_in(history, ["sessionInfo", "startedAt"], nil),
+          put_in(history, ["sessionInfo", "startedAt"], 1999),
+          put_in(history, ["sessionInfo", "startedAt"], 2000),
+          put_in(history, ["sessionInfo", "startedAt"], 4001),
+          put_in(history, ["sessionInfo", "endedAt"], nil),
+          put_in(history, ["sessionInfo", "endedAt"], System.system_time(:millisecond) + 60_000),
+          put_in(history, ["sessionInfo", "status"], "running"),
+          put_in(history, ["sessionInfo", "status"], "unknown"),
+          put_in(history, ["sessionInfo", "hasActiveRun"], true),
+          put_in(history, ["sessionInfo", "hasActiveRun"], nil),
+          put_in(history, ["sessionInfo", "activeRunIds"], ["host-continuation"]),
+          put_in(history, ["sessionInfo", "activeRunIds"], nil),
+          put_in(history, ["sessionInfo", "lifecycleRunId"], "host-continuation"),
+          put_in(history, ["sessionInfo", "hasActiveSubagentRun"], true),
+          put_in(history, ["sessionInfo", "subagentRunState"], "running"),
+          put_in(history, ["sessionInfo", "abortedLastRun"], true),
+          put_in(history, ["sessionInfo", "yielded"], true),
+          put_in(history, ["sessionInfo", "pendingError"], "unknown"),
+          put_in(history, ["sessionInfo", "sessionId"], "foreign"),
+          put_in(history, ["sessionInfo", "key"], "foreign"),
+          Map.put(history, "sessionKey", "foreign"),
+          Map.put(history, "sessionId", "foreign"),
+          Map.delete(history, "sessionInfo"),
+          Map.put(history, "inFlightRun", %{"runId" => "host-continuation"}),
+          Map.put(history, "yielded", true),
+          Map.put(history, "pendingError", %{"unresolved" => true}),
+          Map.delete(history, "pendingInputs"),
+          Map.put(history, "pendingInputs", %{"items" => [], "total" => 1}),
+          Map.put(history, "pendingInputs", original_input),
+          put_in(history, ["pendingInputs", "items"], [%{"state" => "queued", "runId" => order["id"]}]),
+          put_in(history, ["pendingInputs", "nextBefore"], "more"),
+          put_in(history, ["pendingInputs", "nextCursor"], "more"),
+          put_in(history, ["pendingInputs", "hasMore"], true),
+          put_in(history, ["pendingInputs", "truncated"], true)
+        ] do
+      assert {:error, _} = Recovery.retire(order, response, Gateway, interruption_history: fn _ -> {:ok, bad} end)
+      assert {:ok, ^order} = Journal.read("incoming")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    end
+
+    assert {:error, _} = Recovery.retire(order, response, Gateway, interruption_history: fn _ -> {:error, :unavailable} end)
+    assert {:ok, ^order} = Journal.read("incoming")
+  end
+
+  for {original_status, followup_status} <- [{"error", "done"}, {"ok", "failed"}, {"timeout", "killed"}] do
+    @tag original_status: original_status, followup_status: followup_status
+    test "technical retirement keeps original #{original_status} separate from followup #{followup_status}", %{
+      issues: issues,
+      opts: opts,
+      original_status: original_status,
+      followup_status: followup_status
+    } do
+      order = fenced_order(issues, opts)
+      {:ok, order} = Journal.update(order, %{"abort_acknowledged" => false, "resumed" => true})
+      history = later_idle_history(order) |> put_in(["sessionInfo", "status"], followup_status) |> Map.put("messages", [])
+      response = %{"runId" => order["id"], "status" => original_status, "startedAt" => 1000, "endedAt" => 2000}
+      assert {:ok, retired} = Recovery.retire(order, {:ok, response}, Gateway, interruption_history: fn _ -> {:ok, history} end)
+      assert retired["state"] == "retired"
+      assert retired["terminal"] == response
+      assert retired["retirement"]["original_wait"] == response
+      assert retired["retirement"]["session_history"] == history
+      refute Journal.receipt("incoming", order["session_id"])
+      refute Completion.ready?("incoming", issues)
+    end
+  end
+
+  test "later-run proof cannot retire an unfenced or mismatched current attempt", %{issues: issues, opts: opts} do
+    order = fenced_order(issues, opts)
+    {:ok, order} = Journal.update(order, %{"abort_acknowledged" => false, "resumed" => true})
+    history = later_idle_history(order)
+    response = {:ok, %{"runId" => order["id"], "status" => "ok", "startedAt" => 1000, "endedAt" => 2000}}
+    history_opts = [interruption_history: fn _ -> {:ok, history} end]
+    {:ok, record} = Store.read("incoming")
+
+    for changes <- [
+          %{"resumed" => false},
+          %{"interruption_contract" => nil},
+          %{"writable" => true},
+          %{"cancel_requested" => false},
+          %{"project_id" => "foreign"},
+          %{"session_id" => "foreign"},
+          %{"agent" => "other"},
+          %{"linear_agent_id" => "other"},
+          %{"id" => "new-generation"}
+        ] do
+      current = Map.merge(order, changes)
+      assert :ok = DurableState.write(Journal.path("incoming"), current)
+      assert {:error, _} = Recovery.retire(order, response, Gateway, history_opts)
+      assert {:ok, ^current} = Journal.read("incoming")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+    end
+
+    assert :ok = DurableState.write(Journal.path("incoming"), order)
+    assert :ok = Store.write("incoming", put_in(record, ["attempt", "id"], "new-generation"))
+    assert {:error, _} = Recovery.retire(order, response, Gateway, history_opts)
+    assert {:ok, ^order} = Journal.read("incoming")
+  end
+
   for retained_wait? <- [false, true] do
     @tag retained_wait: retained_wait?
     test "original history retires delayed cleanup despite expired wait or independent end times (wait: #{retained_wait?})", %{
@@ -1738,13 +1938,14 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     Recovery.retire(order, {:ok, %{"status" => "timeout"}}, Gateway, interruption_history: fn _ -> {:ok, history} end)
   end
 
-  for pending_original? <- [false, true] do
-    @tag pending_original: pending_original?
-    test "interrupted new order retries only unfinished members (pending original: #{pending_original?})", %{
+  for recovery <- [:empty_ack, :input_ack, :ended_followup] do
+    @tag pending_original: recovery == :input_ack, ended_followup: recovery == :ended_followup
+    test "interrupted new order retries only unfinished members (recovery: #{recovery})", %{
       issues: [completed | unfinished] = issues,
       opts: opts,
       context: context,
-      pending_original: pending?
+      pending_original: pending?,
+      ended_followup: ended_followup?
     } do
       tool_opts = [fetch: opts[:fetch], before_action: opts[:before_action]]
 
@@ -1764,7 +1965,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       {:ok, original} = Journal.read("incoming")
       {:ok, original_decisions} = Store.read("incoming")
       assert {:error, :openclaw_member_reserved} = Journal.member_available(completed.id)
-      history = idle_history(original)
+      history = if ended_followup?, do: later_idle_history(original), else: idle_history(original)
 
       history =
         if pending? do
@@ -1787,10 +1988,15 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       resumed = fn
         "sessions.abort", params ->
           assert params == %{"key" => original["session_id"], "runId" => original["id"]}
-          %{"ok" => true, "status" => "aborted", "abortedRunId" => original["id"]}
+
+          if ended_followup?,
+            do: %{"ok" => false, "status" => "no-active-run"},
+            else: %{"ok" => true, "status" => "aborted", "abortedRunId" => original["id"]}
 
         "agent.wait", _ ->
-          %{"status" => "timeout"}
+          if ended_followup?,
+            do: %{"runId" => original["id"], "status" => "ok", "startedAt" => 1000, "endedAt" => 2000},
+            else: %{"status" => "timeout"}
 
         "chat.history", _ ->
           history
@@ -1806,7 +2012,15 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       assert retired["retirement"]["attempt"] == original_decisions["attempt"]
       assert length(retired["retirement"]["retained_inputs"]) == if(pending?, do: 1, else: 0)
       assert is_binary(retired["retirement"]["retired_at"])
-      refute retired["terminal"]
+
+      if ended_followup? do
+        assert retired["terminal"]["runId"] == original["id"]
+        assert retired["retirement"]["stop_basis"] == "terminal_original_before_followup"
+        refute retired["abort_acknowledged"]
+      else
+        refute retired["terminal"]
+      end
+
       refute Journal.receipt("incoming", original["session_id"])
       refute Journal.writable?("incoming", original["id"])
       assert {:ok, ^original_decisions} = Store.read("incoming")
@@ -1848,7 +2062,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
       assert {:ok, ^retired} = Journal.history("incoming", original["id"])
       assert {:error, :yolo_group_changed} = run_group("incoming", fresh, fresh, next_opts)
       {:ok, next} = Journal.read("incoming")
-      assert {:error, :openclaw_generation_changed} = retire(%{retired | "state" => "cancel_pending"}, history)
+      assert {:error, :openclaw_generation_changed} = retire(Map.merge(retired, %{"state" => "cancel_pending", "terminal" => nil}), history)
       assert {:ok, ^next} = Journal.read("incoming")
     end
   end
@@ -2267,68 +2481,103 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     Recovery.resolve(evidence, apply?, opts)
   end
 
-  test "recovered observer releases one shared slot and leases while retaining current Review and later work", %{issues: issues, opts: opts, context: context} do
-    context = put_in(context.settings.agent.max_concurrent_agents, 1)
-    ProjectContext.bind(context)
-    order = executed_order(issues, opts)
-    {evidence, recovery_opts} = terminal_evidence(order)
-    start_worker_capacity!(contexts: [context])
-    parent = self()
-    current = Enum.map(issues, &%{&1 | state: "Review", delegate_id: nil})
+  for recovery <- [:operator, :followup] do
+    @tag observer_recovery: recovery
+    test "recovered observer releases one shared slot and leases after #{recovery} while retaining current Review and later work", %{
+      issues: issues,
+      opts: opts,
+      context: context,
+      observer_recovery: recovery
+    } do
+      context = put_in(context.settings.agent.max_concurrent_agents, 1)
+      ProjectContext.bind(context)
+      order = executed_order(issues, opts)
+      {evidence, recovery_opts} = terminal_evidence(order)
+      history = later_idle_history(order)
+      {:ok, decisions} = Store.read("incoming")
+      start_worker_capacity!(contexts: [context])
+      parent = self()
+      current = Enum.map(issues, &%{&1 | state: "Review", delegate_id: nil})
 
-    watcher_opts = [
-      interruption_history: fn _ -> {:error, :fixture_history_unavailable} end,
-      fetch: fn ids -> {:ok, Enum.filter(current, &(&1.id in ids))} end,
-      transport:
-        transport(fn
-          "sessions.abort", params -> %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
-          "agent.wait", _ -> %{"status" => "timeout"}
-          _, _ -> flunk("recovery must not submit or read history automatically")
-        end),
-      openclaw_wait: fn _ ->
-        send(parent, {:reserved_observer, self()})
-        receive do: (:resume -> :ok)
+      watcher_opts = [
+        interruption_history: fn _ ->
+          if recovery == :followup and Process.get(:terminal_ready), do: {:ok, history}, else: {:error, :fixture_history_unavailable}
+        end,
+        fetch: fn ids -> {:ok, Enum.filter(current, &(&1.id in ids))} end,
+        transport:
+          transport(fn
+            "sessions.abort", params ->
+              assert params == %{"key" => order["session_id"], "runId" => order["id"]}
+
+              if recovery == :operator,
+                do: %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]},
+                else: %{"ok" => false, "status" => "no-active-run"}
+
+            "agent.wait", params ->
+              assert params["runId"] == order["id"]
+
+              if recovery == :followup and Process.get(:terminal_ready),
+                do: %{"runId" => order["id"], "status" => "ok", "startedAt" => 1000, "endedAt" => 2000},
+                else: %{"status" => "timeout"}
+
+            _, _ ->
+              flunk("recovery must not submit or read history automatically")
+          end),
+        openclaw_wait: fn _ ->
+          send(parent, {:reserved_observer, self()})
+          receive do: (:resume -> :ok)
+          Process.put(:terminal_ready, true)
+        end
+      ]
+
+      state = Coordinator.tick(%Orchestrator.State{max_concurrent_agents: 1, external_poll: true}, [], watcher_opts)
+      assert_receive {:reserved_observer, pid}, 2000
+      ref = Process.monitor(pid)
+      assert SymphonyElixir.WorkerCapacity.count(nil) == 1
+      assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("reserved") end)
+
+      for entry <- Coordinator.entries(state.yolo_runs) do
+        assert entry.state == "Review"
+        assert entry.external.original_group == "incoming"
+        assert entry.external.reserved and entry.external.resumed and entry.external.current_state_known
+        assert entry.external.missing_evidence == "inactive_session_or_input_resolution_required"
       end
-    ]
 
-    state = Coordinator.tick(%Orchestrator.State{max_concurrent_agents: 1, external_poll: true}, [], watcher_opts)
-    assert_receive {:reserved_observer, pid}, 2000
-    ref = Process.monitor(pid)
-    assert SymphonyElixir.WorkerCapacity.count(nil) == 1
-    assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("reserved") end)
+      stale = %{worker_pid: self(), external: %{reserved: false}}
+      assert Coordinator.event(state.yolo_runs, "incoming", stale) == state.yolo_runs
+      unknown = Coordinator.tick(state, [], Keyword.put(watcher_opts, :fetch, fn _ -> {:error, :unavailable} end))
+      assert Enum.all?(Coordinator.entries(unknown.yolo_runs), &(&1.state == "Unbekannt" and not &1.external.current_state_known))
+      if recovery == :operator, do: assert({:ok, _} = Recovery.resolve(evidence, true, recovery_opts))
+      send(pid, :resume)
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2000
+      assert {:ok, ^decisions} = Store.read("incoming")
 
-    for entry <- Coordinator.entries(state.yolo_runs) do
-      assert entry.state == "Review"
-      assert entry.external.original_group == "incoming"
-      assert entry.external.reserved and entry.external.resumed and entry.external.current_state_known
-      assert entry.external.missing_evidence == "inactive_session_or_input_resolution_required"
+      if recovery == :followup do
+        assert {:ok, %{"state" => "retired", "retirement" => proof}} = Journal.read("incoming")
+        assert proof["stop_basis"] == "terminal_original_before_followup"
+        assert proof["session_history"] == history
+        assert {:error, :openclaw_interrupted_order_retired} = OpenClaw.recover(order, transport: fn _ -> flunk("already retired") end)
+      end
+
+      # The normal monitor and reconciliation remove the same observer exactly once.
+      state = Coordinator.tick(state, [], watcher_opts)
+      assert state.yolo_runs == %{} and state.claimed == MapSet.new()
+      assert Coordinator.tick(state, [], watcher_opts).yolo_runs == %{}
+      assert :ok = Journal.member_available(hd(issues).id)
+      if recovery == :operator, do: assert({:ok, _} = Recovery.resolve(evidence, true, recovery_opts))
+
+      assert {:ok, next} =
+               SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn ->
+                 send(parent, :regular_started)
+                 receive do: (:finish -> :ok)
+               end)
+
+      assert_receive :regular_started
+      assert SymphonyElixir.WorkerCapacity.count(nil) == 1
+      assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("double release") end)
+      send(next, :finish)
+      assert Enum.all?(current, &(&1.state == "Review" and is_nil(&1.delegate_id)))
     end
-
-    stale = %{worker_pid: self(), external: %{reserved: false}}
-    assert Coordinator.event(state.yolo_runs, "incoming", stale) == state.yolo_runs
-    unknown = Coordinator.tick(state, [], Keyword.put(watcher_opts, :fetch, fn _ -> {:error, :unavailable} end))
-    assert Enum.all?(Coordinator.entries(unknown.yolo_runs), &(&1.state == "Unbekannt" and not &1.external.current_state_known))
-    assert {:ok, _} = Recovery.resolve(evidence, true, recovery_opts)
-    send(pid, :resume)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 2000
-    # The normal monitor and reconciliation remove the same observer exactly once.
-    state = Coordinator.tick(state, [], watcher_opts)
-    assert state.yolo_runs == %{} and state.claimed == MapSet.new()
-    assert Coordinator.tick(state, [], watcher_opts).yolo_runs == %{}
-    assert :ok = Journal.member_available(hd(issues).id)
-    assert {:ok, _} = Recovery.resolve(evidence, true, recovery_opts)
-
-    assert {:ok, next} =
-             SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn ->
-               send(parent, :regular_started)
-               receive do: (:finish -> :ok)
-             end)
-
-    assert_receive :regular_started
-    assert SymphonyElixir.WorkerCapacity.count(nil) == 1
-    assert {:error, :worker_capacity} = SymphonyElixir.WorkerCapacity.start_child(nil, "Test (AI)", fn -> flunk("double release") end)
-    send(next, :finish)
-    assert Enum.all?(current, &(&1.state == "Review" and is_nil(&1.delegate_id)))
   end
 
   test "failed and cancelled originals keep their technical result", %{issues: issues, opts: opts} do

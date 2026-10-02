@@ -545,6 +545,28 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
 
     assert {:ok, payload} = Projection.payload(Map.merge(uncertain, %{"state" => "retired", "retirement" => retirement}), config(), 4)
     assert payload["observation"]["retirement"] == Map.delete(retirement, "retained_inputs")
+
+    original_end = %{"runId" => uncertain["id"], "status" => "ok", "startedAt" => 1, "endedAt" => 2}
+    followup_end = %{"lastRunId" => "native-followup", "status" => "done", "startedAt" => 3, "endedAt" => 4}
+
+    retirement =
+      Map.merge(retirement, %{
+        "stop_basis" => "terminal_original_before_followup",
+        "session_end" => followup_end,
+        "original_wait" => original_end,
+        "session_history" => %{"sessionInfo" => followup_end, "messages" => ["private"]}
+      })
+
+    retired = Map.merge(uncertain, %{"state" => "retired", "writable" => false, "abort_acknowledged" => false, "terminal" => original_end, "retirement" => retirement})
+    assert {:ok, payload} = Projection.payload(retired, config(), 5)
+    assert payload["observation"]["state"] == "retired"
+    refute payload["observation"]["writable"]
+    assert payload["observation"]["cancel_requested"]
+    refute payload["observation"]["abort_acknowledged"]
+    assert payload["observation"]["terminal"] == Map.put(original_end, "kind", "gateway")
+    assert payload["observation"]["retirement"] == Map.drop(retirement, ~w(retained_inputs original_wait session_history))
+    schema = File.read!("docs/contracts/linearbridge-lifecycle-v1.schema.json") |> Jason.decode!()
+    assert payload["observation"]["retirement"]["stop_basis"] in get_in(schema, ["$defs", "retirement", "properties", "stop_basis", "enum"])
   end
 
   test "invalid or incomplete journal membership is never silently normalized" do

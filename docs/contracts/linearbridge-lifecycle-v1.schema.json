@@ -443,7 +443,8 @@
           "enum": [
             "abort_acknowledged",
             "terminal_original",
-            "terminal_original_history"
+            "terminal_original_history",
+            "terminal_original_before_followup"
           ]
         },
         "retired_at": {

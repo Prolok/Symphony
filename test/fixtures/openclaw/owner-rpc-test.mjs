@@ -81,4 +81,40 @@ for (const mode of ['token', 'password', 'none', 'trusted-proxy']) {
   assert.equal(await localAccess(sdk, { readConfigFileSnapshot: async () => ({ valid: true, config: { gateway: { mode: 'remote' } } }) }, 'fixture-env'), null);
 }
 console.log('PASS: owner connection, no reconnect or credential fallback, failure classification and redaction');
+// A recovered worker has no submitting connection. Its one-shot cancellation
+// must reach the host, which still decides whether the original can be aborted.
+for (const retryable of [true, false]) {
+  const requests = [];
+  let started = 0, stopped = 0;
+  class Client {
+    constructor(opts) { this.opts = opts; }
+    start() { started++; this.opts.onHelloOk({}); }
+    stop() { stopped++; }
+    async request(method, input) {
+      requests.push({ method, input });
+      throw typed('unauthorized', retryable);
+    }
+  }
+  const sdk = { GatewayClient: Client, isGatewayClientRequestError: e => typeof e.retryable === 'boolean' };
+  const connection = ownerConnection(sdk, { token: 'synthetic-shared' }, { abortOnly: true });
+  const input = { key: 'original-session', runId: 'original' };
+  const reply = await connection.request('sessions.abort', input);
+  assert.deepEqual(requests, [{ method: 'sessions.abort', input }]);
+  const wire = wireReply(['gateway', 'call', 'sessions.abort', '--params', JSON.stringify(input)], reply);
+  assert.equal(JSON.parse(wire.output).retryable, retryable);
+  assert.equal(JSON.parse(wire.output).reason, 'unauthorized');
+  assert.equal((await connection.request('agent', params)).ok, false);
+  assert.equal((await connection.request('sessions.abort', { ...input, runId: 'foreign' })).ok, false);
+  assert.equal(requests.length, 1);
+  connection.close();
+  assert.equal(started, 1);
+  assert.equal(stopped, 1);
+}
+for (const input of [{}, { key: '', runId: 'original' }, { key: 'session', runId: null },
+  { key: 'session', runId: '  ' }, { key: 'session', runId: 'original', force: true }]) {
+  const sdk = { GatewayClient: class { constructor() { assert.fail('invalid abort must not connect'); } } };
+  const connection = ownerConnection(sdk, { token: 'synthetic-shared' }, { abortOnly: true });
+  assert.equal((await connection.request('sessions.abort', input)).reason, 'owner_mismatch');
+  connection.close();
+}
 await import('./owner-access-test.mjs');

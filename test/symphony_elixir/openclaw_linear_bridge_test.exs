@@ -492,6 +492,17 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     assert {:ok, ^legacy} = Journal.read("incoming")
   end
 
+  test "local nonstart releases the lifecycle without claiming gateway rejection or execution" do
+    proof = %{"kind" => "local_nonstart", "phase" => "before_delivery", "reason" => "linear_app_request_unavailable"}
+    local = Map.merge(order(), %{"state" => "rejected", "writable" => false, "local_nonstart" => proof, "rejection" => proof})
+    assert {:ok, payload} = Projection.payload(local, config(), 1)
+    assert payload["observation"]["state"] == "rejected"
+    refute payload["observation"]["rejection"]
+    refute payload["observation"]["terminal"]
+    refute payload["observation"]["acceptance_observed"]
+    refute payload["observation"]["execution_observed"]
+  end
+
   test "unknown and abort acknowledgement have no terminal evidence; rejection and operator originals are projected" do
     uncertain = Map.merge(order(), %{"state" => "unknown", "cancel_requested" => true, "abort_acknowledged" => true})
     assert {:ok, payload} = Projection.payload(uncertain, config(), 1)

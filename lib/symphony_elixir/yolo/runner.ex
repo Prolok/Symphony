@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Yolo.Runner do
   alias SymphonyElixir.{CommentCheckpoint, Config, ProjectContext, RuntimePaths, Tracker}
   alias SymphonyElixir.Linear.{Client, Issue, IssueLease, YoloAgent}
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
-  alias SymphonyElixir.Yolo.{Group, Impulse, Observation, OpenClaw, Operations}
+  alias SymphonyElixir.Yolo.{Group, Impulse, Nonstart, Observation, OpenClaw, Operations}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{ReviewContract, ReviewReadiness, Scope, Store, Workspace}
   @groups ~w(incoming planning in_progress blocker review)
@@ -25,6 +25,7 @@ defmodule SymphonyElixir.Yolo.Runner do
 
     result =
       with :ok <- Delivery.reconcile(group),
+           :ok <- Nonstart.reconcile(group),
            {:ok, record} <- Store.read(group),
            :ok <- checkout_available(group, record),
            :ok <- retry_openclaw(record, opts),
@@ -101,7 +102,9 @@ defmodule SymphonyElixir.Yolo.Runner do
   defp checkout_available(group, %{"attempt" => %{"cleanup_contract" => 1} = attempt} = record) when group in @groups do
     delivered? = Enum.any?(Map.values(record["deliveries"] || %{}), &(&1["run_id"] == attempt["id"]))
 
-    if attempt["checkout_cleanup"] in ["none", "removed"] or is_binary(attempt["session_id"]) or delivered? or resolved_external_attempt?(group, attempt),
+    safe? = attempt["checkout_cleanup"] in ["none", "removed"] or is_binary(attempt["session_id"]) or delivered?
+
+    if safe? or Nonstart.resolved_external_attempt?(group, attempt),
       do: :ok,
       else: {:error, cleanup_unconfirmed(group)}
   end
@@ -110,19 +113,6 @@ defmodule SymphonyElixir.Yolo.Runner do
 
   defp cleanup_unconfirmed("review"), do: :yolo_review_checkout_cleanup_unconfirmed
   defp cleanup_unconfirmed(_), do: :yolo_checkout_cleanup_unconfirmed
-
-  defp resolved_external_attempt?(group, attempt) do
-    case Journal.read(group) do
-      {:ok, %{"id" => id, "state" => "retired", "writable" => false, "retirement" => %{"kind" => "fenced_interruption", "attempt" => proof}}} ->
-        id == attempt["id"] and proof == attempt
-
-      {:ok, %{"id" => id, "state" => "rejected", "writable" => false, "rejection" => proof} = order} when is_map(proof) ->
-        id == attempt["id"] and not Journal.pending?(order)
-
-      _ ->
-        false
-    end
-  end
 
   defp with_members([], callback, _lease), do: callback.()
 
@@ -349,22 +339,7 @@ defmodule SymphonyElixir.Yolo.Runner do
 
   defp cleanup_failed_start(_, _, _, _, result), do: result
 
-  defp no_external_start(group, run_id) do
-    case Journal.read(group) do
-      {:ok, nil} ->
-        :ok
-
-      {:ok, %{"id" => ^run_id, "state" => "rejected", "rejection" => proof} = order}
-      when is_map(proof) ->
-        if order["acceptance_observed"] != true and order["execution_observed"] != true, do: :ok, else: {:error, :yolo_review_delivery_uncertain}
-
-      {:ok, %{"id" => other_id} = order} when other_id != run_id ->
-        if Journal.pending?(order), do: {:error, :yolo_review_delivery_uncertain}, else: :ok
-
-      _ ->
-        {:error, :yolo_review_delivery_uncertain}
-    end
-  end
+  defp no_external_start(group, run_id), do: Nonstart.no_external_start(group, run_id)
 
   defp execute_session(group, issues, project_issues, workspace, run_id, {record, observations, _fingerprint}, opts) do
     with {:ok, prompt} <- prompt(group, issues, project_issues, workspace, opts),

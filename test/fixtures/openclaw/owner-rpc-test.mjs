@@ -7,6 +7,13 @@ assert.equal(auth.canRequesterAbortChatRun(old, { connId: 'second-connection', i
 assert.equal(auth.canRequesterAbortChatRun(old, { connId: 'first-connection', isAdmin: false }), true);
 const typed = (message, retryable = false) => Object.assign(new Error(message), { gatewayCode: 'INVALID_REQUEST', retryable });
 const params = { agentId: 'fixture', idempotencyKey: 'run', sessionKey: 'session', message: 'fixture' };
+for (const [reason, code] of [['owner_connection_lost', 123], ['credentials_unavailable', 124]]) {
+  const args = ['gateway', 'call', 'sessions.abort', '--params', '{}'];
+  assert.deepEqual(wireReply(args, { ok: false, reason }), { code, output: '' });
+}
+// A connect rejection predates this abort request and cannot be its final reply.
+assert.equal(wireReply(['gateway', 'call', 'sessions.abort', '--params', '{}'],
+  { ok: false, error: { type: 'gateway_request_error', phase: 'connect', code: 'NOT_LINKED', retryable: false } }).code, 122);
 for (const scenario of ['accepted', 'missing', 'reconnect', 'unauthorized', 'transient', 'connect', 'timeout', 'close', 'exception', 'unknown', 'preflight', 'request-timeout']) {
   let requests = 0, stopped = 0, started = 0, observed;
   class Client {

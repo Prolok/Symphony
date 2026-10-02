@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Yolo.ReviewCheckouts do
   @moduledoc "Operator inventory check for unjournaled, inactive PO checkouts."
   alias SymphonyElixir.{Config, PathSafety, ProjectContext}
+  alias SymphonyElixir.Yolo.Nonstart
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{Store, Workspace}
   @groups ~w(incoming planning in_progress blocker review)
@@ -94,10 +95,10 @@ defmodule SymphonyElixir.Yolo.ReviewCheckouts do
       with {:ok, _} <- Ecto.UUID.cast(id),
            true <- path == Path.join([root, "yolo", group, id]),
            true <- inactive_attempt?(record["attempt"], id),
-           true <- no_delivery?(record["deliveries"], id),
+           true <- Nonstart.no_delivery?(record["deliveries"], id),
            true <- journal == nil or journal["id"] != id,
            {:error, :enoent} <- Journal.history(group, id),
-           false <- File.exists?(Path.join([root, "yolo-runs", id])),
+           :ok <- Nonstart.artifacts_absent(id),
            :ok <- Workspace.remove(group, workspace, id, apply?) do
         if(apply?, do: "removed", else: "removable")
       else
@@ -110,17 +111,6 @@ defmodule SymphonyElixir.Yolo.ReviewCheckouts do
   defp inactive_attempt?(nil, _id), do: true
   defp inactive_attempt?(%{"id" => other_id}, id) when is_binary(other_id), do: other_id != id
   defp inactive_attempt?(_, _), do: false
-
-  defp no_delivery?(nil, _id), do: true
-
-  defp no_delivery?(deliveries, id) when is_map(deliveries) do
-    Enum.all?(Map.values(deliveries), fn
-      %{"run_id" => other_id} when is_binary(other_id) -> other_id != id
-      _ -> false
-    end)
-  end
-
-  defp no_delivery?(_, _), do: false
 
   defp count(root) do
     context = ProjectContext.current()

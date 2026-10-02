@@ -2,7 +2,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
   @moduledoc "Fenced interruption recovery and operator import of original evidence; never a timeout-based release."
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.Yolo.{OpenClaw, Operations, Store}
-  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, TerminalEvidence}
+  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, LocalNonstart, TerminalEvidence}
   @binding ~w(id group project_id agent linear_agent_id linear_workspace_id session_id payload_sha256 workspace sha members)
 
   @doc "Give up a new, fenced order after a fresh idle-session check; preserve the missing original outcome."
@@ -163,6 +163,18 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
 
   @spec resolve(map(), boolean(), keyword()) :: {:ok, map()} | {:error, term()}
   def resolve(evidence, apply? \\ false, opts \\ []) do
+    case evidence do
+      %{"version" => 3, "binding" => binding} when is_map(binding) ->
+        if Enum.sort(Map.keys(evidence)) == ~w(binding version),
+          do: LocalNonstart.resolve(binding, apply?, opts),
+          else: {:error, :openclaw_recovery_evidence_invalid}
+
+      _ ->
+        resolve_original(evidence, apply?, opts)
+    end
+  end
+
+  defp resolve_original(evidence, apply?, opts) do
     with %{"binding" => %{"id" => id, "group" => group} = binding} <- evidence,
          true <- group in ~w(incoming planning in_progress blocker review),
          true <- binding["project_id"] == ProjectContext.current().id,

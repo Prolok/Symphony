@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   alias SymphonyElixir.Linear.{Issue, YoloAgent}
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
   alias SymphonyElixir.Yolo.{AgentHop, Escalation, Group, Impulse, Observation, Operations}
+  alias SymphonyElixir.Yolo.Nonstart
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
   alias SymphonyElixir.Yolo.OpenClaw.Journal
@@ -414,6 +415,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   defp observe_group(group, members, opts) do
     with :ok <- Journal.available(group),
          :ok <- Delivery.reconcile(group),
+         :ok <- Nonstart.reconcile(group),
          {:ok, stored} <- Store.read(group),
          {:ok, record} <- Impulse.observe(members, stored, opts),
          {:ok, valid_observations, _fingerprint, operator_errors} <-

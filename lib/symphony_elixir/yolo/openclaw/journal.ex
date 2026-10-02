@@ -3,10 +3,10 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
   alias SymphonyElixir.{Config, ProjectContext}
   alias SymphonyElixir.Linear.{DurableState, IssueLease}
   alias SymphonyElixir.Relay.Store, as: Digest
-  alias SymphonyElixir.Yolo.OpenClaw.LinearBridge
+  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, LinearBridge}
   @groups ~w(incoming planning in_progress blocker review)
   @terminal ~w(completed failed cancelled rejected retired)
-  @mutable ~w(state writable error cancel_requested abort_acknowledged abort_error terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery resumed retirement)
+  @mutable ~w(state writable error cancel_requested abort_acknowledged abort_error terminal acceptance_observed execution_observed checkout_proof rejection recovery before_recovery resumed retirement submit_started local_nonstart)
 
   @spec path(String.t()) :: Path.t()
   def path(group) do
@@ -123,7 +123,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
 
   defp change(current, %{"state" => "rejected"} = changes) do
     if current["acceptance_observed"] == true or current["execution_observed"] == true or
-         current["state"] in ~w(accepted running) or not is_map(changes["rejection"]) do
+         current["state"] in ~w(accepted running) or not is_map(changes["rejection"]) or
+         (is_map(changes["local_nonstart"]) and (current["submit_started"] == true or not is_nil(current["checkout_proof"]) or not is_nil(current["terminal"]))) do
       {:error, :openclaw_rejection_conflicts_with_execution}
     else
       {:ok, Map.merge(current, changes)}
@@ -132,11 +133,11 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Journal do
 
   defp change(current, changes) do
     updated = Map.merge(current, changes)
-    updated = if get_in(current, ["abort_error", "retryable"]) == false, do: Map.put(updated, "abort_error", current["abort_error"]), else: updated
+    updated = if Gateway.abort_retryable?(current["abort_error"]), do: updated, else: Map.put(updated, "abort_error", current["abort_error"])
     updated = if current["interruption_contract"] == 1 and current["writable"] == false, do: Map.put(updated, "writable", false), else: updated
 
     updated =
-      Enum.reduce(~w(acceptance_observed execution_observed), updated, fn key, acc ->
+      Enum.reduce(~w(acceptance_observed execution_observed submit_started), updated, fn key, acc ->
         if current[key] == true, do: Map.put(acc, key, true), else: acc
       end)
 

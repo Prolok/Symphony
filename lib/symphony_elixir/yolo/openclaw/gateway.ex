@@ -5,7 +5,6 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.{LinearBridge, Transport}
   @minimum_openclaw_version "2026.9.4"
-  @owner_unavailable [:openclaw_owner_connection_lost, :openclaw_owner_credentials_unavailable]
 
   @impl true
   def preflight(agent, opts) do
@@ -66,6 +65,28 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
     rpc("chat.history", %{"agentId" => order["agent"], "sessionKey" => order["session_id"], "offset" => 0, "limit" => 200, "maxBytes" => 1_048_576, "maxChars" => 500_000}, opts)
   end
 
+  @doc "A fresh, successful empty session search; missing or truncated replies are not absence."
+  @spec absent_session(map(), keyword()) :: {:ok, map()} | {:error, atom()}
+  def absent_session(order, opts) do
+    with :ok <- preflight(order["agent"], opts),
+         {:ok, %{"sessions" => []} = reply} <-
+           rpc(
+             "sessions.list",
+             %{"agentId" => order["agent"], "search" => order["session_id"], "limit" => 100, "offset" => 0, "archived" => "all", "includeUnknown" => true, "includeGlobal" => true},
+             opts
+           ),
+         true <- complete_empty_list?(reply) do
+      {:ok, %{"session_key" => order["session_id"], "sessions" => [], "checked_at" => DateTime.to_iso8601(DateTime.utc_now())}}
+    else
+      _ -> {:error, :openclaw_session_absence_unconfirmed}
+    end
+  end
+
+  defp complete_empty_list?(reply) do
+    reply["count"] == 0 and reply["totalCount"] in [nil, 0] and reply["offset"] in [nil, 0] and
+      reply["hasMore"] in [nil, false] and reply["truncated"] in [nil, false] and is_nil(reply["nextCursor"])
+  end
+
   @impl true
   def cancel(order, opts) do
     id = order["id"]
@@ -114,10 +135,6 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
          {:ok, response} when is_map(response) <- Jason.decode(output) do
       decode_response(response, method, raw)
     else
-      {:error, reason} when method == "sessions.abort" and reason in @owner_unavailable ->
-        reason = if reason == :openclaw_owner_connection_lost, do: "owner_connection_lost", else: "credentials_unavailable"
-        {:error, {:openclaw_abort_failed, %{"method" => method, "code" => "NOT_LINKED", "reason" => reason, "retryable" => false, "request_sha256" => OpenClaw.digest(raw)}}}
-
       {:error, reason} when is_atom(reason) ->
         {:error, reason}
 
@@ -126,9 +143,16 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Gateway do
     end
   end
 
+  @doc "Old NOT_LINKED records with these local-only reasons are not gateway denials."
+  @spec abort_retryable?(map() | nil) :: boolean()
+  def abort_retryable?(%{"method" => "sessions.abort", "code" => "NOT_LINKED", "reason" => reason})
+      when reason in ~w(owner_connection_lost credentials_unavailable), do: true
+
+  def abort_retryable?(proof), do: not is_map(proof) or proof["retryable"] != false
+
   defp decode_response(%{"symphony_openclaw_abort_error" => 1} = proof, "sessions.abort", raw) do
     if proof["method"] == "sessions.abort" and proof["code"] in ~w(INVALID_REQUEST UNAVAILABLE NOT_LINKED OTHER) and
-         proof["reason"] in ~w(unauthorized request_rejected owner_connection_lost owner_mismatch credentials_unavailable) and is_boolean(proof["retryable"]) and
+         proof["reason"] in ~w(unauthorized request_rejected) and is_boolean(proof["retryable"]) and
          proof["request_sha256"] == OpenClaw.digest(raw) do
       {:error, {:openclaw_abort_failed, Map.take(proof, ~w(method code reason retryable request_sha256))}}
     else

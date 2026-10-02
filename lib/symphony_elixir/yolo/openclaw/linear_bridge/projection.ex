@@ -58,6 +58,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.LinearBridge.Projection do
 
   defp terminal(_), do: nil
 
+  defp rejection(%{"local_nonstart" => proof}) when is_map(proof), do: nil
+
   defp rejection(%{"rejection" => proof, "recovery" => recovery}) when is_map(proof) and is_map(recovery) do
     recovery |> Map.take(~w(code reason request_id source_sha256 execution_source_sha256 evidence_sha256)) |> Map.put("kind", "operator_pre_acceptance")
   end

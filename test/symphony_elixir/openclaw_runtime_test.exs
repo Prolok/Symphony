@@ -75,6 +75,198 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
 
   defp synthetic_linear(_, _, _), do: {:ok, %{"data" => %{"viewer" => %{"id" => "synthetic"}}}}
 
+  test "before_delivery failure durably releases an intent without submitting or aborting", %{issues: issues, workspace: workspace} do
+    id = Ecto.UUID.generate()
+    deny = fn _, _ -> flunk("local nonstart must not reach the gateway") end
+
+    before = fn ->
+      assert :ok = Delivery.reserve("incoming", id, %{"member0" => %{"semantic" => "frozen"}})
+      {:error, :linear_app_request_unavailable}
+    end
+
+    opts = [transport: transport(deny), before_delivery: before]
+    assert {:error, :linear_app_request_unavailable} = Scope.with_scope("incoming", issues, id, fn -> OpenClaw.run(workspace, "fixture", issues, id, opts) end)
+    assert {:ok, order} = Journal.read("incoming")
+    assert order["state"] == "rejected"
+    assert order["local_nonstart"]["phase"] == "before_delivery"
+    refute order["submit_started"]
+    refute order["writable"]
+    refute order["terminal"]
+    assert :ok = Journal.available("incoming")
+    assert :ok = Journal.member_available("member0")
+    assert :ok = Delivery.reconcile("incoming")
+    assert {:ok, %{"deliveries" => %{}}} = Store.read("incoming")
+    assert {:error, :openclaw_local_nonstart} = OpenClaw.recover(order, opts)
+    assert {:ok, ^order} = Journal.update(order, %{"state" => "accepted", "acceptance_observed" => true})
+  end
+
+  for kind <- [:raise, :throw, :invalid, :linear_tuple] do
+    @tag before_kind: kind
+    test "before_delivery #{kind} is a local nonstart", %{issues: issues, workspace: workspace, before_kind: kind} do
+      id = Ecto.UUID.generate()
+
+      before = fn ->
+        case kind do
+          :raise -> raise "synthetic"
+          :throw -> throw(:synthetic)
+          :invalid -> :unexpected
+          :linear_tuple -> {:error, {:linear_api_request, :linear_app_request_unavailable}}
+        end
+      end
+
+      opts = [transport: transport(fn _, _ -> flunk("no external call") end), before_delivery: before]
+      assert {:error, _} = Scope.with_scope("incoming", issues, id, fn -> OpenClaw.run(workspace, "fixture", issues, id, opts) end)
+      assert {:ok, %{"state" => "rejected", "writable" => false}} = Journal.read("incoming")
+    end
+  end
+
+  test "a concurrent fence before submission prevents any external call", %{issues: issues, workspace: workspace} do
+    id = Ecto.UUID.generate()
+
+    before = fn ->
+      assert {:ok, current} = Journal.read("incoming")
+      assert {:ok, _} = Journal.update(current, %{"state" => "cancel_pending", "writable" => false, "cancel_requested" => true})
+      :ok
+    end
+
+    opts = [transport: transport(fn _, _ -> flunk("a fenced start must not call the gateway") end), before_delivery: before]
+    assert {:error, :openclaw_submission_fenced} = Scope.with_scope("incoming", issues, id, fn -> OpenClaw.run(workspace, "fixture", issues, id, opts) end)
+    assert {:ok, current} = Journal.read("incoming")
+    assert Journal.pending?(current)
+    refute current["submit_started"]
+    refute current["local_nonstart"]
+  end
+
+  test "timeout after submit begins preserves the durable reservation", %{issues: issues, workspace: workspace} do
+    id = Ecto.UUID.generate()
+
+    handler = fn
+      "agent", _ ->
+        assert {:ok, %{"submit_started" => true}} = Journal.read("incoming")
+        {:error, :openclaw_transport_timeout}
+
+      "agent.wait", _ ->
+        %{"status" => "timeout"}
+
+      "sessions.abort", _ ->
+        flunk("no cancellation before the deadline")
+    end
+
+    opts = [transport: transport(handler), openclaw_wait: fn _ -> throw(:fixture_stop) end]
+    assert catch_throw(Scope.with_scope("incoming", issues, id, fn -> OpenClaw.run(workspace, "fixture", issues, id, opts) end)) == :fixture_stop
+    assert {:ok, order} = Journal.read("incoming")
+    assert order["submit_started"] == true
+    assert Journal.pending?(order)
+    refute order["local_nonstart"]
+  end
+
+  test "local abort failure retries and a later real abort is acknowledged", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", _ ->
+        %{"status" => "timeout"}
+
+      "sessions.abort", params ->
+        send(self(), :local_abort_attempt)
+
+        if Process.get(:local_abort_failed) do
+          %{"ok" => true, "status" => "aborted", "abortedRunId" => params["runId"]}
+        else
+          Process.put(:local_abort_failed, true)
+          {:error, :openclaw_owner_connection_lost}
+        end
+    end
+
+    opts = Keyword.merge(opts, transport: transport(handler), openclaw_timeout_seconds: 0, openclaw_wait: fn _ -> throw(:pending) end)
+    assert catch_throw(run_group("incoming", issues, issues, opts)) == :pending
+    assert_receive :local_abort_attempt
+    assert {:ok, order} = Journal.read("incoming")
+    assert order["abort_error"]["retryable"] == true
+    assert catch_throw(OpenClaw.recover(order, opts)) == :pending
+    assert_receive :local_abort_attempt
+    assert {:ok, current} = Journal.read("incoming")
+    assert current["abort_acknowledged"] == true
+    assert Journal.pending?(current)
+  end
+
+  test "a conflicting execution or failed journal write cannot release a before_delivery error", %{issues: issues, workspace: workspace} do
+    id = Ecto.UUID.generate()
+
+    before = fn ->
+      assert {:ok, current} = Journal.read("incoming")
+      assert {:ok, _} = Journal.update(current, %{"execution_observed" => true})
+      {:error, :synthetic_prestart_failure}
+    end
+
+    opts = [transport: transport(fn _, _ -> flunk("no external call") end), before_delivery: before]
+    assert {:error, :openclaw_rejection_conflicts_with_execution} = Scope.with_scope("incoming", issues, id, fn -> OpenClaw.run(workspace, "fixture", issues, id, opts) end)
+    assert {:ok, current} = Journal.read("incoming")
+    assert Journal.pending?(current)
+    refute current["local_nonstart"]
+    assert current["execution_observed"] == true
+  end
+
+  test "a local before_delivery error cannot release when its atomic journal write fails", %{issues: issues, workspace: workspace} do
+    id = Ecto.UUID.generate()
+
+    before = fn ->
+      path = Journal.path("incoming")
+      File.rename!(path, path <> ".saved")
+      File.mkdir!(path)
+      {:error, :synthetic_prestart_failure}
+    end
+
+    opts = [transport: transport(fn _, _ -> flunk("no external call") end), before_delivery: before]
+    assert {:error, :openclaw_journal_corrupt} = Scope.with_scope("incoming", issues, id, fn -> OpenClaw.run(workspace, "fixture", issues, id, opts) end)
+    File.rmdir!(Journal.path("incoming"))
+    File.rename!(Journal.path("incoming") <> ".saved", Journal.path("incoming"))
+    assert {:ok, current} = Journal.read("incoming")
+    assert Journal.pending?(current)
+    refute current["local_nonstart"]
+  end
+
+  test "legacy local NOT_LINKED is retried while a typed gateway denial stays final", %{issues: issues, opts: opts} do
+    handler = fn
+      "agent", params ->
+        %{"runId" => params["idempotencyKey"], "status" => "accepted"}
+
+      "agent.wait", _ ->
+        %{"status" => "timeout"}
+
+      "sessions.abort", _ ->
+        send(self(), :legacy_abort_retry)
+        {:error, :openclaw_owner_connection_lost}
+    end
+
+    opts = Keyword.merge(opts, transport: transport(handler), openclaw_wait: fn _ -> throw(:pending) end)
+    assert catch_throw(run_group("incoming", issues, issues, opts)) == :pending
+    assert {:ok, order} = Journal.read("incoming")
+    old = Map.merge(order, %{"cancel_requested" => true, "abort_error" => %{"method" => "sessions.abort", "code" => "NOT_LINKED", "reason" => "owner_connection_lost", "retryable" => false}})
+    assert :ok = DurableState.write(Journal.path("incoming"), old)
+    assert catch_throw(OpenClaw.recover(old, opts)) == :pending
+    assert_receive :legacy_abort_retry
+    assert {:ok, current} = Journal.read("incoming")
+    assert current["abort_error"]["retryable"] == true
+    assert Journal.pending?(current)
+  end
+
+  for kind <- [:raise, :throw] do
+    @tag submit_kind: kind
+    test "#{kind} after submit begins cannot become a local nonstart", %{issues: issues, workspace: workspace, submit_kind: kind} do
+      id = Ecto.UUID.generate()
+      handler = fn "agent", _ -> if kind == :raise, do: raise("synthetic"), else: throw(:synthetic) end
+      opts = [transport: transport(handler)]
+      run = fn -> Scope.with_scope("incoming", issues, id, fn -> OpenClaw.run(workspace, "fixture", issues, id, opts) end) end
+      if kind == :raise, do: assert_raise(RuntimeError, "synthetic", run), else: assert(catch_throw(run.()) == :synthetic)
+      assert {:ok, current} = Journal.read("incoming")
+      assert current["submit_started"] == true
+      assert Journal.pending?(current)
+      refute current["local_nonstart"]
+    end
+  end
+
   defp rpc(method, params, handler), do: handler.(method, Jason.decode!(params))
 
   defp transport(handler) do
@@ -935,7 +1127,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     assert deliveries == %{}
   end
 
-  test "owner connection loss fences writes and preserves terminal abort failure until proven natural retirement", %{issues: issues, opts: opts} do
+  test "owner connection loss fences writes and retries local abort failure until proven natural retirement", %{issues: issues, opts: opts} do
     handler = fn
       "agent", params ->
         %{"runId" => params["idempotencyKey"], "status" => "accepted"}
@@ -961,7 +1153,7 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     refute order["writable"]
     refute order["abort_acknowledged"]
     assert order["abort_error"]["reason"] == "owner_connection_lost"
-    refute order["abort_error"]["retryable"]
+    assert order["abort_error"]["retryable"]
     assert order["retirement"]["stop_basis"] == "terminal_original"
     assert_receive :owner_abort_attempt
     refute_receive :owner_abort_attempt

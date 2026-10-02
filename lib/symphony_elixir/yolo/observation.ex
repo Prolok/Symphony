@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Yolo.Observation do
   @moduledoc "Relay-driven observations; confirmed workpad output restarts PO work only for explicit operator duties."
   alias SymphonyElixir.CommentCheckpoint
+  alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Relay.Store, as: Digest
   alias SymphonyElixir.Yolo.{Dependencies, OperatorHandoff, ReviewReadiness}
 
@@ -46,7 +47,10 @@ defmodule SymphonyElixir.Yolo.Observation do
 
   @spec relay_signal(map()) :: String.t()
   def relay_signal(issue) do
-    Digest.digest({issue.id, issue.state, issue.updated_at, issue.last_comment_signal, issue.assignee_id, issue.delegate_id, issue.title, issue.description, issue.labels, issue.blocked_by})
+    Digest.digest(
+      {issue.id, issue.state, issue.updated_at, issue.last_comment_signal, issue.assignee_id, issue.delegate_id, issue.title, issue.description, issue.labels,
+       Issue.normalize_blockers(issue.blocked_by)}
+    )
   end
 
   defp observe(issue, previous, generation, opts) do
@@ -90,7 +94,7 @@ defmodule SymphonyElixir.Yolo.Observation do
            "agent_sources" => agent_sources,
            "human_sources" => human_sources,
            "operator_confirmation" => confirmation,
-           "legacy_semantic" => legacy_semantic(issue, generation, handoffs, confirmation, comments)
+           "legacy_semantic" => legacy_semantic(issue, generation, handoffs, confirmation, comments, opts)
          }}
       else
         {:error, _} = error -> error
@@ -113,16 +117,30 @@ defmodule SymphonyElixir.Yolo.Observation do
   defp previous_confirmation(%{state: "Yolo Review"}, %{"operator_confirmation" => digest}) when is_binary(digest), do: digest
   defp previous_confirmation(_, _), do: nil
 
-  defp legacy_semantic(_issue, generation, handoffs, confirmation, _comments) when generation != 0 or handoffs != [] or not is_nil(confirmation), do: nil
+  defp legacy_semantic(_issue, generation, handoffs, confirmation, _comments, _opts) when generation != 0 or handoffs != [] or not is_nil(confirmation), do: nil
 
-  defp legacy_semantic(issue, _generation, _handoffs, _confirmation, comments) do
+  defp legacy_semantic(issue, _generation, _handoffs, _confirmation, comments, opts) do
     legacy =
       issue
       |> semantic_issue()
       |> Map.put(:state, issue.state)
-      |> Map.put(:blocked_by, Enum.map(issue.blocked_by, &Map.delete(&1, :state_type)))
+      |> Map.put(:blocked_by, legacy_blockers(issue, opts))
 
     Digest.digest({legacy, comments})
+  end
+
+  defp legacy_blockers(issue, opts) do
+    current = Enum.map(issue.blocked_by, &Map.delete(&1, :state_type))
+    snapshot = get_in(opts[:legacy_dependency_snapshot] || %{}, [issue.id])
+
+    # Only the saved order of identical dependencies can recover an old digest.
+    # Changed blockers must never inherit a historical completion.
+    if is_list(snapshot) and Enum.all?(snapshot, &is_map/1) do
+      previous = snapshot |> Issue.restore_blockers() |> Enum.map(&Map.delete(&1, :state_type))
+      if Issue.normalize_blockers(previous) == Issue.normalize_blockers(current), do: previous, else: current
+    else
+      current
+    end
   end
 
   defp with_handoffs(semantic, []), do: semantic

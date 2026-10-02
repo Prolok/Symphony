@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Yolo.Dependencies do
   @moduledoc "Complete, fresh dependency snapshots and connected acceptance chains."
-  alias SymphonyElixir.Linear.{Budget, IssueReadCache, YoloAgent}
+  alias SymphonyElixir.Linear.{Budget, Issue, IssueReadCache, YoloAgent}
   alias SymphonyElixir.ProjectContext
   alias SymphonyElixir.WaitMarker
   alias SymphonyElixir.Yolo.{Admission, API}
@@ -100,15 +100,15 @@ defmodule SymphonyElixir.Yolo.Dependencies do
          {:ok, workpad_markers, updated} <- background_markers(issue, cache, opts) do
       case WaitMarker.resolve_targets_background(issue, workpad_markers, updated, marker_opts) do
         {:ok, markers, resolved} ->
-          {:ok, %{issue | blocked_by: blockers ++ markers}, resolved}
+          {:ok, with_blockers(issue, blockers ++ markers), resolved}
 
         {:error, {:wait_marker_unresolved, identifier, reason} = error, resolved}
         when reason in [:wait_target_unresolved, :wait_target_ambiguous] ->
-          {:ok, %{issue | blocked_by: blockers ++ [marker_error_blocker(issue, identifier, error)]}, resolved}
+          {:ok, with_blockers(issue, blockers ++ [marker_error_blocker(issue, identifier, error)]), resolved}
 
         {:error, {:wait_marker_unresolved, identifier, reason, _write_reason} = error, resolved}
         when reason in [:wait_target_unresolved, :wait_target_ambiguous] ->
-          {:ok, %{issue | blocked_by: blockers ++ [marker_error_blocker(issue, identifier, error)]}, resolved}
+          {:ok, with_blockers(issue, blockers ++ [marker_error_blocker(issue, identifier, error)]), resolved}
 
         {:error, reason, resolved} ->
           {:error, reason, resolved}
@@ -117,6 +117,8 @@ defmodule SymphonyElixir.Yolo.Dependencies do
       {:error, reason} -> {:error, reason, cache}
     end
   end
+
+  defp with_blockers(issue, blockers), do: %{issue | blocked_by: Issue.normalize_blockers(blockers)}
 
   defp marker_error_blocker(issue, identifier, error) do
     %{id: "wait-marker-error:#{issue.id}:#{identifier}", identifier: identifier, marker: true, state: "Unauflösbar", error: error}
@@ -145,7 +147,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
     if YoloAgent.delegated?(issue) and issue.state in @waiting_states do
       with {:ok, blockers} <- background_blockers(issue, opts),
            {:ok, markers} <- WaitMarker.targets(issue, Keyword.put_new(opts, :budget_background, true)) do
-        {:ok, %{issue | blocked_by: blockers ++ markers}}
+        {:ok, with_blockers(issue, blockers ++ markers)}
       end
     else
       {:ok, issue}
@@ -156,7 +158,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
        when is_list(blockers) and is_binary(epoch) do
     cond do
       opts[:force_full] == true or opts[:relay_background] != true -> blockers(id, opts)
-      complete? and Enum.all?(blockers, &is_binary(Map.get(&1, :state_type))) -> {:ok, blockers}
+      complete? and Enum.all?(blockers, &is_binary(Map.get(&1, :state_type))) -> {:ok, Issue.normalize_blockers(blockers)}
       Budget.allow_background_lookup?(SymphonyElixir.Config.settings!().tracker.app, id) -> blockers(id, opts)
       true -> {:error, :linear_budget_reserved}
     end
@@ -168,7 +170,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
   def blockers(id, opts) do
     if is_nil(opts[:query]) and opts[:force_full] != true do
       case IssueReadCache.fetch([id], opts) do
-        {:ok, [%{relations_complete: true, blocked_by: blockers}]} -> {:ok, blockers}
+        {:ok, [%{relations_complete: true, blocked_by: blockers}]} -> {:ok, Issue.normalize_blockers(blockers)}
         {:ok, _} -> linear_blockers(id, opts)
         error -> error
       end
@@ -183,7 +185,7 @@ defmodule SymphonyElixir.Yolo.Dependencies do
 
     with {:ok, nodes} <- API.pages(document, %{id: id}, ["issue", "inverseRelations"], opts),
          true <- Enum.all?(nodes, &valid_relation?/1) do
-      {:ok, nodes |> Enum.filter(&(&1["type"] == "blocks")) |> Enum.map(&blocker/1) |> Enum.sort_by(& &1.id)}
+      {:ok, nodes |> Enum.filter(&(&1["type"] == "blocks")) |> Enum.map(&blocker/1) |> Issue.normalize_blockers()}
     else
       {:error, _} = error -> error
       _ -> {:error, :yolo_dependencies_incomplete}

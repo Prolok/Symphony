@@ -10,6 +10,31 @@ defmodule SymphonyElixir.IssueReadCacheTest do
     put_in(settings.tracker.app["workspace_id"], "read-cache-#{System.unique_integer([:positive])}")
   end
 
+  test "reordered complete blockers authorize cache reuse and stay canonical" do
+    context = %ProjectContext{id: "blocker-order", settings: relay_settings()}
+    blockers = for id <- ["z", "a"], do: %{id: id, state: "Review", state_type: "completed"}
+    relay = %Issue{id: "issue", relations_complete: true, blocked_by: blockers}
+    linear = %{relay | blocked_by: Enum.reverse(blockers)}
+
+    opts = [
+      context: context,
+      relay: fn _, _ -> {:ok, [{1, relay}]} end,
+      fetch_linear: fn _ ->
+        send(self(), :linear_read)
+        {:ok, [linear]}
+      end,
+      now: 0
+    ]
+
+    assert {:ok, [^linear]} = IssueReadCache.fetch([relay.id], opts)
+    assert_receive :linear_read
+    assert {:ok, [^linear]} = IssueReadCache.fetch([relay.id], opts)
+    refute_receive :linear_read
+    assert {:ok, blockers} = Dependencies.blockers(relay.id, opts)
+    assert blockers == linear.blocked_by
+    refute_receive :linear_read
+  end
+
   test "relay reads reuse a verified epoch, then refresh on change or fifteen-minute safety deadline" do
     settings = relay_settings()
     context = %ProjectContext{id: "read-#{System.unique_integer([:positive])}", settings: settings}

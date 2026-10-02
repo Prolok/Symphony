@@ -2,7 +2,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   @moduledoc "PO scheduling inside the existing project orchestrator and shared capacity."
   require Logger
   alias SymphonyElixir.{Config, ProjectContext, Tracker, Workpad}
-  alias SymphonyElixir.Linear.YoloAgent
+  alias SymphonyElixir.Linear.{Issue, YoloAgent}
   alias SymphonyElixir.Yolo.{Admission, BlockerBrake, Completion, Delivery, Dependencies}
   alias SymphonyElixir.Yolo.{AgentHop, Escalation, Group, Impulse, Observation, Operations}
   alias SymphonyElixir.Yolo.OpenClaw
@@ -230,15 +230,8 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   defp restore_dependency_snapshot(snapshot, signals) do
     if Enum.sort(Map.keys(snapshot)) == Enum.sort(Map.keys(signals)) and
          Enum.all?(Map.values(snapshot), fn blockers -> is_list(blockers) and Enum.all?(blockers, &is_map/1) end) do
-      Map.new(snapshot, fn {id, blockers} -> {id, Enum.map(blockers, &restore_blocker/1)} end)
+      Map.new(snapshot, fn {id, blockers} -> {id, blockers |> Issue.restore_blockers() |> Issue.normalize_blockers()} end)
     end
-  end
-
-  defp restore_blocker(blocker) do
-    Enum.reduce([:id, :identifier, :state, :state_type, :marker], %{}, fn field, acc ->
-      value = Map.get(blocker, Atom.to_string(field), Map.get(blocker, field))
-      if is_nil(value), do: acc, else: Map.put(acc, field, value)
-    end)
   end
 
   defp recover_external(state, opts) do
@@ -471,11 +464,12 @@ defmodule SymphonyElixir.Yolo.Coordinator do
   end
 
   defp capture_group(group, members, record, opts) do
+    opts = Keyword.put(opts, :legacy_dependency_snapshot, record["dependency_snapshot"])
     cached = record["deferred_observations"] || record["observations"] || %{}
 
     if Map.has_key?(opts[:retrying_groups] || %{}, group) and
          map_size(record["operator_errors"] || %{}) == 0 and
-         Enum.all?(members, &is_map(cached[&1.id])) do
+         Enum.all?(members, &is_binary(get_in(cached, [&1.id, "source"]))) do
       observations = Map.take(cached, Enum.map(members, & &1.id))
       {:ok, observations, Observation.fingerprint(observations), %{}}
     else
@@ -630,7 +624,7 @@ defmodule SymphonyElixir.Yolo.Coordinator do
 
   defp reset_changed_retry(record, _), do: record
 
-  defp dependency_snapshot(members), do: Map.new(members, &{&1.id, &1.blocked_by})
+  defp dependency_snapshot(members), do: Map.new(members, &{&1.id, Issue.normalize_blockers(&1.blocked_by)})
 
   defp persist_observations(group, stored, record, observations, signals, members) do
     previous = record["observations"] || %{}

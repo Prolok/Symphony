@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
   use GenServer
 
   alias SymphonyElixir.{CommentCheckpoint, ProjectContext, ProjectPoller}
-  alias SymphonyElixir.Linear.{Adapter, Budget, CommentVersion, WriteContext}
+  alias SymphonyElixir.Linear.{Adapter, Budget, CommentVersion, Issue, WriteContext}
   alias SymphonyElixir.Tracker
 
   @safety_ms 900_000
@@ -14,6 +14,13 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
 
   @spec fetch([String.t()], keyword()) :: {:ok, [SymphonyElixir.Linear.Issue.t()]} | {:error, term()}
   def fetch(ids, opts \\ []) when is_list(ids) do
+    case fetch_issues(ids, opts) do
+      {:ok, issues} -> {:ok, Enum.map(issues, &Issue.normalize_dependencies/1)}
+      error -> error
+    end
+  end
+
+  defp fetch_issues(ids, opts) do
     ids = Enum.uniq(ids)
     fetch_linear = Keyword.get(opts, :fetch_linear, fn ids -> Tracker.adapter().fetch_issue_states_by_ids(ids) end)
     context = Keyword.get(opts, :context, ProjectContext.current())
@@ -132,7 +139,10 @@ defmodule SymphonyElixir.Linear.IssueReadCache do
 
     with {:ok, issues} <- budgeted_linear(context, fetch_linear, ids, critical?) do
       same_fields =
-        Enum.zip_with(issues, entries, fn linear, {_, snapshot} -> linear == without_relay_metadata(snapshot) end)
+        Enum.zip_with(issues, entries, fn linear, {_, snapshot} ->
+          Issue.normalize_dependencies(linear) ==
+            Issue.normalize_dependencies(without_relay_metadata(snapshot))
+        end)
         |> Enum.all?(& &1)
 
       matches = Enum.map(issues, & &1.id) == ids and same_fields

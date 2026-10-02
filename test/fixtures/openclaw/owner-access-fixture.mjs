@@ -1,6 +1,7 @@
 // Synthetic public SDK boundary; never reads an installation, store or gateway.
 // API shape: OpenClaw v2026.9.6 secret-ref-runtime / secrets/resolve.ts.
 import assert from 'node:assert/strict';
+import { appendFileSync } from 'node:fs';
 
 export function accessFixture({ scenario = 'store', mode = 'token', source = 'store', diagnostics = false, env: suppliedEnv } = {}) {
   const expected = `synthetic-private-${mode}-${scenario}`;
@@ -43,7 +44,12 @@ export function accessFixture({ scenario = 'store', mode = 'token', source = 'st
       }
       start() { diagnostic(); this.options.onHelloOk({}); }
       stop() {}
-      async request(method) {
+      async request(method, params) {
+        if (scenario === 'abort') {
+          assert.equal(method, 'sessions.abort');
+          appendFileSync(env.FIXTURE_REQUEST_LOG, JSON.stringify({ method, params }) + '\n');
+          return { ok: false, status: 'no-active-run' };
+        }
         assert.equal(method, 'agents.list');
         if (scenario === 'request-error') throw Object.assign(new Error(expected), { gatewayCode: 'INVALID_REQUEST', retryable: false });
         return { agents: [] };

@@ -90,14 +90,25 @@ defmodule SymphonyElixir.OpenClawTransportTest do
     refute OwnerTransport.active?()
   end
 
-  test "lost connection cannot reopen or abort but later read-only status can prove original end" do
+  test "second abort after owner loss reaches a fresh process while submit stays fenced" do
     OwnerTransport.within(fn ->
-      Process.put(:replies, [{:exit_status, 1}])
-      assert {:error, :openclaw_owner_connection_lost} = Transport.command(["gateway", "call", "agent.wait"], options())
-      assert_receive {:opened, _, _}
-      assert_receive {:closed, _}
       transport = &Transport.command(&1, options())
-      assert {:error, :openclaw_owner_connection_lost} = Gateway.cancel(%{"id" => "original", "session_id" => "own"}, transport: transport)
+      order = %{"id" => "original", "session_id" => "own"}
+      Process.put(:replies, [{:exit_status, 1}])
+      assert {:error, :openclaw_owner_connection_lost} = Gateway.cancel(order, transport: transport)
+      assert_receive {:opened, _, _}
+      assert_receive {:input, _}
+      assert_receive {:closed, _}
+      Process.put(:replies, [{:data, ~s({"ok":true,"status":"aborted","abortedRunId":"original"})}, {:exit_status, 0}])
+      assert :ok = Gateway.cancel(order, transport: transport)
+      assert_receive {:opened, _, flags}
+      refute "--stream" in Keyword.fetch!(flags, :args)
+      assert_receive {:input, input}
+      assert ["gateway", "call", "sessions.abort", "--params", raw | _] = Jason.decode!(input)
+      assert Jason.decode!(raw) == %{"key" => "own", "runId" => "original"}
+      assert_receive {:closed, _}
+      assert OwnerTransport.lost?()
+      assert {:error, :openclaw_owner_connection_lost} = Transport.command(["gateway", "call", "agent"], options())
       refute_receive {:opened, _, _}
       Process.put(:replies, [{:data, ~s({"status":"ok","runId":"original","endedAt":123})}, {:exit_status, 0}])
       assert {:ok, %{"endedAt" => 123}} = Gateway.status(%{"id" => "original"}, transport: transport)
@@ -140,7 +151,7 @@ defmodule SymphonyElixir.OpenClawTransportTest do
       assert_receive {:opened, _, _}
       assert_receive {:closed, _}
       assert OwnerTransport.lost?()
-      assert {:error, :openclaw_owner_connection_lost} = Transport.command(["gateway", "call", "sessions.abort"], options())
+      assert {:error, :openclaw_owner_connection_lost} = Transport.command(["gateway", "call", "agent"], options())
       refute_receive {:opened, _, _}
       refute_receive {:closed, _}
     end)

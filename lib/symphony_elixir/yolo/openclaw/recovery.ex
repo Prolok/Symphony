@@ -15,7 +15,12 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
     end
   end
 
-  defp retirement_response?(response, order), do: lost_result?(response, order) or match?({:terminal, _, _}, OpenClaw.terminal(response, order))
+  defp retirement_response?({:ok, reply} = response, order) when is_map(reply) do
+    terminal? = match?({:terminal, _, _}, OpenClaw.terminal(response, order))
+    clear_response?(reply) and (lost_result?(response, order) or terminal?)
+  end
+
+  defp retirement_response?(_, _), do: false
 
   defp retirement_candidate?(order) do
     order["interruption_contract"] == 1 and order["writable"] == false and
@@ -51,6 +56,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
         "physical_session_id" => history["sessionId"],
         "last_run_id" => history["sessionInfo"]["lastRunId"],
         "session_end" => Map.take(history["sessionInfo"], ~w(lastRunId status startedAt endedAt)),
+        "original_wait" => elem(response, 1),
+        "session_history" => history,
         "history_sha256" => OpenClaw.digest(Jason.encode!(history)),
         "before_retirement" => Map.take(current, ~w(state error resumed cancel_requested abort_acknowledged)),
         "retained_inputs" => inputs,
@@ -72,8 +79,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
   defp stop_basis(%{"abort_acknowledged" => true}, _response, _history), do: {:ok, "abort_acknowledged"}
 
   defp stop_basis(order, response, history) do
-    # A denied abort is never an acknowledgement. A naturally ended original
-    # can still be retired, but only while that same run is freshly proven idle.
+    # A denied abort is never an acknowledgement. Independent original/end
+    # clocks remain separate, including a later ended run in the same session.
     info = history["sessionInfo"]
 
     case {info["lastRunId"] == order["id"], OpenClaw.terminal(response, order)} do
@@ -85,10 +92,26 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
         # fresh, ended ORIGINAL lifecycle permits retirement, never a result.
         {:ok, "terminal_original_history"}
 
+      {false, {:terminal, _, evidence}} ->
+        if followup_after_original?(order, evidence, history),
+          do: {:ok, "terminal_original_before_followup"},
+          else: {:error, :openclaw_interruption_unresolved}
+
       _ ->
         {:error, :openclaw_interruption_unresolved}
     end
   end
+
+  defp followup_after_original?(order, evidence, history) do
+    order["resumed"] == true and plausible_times?(evidence["startedAt"], evidence["endedAt"]) and
+      history["sessionInfo"]["startedAt"] > evidence["endedAt"] and empty_inputs?(history["pendingInputs"])
+  end
+
+  defp empty_inputs?(%{"items" => [], "total" => 0} = page) do
+    is_nil(page["nextBefore"]) and is_nil(page["nextCursor"]) and page["hasMore"] in [nil, false] and page["truncated"] in [nil, false]
+  end
+
+  defp empty_inputs?(_), do: false
 
   defp consistent_terminal?(state, evidence, info) do
     started = evidence["startedAt"] || info["startedAt"]
@@ -121,8 +144,10 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
       is_nil(info["lifecycleRunId"]) and
       info["hasActiveSubagentRun"] in [nil, false] and info["subagentRunState"] in [nil, "historical"] and
       is_nil(history["inFlightRun"]) and
-      Enum.all?([history, info], &(&1["yielded"] != true and &1["pendingError"] != true))
+      Enum.all?([history, info], &clear_response?/1)
   end
+
+  defp clear_response?(projection), do: projection["yielded"] in [nil, false] and projection["pendingError"] in [nil, false]
 
   defp ended?(info) do
     is_binary(info["lastRunId"]) and info["lastRunId"] != "" and info["status"] in ~w(done failed timeout killed) and

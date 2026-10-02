@@ -48,8 +48,15 @@ Der SDK-Client nutzt den vorhandenen normalen lokalen Token-/Passwortzugang,
 `sharedStateMode=read-only` und ausschließlich `operator.write`. Die öffentlichen
 SDK-Funktionen `health.readConfigFileSnapshot` (`observe=false`, keine Recovery)
 und `resolveGatewayAuth` lesen
-Profil/Umgebung; Zugangsdaten bleiben im Kindprozess. Nicht auflösbare Zugänge,
-Remote- und andere Authmodi scheitern vor der Vorprüfung. Keine Kopplung,
+Profil/Umgebung. Fehlt im gewählten Token-/Passwortmodus ein wirksamer String,
+werden Referenzen im entsprechenden `gateway.auth`-Feld über die öffentliche API
+`secret-ref-runtime.coerceSecretRef` und `resolveSecretRefValues` aufgelöst
+(Store und weitere SDK-Quellen, mit Snapshot-Konfiguration und derselben Umgebung).
+Bereits wirksame Klartext-/Umgebungswerte und die Moduswahl bleiben erhalten;
+Konfiguration und Store werden nicht verändert. Zugangsdaten bleiben im Kindprozess,
+SDK-Diagnosen werden unterdrückt. Fehlende, leere oder fehlerhafte Auflösung
+ergibt weiterhin `credentials_unavailable` (Code 124), ohne Quellenwechsel.
+Ungültige Snapshots, Remote- und andere Authmodi scheitern vor der Vorprüfung. Keine Kopplung,
 Identitätserzeugung, neuen Tokens, Konfigurationsschreibzugriffe oder Authfallbacks.
 Wie die normale lokale CLI sendet dieser Weg keine Geräteidentität. Stattdessen
 bleibt dieselbe Verbindung von der Vorprüfung bis zum eigenen Abbruch/Ende offen;
@@ -66,6 +73,9 @@ keine Quittung. Neustart oder neue Verbindung verleihen keine rückwirkenden
 Abbruchrechte. Der bestehende Recoveryvertrag bleibt maßgeblich.
 Öffentliche Verträge: [Gateway-SDK](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugin-sdk/gateway-runtime.ts),
 [schreibgeschützter Client](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/gateway/client.ts).
+SecretRef-Vertrag: [öffentlicher SDK-Export](https://github.com/openclaw/openclaw/blob/v2026.9.6/src/plugin-sdk/secret-ref-runtime.ts),
+[Resolver](https://github.com/openclaw/openclaw/blob/v2026.9.6/src/secrets/resolve.ts)
+(Quellnachweis für 2026.9.6).
 
 Geprüfte Quelle: offizielles Tag `v2026.9.4`, Commit
 [`3a9d69db306cd7f081e06254cb89c4bcc14a7107`](https://github.com/openclaw/openclaw/tree/3a9d69db306cd7f081e06254cb89c4bcc14a7107).

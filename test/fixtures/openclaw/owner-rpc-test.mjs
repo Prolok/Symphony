@@ -44,7 +44,7 @@ for (const scenario of ['accepted', 'missing', 'reconnect', 'unauthorized', 'tra
     assert.deepEqual(observed.scopes, ['operator.write']);
     assert.equal(observed.sharedStateMode, 'read-only');
     assert.equal(observed.deviceIdentity, null);
-    assert.equal(observed.token, 'synthetic-shared');
+    assert.ok(observed.token === 'synthetic-shared', 'connection credential must match');
     for (const key of ['password', 'deviceToken', 'hostDeps', 'preparedDeviceAuth']) assert.equal(observed[key], undefined);
   }
   assert.ok(!JSON.stringify(result).includes('SECRET'));
@@ -74,3 +74,4 @@ for (const mode of ['token', 'password', 'none', 'trusted-proxy']) {
   assert.equal(await localAccess(sdk, { readConfigFileSnapshot: async () => ({ valid: true, config: { gateway: { mode: 'remote' } } }) }, 'fixture-env'), null);
 }
 console.log('PASS: owner connection, no reconnect or credential fallback, failure classification and redaction');
+await import('./owner-access-test.mjs');

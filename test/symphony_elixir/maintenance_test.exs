@@ -257,6 +257,62 @@ defmodule SymphonyElixir.MaintenanceTest do
     end)
   end
 
+  test "unreadable journals block external idle without hiding an attached worker" do
+    context = %ProjectContext{id: "unreadable-observation", root: Path.dirname(Workflow.workflow_file_path()), settings: Config.settings!()}
+
+    ProjectContext.with_context(context, fn ->
+      run = %{
+        pid: self(),
+        issues: [%{id: "member", identifier: "PRO-1", state: "Yolo Review"}],
+        started_at: DateTime.utc_now(),
+        event: %{session_id: "active-session"}
+      }
+
+      path = Journal.path("review")
+      assert :ok = DurableState.write(path, %{"id" => "broken", "group" => "review", "members" => [], "state" => "accepted"})
+      File.write!(path, "unreadable")
+      refute Maintenance.external_idle?()
+      assert [entry] = Coordinator.entries(%{"review" => run})
+      assert entry.session_id == "active-session"
+      assert entry.state == "YOLO review"
+      refute Map.has_key?(entry, :external)
+      assert File.read!(path) == "unreadable"
+    end)
+  end
+
+  test "reservation projection preserves active generations and omits unattached writable or unknown orders" do
+    context = %ProjectContext{id: "observation-generation", root: Path.dirname(Workflow.workflow_file_path()), settings: Config.settings!()}
+
+    ProjectContext.with_context(context, fn ->
+      path = Journal.path("review")
+      order = %{"id" => "reserved", "group" => "review", "members" => [%{"id" => "member", "identifier" => "PRO-1", "state" => "Yolo Review"}], "state" => "cancel_pending"}
+
+      for writable <- [true, nil] do
+        assert :ok = DurableState.write(path, Map.put(order, "writable", writable))
+        assert Coordinator.entries(%{}) == []
+        refute Maintenance.external_idle?()
+      end
+
+      readonly = Map.put(order, "writable", false)
+      assert :ok = DurableState.write(path, readonly)
+      active = Map.merge(order, %{"id" => "active", "state" => "running", "writable" => true})
+
+      run = %{
+        pid: self(),
+        issues: [%{id: "member", identifier: "PRO-1", state: "Yolo Review"}],
+        started_at: DateTime.utc_now(),
+        event: %{external: Map.put(OpenClaw.observation(active), :maintenance_blocking, true)}
+      }
+
+      assert [entry] = Coordinator.entries(%{"review" => run})
+      assert entry.external.run_id == "active"
+      assert entry.external.maintenance_blocking
+      refute entry.external.reserved
+      assert {:ok, ^readonly} = Journal.read("review")
+      assert {:error, :openclaw_member_reserved} = Journal.member_available("member")
+    end)
+  end
+
   test "orphan reservations are visible in API and dashboards without duplicate attached rows" do
     root = Path.dirname(Workflow.workflow_file_path())
     context = %ProjectContext{id: "visible-orphan", root: root, settings: Config.settings!()}

@@ -2124,6 +2124,43 @@ defmodule SymphonyElixir.OpenClawRuntimeTest do
     Recovery.retire(order, {:ok, %{"status" => "timeout"}}, Gateway, interruption_history: fn _ -> {:ok, history} end)
   end
 
+  for format <- [:string, :text_block] do
+    @tag retained_input_format: format
+    test "new fenced order retains its exact interrupted original input (#{format})", %{issues: issues, opts: opts, retained_input_format: format} do
+      order = fenced_order(issues, opts)
+      refute order["resumed"]
+      {:ok, decisions} = Store.read("incoming")
+      payload = File.read!(Path.join(Path.dirname(descriptor(ProjectContext.current(), order["id"])), "request.md"))
+      content = if format == :string, do: payload, else: [%{"type" => "text", "text" => payload}]
+
+      input = %{
+        "id" => "input-original",
+        "runId" => order["id"],
+        "state" => "interrupted",
+        "acceptedAt" => 1000,
+        "message" => %{"role" => "user", "content" => content}
+      }
+
+      history = Map.put(idle_history(order), "pendingInputs", %{"total" => 1, "items" => [input]})
+      assert {:error, :openclaw_member_reserved} = Journal.member_available(hd(issues).id)
+      assert {:ok, retired} = retire(order, history)
+      assert retired["state"] == "retired"
+      assert retired["retirement"]["stop_basis"] == "abort_acknowledged"
+      assert retired["retirement"]["session_history"] == history
+
+      assert retired["retirement"]["retained_inputs"] == [
+               %{"id" => "input-original", "runId" => order["id"], "state" => "interrupted", "acceptedAt" => 1000, "payload_sha256" => OpenClaw.digest(payload)}
+             ]
+
+      refute retired["terminal"]
+      refute Journal.receipt("incoming", order["session_id"])
+      refute Completion.ready?("incoming", issues)
+      assert {:ok, ^decisions} = Store.read("incoming")
+      assert {:ok, []} = Journal.pending()
+      assert :ok = Journal.member_available(hd(issues).id)
+    end
+  end
+
   for recovery <- [:empty_ack, :input_ack, :ended_followup] do
     @tag pending_original: recovery == :input_ack, ended_followup: recovery == :ended_followup
     test "interrupted new order retries only unfinished members (recovery: #{recovery})", %{

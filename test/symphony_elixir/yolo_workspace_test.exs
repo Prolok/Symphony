@@ -3,9 +3,9 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
   alias Mix.Tasks.Openclaw.Recover, as: RecoverCommand
   alias SymphonyElixir.ProjectContext
 
-  alias SymphonyElixir.Linear.DurableState
+  alias SymphonyElixir.Linear.{DurableState, Issue}
   alias SymphonyElixir.TestRun.PoIncoming
-  alias SymphonyElixir.Yolo.{Delivery, Nonstart, OpenClaw}
+  alias SymphonyElixir.Yolo.{Coordinator, Delivery, Group, Nonstart, OpenClaw, Operations}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{ReviewCheckouts, Runner, Scope, Store, Workspace}
 
@@ -37,6 +37,206 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     String.trim(output)
   end
 
+  defp interrupted_checkout(root, context, group \\ "review") do
+    context = put_in(%{context | yolo_agent_id: "pai", assignee_ids: ["human"], human_handoff_id: "human"}.settings.tracker.app["state_root"], Path.join(root, "state"))
+    ProjectContext.bind(context)
+    id = Ecto.UUID.generate()
+    member = Ecto.UUID.generate()
+    assert {:ok, workspace} = Workspace.create(group, id)
+    assert {:ok, record} = Store.read(group)
+    attempt = checkout_attempt(workspace, id, [member])
+    assert :ok = Store.write(group, Map.put(record, "attempt", attempt))
+    {context, workspace, attempt}
+  end
+
+  defp checkout_attempt(workspace, id, members, status \\ "creating") do
+    %{"id" => id, "members" => members, "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1, "checkout_cleanup" => status}
+  end
+
+  defp related_operation(member, done, via) do
+    request = %{"kind" => "followup", "origin_ids" => if(via == :origin, do: [member], else: [])}
+    intent = %{"key" => "earlier-followup", "request" => request, "issue_id" => if(via == :target, do: member, else: Ecto.UUID.generate())}
+    intent = if is_nil(done), do: intent, else: Map.put(intent, "done", done)
+    assert :ok = Operations.save(intent)
+    intent
+  end
+
+  for via <- [:origin, :target], done <- [true, false, nil, "true", 1, :corrupt, :unreadable] do
+    @tag :nonstart_operations
+    @tag operation_done: done, related_via: via
+    test "interrupted checkout with #{inspect(done)} operation related by #{via}", %{root: root, context: context, operation_done: done, related_via: via} do
+      {_context, workspace, attempt} = interrupted_checkout(root, context)
+      intent = related_operation(hd(attempt["members"]), if(done in [:corrupt, :unreadable], do: true, else: done), via)
+      path = Operations.path(intent["key"])
+      if done == :corrupt, do: File.write!(path, "corrupt")
+
+      if done == :unreadable do
+        File.rm!(path)
+        File.mkdir!(path)
+      end
+
+      opts = [fetch: fn _ -> {:error, :fixture_stop} end, project: fn -> {:ok, []} end]
+      expected = if done == true, do: :fixture_stop, else: :yolo_review_checkout_cleanup_unconfirmed
+      assert {:error, ^expected} = Runner.run("review", [], [], opts)
+      assert {:ok, current} = Store.read("review")
+
+      if done == true do
+        refute File.exists?(workspace.path)
+        assert current["attempt"]["checkout_cleanup"] == "removed"
+        assert current["checkout_cleanup_blocked"] == false
+        assert {:error, :fixture_stop} = Runner.run("review", [], [], opts)
+      else
+        assert File.dir?(workspace.path)
+        assert current["attempt"] == attempt
+      end
+
+      if done not in [:corrupt, :unreadable], do: assert({:ok, ^intent} = DurableState.read(path))
+    end
+  end
+
+  @tag :nonstart_warning
+  test "interrupted protection warning survives repeated Runner and Coordinator checks and a fresh process", %{root: root, context: context} do
+    {context, workspace, attempt} = interrupted_checkout(root, context)
+    related_operation(hd(attempt["members"]), false, :origin)
+    opts = [fetch: fn _ -> flunk("protected checkout must not start") end]
+
+    issue = %Issue{
+      id: hd(attempt["members"]),
+      identifier: "PRO-1",
+      state: "Yolo Review",
+      assignee_id: "human",
+      delegate_id: "pai",
+      project_context_id: context.id,
+      workspace_id: context.settings.tracker.app["workspace_id"],
+      in_project_scope: true,
+      labels: [~s(skip "freigabe implementierung"), ~s(skip "freigabe review")]
+    }
+
+    assert Group.groups([issue]) == %{"review" => [issue]}
+    state = %Orchestrator.State{max_concurrent_agents: 1, codex_totals: %{}}
+    tick_opts = [dependencies: &{:ok, &1}, start: fn _, _ -> flunk("protected group must not start") end]
+    store_stat = fn -> Map.drop(File.stat!(Store.path("review")), [:atime]) end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = Runner.run("review", [], [], opts)
+
+        for _ <- 1..2 do
+          Coordinator.tick(state, [issue], tick_opts)
+          assert {:ok, %{"waiting_reason" => ":yolo_review_checkout_cleanup_unconfirmed"}} = Store.read("review")
+          assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = Runner.run("review", [], [], opts)
+        end
+
+        warmed = Coordinator.tick(state, [issue], tick_opts)
+        before = store_stat.()
+
+        Enum.reduce(1..10, warmed, fn _, current ->
+          ticked = Coordinator.tick(current, [issue], tick_opts)
+          assert ticked.yolo_runs == %{}
+          assert store_stat.() == before
+          ticked
+        end)
+
+        task = Task.async(fn -> ProjectContext.with_context(context, fn -> Store.lock("review", fn -> Nonstart.reconcile("review") end) end) end)
+        assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = Task.await(task)
+        assert store_stat.() == before
+      end)
+
+    assert length(Regex.scan(~r/YOLO interrupted checkout protected/, log)) == 1
+    assert log =~ "issue_id=#{issue.id} issue_identifier=unknown"
+    assert {:ok, %{"attempt" => ^attempt}} = Store.read("review")
+    assert File.dir?(workspace.path)
+  end
+
+  test "a changed protection reason or checkout attempt logs again without releasing the group", %{root: root, context: context} do
+    {_context, workspace, attempt} = interrupted_checkout(root, context)
+    File.write!(Path.join(workspace.path, "tracked"), "preserve changed checkout")
+    check = fn -> assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = Store.lock("review", fn -> Nonstart.reconcile("review") end) end
+
+    first =
+      ExUnit.CaptureLog.capture_log(fn ->
+        check.()
+        check.()
+      end)
+
+    assert length(Regex.scan(~r/YOLO interrupted checkout protected/, first)) == 1
+    assert first =~ "reason={:error, :yolo_checkout_unsafe}"
+
+    related_operation(hd(attempt["members"]), false, :origin)
+
+    changed =
+      ExUnit.CaptureLog.capture_log(fn ->
+        check.()
+        check.()
+      end)
+
+    assert length(Regex.scan(~r/YOLO interrupted checkout protected/, changed)) == 1
+    assert changed =~ "reason={:error, :yolo_nonstart_activity_unconfirmed}"
+
+    id = Ecto.UUID.generate()
+    assert {:ok, next_workspace} = Workspace.create("review", id)
+    next = Map.merge(attempt, %{"id" => id, "workspace" => next_workspace.path, "sha" => next_workspace.sha})
+    assert {:ok, record} = Store.read("review")
+    assert :ok = Store.write("review", Map.put(record, "attempt", next))
+
+    changed =
+      ExUnit.CaptureLog.capture_log(fn ->
+        check.()
+        check.()
+      end)
+
+    assert length(Regex.scan(~r/YOLO interrupted checkout protected/, changed)) == 1
+    assert changed =~ "run_id=#{id}"
+    assert changed =~ "reason={:error, :yolo_nonstart_activity_unconfirmed}"
+    assert {:ok, %{"attempt" => ^next}} = Store.read("review")
+    assert File.dir?(workspace.path) and File.dir?(next_workspace.path)
+  end
+
+  test "protection warning receipts stay separate across projects, agents and groups", %{root: root, context: context} do
+    {context, _workspace, attempt} = interrupted_checkout(root, context)
+    attempt = Map.drop(attempt, ~w(workspace sha))
+    contexts = [context, %{context | id: context.id <> "-other"}, %{context | yolo_agent_id: "other-agent"}]
+
+    for isolated <- contexts, group <- ~w(review incoming) do
+      ProjectContext.with_context(isolated, fn ->
+        assert {:ok, record} = Store.read(group)
+        assert :ok = Store.write(group, Map.put(record, "attempt", attempt))
+
+        log =
+          ExUnit.CaptureLog.capture_log(fn ->
+            for _ <- 1..2 do
+              assert {:error, _} = Store.lock(group, fn -> Nonstart.reconcile(group) end)
+            end
+          end)
+
+        assert length(Regex.scan(~r/YOLO interrupted checkout protected/, log)) == 1
+      end)
+    end
+  end
+
+  for activity <- [:session, :session_end, :delivery_end] do
+    @tag nonstart_activity: activity
+    test "settled historical operations cannot hide #{activity} evidence", %{root: root, context: context, nonstart_activity: activity} do
+      {_context, workspace, attempt} = interrupted_checkout(root, context)
+      related_operation(hd(attempt["members"]), true, :origin)
+      assert {:ok, record} = Store.read("review")
+
+      record =
+        case activity do
+          :session -> put_in(record, ["attempt", "session_id"], "started-session")
+          :session_end -> put_in(record, ["attempt", "session_end"], true)
+          :delivery_end -> Map.put(record, "delivery_ends", %{attempt["id"] => true})
+        end
+
+      assert :ok = Store.write("review", record)
+      assert {:error, :yolo_nonstart_activity_unconfirmed} = Nonstart.inactive(record, attempt["id"])
+      Store.lock("review", fn -> Nonstart.reconcile("review") end)
+      assert {:ok, current} = Store.read("review")
+      assert current["attempt"]["checkout_cleanup"] == "creating"
+      assert File.dir?(workspace.path)
+    end
+  end
+
   for scenario <- [:clean, :dirty, :ignored, :journal, :artifacts, :delivery, :completed, :history, :wrong_sha] do
     @tag creating_scenario: scenario
     test "interrupted creating checkout #{scenario} is recovered conservatively before starting", %{root: root, context: context, creating_scenario: scenario} do
@@ -45,7 +245,7 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
       id = Ecto.UUID.generate()
       assert {:ok, workspace} = Workspace.create("review", id)
       assert {:ok, record} = Store.read("review")
-      attempt = %{"id" => id, "members" => [], "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1, "checkout_cleanup" => "creating"}
+      attempt = checkout_attempt(workspace, id, [])
       attempt = if scenario == :wrong_sha, do: Map.put(attempt, "sha", String.duplicate("0", 40)), else: attempt
       record = Map.put(record, "attempt", attempt)
       record = if scenario == :delivery, do: Map.put(record, "deliveries", %{"member" => %{"run_id" => id}}), else: record
@@ -90,7 +290,7 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
       id = "06401b58-5134-4ed5-8639-bf331fea05dc"
       assert {:ok, workspace} = Workspace.create("review", id)
       {:ok, record} = Store.read("review")
-      attempt = %{"id" => id, "members" => [], "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1, "checkout_cleanup" => "pending"}
+      attempt = checkout_attempt(workspace, id, [], "pending")
       attempt = if confirmed, do: Map.put(attempt, "cleanup_proof", Map.take(attempt, ~w(id workspace sha))), else: attempt
       assert :ok = Store.write("review", Map.merge(record, %{"attempt" => attempt, "checkout_cleanup_blocked" => true}))
       assert :ok = Workspace.remove("review", workspace, id)
@@ -142,7 +342,9 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
     :snapshots_safe,
     :snapshot_execution,
     :snapshots_empty,
-    :snapshots_invalid
+    :snapshots_invalid,
+    :settled_operation,
+    :open_operation
   ]
   for scenario <- @legacy_scenarios ++ [:missing_failure, :foreign_failure, :artifacts] do
     @tag legacy_scenario: scenario
@@ -157,12 +359,16 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
       id = "e1c7b225-ba82-4baa-a4cf-ff0d1e9effa0"
       assert {:ok, workspace} = Workspace.create("review", id)
       {:ok, record} = Store.read("review")
-      attempt = %{"id" => id, "members" => [member], "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1, "checkout_cleanup" => "creating"}
+      attempt = checkout_attempt(workspace, id, [member])
       failure = %{"group" => "review", "run_id" => id, "reason" => "{:linear_api_request, :linear_app_request_unavailable}"}
       failure = if scenario == :foreign_failure, do: Map.put(failure, "run_id", Ecto.UUID.generate()), else: failure
       record = Map.merge(record, %{"attempt" => attempt, "failure" => failure})
       record = if scenario == :missing_failure, do: Map.delete(record, "failure"), else: record
       assert :ok = Store.write("review", record)
+
+      if scenario in [:settled_operation, :open_operation] do
+        related_operation(member, scenario == :settled_operation, :origin)
+      end
 
       order = %{
         "id" => id,
@@ -238,7 +444,7 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
       evidence = %{"version" => 3, "binding" => binding}
       opts = [transport: transport]
 
-      if scenario in [:safe, :snapshots_safe] do
+      if scenario in [:safe, :snapshots_safe, :settled_operation] do
         journal_before = File.read!(Journal.path("review"))
         assert {:ok, %{"state" => "rejected"}} = Recovery.resolve(evidence, false, opts)
         assert File.read!(Journal.path("review")) == journal_before

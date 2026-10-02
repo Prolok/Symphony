@@ -3,6 +3,46 @@ defmodule SymphonyElixir.OpenClawGatewayTest do
   alias SymphonyElixir.Yolo.OpenClaw
   alias SymphonyElixir.Yolo.OpenClaw.Gateway
 
+  test "local owner errors remain transport errors rather than terminal abort rejections" do
+    for reason <- [:openclaw_owner_connection_lost, :openclaw_owner_credentials_unavailable] do
+      assert {:error, ^reason} = Gateway.cancel(%{"id" => "run", "session_id" => "session"}, transport: fn _ -> {:error, reason} end)
+    end
+  end
+
+  test "session absence requires a complete empty search including archived sessions" do
+    order = %{"agent" => "po", "session_id" => "agent:po:symphony:fixture:review:run"}
+
+    for response <- [
+          %{"sessions" => [], "count" => 0},
+          %{"sessions" => []},
+          %{"sessions" => [], "count" => 1},
+          %{"sessions" => [], "count" => 0, "hasMore" => true},
+          %{"sessions" => [], "count" => 0, "totalCount" => 1},
+          %{"sessions" => [%{"key" => order["session_id"]}], "count" => 1}
+        ] do
+      transport = fn
+        ["--version"] ->
+          {:ok, "2026.9.4"}
+
+        ["gateway", "call", "agents.list" | _] ->
+          {:ok, ~s({"agents":[{"id":"po"}]})}
+
+        ["gateway", "call", "sessions.list", "--params", raw | _] ->
+          params = Jason.decode!(raw)
+          assert params == %{"agentId" => "po", "search" => order["session_id"], "limit" => 100, "offset" => 0, "archived" => "all", "includeUnknown" => true, "includeGlobal" => true}
+          {:ok, Jason.encode!(response)}
+      end
+
+      result = Gateway.absent_session(order, transport: transport)
+
+      if response == %{"sessions" => [], "count" => 0} do
+        assert match?({:ok, _}, result)
+      else
+        assert result == {:error, :openclaw_session_absence_unconfirmed}
+      end
+    end
+  end
+
   test "preflight accepts the minimum and newer CLI versions before querying the standard gateway" do
     parent = self()
 

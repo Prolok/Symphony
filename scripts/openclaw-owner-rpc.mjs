@@ -113,10 +113,10 @@ export function wireReply(args, reply) {
   const digest = () => createHash('sha256').update(raw).digest('hex');
   if (method === 'sessions.abort') {
     const error = reply.error;
-    if (reply.reason || typeof error?.retryable === 'boolean') {
+    if (error?.type === 'gateway_request_error' && error.phase === 'request' && typeof error.retryable === 'boolean') {
       return { code: 0, output: JSON.stringify({ symphony_openclaw_abort_error: 1, method,
-        code: error?.code ?? 'NOT_LINKED', retryable: error?.retryable ?? false,
-        reason: reply.reason ?? (error.message === 'unauthorized' ? 'unauthorized' : 'request_rejected'), request_sha256: digest() }) };
+        code: error.code, retryable: error.retryable,
+        reason: error.message === 'unauthorized' ? 'unauthorized' : 'request_rejected', request_sha256: digest() }) };
     }
   }
   const reasons = { 'cwd is reserved for plugin-owned subagent runs': 'cwd_reserved', 'cwd must be absolute': 'cwd_not_absolute' };

@@ -97,9 +97,7 @@ defmodule SymphonyElixir.OpenClawTransportTest do
       assert_receive {:opened, _, _}
       assert_receive {:closed, _}
       transport = &Transport.command(&1, options())
-      assert {:error, {:openclaw_abort_failed, proof}} = Gateway.cancel(%{"id" => "original", "session_id" => "own"}, transport: transport)
-      assert proof["reason"] == "owner_connection_lost"
-      refute proof["retryable"]
+      assert {:error, :openclaw_owner_connection_lost} = Gateway.cancel(%{"id" => "original", "session_id" => "own"}, transport: transport)
       refute_receive {:opened, _, _}
       Process.put(:replies, [{:data, ~s({"status":"ok","runId":"original","endedAt":123})}, {:exit_status, 0}])
       assert {:ok, %{"endedAt" => 123}} = Gateway.status(%{"id" => "original"}, transport: transport)

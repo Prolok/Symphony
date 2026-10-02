@@ -33,6 +33,8 @@ defmodule Mix.Tasks.Openclaw.Recover do
     end
   end
 
+  defp sources(%{"version" => 3}, _directory), do: {:ok, %{}}
+
   defp sources(evidence, directory) do
     Enum.reduce_while(["source", "execution_source"], {:ok, %{}}, fn key, {:ok, sources} ->
       with path when is_binary(path) <- evidence[key <> "_file"],

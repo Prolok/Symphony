@@ -1,11 +1,13 @@
 defmodule SymphonyElixir.YoloWorkspaceTest do
   use SymphonyElixir.TestSupport
+  alias Mix.Tasks.Openclaw.Recover, as: RecoverCommand
   alias SymphonyElixir.ProjectContext
 
   alias SymphonyElixir.Linear.DurableState
   alias SymphonyElixir.TestRun.PoIncoming
+  alias SymphonyElixir.Yolo.{Delivery, Nonstart, OpenClaw}
   alias SymphonyElixir.Yolo.OpenClaw.Journal
-  alias SymphonyElixir.Yolo.{ReviewCheckouts, Scope, Store, Workspace}
+  alias SymphonyElixir.Yolo.{ReviewCheckouts, Runner, Scope, Store, Workspace}
 
   setup do
     root = Path.dirname(Workflow.workflow_file_path())
@@ -33,6 +35,237 @@ defmodule SymphonyElixir.YoloWorkspaceTest do
   defp git(root, args) do
     assert {output, 0} = System.cmd("git", args, cd: root, stderr_to_stdout: true)
     String.trim(output)
+  end
+
+  for scenario <- [:clean, :dirty, :ignored, :journal, :artifacts, :delivery, :completed, :history, :wrong_sha] do
+    @tag creating_scenario: scenario
+    test "interrupted creating checkout #{scenario} is recovered conservatively before starting", %{root: root, context: context, creating_scenario: scenario} do
+      context = %{context | yolo_agent_id: "pai"}
+      ProjectContext.bind(put_in(context.settings.tracker.app["state_root"], Path.join(root, "state")))
+      id = Ecto.UUID.generate()
+      assert {:ok, workspace} = Workspace.create("review", id)
+      assert {:ok, record} = Store.read("review")
+      attempt = %{"id" => id, "members" => [], "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1, "checkout_cleanup" => "creating"}
+      attempt = if scenario == :wrong_sha, do: Map.put(attempt, "sha", String.duplicate("0", 40)), else: attempt
+      record = Map.put(record, "attempt", attempt)
+      record = if scenario == :delivery, do: Map.put(record, "deliveries", %{"member" => %{"run_id" => id}}), else: record
+      record = if scenario == :completed, do: put_in(record, ["attempt", "completed"], %{"member" => "done"}), else: record
+      assert :ok = Store.write("review", record)
+      if scenario == :dirty, do: File.write!(Path.join(workspace.path, "tracked"), "changed")
+
+      if scenario == :ignored do
+        File.write!(Path.join(workspace.path, ".gitignore"), "scratch\n")
+        File.write!(Path.join(workspace.path, "scratch"), "keep")
+      end
+
+      if scenario == :artifacts, do: File.mkdir_p!(Path.join([context.settings.workspace.root, "yolo-runs", id]))
+
+      if scenario in [:journal, :history] do
+        order = %{"id" => id, "group" => "review", "members" => [], "state" => "completed"}
+        assert :ok = Journal.write(order)
+        if scenario == :history, do: assert(:ok == Journal.write(%{order | "id" => Ecto.UUID.generate()}))
+      end
+
+      opts = [fetch: fn _ -> {:error, :fixture_stop} end, project: fn -> {:ok, []} end]
+      result = Runner.run("review", [], [], opts)
+      assert {:ok, current} = Store.read("review")
+
+      if scenario == :clean do
+        assert result == {:error, :fixture_stop}
+        assert current["attempt"]["checkout_cleanup"] == "removed"
+        refute File.exists?(workspace.path)
+        assert {:error, :fixture_stop} = Runner.run("review", [], [], opts)
+      else
+        expected = if scenario == :delivery, do: :fixture_stop, else: :yolo_review_checkout_cleanup_unconfirmed
+        assert result == {:error, expected}
+        assert File.dir?(workspace.path)
+      end
+    end
+  end
+
+  for confirmed <- [true, false] do
+    @tag cleanup_confirmed: confirmed
+    test "removed checkout needs receipt (#{confirmed})", %{root: root, context: context, cleanup_confirmed: confirmed} do
+      ProjectContext.bind(put_in(%{context | yolo_agent_id: "pai"}.settings.tracker.app["state_root"], Path.join(root, "state")))
+      id = "06401b58-5134-4ed5-8639-bf331fea05dc"
+      assert {:ok, workspace} = Workspace.create("review", id)
+      {:ok, record} = Store.read("review")
+      attempt = %{"id" => id, "members" => [], "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1, "checkout_cleanup" => "pending"}
+      attempt = if confirmed, do: Map.put(attempt, "cleanup_proof", Map.take(attempt, ~w(id workspace sha))), else: attempt
+      assert :ok = Store.write("review", Map.merge(record, %{"attempt" => attempt, "checkout_cleanup_blocked" => true}))
+      assert :ok = Workspace.remove("review", workspace, id)
+      result = Store.lock("review", fn -> Nonstart.reconcile("review") end)
+      assert {:ok, current} = Store.read("review")
+
+      if confirmed do
+        assert result == :ok
+        assert current["attempt"]["checkout_cleanup"] == "removed"
+        assert :ok = Store.lock("review", fn -> Nonstart.reconcile("review") end)
+      else
+        assert result == {:error, :yolo_review_checkout_cleanup_unconfirmed}
+        assert current["attempt"]["checkout_cleanup"] == "pending"
+      end
+    end
+  end
+
+  test "missing checkout binding and unreadable journal retain the interrupted attempt", %{root: root, context: context} do
+    ProjectContext.bind(put_in(%{context | yolo_agent_id: "pai"}.settings.tracker.app["state_root"], Path.join(root, "state")))
+    {:ok, record} = Store.read("review")
+    attempt = %{"id" => Ecto.UUID.generate(), "members" => [], "cleanup_contract" => 1, "checkout_cleanup" => "creating"}
+    assert :ok = Store.write("review", Map.put(record, "attempt", attempt))
+    File.mkdir_p!(Path.dirname(Journal.path("review")))
+    File.write!(Journal.path("review"), "unreadable fixture")
+    refute Nonstart.resolved_external_attempt?("review", attempt)
+    assert {:error, :yolo_review_checkout_cleanup_unconfirmed} = Store.lock("review", fn -> Nonstart.reconcile("review") end)
+    assert {:ok, %{"attempt" => ^attempt}} = Store.read("review")
+  end
+
+  test "V3 operator command checks binding without requiring external source files", %{root: root, context: context} do
+    path = Path.join(root, "legacy-binding.json")
+    File.write!(path, Jason.encode!(%{"version" => 3, "binding" => %{}}))
+    isolated = %{context | env: Map.put(context.env, "SYMPHONY_ROOT_DIR", root)}
+
+    ProjectContext.with_context(isolated, fn ->
+      assert_raise Mix.Error, "OpenClaw recovery refused: openclaw_local_nonstart_unconfirmed", fn ->
+        RecoverCommand.run(["--project", root, "--evidence", path])
+      end
+    end)
+  end
+
+  @legacy_scenarios [
+    :safe,
+    :started,
+    :observed,
+    :session,
+    :truncated,
+    :offline,
+    :snapshots_safe,
+    :snapshot_execution,
+    :snapshots_empty,
+    :snapshots_invalid
+  ]
+  for scenario <- @legacy_scenarios ++ [:missing_failure, :foreign_failure, :artifacts] do
+    @tag legacy_scenario: scenario
+    test "legacy proof #{scenario}", %{root: root, context: context, legacy_scenario: scenario} do
+      alias SymphonyElixir.Yolo.OpenClaw.{LocalNonstart, Recovery}
+      agent = Ecto.UUID.generate()
+      member = Ecto.UUID.generate()
+      context = %{context | yolo_agent_id: agent, env: Map.put(context.env, "OPENCLAW_YOLO_AGENT", "po")}
+      context = put_in(context.settings.tracker.openclaw_yolo_agent, "po")
+      context = put_in(context.settings.tracker.app["workspace_id"], Ecto.UUID.generate())
+      ProjectContext.bind(put_in(context.settings.tracker.app["state_root"], Path.join(root, "state")))
+      id = "e1c7b225-ba82-4baa-a4cf-ff0d1e9effa0"
+      assert {:ok, workspace} = Workspace.create("review", id)
+      {:ok, record} = Store.read("review")
+      attempt = %{"id" => id, "members" => [member], "workspace" => workspace.path, "sha" => workspace.sha, "cleanup_contract" => 1, "checkout_cleanup" => "creating"}
+      failure = %{"group" => "review", "run_id" => id, "reason" => "{:linear_api_request, :linear_app_request_unavailable}"}
+      failure = if scenario == :foreign_failure, do: Map.put(failure, "run_id", Ecto.UUID.generate()), else: failure
+      record = Map.merge(record, %{"attempt" => attempt, "failure" => failure})
+      record = if scenario == :missing_failure, do: Map.delete(record, "failure"), else: record
+      assert :ok = Store.write("review", record)
+
+      order = %{
+        "id" => id,
+        "group" => "review",
+        "project_id" => context.id,
+        "agent" => "po",
+        "linear_agent_id" => agent,
+        "linear_workspace_id" => context.settings.tracker.app["workspace_id"],
+        "members" => [%{"id" => member}],
+        "session_id" => "agent:po:symphony:#{OpenClaw.digest(context.id)}:review:#{id}",
+        "payload_sha256" => String.duplicate("a", 64),
+        "workspace" => workspace.path,
+        "sha" => workspace.sha,
+        "state" => "cancel_pending",
+        "writable" => false,
+        "cancel_requested" => true,
+        "acceptance_observed" => false,
+        "execution_observed" => false,
+        "abort_error" => %{"method" => "sessions.abort", "code" => "NOT_LINKED", "reason" => "owner_connection_lost", "retryable" => false}
+      }
+
+      order = if scenario == :started, do: Map.put(order, "submit_started", true), else: order
+      order = if scenario == :observed, do: Map.put(order, "execution_observed", true), else: order
+      order = if scenario == :artifacts, do: Map.put(order, "checkout_proof", %{"bound" => true}), else: order
+
+      order =
+        case scenario do
+          :snapshots_safe ->
+            observation = %{"acceptance_observed" => false, "execution_observed" => false}
+            config = %{"producer_id" => "fixture", "consumer_account_id" => "fixture", "key_id" => "fixture"}
+            snapshot = %{"sequence" => 1, "projection" => %{"observation" => observation}}
+            order |> Map.drop(~w(acceptance_observed execution_observed)) |> Map.put("linear_bridge", %{"config" => config, "snapshots" => [snapshot]})
+
+          :snapshot_execution ->
+            observation = %{"acceptance_observed" => false, "execution_observed" => true}
+            Map.put(order, "linear_bridge", %{"snapshots" => [%{"projection" => %{"observation" => observation}}]})
+
+          :snapshots_empty ->
+            Map.put(order, "linear_bridge", %{"snapshots" => []})
+
+          :snapshots_invalid ->
+            Map.put(order, "linear_bridge", %{"snapshots" => [%{"projection" => %{}}]})
+
+          _ ->
+            order
+        end
+
+      assert :ok = Journal.write(order)
+
+      transport = fn
+        ["--version"] ->
+          {:ok, "2026.9.4"}
+
+        ["gateway", "call", "agents.list" | _] ->
+          {:ok, ~s({"agents":[{"id":"po"}]})}
+
+        ["gateway", "call", "sessions.list", "--params", raw | _] ->
+          assert Jason.decode!(raw)["search"] == order["session_id"]
+          send(self(), :legacy_session_check)
+
+          case scenario do
+            :offline -> {:error, :openclaw_gateway_unavailable}
+            :session -> {:ok, Jason.encode!(%{"sessions" => [%{"key" => order["session_id"]}]})}
+            :truncated -> {:ok, ~s({"sessions":[],"hasMore":true})}
+            _ -> {:ok, ~s({"sessions":[],"count":0})}
+          end
+
+        _ ->
+          flunk("legacy nonstart must not submit or abort")
+      end
+
+      binding = Map.take(order, ~w(id group project_id agent linear_agent_id linear_workspace_id session_id payload_sha256 workspace sha members))
+      evidence = %{"version" => 3, "binding" => binding}
+      opts = [transport: transport]
+
+      if scenario in [:safe, :snapshots_safe] do
+        journal_before = File.read!(Journal.path("review"))
+        assert {:ok, %{"state" => "rejected"}} = Recovery.resolve(evidence, false, opts)
+        assert File.read!(Journal.path("review")) == journal_before
+        operator_context = %{ProjectContext.current() | yolo_agent_id: nil}
+        dry_run = fn -> Recovery.resolve(evidence, false, opts) end
+        assert {:ok, %{"state" => "rejected"}} = ProjectContext.with_context(operator_context, dry_run)
+        assert {:ok, fixed} = LocalNonstart.recover(order, opts)
+        assert fixed["local_nonstart"]["failure"] == failure
+        assert fixed["before_recovery"]["abort_error"] == order["abort_error"]
+        refute fixed["terminal"]
+        assert {:ok, ^fixed} = LocalNonstart.recover(fixed, opts)
+        assert :ok = Delivery.reconcile("review")
+        assert :ok = Store.lock("review", fn -> Nonstart.reconcile("review") end)
+        assert :ok = Journal.available("review")
+        refute File.exists?(workspace.path)
+        assert {:ok, %{"attempt" => %{"checkout_cleanup" => "removed"}}} = Store.read("review")
+        next = Map.merge(order, %{"id" => Ecto.UUID.generate(), "state" => "unknown"})
+        assert :ok = Journal.write(next)
+        assert {:ok, ^fixed} = Recovery.resolve(evidence, true, opts)
+        assert {:ok, ^next} = Journal.read("review")
+      else
+        assert {:error, :openclaw_local_nonstart_unconfirmed} = LocalNonstart.recover(order, opts)
+        assert {:ok, ^order} = Journal.read("review")
+        assert Journal.pending?(order)
+        assert File.dir?(workspace.path)
+      end
+    end
   end
 
   test "detached checkout fixes the merged SHA, retains source work and rejects unsafe paths", %{root: root} do

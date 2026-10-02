@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   require Logger
   alias SymphonyElixir.{Config, PathSafety, ProjectContext}
   alias SymphonyElixir.Linear.IssueLease
-  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, OwnerTransport, Recovery, ToolBridge}
+  alias SymphonyElixir.Yolo.OpenClaw.{Gateway, Journal, LocalNonstart, OwnerTransport, Recovery, ToolBridge}
   alias SymphonyElixir.Yolo.Scope
 
   @spec retry_preflight(keyword()) :: :ok | {:error, term()}
@@ -83,6 +83,9 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
       "sha" => workspace.sha,
       "members" => Enum.map(issues, &%{"id" => &1.id, "identifier" => &1.identifier, "state" => &1.state}),
       "state" => "intent",
+      "acceptance_observed" => false,
+      "execution_observed" => false,
+      "submit_started" => false,
       "writable" => true,
       "execution" => "openclaw",
       "interruption_contract" => 1,
@@ -97,7 +100,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
     with :ok <- File.write(Path.join(Path.dirname(bridge.descriptor), "request.md"), payload),
          :ok <- Journal.write(order),
-         :ok <- Keyword.get(opts, :before_delivery, fn -> :ok end).() do
+         :ok <- before_delivery(order, opts),
+         {:ok, order} <- Journal.transition(order, &begin_submission/1) do
       event(order, :submitted, opts)
       # The intent is durable BEFORE invoking any external submission. Even a
       # transport failure leaves this exact run reserved until terminal proof.
@@ -111,6 +115,46 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
       end
     end
   end
+
+  defp begin_submission(%{"state" => "intent", "writable" => true} = current) do
+    if current["submit_started"] != true,
+      do: {:ok, %{"submit_started" => true}},
+      else: {:error, :openclaw_submission_already_started}
+  end
+
+  defp begin_submission(_), do: {:error, :openclaw_submission_fenced}
+
+  defp before_delivery(order, opts) do
+    result = delivery_check(opts)
+
+    case result do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        proof = %{"kind" => "local_nonstart", "phase" => "before_delivery", "reason" => local_reason(reason)}
+
+        with {:ok, _} <- Journal.update(order, %{"state" => "rejected", "writable" => false, "error" => "openclaw_local_nonstart", "rejection" => proof, "local_nonstart" => proof}) do
+          error
+        end
+    end
+  end
+
+  defp delivery_check(opts) do
+    case Keyword.get(opts, :before_delivery, fn -> :ok end).() do
+      :ok -> :ok
+      {:error, _} = error -> error
+      _ -> {:error, :openclaw_before_delivery_invalid}
+    end
+  rescue
+    error -> {:error, {:openclaw_before_delivery_exception, error.__struct__}}
+  catch
+    kind, _ -> {:error, {:openclaw_before_delivery_caught, kind}}
+  end
+
+  defp local_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp local_reason({:linear_api_request, :linear_app_request_unavailable}), do: "linear_app_request_unavailable"
+  defp local_reason(_), do: "openclaw_before_delivery_failed"
 
   defp acceptance({:ok, %{"runId" => id, "status" => "accepted"}}, %{"id" => id}), do: %{"state" => "accepted", "acceptance_observed" => true}
 
@@ -183,11 +227,22 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
   defp recover_locked(order, opts) do
     hold_members(order["members"], order, opts, fn ->
-      with {:ok, current} <- Journal.update(order, %{"writable" => false, "cancel_requested" => true, "resumed" => true}) do
-        event(current, :recovered, opts)
-        await(current, Keyword.get(opts, :openclaw_adapter, Gateway), opts)
+      case LocalNonstart.recover(order, opts) do
+        {:ok, current} ->
+          event(current, :ended, opts)
+          run_result(current, current["state"])
+
+        {:error, _} ->
+          recover_pending(order, opts)
       end
     end)
+  end
+
+  defp recover_pending(order, opts) do
+    with {:ok, current} <- Journal.update(order, %{"writable" => false, "cancel_requested" => true, "resumed" => true}) do
+      event(current, :recovered, opts)
+      await(current, Keyword.get(opts, :openclaw_adapter, Gateway), opts)
+    end
   end
 
   @doc "One terminal reconciliation for an already fenced order; no abort, submission or polling loop."
@@ -349,8 +404,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
   end
 
   defp abort_external(order, adapter, opts) do
-    if Journal.pending?(order) and enabled_for?(order) and order["abort_acknowledged"] != true and
-         get_in(order, ["abort_error", "retryable"]) != false do
+    if Journal.pending?(order) and enabled_for?(order) and order["abort_acknowledged"] != true and Gateway.abort_retryable?(order["abort_error"]) do
       persist_abort_result(order, adapter.cancel(order, opts), opts)
     else
       order
@@ -365,6 +419,8 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
 
   defp persist_abort_result(order, {:error, reason}, opts) do
     reason = if is_atom(reason), do: Atom.to_string(reason), else: "openclaw_transport_failed"
+    reason = if reason in ~w(openclaw_owner_connection_lost openclaw_owner_credentials_unavailable), do: String.replace_prefix(reason, "openclaw_", ""), else: reason
+    reason = if reason == "owner_credentials_unavailable", do: "credentials_unavailable", else: reason
     update_abort(order, %{"abort_error" => %{"reason" => reason, "retryable" => true}}, opts)
   end
 
@@ -381,6 +437,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw do
     end
   end
 
+  defp run_result(%{"local_nonstart" => proof}, "rejected") when is_map(proof), do: {:error, :openclaw_local_nonstart}
   defp run_result(_order, "rejected"), do: {:error, :openclaw_request_rejected_before_acceptance}
   defp run_result(_order, "retired"), do: {:error, :openclaw_interrupted_order_retired}
 

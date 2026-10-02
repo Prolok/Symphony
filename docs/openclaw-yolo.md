@@ -68,7 +68,7 @@ Bei Verbindungs-/Prozessverlust wird diese Besitzerbindung nicht neu aufgebaut.
 Die erste fehlgeschlagene Beobachtung entzieht die Schreibrechte; Reservierung
 und bestätigte Entscheidungen bleiben erhalten. Weitere lesende CLI-Abfragen
 dürfen einen tatsächlichen Originalabschluss samt Inaktivität/Eingaben belegen.
-Abbruch ohne ursprüngliche Verbindung bleibt ein sanitierter terminaler Fehler,
+Abbruch ohne ursprüngliche Verbindung bleibt ein sanitierter lokaler, wiederholbarer Fehler,
 keine Quittung. Neustart oder neue Verbindung verleihen keine rückwirkenden
 Abbruchrechte. Der bestehende Recoveryvertrag bleibt maßgeblich.
 Öffentliche Verträge: [Gateway-SDK](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/src/plugin-sdk/gateway-runtime.ts),
@@ -86,7 +86,7 @@ Das ist ein Quellnachweis, kein Beleg für eine lokale Installation.
 | Vorprüfung | `--version` mindestens 2026.9.4, anschließend `agents.list`; exakt konfigurierte ID erforderlich |
 | Start | Externes `agent`: `agentId`, `sessionKey`, `idempotencyKey`, vollständige `message`, `timeout`, `deliver=false`; kein `cwd` oder interner/plugin-eigener Principal |
 | Annahme | Antwort `runId` gleich Auftrags-ID und `status=accepted`; noch kein Arbeitsabschluss |
-| Nichtstart | Typisierte erste Gateway-Fehlerantwort mit belegtem Vorab-Grund; eigener Ablehnungsbeleg, kein erfundenes `endedAt` |
+| Nichtstart | Atomarer lokaler Vorabfehler oder typisierte erste Gateway-Fehlerantwort mit belegtem Vorab-Grund; eigener Ablehnungsbeleg, kein erfundenes `endedAt` |
 | Beobachtung | `agent.wait` mit derselben `runId`; `timeout` ohne Endbeleg bleibt ungeklärt |
 | Abbruch | `sessions.abort` mit Sitzungsschlüssel **und** `runId`; nur `ok=true`, `status=aborted` und die exakte `abortedRunId` quittieren den Abbruch; Bestätigung ersetzt keinen Endbeleg |
 | Ende | Passende `runId`, terminaler Status und `endedAt`; `yielded`/`pendingError` sind kein Ende |
@@ -116,7 +116,11 @@ Typisierte Abbruchfehler werden auf Code, erlaubten Grund, `retryable` und den
 Hash der konkreten Anfrage reduziert. `abort_error` bleibt im Originaljournal,
 der Laufbeobachtung und dem isolierten Testbeleg erhalten, auch wenn spätere
 Zustandsabfragen scheitern. `retryable=false` verhindert weitere automatische
-Abbruchversuche derselben Generation, einschließlich Wiederaufnahme. Transiente
+Abbruchversuche derselben Generation, einschließlich Wiederaufnahme. Nur eine
+typisierte Antwort auf die konkrete Abbruchanfrage darf endgültig sein;
+lokale `owner_connection_lost`/`credentials_unavailable` und Verbindungsfehler
+vor dieser Anfrage bleiben wiederholbar. Alte lokal erzeugte `NOT_LINKED`-Belege
+mit genau diesen beiden Gründen gelten ebenfalls als wiederholbar. Transiente
 oder ungeklärte Transportfehler bleiben wiederholbar. Eine Ablehnung, ein Timeout
 oder eine Abbruchquittung allein gibt keine Reservierung frei; der bestehende
 End-/Inaktivitäts-/Eingabevertrag gilt unverändert.
@@ -197,7 +201,8 @@ behält Mitgliederleases, lokale Sperren und einen gemeinsamen Kapazitätsplatz
 bis zum bestätigten externen Ende, belegten Nichtstart oder zur unten beschriebenen
 kontrollierten technischen Aufgabe. Beim Neustart werden Reservierungen aus dem
 Symphony-Journal rekonstruiert; alte Werkzeuge bekommen keine neue Schreibfreigabe.
-Die Wiederaufnahme beobachtet denselben Auftrag und fordert dessen gezielten
+Die Wiederaufnahme löst zunächst belegte lokale Nichtstarts auf; sonst beobachtet
+sie denselben Auftrag und fordert dessen gezielten
 Abbruch an. Sie sendet den Arbeitsauftrag **niemals erneut**.
 
 Verlorene Annahme, Prozessabbruch, Gateway-/Verbindungsverlust oder fehlender
@@ -293,11 +298,12 @@ Reservierungen bleiben geschützt. Dieser Zustellbeleg ist kein Live-Testpass.
 Das ist eine begrenzte aktuelle Schnittstellenprüfung mit dauerhaftem lokalem
 Rechteentzug, keine atomare Sperre des OpenClaw-Hosts. Zustandsabfragen können
 fehlschlagen; dann bleibt die Reservierung bestehen. Ältere Aufträge ohne diesen
-Vertrag werden nicht automatisch migriert. V1-/V2-Importe behalten ihre bisherigen
+Vertrag werden nicht pauschal migriert; die unten beschriebene begrenzte
+V3-Nichtstartbehandlung bleibt davon getrennt. V1-/V2-Importe behalten ihre bisherigen
 Voraussetzungen; eine ausdrücklich beauftragte administrative Einmalbereinigung
 ist davon getrennt.
 
-Für einen Nichtstartbeleg akzeptiert `openclaw-rpc.py` ausschließlich typisierte
+Für einen externen Nichtstartbeleg akzeptiert `openclaw-rpc.py` ausschließlich typisierte
 erste JSON-Fehler aus dem geprüften CLI-/SDK-Pfad: Exit 1, `ok=false`, `error.type=gateway_request_error`,
 `code=INVALID_REQUEST`, `retryable=false` und den exakten Vorab-Grund
 `cwd is reserved for plugin-owned subagent runs` oder `cwd must be absolute`.
@@ -321,6 +327,23 @@ ersetzt. Ein Abbruch dazwischen lässt den alten Datensatz lesbar und den Archiv
 wiederholbar. Nichtstart markiert keine PO-Entscheidung als verarbeitet; der bestehende
 Retryabstand bleibt erhalten. Dashboard und Lifecycle nennen bei Unsicherheit die
 Betreiberklärung und nach Ablehnung die freigegebene Reservierung.
+
+Fehler, Exceptions und Throws in `before_delivery` werden vor `adapter.submit`
+atomar als `local_nonstart` mit Phase und sanitierter Ursache journalisiert:
+`state=rejected`, `writable=false`, ohne Gateway-Ablehnung oder Enddatum.
+Vor dem externen Aufruf wird `submit_started=true` dauerhaft geschrieben.
+Ein Persistenzfehler oder ein bereits begonnener Aufruf erlaubt keine lokale
+Freigabe; Annahme-, Werkzeug- und Ausführungsbelege bleiben monoton geschützt.
+Die bestehende Reconciliation löst nur die Zustellreservierungen dieses Laufs.
+
+Ein unterbrochener Versuch mit `checkout_cleanup=creating` wird bei der nächsten
+Gruppenbeobachtung oder beim Start geprüft. Ohne Sitzung, Zustellung, Completion,
+Aktion, aktuelles/archiviertes OpenClaw-Journal und Laufartefakte entfernt Symphony
+nur den eigenen registrierten, sauberen detached Checkout der gespeicherten SHA.
+Veränderte, unklare oder unlesbare Belege bleiben geschützt und werden als
+`YOLO interrupted checkout protected` mit Grund geloggt. Vor der Entfernung wird
+eine lauf-/pfad-/SHA-gebundene Cleanupquittung persistiert; ein Neustart nach der
+Entfernung kann damit denselben Versuch idempotent als `removed` bestätigen.
 
 Bei der Gruppenbeobachtung ergänzt Symphony fehlende Zustellungs-Endmarken für alte
 Läufe aus dem aktuellen oder archivierten Auftrag. Nur ein Auftrag derselben Gruppe
@@ -346,6 +369,31 @@ ein externer Auftrag darauf ungeklärt ist. Ein lokaler Prozesskill gilt nie als
 OpenClaw-Abbruch. Keine automatische Bereinigung des Wissensworkspace.
 
 ## Gezielte Betreiber-Recovery eines Altauftrags
+
+### Lokaler Alt-Nichtstart ohne Zustellung (Version 3)
+
+`{"version":3,"binding":{...}}` enthält dieselbe vollständige Originalbindung
+wie Version 1/2, ohne frei behauptete externe Belege oder Quelldateien. Trockenlauf
+und `--apply` verwenden die unten genannten `mix openclaw.recover`-Aufrufe.
+Die automatische Wiederaufnahme benutzt denselben Prüfkern. Er verlangt ein
+Altjournal ohne `submit_started`, ausdrücklich unbeobachtete Annahme/Ausführung
+(gegebenenfalls in sämtlichen Producer-Snapshots), keinen Werkzeug-/Endbeleg und
+den zum Versuch gehörenden Symphony-Store-Startfehler exakt
+`:linear_app_request_unavailable` oder
+`{:linear_api_request, :linear_app_request_unavailable}`. Dieser Fehler konnte
+im alten Startpfad nach dem Intent nur vor `adapter.submit` zurückgegeben werden.
+Sitzungs-/Zustellungs-/Completion-/Aktionsbelege schließen die Behandlung aus.
+Ein allgemeiner Timeout oder ein fehlender Zustellmarker genügt nicht.
+
+Unmittelbar unter der Journal-/Gruppensperre wird `sessions.list` nach dem
+Originalsitzungsschlüssel mit `archived=all` und ohne Aktivitätsfilter gelesen;
+nur eine erfolgreiche, leere, nicht abgeschnittene Antwort bestätigt Abwesenheit.
+Der [geprüfte Sitzungslistenvertrag](https://github.com/openclaw/openclaw/blob/3a9d69db306cd7f081e06254cb89c4bcc14a7107/packages/gateway-protocol/src/schema/sessions-list.ts)
+enthält diese Filter. Fehler oder vorhandene Sitzungen lassen die Reservierung
+bestehen. Anwendung erhält Originalbindung, Startfehler, Hash der frischen
+Sitzungsprüfung und Vorzustand im Journal. Sie erfindet kein Ende und ist
+idempotent. Pai führt die beauftragte Bestandsprobe/Trockenlauf/Anwendung in
+Yolo Review aus; Journale und Stores werden nicht von Hand geändert.
 
 Nur der Betreiber importiert Originalbelege; Worker verändern weder produktive
 Journale noch laufende Tickets. Dienst und Befehl müssen den obigen Journalvertrag

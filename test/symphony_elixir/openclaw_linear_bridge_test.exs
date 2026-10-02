@@ -567,6 +567,16 @@ defmodule SymphonyElixir.OpenClawLinearBridgeTest do
     assert payload["observation"]["retirement"] == Map.drop(retirement, ~w(retained_inputs original_wait session_history))
     schema = File.read!("docs/contracts/linearbridge-lifecycle-v1.schema.json") |> Jason.decode!()
     assert payload["observation"]["retirement"]["stop_basis"] in get_in(schema, ["$defs", "retirement", "properties", "stop_basis", "enum"])
+
+    # Expired wait plus durable original transcript uses the same retirement
+    # wire value, without projecting the followup or transcript as a terminal.
+    expired = put_in(retired, ["retirement", "original_wait"], %{"runId" => uncertain["id"], "status" => "timeout"}) |> Map.put("terminal", nil)
+    assert {:ok, expired_payload} = Projection.payload(expired, config(), 6)
+    assert expired_payload["observation"]["terminal"] == nil
+    assert expired_payload["observation"]["retirement"] == payload["observation"]["retirement"]
+    assert expired_payload["observation"]["state"] == "retired"
+    refute Map.has_key?(expired_payload["observation"]["retirement"], "original_wait")
+    refute Map.has_key?(expired_payload["observation"]["retirement"], "session_history")
   end
 
   test "invalid or incomplete journal membership is never silently normalized" do

@@ -15,10 +15,10 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
     end
   end
 
-  defp retirement_response?({:ok, reply} = response, order) when is_map(reply) do
-    terminal? = match?({:terminal, _, _}, OpenClaw.terminal(response, order))
-    clear_response?(reply) and (lost_result?(response, order) or terminal?)
-  end
+  defp retirement_response?({:ok, reply} = response, order) when is_map(reply),
+    do:
+      clear_response?(reply) and
+        (lost_result?(response, order) or match?({:terminal, _, _}, OpenClaw.terminal(response, order)))
 
   defp retirement_response?(_, _), do: false
 
@@ -29,8 +29,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
   end
 
   defp lost_result?({:ok, %{"status" => "timeout"} = reply}, order) do
-    reply["runId"] in [nil, order["id"]] and is_nil(reply["startedAt"]) and is_nil(reply["endedAt"]) and
-      reply["yielded"] != true and reply["pendingError"] != true
+    reply["runId"] in [nil, order["id"]] and is_nil(reply["startedAt"]) and is_nil(reply["endedAt"]) and clear_response?(reply)
   end
 
   defp lost_result?(_, _), do: false
@@ -39,12 +38,13 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
 
   defp retirement_changes(current, response, adapter, opts) do
     read = Keyword.get(opts, :interruption_history, &adapter.history(&1, opts))
+    terminal = terminal_fields(OpenClaw.terminal(response, current))
 
     with true <- retirement_candidate?(current),
          true <- current["project_id"] == ProjectContext.current().id and OpenClaw.enabled_for?(current),
          {:ok, history} <- read.(current),
          :ok <- idle_session(history, current),
-         {:ok, stop_basis} <- stop_basis(current, response, history),
+         {:ok, stop_basis} <- stop_basis(current, terminal, history),
          {:ok, inputs} <- retained_inputs(history["pendingInputs"], current),
          {:ok, record} <- Store.read(current["group"]),
          %{"id" => id} = attempt <- record["attempt"],
@@ -65,46 +65,39 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
         "deliveries" => Map.filter(record["deliveries"] || %{}, fn {_, receipt} -> receipt["run_id"] == id end)
       }
 
-      changes = %{"state" => "retired", "writable" => false, "retirement" => proof, "error" => "openclaw_interrupted_order_retired"}
-
-      case OpenClaw.terminal(response, current) do
-        {:terminal, _, evidence} -> {:ok, Map.put(changes, "terminal", evidence)}
-        :pending -> {:ok, changes}
-      end
+      {:ok, %{"state" => "retired", "writable" => false, "retirement" => proof, "terminal" => terminal, "error" => "openclaw_interrupted_order_retired"}}
     else
       _ -> {:error, :openclaw_interruption_unresolved}
     end
   end
 
+  defp terminal_fields({:terminal, _, evidence}), do: evidence
+  defp terminal_fields(:pending), do: nil
+
   defp stop_basis(%{"abort_acknowledged" => true}, _response, _history), do: {:ok, "abort_acknowledged"}
 
-  defp stop_basis(order, response, history) do
-    # A denied abort is never an acknowledgement. Independent original/end
-    # clocks remain separate, including a later ended run in the same session.
+  defp stop_basis(order, terminal, history) do
     info = history["sessionInfo"]
+    original? = info["lastRunId"] == order["id"]
 
-    case {info["lastRunId"] == order["id"], OpenClaw.terminal(response, order)} do
-      {true, {:terminal, state, evidence}} ->
-        if consistent_terminal?(state, evidence, info), do: {:ok, "terminal_original"}, else: {:error, :openclaw_interruption_unresolved}
+    # Ordered original evidence; an invalid retained wait never falls through.
+    # The timestamp establishes chronology only, never an original terminal.
+    {basis, ended} =
+      case terminal do
+        evidence when is_map(evidence) ->
+          {"terminal_original", if(consistent_terminal?(evidence, info, original?), do: evidence["endedAt"])}
 
-      {true, :pending} ->
-        # retirement_response? already required a lost-result response. The
-        # fresh, ended ORIGINAL lifecycle permits retirement, never a result.
-        {:ok, "terminal_original_history"}
+        nil when original? ->
+          {"terminal_original_history", info["endedAt"]}
 
-      {false, {:terminal, _, evidence}} ->
-        if followup_after_original?(order, evidence, history),
-          do: {:ok, "terminal_original_before_followup"},
-          else: {:error, :openclaw_interruption_unresolved}
+        nil ->
+          {"terminal_original_before_followup", TerminalEvidence.original_end(history, order["id"])}
+      end
 
-      _ ->
-        {:error, :openclaw_interruption_unresolved}
-    end
-  end
-
-  defp followup_after_original?(order, evidence, history) do
-    order["resumed"] == true and plausible_times?(evidence["startedAt"], evidence["endedAt"]) and
-      history["sessionInfo"]["startedAt"] > evidence["endedAt"] and empty_inputs?(history["pendingInputs"])
+    with true <- is_integer(ended),
+         true <- original? or (order["resumed"] == true and info["startedAt"] > ended),
+         do: {:ok, if(original?, do: basis, else: "terminal_original_before_followup")},
+         else: (_ -> {:error, :openclaw_interruption_unresolved})
   end
 
   defp empty_inputs?(%{"items" => [], "total" => 0} = page) do
@@ -113,18 +106,13 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
 
   defp empty_inputs?(_), do: false
 
-  defp consistent_terminal?(state, evidence, info) do
-    started = evidence["startedAt"] || info["startedAt"]
-    ended = evidence["endedAt"]
-
-    # Separate host projections settle at different times. Preserve both clocks;
-    # bind by run identity and finality rather than equality or a tolerance.
-    plausible_times?(started, ended) and
-      ((state == "completed" and info["status"] == "done") or (state == "failed" and info["status"] in ~w(failed timeout killed)))
+  defp consistent_terminal?(evidence, info, original?) do
+    TerminalEvidence.plausible_times?(evidence["startedAt"] || if(original?, do: info["startedAt"]), evidence["endedAt"]) and
+      (not original? or (evidence["status"] == "ok" and info["status"] == "done") or (evidence["status"] != "ok" and info["status"] in ~w(failed timeout killed)))
   end
 
   defp idle_session(%{"sessionInfo" => info} = history, order) when is_map(info) do
-    if session_identity?(history, info, order) and inactive?(history, info) and ended?(info),
+    if session_identity?(history, info, order) and TerminalEvidence.inactive?(history, info) and TerminalEvidence.ended?(info),
       do: :ok,
       else: {:error, :openclaw_interruption_unresolved}
   end
@@ -139,32 +127,14 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
       is_binary(physical) and physical != "" and info["sessionId"] == physical
   end
 
-  defp inactive?(history, info) do
-    info["hasActiveRun"] == false and info["activeRunIds"] == [] and
-      is_nil(info["lifecycleRunId"]) and
-      info["hasActiveSubagentRun"] in [nil, false] and info["subagentRunState"] in [nil, "historical"] and
-      is_nil(history["inFlightRun"]) and
-      Enum.all?([history, info], &clear_response?/1)
-  end
-
   defp clear_response?(projection), do: projection["yielded"] in [nil, false] and projection["pendingError"] in [nil, false]
-
-  defp ended?(info) do
-    is_binary(info["lastRunId"]) and info["lastRunId"] != "" and info["status"] in ~w(done failed timeout killed) and
-      (info["abortedLastRun"] != true or info["status"] == "killed") and
-      plausible_times?(info["startedAt"], info["endedAt"])
-  end
-
-  defp plausible_times?(started, ended) do
-    is_integer(started) and is_integer(ended) and started > 0 and ended >= started and
-      ended <= System.system_time(:millisecond)
-  end
 
   defp retained_inputs(%{"items" => items, "total" => total} = page, order) when is_list(items) and is_integer(total) do
     # Only an exact copy of our original payload can be accounted for without
     # introducing a second inbox. Keep it on the host and retain its receipt.
     # Filtered/truncated pages, queued work and additional input require review.
-    if total == length(items) and total <= 1 and is_nil(page["nextBefore"]) and Enum.all?(items, &original_input?(&1, order)) do
+    if total == length(items) and total <= 1 and is_nil(page["nextBefore"]) and
+         (order["resumed"] != true or empty_inputs?(page)) and Enum.all?(items, &original_input?(&1, order)) do
       {:ok, Enum.map(items, &(Map.take(&1, ~w(id runId state acceptedAt)) |> Map.put("payload_sha256", order["payload_sha256"])))}
     else
       {:error, :openclaw_interruption_input_unresolved}
@@ -273,17 +243,7 @@ defmodule SymphonyElixir.Yolo.OpenClaw.Recovery do
 
   defp no_active_run(order, opts) do
     status = Keyword.get(opts, :status, &gateway_status/1)
-
-    case status.(order) do
-      {:ok, %{"status" => "timeout"} = reply} ->
-        if reply["runId"] in [nil, order["id"]] and is_nil(reply["startedAt"]) and is_nil(reply["endedAt"]) and
-             reply["yielded"] != true and reply["pendingError"] != true,
-           do: :ok,
-           else: {:error, :openclaw_recovery_active_or_foreign_run}
-
-      _ ->
-        {:error, :openclaw_recovery_active_or_foreign_run}
-    end
+    if lost_result?(status.(order), order), do: :ok, else: {:error, :openclaw_recovery_active_or_foreign_run}
   end
 
   defp gateway_status(order) do

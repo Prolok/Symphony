@@ -8,15 +8,29 @@ import { createHash } from 'node:crypto';
 
 const messages = new Set(['unauthorized', 'cwd is reserved for plugin-owned subagent runs', 'cwd must be absolute']);
 const localError = reason => ({ ok: false, reason });
+const nonEmptyString = value => typeof value === 'string' && value.trim().length > 0;
 
-export async function localAccess(sdk, configSdk, env) {
+export async function localAccess(sdk, configSdk, env, loadSecretsSdk) {
   // The supported read-only snapshot API resolves the existing profile/env.
   // Credentials remain in this child; never return them to Symphony or logs.
   const snapshot = await configSdk.readConfigFileSnapshot({ observe: false, recoverSuspicious: false, pluginValidation: 'core-only' });
   if (!snapshot.valid || snapshot.config?.gateway?.mode === 'remote') return null;
   const auth = sdk.resolveGatewayAuth({ authConfig: snapshot.config?.gateway?.auth, env });
-  if (!['token', 'password'].includes(auth.mode) || typeof auth[auth.mode] !== 'string' || !auth[auth.mode].trim()) return null;
-  return { [auth.mode]: auth[auth.mode] };
+  if (!['token', 'password'].includes(auth.mode)) return null;
+  let credential = auth[auth.mode];
+  if (!nonEmptyString(credential)) {
+    const input = snapshot.config?.gateway?.auth?.[auth.mode];
+    if (input == null) return null;
+    try {
+      // Resolve only the active missing credential; preserve the SDK's env precedence.
+      const secretsSdk = await loadSecretsSdk();
+      const ref = secretsSdk.coerceSecretRef(input, snapshot.config?.secrets?.defaults);
+      if (!ref) return null;
+      const values = await secretsSdk.resolveSecretRefValues([ref], { config: snapshot.config, env });
+      credential = values.get(`${ref.source}:${ref.provider}:${ref.id.trim()}`);
+    } catch { return null; }
+  }
+  return nonEmptyString(credential) ? { [auth.mode]: credential } : null;
 }
 
 export function ownerConnection(sdk, access, options = {}) {
@@ -117,10 +131,11 @@ export function wireReply(args, reply) {
 
 export async function runTransport(packageEntry, options = {}) {
   const require = createRequire(realpathSync(packageEntry));
-  const sdk = await import(pathToFileURL(require.resolve('openclaw/plugin-sdk/gateway-runtime')).href);
-  const configSdk = await import(pathToFileURL(require.resolve('openclaw/plugin-sdk/health')).href);
+  const loadSdk = name => import(pathToFileURL(require.resolve(`openclaw/plugin-sdk/${name}`)).href);
+  const sdk = await loadSdk('gateway-runtime');
+  const configSdk = await loadSdk('health');
   let access;
-  try { access = await localAccess(sdk, configSdk, process.env); } catch { access = null; }
+  try { access = await localAccess(sdk, configSdk, process.env, () => loadSdk('secret-ref-runtime')); } catch { access = null; }
   const connection = ownerConnection(sdk, access, options);
   const lines = createInterface({ input: process.stdin });
   try {

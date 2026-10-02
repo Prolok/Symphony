@@ -63,7 +63,7 @@ class OpenClawBoundaryTest(unittest.TestCase):
 
     def test_owner_sdk_boundary_without_loading_an_installation(self):
         result = subprocess.run(["node", str(REPO / "test/fixtures/openclaw/owner-rpc-test.mjs")], capture_output=True)
-        self.assertEqual(result.returncode, 0, result.stderr.decode())
+        self.assertEqual(result.returncode, 0, 'owner SDK fixture failed; captured output suppressed')
         denied = subprocess.run(["node", str(REPO / "scripts/openclaw-owner-rpc.mjs"), "/missing/cli"],
                                 env=dict(os.environ, SYMPHONY_OPENCLAW_TEST_DENY="1"), capture_output=True)
         self.assertEqual(denied.returncode, 126)
@@ -82,6 +82,59 @@ class OpenClawBoundaryTest(unittest.TestCase):
                 mock.patch.object(rpc.sys, "stdin", io.StringIO(json.dumps(args))), \
                 mock.patch.object(rpc.subprocess, "run", side_effect=AssertionError("no CLI fallback")):
             self.assertEqual(rpc.main(), 127)
+
+    def test_owner_secret_refs_and_diagnostics_at_child_process_boundary(self):
+        # A disposable package with public SDK exports only; no host discovery.
+        temp_root = REPO / 'tmp'
+        temp_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=temp_root) as directory:
+            root = Path(directory)
+            entry = root / 'cli.mjs'
+            entry.write_text('// synthetic CLI entry')
+            package = root / 'node_modules' / 'openclaw'
+            package.mkdir(parents=True)
+            modules = ('gateway-runtime', 'health', 'secret-ref-runtime')
+            (package / 'package.json').write_text(json.dumps(dict(name='openclaw', type='module', exports={
+                f'./plugin-sdk/{name}': f'./{name}.mjs' for name in modules})))
+            fixture_uri = (REPO / 'test/fixtures/openclaw/owner-access-fixture.mjs').as_uri()
+            (package / 'fixture.mjs').write_text(
+                f'import {{ accessFixture }} from {json.dumps(fixture_uri)};\n'
+                'export const fixture = accessFixture({ scenario: process.env.FIXTURE_SCENARIO, '
+                'mode: process.env.FIXTURE_MODE, diagnostics: true, env: process.env });\n'
+                'fixture.diagnostic();\n')
+            prefix = "import { fixture } from './fixture.mjs';\n"
+            (package / 'gateway-runtime.mjs').write_text(prefix + '\n'.join(
+                f'export const {name} = fixture.sdk.{name};'
+                for name in ('GatewayClient', 'resolveGatewayAuth', 'isGatewayClientRequestError')))
+            (package / 'health.mjs').write_text(prefix +
+                'export const readConfigFileSnapshot = fixture.configSdk.readConfigFileSnapshot;')
+            (package / 'secret-ref-runtime.mjs').write_text(prefix +
+                "if (process.env.FIXTURE_SCENARIO === 'import-error') throw new Error(fixture.expected);\n" +
+                '\n'.join(f'export const {name} = fixture.secretSdk.{name};'
+                          for name in ('coerceSecretRef', 'resolveSecretRefValues')))
+            args = ['gateway', 'call', 'agents.list', '--params', '{}', '--json']
+            for mode in ('token', 'password'):
+                for scenario in ('plaintext', 'environment', 'store', 'unresolved', 'missing', 'empty', 'blank',
+                                 'non-string', 'import-error', 'coerce-error', 'invalid-ref', 'absent',
+                                 'invalid', 'remote', 'snapshot-error', 'request-error'):
+                    for stream in (False, True):
+                        with self.subTest(mode=mode, scenario=scenario, stream=stream):
+                            env = dict(PATH=os.environ['PATH'], SYMPHONY_OPENCLAW_TEST_DENY='0',
+                                       FIXTURE_SCENARIO=scenario, FIXTURE_MODE=mode)
+                            if scenario == 'environment':
+                                env[f'OPENCLAW_GATEWAY_{mode.upper()}'] = f'synthetic-private-{mode}-{scenario}'
+                            command = ['node', str(REPO / 'scripts/openclaw-owner-rpc.mjs'), str(entry)]
+                            if stream:
+                                command.append('--stream')
+                            result = subprocess.run(command, input=(json.dumps(args) + '\n').encode(),
+                                                    env=env, capture_output=True, timeout=5)
+                            code = 0 if scenario in ('plaintext', 'environment', 'store') else 1 if scenario == 'request-error' else 124
+                            output = '{"agents":[]}' if code == 0 else ''
+                            expected = (json.dumps(dict(code=code, output=output), separators=(',', ':')) + '\n').encode() if stream else output.encode()
+                            # Never attach captured diagnostics or values to a failed assertion.
+                            self.assertEqual(result.returncode, 0 if stream else code)
+                            self.assertTrue(result.stdout == expected, 'unexpected owner protocol output; suppressed')
+                            self.assertTrue(result.stderr == b'', 'SDK diagnostics escaped; suppressed')
 
     def test_abort_error_is_sanitized_correlated_and_preserves_retryability(self):
         rpc = load("openclaw-rpc.py")

@@ -338,10 +338,19 @@ Die bestehende Reconciliation löst nur die Zustellreservierungen dieses Laufs.
 
 Ein unterbrochener Versuch mit `checkout_cleanup=creating` wird bei der nächsten
 Gruppenbeobachtung oder beim Start geprüft. Ohne Sitzung, Zustellung, Completion,
-Aktion, aktuelles/archiviertes OpenClaw-Journal und Laufartefakte entfernt Symphony
+offene Aktion, aktuelles/archiviertes OpenClaw-Journal und Laufartefakte entfernt Symphony
 nur den eigenen registrierten, sauberen detached Checkout der gespeicherten SHA.
+Aktionsjournale besitzen keinen belastbaren Laufbezug. Ausschließlich `done=true`
+abgeschlossene Folgeoperationen früherer Läufe sperren diese Prüfung deshalb nicht:
+Ohne die übrigen Startbelege konnte der unterbrochene Versuch keine erzeugen.
+Fehlendes oder anderes `done` sowie unlesbare Journale bleiben sperrend.
 Veränderte, unklare oder unlesbare Belege bleiben geschützt und werden als
-`YOLO interrupted checkout protected` mit Grund geloggt. Vor der Entfernung wird
+`YOLO interrupted checkout protected` mit Grund geloggt. Ein dauerhafter Warnbeleg
+im projekt-/agent-/gruppenbezogenen Record unterdrückt Wiederholungen für denselben
+unveränderten Versuch und Grund; ein geänderter Versuch oder Grund wird erneut
+geloggt. Jede Prüfung findet weiterhin statt. Scheitert die Speicherung des
+Warnbelegs, bleibt der Checkout geschützt und die Warnung nennt den Schreibfehler.
+Vor der Entfernung wird
 eine lauf-/pfad-/SHA-gebundene Cleanupquittung persistiert; ein Neustart nach der
 Entfernung kann damit denselben Versuch idempotent als `removed` bestätigen.
 
@@ -382,7 +391,10 @@ den zum Versuch gehörenden Symphony-Store-Startfehler exakt
 `:linear_app_request_unavailable` oder
 `{:linear_api_request, :linear_app_request_unavailable}`. Dieser Fehler konnte
 im alten Startpfad nach dem Intent nur vor `adapter.submit` zurückgegeben werden.
-Sitzungs-/Zustellungs-/Completion-/Aktionsbelege schließen die Behandlung aus.
+Sitzungs-/Zustellungs-/Completionbelege und offene oder unklare Aktionsjournale
+schließen die Behandlung aus. Für abgeschlossene Altoperationen gilt dieselbe
+strikte `done=true`-Prüfung wie bei der automatischen Wiederaufnahme; fehlendes
+oder anderes `done` sowie unlesbare Journale bleiben sperrend.
 Ein allgemeiner Timeout oder ein fehlender Zustellmarker genügt nicht.
 
 Unmittelbar unter der Journal-/Gruppensperre wird `sessions.list` nach dem

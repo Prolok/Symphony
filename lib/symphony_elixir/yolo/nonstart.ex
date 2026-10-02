@@ -2,6 +2,7 @@ defmodule SymphonyElixir.Yolo.Nonstart do
   @moduledoc "Conservative recovery of an interrupted, locally unstarted PO checkout under the group lock."
   require Logger
   alias SymphonyElixir.{Config, PathSafety}
+  alias SymphonyElixir.Relay.Store, as: Digest
   alias SymphonyElixir.Yolo.OpenClaw.Journal
   alias SymphonyElixir.Yolo.{Operations, Store, Workspace}
 
@@ -85,10 +86,17 @@ defmodule SymphonyElixir.Yolo.Nonstart do
     attempt = record["attempt"]
 
     if idle_attempt?(attempt, id) and is_nil(get_in(record, ["delivery_ends", id])) and no_delivery?(record["deliveries"], id) and
-         is_list(attempt["members"]) and match?({:ok, []}, Operations.related(attempt["members"])) do
+         is_list(attempt["members"]) and operations_settled?(attempt["members"]) do
       :ok
     else
       {:error, :yolo_nonstart_activity_unconfirmed}
+    end
+  end
+
+  defp operations_settled?(members) do
+    case Operations.related(members) do
+      {:ok, operations} -> Enum.all?(operations, &(&1["done"] == true))
+      _ -> false
     end
   end
 
@@ -149,12 +157,27 @@ defmodule SymphonyElixir.Yolo.Nonstart do
   end
 
   defp diagnose(group, attempt, reason) do
-    members = Enum.map_join(attempt["members"] || [], " ", &"issue_id=#{&1} issue_identifier=unknown")
+    receipt = warning_receipt(group, attempt, reason)
 
-    Logger.warning(
-      "YOLO interrupted checkout protected group=#{group} run_id=#{attempt["id"]} #{members} workspace=#{attempt["workspace"]} reason=#{inspect(reason)} action=checkout_binding_and_nonstart_evidence_required"
-    )
+    if receipt != :unchanged do
+      members = Enum.map_join(attempt["members"] || [], " ", &"issue_id=#{&1} issue_identifier=unknown")
+
+      Logger.warning(
+        "YOLO interrupted checkout protected group=#{group} run_id=#{attempt["id"]} #{members} workspace=#{attempt["workspace"]} reason=#{inspect(reason)} warning_receipt=#{inspect(receipt)} action=checkout_binding_and_nonstart_evidence_required"
+      )
+    end
 
     {:error, if(group == "review", do: :yolo_review_checkout_cleanup_unconfirmed, else: :yolo_checkout_cleanup_unconfirmed)}
+  end
+
+  defp warning_receipt(group, attempt, reason) do
+    fingerprint = Digest.digest({attempt, reason})
+
+    # Removal may already have persisted a cleanup receipt before failing.
+    with {:ok, record} <- Store.read(group) do
+      if record["checkout_protection_warning"] == fingerprint,
+        do: :unchanged,
+        else: Store.write(group, Map.put(record, "checkout_protection_warning", fingerprint))
+    end
   end
 end
